@@ -21,8 +21,12 @@ rhs = [
 solution = solve_ivp(
     "lsode2", rhs, ["x", "y", "z"], "t", [1.0, 1.0, 1.0],
     0.0, 25.0, 0.01,
+    # Lorenz is a sensitive nonlinear system; Auto is used to exercise LSODE2's
+    # native family switching rather than prescribing one controller by hand.
     controller="auto",
     options=SolverOptions(
+        # Dense is intentional for this 3-state, tightly coupled demonstration;
+        # it is not a recommendation for large sparse systems.
         frontend="atom_native", execution="lambdify",
         matrix_layout="dense", telemetry="timings",
     ),

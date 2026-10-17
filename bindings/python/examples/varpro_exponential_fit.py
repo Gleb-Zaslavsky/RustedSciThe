@@ -15,17 +15,26 @@ from rustedscithe import VarProSolver
 x_data = [index * 0.2 for index in range(30)]
 y_data = [2.5 * math.exp(-x_value / 1.7) + 0.8 for x_value in x_data]
 
+# `tau` controls nonlinear basis shape; the amplitude and constant offset are
+# linear coefficients solved internally at every trial tau.
 solver = VarProSolver("x")
 solver.with_parameters(["tau"])
 solver.with_initial_parameters([1.2])
 solver.with_data(x_data, y_data)
 solver.with_basis_str("tau", "exp(-x/tau)")
-solver.with_invariant_str("1")  # constant offset is another linear term
+# The invariant contributes the constant basis column whose coefficient is c1.
+solver.with_invariant_str("1")
+# Keep all three convergence tests tight enough for this noiseless synthetic
+# data; the step bound limits excessively large trial changes in tau.
 solver.with_tolerances(1e-9, 1e-9, 1e-10)
 solver.with_max_iterations(200)
+# The generous evaluation cap is an independent safety budget, not a target.
 solver.with_max_function_evaluations(1000)
+# Ten is comfortably larger than the expected tau update from the initial
+# guess, while still preventing an unbounded trial jump on other data.
 solver.with_step_bound(10.0)
-solver.with_scale_diag(True)
+# There is only one nonlinear shape parameter here, so diagonal scaling has no
+# useful multi-parameter scale disparity to correct; keep the solver default.
 solver.with_telemetry("detailed")
 
 result = solver.solve()

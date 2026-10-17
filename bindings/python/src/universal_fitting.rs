@@ -7,19 +7,20 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 
-use rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresTelemetryMode;
-use rustedscithe_core::numerical::Nonlinear_systems::symbolic::{
-    LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
-};
 use rustedscithe_core::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
 use rustedscithe_core::numerical::optimization::universal_fitting::{
     Method, UniversalFitting, UniversalFittingError, UniversalFittingResult,
 };
 use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
+use rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresTelemetryMode;
+use rustedscithe_core::numerical::Nonlinear_systems::symbolic::{
+    LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
+};
+use rustedscithe_core::numerical::SolverTelemetryMode;
 
 use crate::errors::{
-    ExhaustionError, InvalidConfigurationError, InvalidExpressionError, SolverError,
-    SolverPanicState, UnsupportedOptionError, annotate_native, native_variant,
+    annotate_native, native_variant, ExhaustionError, InvalidConfigurationError,
+    InvalidExpressionError, SolverError, SolverPanicState, UnsupportedOptionError,
 };
 use crate::expr::PyExpr;
 
@@ -43,10 +44,20 @@ fn parse_telemetry(value: &str) -> PyResult<LeastSquaresTelemetryMode> {
     match value.trim().to_ascii_lowercase().as_str() {
         "off" | "none" => Ok(LeastSquaresTelemetryMode::Off),
         "counters" => Ok(LeastSquaresTelemetryMode::Counters),
-        "detailed" | "timings" => Ok(LeastSquaresTelemetryMode::Detailed),
+        "timings" => Ok(LeastSquaresTelemetryMode::Timings),
+        "detailed" => Ok(LeastSquaresTelemetryMode::Detailed),
         other => Err(InvalidConfigurationError::new_err(format!(
             "unsupported UniversalFitting telemetry '{other}'"
         ))),
+    }
+}
+
+fn to_solver_telemetry_mode(mode: LeastSquaresTelemetryMode) -> SolverTelemetryMode {
+    match mode {
+        LeastSquaresTelemetryMode::Off => SolverTelemetryMode::Off,
+        LeastSquaresTelemetryMode::Counters => SolverTelemetryMode::Counters,
+        LeastSquaresTelemetryMode::Timings => SolverTelemetryMode::Timings,
+        LeastSquaresTelemetryMode::Detailed => SolverTelemetryMode::Detailed,
     }
 }
 
@@ -111,17 +122,65 @@ fn map_error(error: UniversalFittingError) -> PyErr {
 /// Detached common result from native `UniversalFitting` dispatch.
 ///
 /// The universal Rust result guarantees a parameter map and R-squared value
-/// when available. Route-specific covariance or detailed solver telemetry
-/// remain on `GavinFittingSolution`, `VarProSolution`, or `FittingSolution`.
+/// when available. Native counters and timings are detached with the result;
+/// route-specific covariance and fit diagnostics remain on the standalone
+/// `GavinFittingSolution`, `VarProSolution`, or `FittingSolution` classes.
 #[pyclass(name = "UniversalFittingSolution", module = "rustedscithe")]
 pub struct PyUniversalFittingSolution {
     method: String,
     solution: Option<HashMap<String, f64>>,
     r_squared: Option<f64>,
+    telemetry_mode: SolverTelemetryMode,
+    counters: HashMap<String, u64>,
+    timings_ms: HashMap<String, f64>,
+    attempt_counters: Vec<HashMap<String, u64>>,
+    attempt_timings_ms: Vec<HashMap<String, f64>>,
 }
 
 impl PyUniversalFittingSolution {
-    fn from_native(method: Method, result: UniversalFittingResult) -> Self {
+    fn from_native(
+        method: Method,
+        telemetry_mode: SolverTelemetryMode,
+        result: UniversalFittingResult,
+    ) -> Self {
+        let (counters, timings_ms, attempt_counters, attempt_timings_ms) = match &result {
+            UniversalFittingResult::LM(fitting) => fitting.last_statistics().map_or_else(
+                || (HashMap::new(), HashMap::new(), Vec::new(), Vec::new()),
+                |stats| {
+                    (
+                        crate::nonlinear::statistics_counters(stats),
+                        crate::nonlinear::statistics_timings(stats),
+                        crate::nonlinear::statistics_attempt_counters(stats),
+                        crate::nonlinear::statistics_attempt_timings_ms(stats),
+                    )
+                },
+            ),
+            UniversalFittingResult::VARPRO(fit) => (
+                crate::nonlinear::statistics_counters(&fit.minimization_report.statistics),
+                crate::nonlinear::statistics_timings(&fit.minimization_report.statistics),
+                crate::nonlinear::statistics_attempt_counters(&fit.minimization_report.statistics),
+                crate::nonlinear::statistics_attempt_timings_ms(&fit.minimization_report.statistics),
+            ),
+            UniversalFittingResult::GAVIN(fit) => fit.telemetry.as_ref().map_or_else(
+                || (HashMap::new(), HashMap::new(), Vec::new(), Vec::new()),
+                |telemetry| {
+                    (
+                        if telemetry_mode.collects_counters() {
+                            crate::gavin::telemetry_counters(telemetry)
+                        } else {
+                            HashMap::new()
+                        },
+                        if telemetry_mode.collects_timings() {
+                            crate::gavin::telemetry_timings(telemetry)
+                        } else {
+                            HashMap::new()
+                        },
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                },
+            ),
+        };
         let method = match method {
             Method::LM => "lm",
             Method::VARPRO => "varpro",
@@ -132,6 +191,11 @@ impl PyUniversalFittingSolution {
             method,
             solution: result.solution_map(),
             r_squared: result.r_squared(),
+            telemetry_mode,
+            counters,
+            timings_ms,
+            attempt_counters,
+            attempt_timings_ms,
         }
     }
 }
@@ -154,6 +218,37 @@ impl PyUniversalFittingSolution {
     /// Coefficient of determination when defined by the supplied observations.
     pub fn r_squared(&self) -> Option<f64> {
         self.r_squared
+    }
+
+    #[getter]
+    /// Selected native collection policy: `off`, `counters`, `timings`, or `detailed`.
+    pub fn telemetry_mode(&self) -> &'static str {
+        match self.telemetry_mode {
+            SolverTelemetryMode::Off => "off",
+            SolverTelemetryMode::Counters => "counters",
+            SolverTelemetryMode::Timings => "timings",
+            SolverTelemetryMode::Detailed => "detailed",
+        }
+    }
+
+    /// Return collected discrete solver counts; empty means counters were disabled.
+    pub fn telemetry_counters(&self) -> HashMap<String, u64> {
+        self.counters.clone()
+    }
+
+    /// Return collected solver stage durations in milliseconds.
+    pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
+        self.timings_ms.clone()
+    }
+
+    /// Return per-iteration counters when the selected native route provides them.
+    pub fn telemetry_attempt_counters(&self) -> Vec<HashMap<String, u64>> {
+        self.attempt_counters.clone()
+    }
+
+    /// Return per-iteration timings; empty for routes without native attempt traces.
+    pub fn telemetry_attempt_timings_ms(&self) -> Vec<HashMap<String, f64>> {
+        self.attempt_timings_ms.clone()
     }
 
     /// Return stable common diagnostics without flattening route-specific data.
@@ -184,6 +279,8 @@ impl PyUniversalFittingSolution {
 pub struct PyUniversalFitting {
     builder: Option<UniversalFitting>,
     method: Method,
+    telemetry_mode: LeastSquaresTelemetryMode,
+    gavin_telemetry_mode: SolverTelemetryMode,
     panic_state: SolverPanicState,
 }
 
@@ -210,6 +307,8 @@ impl PyUniversalFitting {
         Ok(Self {
             builder: Some(UniversalFitting::new().with_method(method)),
             method,
+            telemetry_mode: LeastSquaresTelemetryMode::Off,
+            gavin_telemetry_mode: SolverTelemetryMode::Off,
             panic_state: SolverPanicState::default(),
         })
     }
@@ -342,23 +441,32 @@ impl PyUniversalFitting {
     /// Configure the native least-squares telemetry level.
     pub fn with_telemetry(&mut self, mode: &str) -> PyResult<()> {
         let mode = parse_telemetry(mode)?;
-        if self.method == Method::GAVIN && mode != LeastSquaresTelemetryMode::Off {
-            return Err(InvalidConfigurationError::new_err(
-                "Configure Gavin telemetry with with_gavin_telemetry(enabled)",
-            ));
+        if self.method == Method::GAVIN {
+            self.gavin_telemetry_mode = to_solver_telemetry_mode(mode);
+            let gavin_mode = self.gavin_telemetry_mode;
+            self.update(|builder| builder.with_gavin_telemetry(gavin_mode))
+        } else {
+            self.telemetry_mode = mode;
+            self.update(|builder| builder.with_telemetry(mode))
         }
-        self.update(|builder| builder.with_telemetry(mode))
     }
 
     /// Enable or disable Gavin's complete native telemetry snapshot.
     pub fn with_gavin_telemetry(&mut self, enabled: bool) -> PyResult<()> {
-        self.update(|builder| {
-            builder.with_gavin_telemetry(if enabled {
-                rustedscithe_core::numerical::SolverTelemetryMode::Detailed
-            } else {
-                rustedscithe_core::numerical::SolverTelemetryMode::Off
-            })
-        })
+        self.gavin_telemetry_mode = if enabled {
+            SolverTelemetryMode::Detailed
+        } else {
+            SolverTelemetryMode::Off
+        };
+        let mode = self.gavin_telemetry_mode;
+        self.update(|builder| builder.with_gavin_telemetry(mode))
+    }
+
+    /// Select one of the shared telemetry channels for the Gavin route.
+    pub fn with_gavin_telemetry_mode(&mut self, mode: &str) -> PyResult<()> {
+        let mode = to_solver_telemetry_mode(parse_telemetry(mode)?);
+        self.gavin_telemetry_mode = mode;
+        self.update(|builder| builder.with_gavin_telemetry(mode))
     }
 
     /// Enable or disable the native application's configured logger.
@@ -428,6 +536,11 @@ impl PyUniversalFitting {
     /// Build and solve using the actual Rust `UniversalFitting` dispatcher.
     pub fn build(&mut self) -> PyResult<PyUniversalFittingSolution> {
         let method = self.method;
+        let telemetry_mode = if method == Method::GAVIN {
+            self.gavin_telemetry_mode
+        } else {
+            to_solver_telemetry_mode(self.telemetry_mode)
+        };
         let route = self.method();
         let panic_state = self.panic_state.clone();
         panic_state.run("build", "universal_fitting", route, || {
@@ -436,7 +549,9 @@ impl PyUniversalFitting {
             })?;
             builder
                 .build()
-                .map(|result| PyUniversalFittingSolution::from_native(method, result))
+                .map(|result| {
+                    PyUniversalFittingSolution::from_native(method, telemetry_mode, result)
+                })
                 .map_err(map_error)
         })
     }

@@ -11,7 +11,7 @@ use nalgebra::DVector;
 use pyo3::prelude::*;
 
 use rustedscithe_core::numerical::Nonlinear_systems::engine::{
-    DiagnosticsOptions, EngineLogLevel, SolveOptions, SolveStatistics,
+    DiagnosticsOptions, EngineLogLevel, SolveAttemptStatistics, SolveOptions, SolveStatistics,
 };
 use rustedscithe_core::numerical::Nonlinear_systems::error::SolveError;
 use rustedscithe_core::numerical::Nonlinear_systems::least_squares::{
@@ -27,6 +27,12 @@ use rustedscithe_core::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, PreparationTelemetryMode, PreparedSymbolicNonlinearProblem,
     SymbolicLambdifyFrontend, SymbolicProblemOptions,
 };
+use rustedscithe_core::numerical::Nonlinear_systems::symbolic_backend::SymbolicBackendSelectionPolicy;
+use rustedscithe_core::numerical::Nonlinear_systems::symbolic_generated::{
+    SymbolicAotBuildPolicy, SymbolicGeneratedBackendConfig,
+};
+use rustedscithe_core::numerical::SolverTelemetryMode;
+use rustedscithe_core::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 
 use crate::errors::{
     ExhaustionError, InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
@@ -36,6 +42,10 @@ use crate::expr::PyExpr;
 use crate::system::SymbolicSystem;
 
 fn map_solve_error(error: SolveError) -> PyErr {
+    map_solve_error_context(error, "solve", "nonlinear_system", "lambdify")
+}
+
+fn map_solve_error_context(error: SolveError, stage: &str, solver: &str, route: &str) -> PyErr {
     let native_kind = native_variant(&error);
     annotate_native(
         match error {
@@ -61,9 +71,9 @@ fn map_solve_error(error: SolveError) -> PyErr {
             | SolveError::SingularJacobian
             | SolveError::NumericalBreakdown(_) => SolverError::new_err(error.to_string()),
         },
-        "solve",
-        "nonlinear_system",
-        "lambdify",
+        stage,
+        solver,
+        route,
         &native_kind,
     )
 }
@@ -131,12 +141,14 @@ fn parse_execution_policy(value: &str, min_work: usize) -> PyResult<LambdifyExec
     }
 }
 
-fn parse_preparation_telemetry(value: &str) -> PyResult<PreparationTelemetryMode> {
+fn parse_telemetry(value: &str) -> PyResult<SolverTelemetryMode> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "off" | "none" => Ok(PreparationTelemetryMode::Disabled),
-        "counters" | "detailed" | "timings" | "on" => Ok(PreparationTelemetryMode::Collect),
+        "off" | "none" => Ok(SolverTelemetryMode::Off),
+        "counters" => Ok(SolverTelemetryMode::Counters),
+        "timings" => Ok(SolverTelemetryMode::Timings),
+        "detailed" => Ok(SolverTelemetryMode::Detailed),
         other => Err(InvalidConfigurationError::new_err(format!(
-            "unsupported nonlinear telemetry '{other}'; expected off, counters or detailed"
+            "unsupported nonlinear telemetry '{other}'; expected off, counters, timings or detailed"
         ))),
     }
 }
@@ -710,6 +722,9 @@ fn method_from_name(
 }
 
 pub(crate) fn statistics_counters(statistics: &SolveStatistics) -> HashMap<String, u64> {
+    if !statistics.availability.is_collected() {
+        return HashMap::new();
+    }
     HashMap::from([
         ("iterations".into(), statistics.iterations as u64),
         (
@@ -717,8 +732,24 @@ pub(crate) fn statistics_counters(statistics: &SolveStatistics) -> HashMap<Strin
             statistics.residual_evaluations as u64,
         ),
         (
+            "state_residual_evaluations".into(),
+            statistics.state_residual_evaluations as u64,
+        ),
+        (
+            "trial_residual_evaluations".into(),
+            statistics.trial_residual_evaluations as u64,
+        ),
+        (
             "jacobian_evaluations".into(),
             statistics.jacobian_evaluations as u64,
+        ),
+        (
+            "state_jacobian_evaluations".into(),
+            statistics.state_jacobian_evaluations as u64,
+        ),
+        (
+            "trial_jacobian_evaluations".into(),
+            statistics.trial_jacobian_evaluations as u64,
         ),
         ("linear_solves".into(), statistics.linear_solves as u64),
         (
@@ -731,10 +762,21 @@ pub(crate) fn statistics_counters(statistics: &SolveStatistics) -> HashMap<Strin
             "domain_rejections".into(),
             statistics.domain_rejections as u64,
         ),
+        (
+            "trust_region_trials".into(),
+            statistics.trust_region_trials as u64,
+        ),
+        (
+            "reusable_trial_points".into(),
+            statistics.reusable_trial_points as u64,
+        ),
     ])
 }
 
 pub(crate) fn statistics_timings(statistics: &SolveStatistics) -> HashMap<String, f64> {
+    if !statistics.timings_collected {
+        return HashMap::new();
+    }
     let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
     HashMap::from([
         ("total_ms".into(), ms(statistics.total_duration)),
@@ -748,7 +790,119 @@ pub(crate) fn statistics_timings(statistics: &SolveStatistics) -> HashMap<String
             "linear_factorization_ms".into(),
             ms(statistics.linear_factorization_duration),
         ),
+        (
+            "linear_system_solve_ms".into(),
+            ms(statistics.linear_system_solve_duration),
+        ),
+        (
+            "trust_region_subproblem_ms".into(),
+            ms(statistics.trust_region_subproblem_duration),
+        ),
     ])
+}
+
+pub(crate) fn statistics_attempt_counters(
+    statistics: &SolveStatistics,
+) -> Vec<HashMap<String, u64>> {
+    if !statistics.availability.is_collected() {
+        return Vec::new();
+    }
+    statistics.attempts.iter().map(attempt_counters).collect()
+}
+
+fn attempt_counters(attempt: &SolveAttemptStatistics) -> HashMap<String, u64> {
+    let mut values = HashMap::from([
+        ("iteration".to_owned(), attempt.iteration as u64),
+        (
+            "residual_evaluations".to_owned(),
+            attempt.residual_evaluations as u64,
+        ),
+        (
+            "state_residual_evaluations".to_owned(),
+            attempt.state_residual_evaluations as u64,
+        ),
+        (
+            "trial_residual_evaluations".to_owned(),
+            attempt.trial_residual_evaluations as u64,
+        ),
+        (
+            "jacobian_evaluations".to_owned(),
+            attempt.jacobian_evaluations as u64,
+        ),
+        (
+            "state_jacobian_evaluations".to_owned(),
+            attempt.state_jacobian_evaluations as u64,
+        ),
+        (
+            "trial_jacobian_evaluations".to_owned(),
+            attempt.trial_jacobian_evaluations as u64,
+        ),
+        (
+            "jacobian_refreshes".to_owned(),
+            attempt.jacobian_refreshes as u64,
+        ),
+        ("jacobian_reuses".to_owned(), attempt.jacobian_reuses as u64),
+        (
+            "linear_factorizations".to_owned(),
+            attempt.linear_factorizations as u64,
+        ),
+        ("linear_solves".to_owned(), attempt.linear_solves as u64),
+        ("accepted_steps".to_owned(), attempt.accepted_steps as u64),
+        ("rejected_steps".to_owned(), attempt.rejected_steps as u64),
+    ]);
+    if let Some(retries) = attempt.termination_retries {
+        values.insert("termination_retries".to_owned(), retries as u64);
+    }
+    values
+}
+
+pub(crate) fn statistics_attempt_timings_ms(
+    statistics: &SolveStatistics,
+) -> Vec<HashMap<String, f64>> {
+    if !statistics.timings_collected {
+        return Vec::new();
+    }
+    statistics
+        .attempts
+        .iter()
+        .map(|attempt| {
+            let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
+            HashMap::from([
+                ("residual_ms".to_owned(), ms(attempt.residual_duration)),
+                ("jacobian_ms".to_owned(), ms(attempt.jacobian_duration)),
+                (
+                    "linear_solve_ms".to_owned(),
+                    ms(attempt.linear_solve_duration),
+                ),
+                (
+                    "linear_factorization_ms".to_owned(),
+                    ms(attempt.linear_factorization_duration),
+                ),
+                (
+                    "linear_system_solve_ms".to_owned(),
+                    ms(attempt.linear_system_solve_duration),
+                ),
+            ])
+        })
+        .collect()
+}
+
+pub(crate) fn least_squares_telemetry_mode_name(mode: LeastSquaresTelemetryMode) -> &'static str {
+    match mode {
+        LeastSquaresTelemetryMode::Off => "off",
+        LeastSquaresTelemetryMode::Counters => "counters",
+        LeastSquaresTelemetryMode::Timings => "timings",
+        LeastSquaresTelemetryMode::Detailed => "detailed",
+    }
+}
+
+fn solver_telemetry_mode_name(mode: SolverTelemetryMode) -> &'static str {
+    match mode {
+        SolverTelemetryMode::Off => "off",
+        SolverTelemetryMode::Counters => "counters",
+        SolverTelemetryMode::Timings => "timings",
+        SolverTelemetryMode::Detailed => "detailed",
+    }
 }
 
 /// Detached result of one square nonlinear-system solve.
@@ -763,6 +917,7 @@ pub struct NonlinearSolution {
     residual_norm: f64,
     iterations: usize,
     termination: String,
+    telemetry_mode: SolverTelemetryMode,
     statistics: SolveStatistics,
 }
 
@@ -801,6 +956,11 @@ impl NonlinearSolution {
     pub fn termination(&self) -> &str {
         &self.termination
     }
+    #[getter]
+    /// Native telemetry mode selected for this solve.
+    pub fn telemetry_mode(&self) -> &'static str {
+        solver_telemetry_mode_name(self.telemetry_mode)
+    }
     /// Return discrete nonlinear-solver counters.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         statistics_counters(&self.statistics)
@@ -808,6 +968,14 @@ impl NonlinearSolution {
     /// Return timing totals in milliseconds for the completed solve.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         statistics_timings(&self.statistics)
+    }
+    /// Per-iteration counter rows; empty when counters or attempt history were not collected.
+    pub fn telemetry_attempt_counters(&self) -> Vec<HashMap<String, u64>> {
+        statistics_attempt_counters(&self.statistics)
+    }
+    /// Per-iteration timing rows; each duration is nested in aggregate solve timing.
+    pub fn telemetry_attempt_timings_ms(&self) -> Vec<HashMap<String, f64>> {
+        statistics_attempt_timings_ms(&self.statistics)
     }
     /// Return a compact mapping of termination, residual norm and iteration count.
     pub fn diagnostics(&self) -> HashMap<String, String> {
@@ -837,6 +1005,10 @@ pub struct NonlinearSolver {
     prepared: Option<PreparedSymbolicNonlinearProblem>,
     frontend: SymbolicLambdifyFrontend,
     execution_policy: LambdifyExecutionPolicy,
+    execution: String,
+    aot_policy: String,
+    aot_profile: String,
+    aot_output_dir: Option<String>,
     preparation_telemetry: PreparationTelemetryMode,
     method: String,
     method_options: HashMap<String, f64>,
@@ -847,7 +1019,7 @@ pub struct NonlinearSolver {
     max_iterations: usize,
     parameters: Option<Vec<f64>>,
     bounds: Option<Bounds>,
-    telemetry: bool,
+    telemetry: SolverTelemetryMode,
     logging: Option<EngineLogLevel>,
     panic_state: SolverPanicState,
 }
@@ -861,14 +1033,21 @@ impl NonlinearSolver {
     /// `parameters` declare value-only equation symbols. `telemetry` controls
     /// preparation diagnostics (`off`, `counters`, or detailed timings where
     /// supported), while `loglevel="off"` keeps solver logging disabled.
+    /// `execution="aot"` opts into the native Dense generated backend; its
+    /// lifecycle policy/profile/output directory are independent of the
+    /// ExprLegacy/AtomNative symbolic frontend. Lambdify remains the default.
     #[new]
-    #[pyo3(signature=(system, *, method="newton", frontend="expr_legacy", execution_policy="sequential", min_work=1, telemetry="off", parameters=None, parameter_values=None, method_options=None, method_flags=None, method_vectors=None, method_choices=None, tolerance=1e-6, max_iterations=100, bounds=None, loglevel="off"))]
+    #[pyo3(signature=(system, *, method="newton", frontend="expr_legacy", execution="lambdify", execution_policy="sequential", min_work=1, aot_policy="build_if_missing", aot_profile="release", aot_output_dir=None, telemetry="off", parameters=None, parameter_values=None, method_options=None, method_flags=None, method_vectors=None, method_choices=None, tolerance=1e-6, max_iterations=100, bounds=None, loglevel="off"))]
     pub fn new(
         system: SymbolicSystem,
         method: &str,
         frontend: &str,
+        execution: &str,
         execution_policy: &str,
         min_work: usize,
+        aot_policy: &str,
+        aot_profile: &str,
+        aot_output_dir: Option<String>,
         telemetry: &str,
         parameters: Option<Vec<String>>,
         parameter_values: Option<Vec<f64>>,
@@ -888,7 +1067,57 @@ impl NonlinearSolver {
         }
         let frontend = parse_frontend(frontend)?;
         let execution_policy = parse_execution_policy(execution_policy, min_work)?;
-        let preparation_telemetry = parse_preparation_telemetry(telemetry)?;
+        let execution = execution.trim().to_ascii_lowercase();
+        if execution != "lambdify" && execution != "aot" {
+            return Err(UnsupportedOptionError::new_err(
+                "nonlinear execution must be 'lambdify' or 'aot'",
+            ));
+        }
+        let aot_policy = aot_policy.trim().to_ascii_lowercase();
+        if !matches!(
+            aot_policy.as_str(),
+            "require_prebuilt" | "build_if_missing" | "rebuild_always"
+        ) {
+            return Err(InvalidConfigurationError::new_err(
+                "aot_policy must be require_prebuilt, build_if_missing or rebuild_always",
+            ));
+        }
+        let aot_profile = aot_profile.trim().to_ascii_lowercase();
+        if aot_profile != "debug" && aot_profile != "release" {
+            return Err(InvalidConfigurationError::new_err(
+                "aot_profile must be 'debug' or 'release'",
+            ));
+        }
+        if aot_output_dir
+            .as_ref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            return Err(InvalidConfigurationError::new_err(
+                "aot_output_dir must not be empty",
+            ));
+        }
+        if execution == "lambdify"
+            && (aot_policy != "build_if_missing"
+                || aot_profile != "release"
+                || aot_output_dir.is_some())
+        {
+            return Err(UnsupportedOptionError::new_err(
+                "AOT lifecycle options require execution='aot'",
+            ));
+        }
+        if execution == "aot" && aot_policy != "require_prebuilt" && aot_output_dir.is_none() {
+            return Err(InvalidConfigurationError::new_err(
+                "AOT build policies require aot_output_dir",
+            ));
+        }
+        let telemetry = parse_telemetry(telemetry)?;
+        // Symbolic preparation has one opt-in timing mode. Avoid paying that
+        // cost for runtime counters-only collection.
+        let preparation_telemetry = if telemetry.collects_timings() {
+            PreparationTelemetryMode::Collect
+        } else {
+            PreparationTelemetryMode::Disabled
+        };
         let (method_options, method_flags) =
             normalized_method_options(method_options, method_flags)?;
         let method_vectors = normalized_method_vectors(method_vectors)?;
@@ -965,6 +1194,10 @@ impl NonlinearSolver {
             prepared: None,
             frontend,
             execution_policy,
+            execution,
+            aot_policy,
+            aot_profile,
+            aot_output_dir,
             preparation_telemetry,
             method: method.trim().to_owned(),
             method_options,
@@ -975,10 +1208,7 @@ impl NonlinearSolver {
             max_iterations,
             parameters: parameter_values,
             bounds,
-            telemetry: !matches!(
-                telemetry.trim().to_ascii_lowercase().as_str(),
-                "off" | "none"
-            ),
+            telemetry,
             logging: parse_log_level(loglevel)?,
             panic_state: SolverPanicState::default(),
         })
@@ -988,9 +1218,15 @@ impl NonlinearSolver {
     pub fn variables(&self) -> Vec<String> {
         self.variables.clone()
     }
-    /// Return the numerical callback backend (`lambdify` for this API).
+    /// Return the selected numerical backend (`lambdify` or `aot`).
     pub fn backend(&self) -> String {
-        "lambdify".to_owned()
+        self.prepared
+            .as_ref()
+            .map(|prepared| {
+                format!("{:?}", prepared.preparation_report().effective_backend)
+                    .to_ascii_lowercase()
+            })
+            .unwrap_or_else(|| self.execution.clone())
     }
     /// Return the selected symbolic frontend name.
     pub fn frontend(&self) -> String {
@@ -1007,7 +1243,7 @@ impl NonlinearSolver {
         if self.prepared.is_some() {
             return Ok(());
         }
-        let route = format!("{}:{:?}", self.frontend.as_str(), self.execution_policy);
+        let route = self.route();
         let panic_state = self.panic_state.clone();
         panic_state.run("prepare", "nonlinear", &route, || self.prepare_inner())
     }
@@ -1030,7 +1266,7 @@ impl NonlinearSolver {
         initial_guess: Vec<f64>,
         parameters: Option<Vec<f64>>,
     ) -> PyResult<NonlinearSolution> {
-        let route = format!("{}:{:?}", self.frontend.as_str(), self.execution_policy);
+        let route = self.route();
         let panic_state = self.panic_state.clone();
         panic_state.run("solve", "nonlinear", &route, || {
             self.solve_inner(initial_guess, parameters)
@@ -1039,6 +1275,15 @@ impl NonlinearSolver {
 }
 
 impl NonlinearSolver {
+    fn route(&self) -> String {
+        format!(
+            "{}:{}:{:?}",
+            self.frontend.as_str(),
+            self.execution,
+            self.execution_policy
+        )
+    }
+
     fn prepare_inner(&mut self) -> PyResult<()> {
         if self.prepared.is_some() {
             return Ok(());
@@ -1056,10 +1301,40 @@ impl NonlinearSolver {
             (Some(names), None) => options.with_equation_parameters(names),
             _ => options,
         };
-        self.prepared = Some(
+        let route = self.route();
+        let prepared = if self.execution == "aot" {
+            let profile = match self.aot_profile.as_str() {
+                "debug" => AotBuildProfile::Debug,
+                _ => AotBuildProfile::Release,
+            };
+            let build_policy = match self.aot_policy.as_str() {
+                "require_prebuilt" => SymbolicAotBuildPolicy::RequirePrebuilt,
+                "build_if_missing" => SymbolicAotBuildPolicy::BuildIfMissing { profile },
+                "rebuild_always" => SymbolicAotBuildPolicy::RebuildAlways { profile },
+                _ => unreachable!("constructor validates AOT policy"),
+            };
+            let mut config = SymbolicGeneratedBackendConfig::new()
+                .with_backend_policy_override(Some(SymbolicBackendSelectionPolicy::AotOnly))
+                .with_build_policy(build_policy);
+            if let Some(output_dir) = &self.aot_output_dir {
+                config = config.with_output_parent_dir(Some(output_dir.into()));
+            }
+            rustedscithe_core::numerical::Nonlinear_systems::symbolic::SymbolicNonlinearProblem::from_expressions_with_generated_backend(
+                self.equations.clone(),
+                options,
+                config,
+            )
+            .map(|generated| PreparedSymbolicNonlinearProblem::from_problem(generated.problem))
+            .map_err(|error| {
+                map_solve_error_context(error, "prepare", "nonlinear_system", &route)
+            })?
+        } else {
             PreparedSymbolicNonlinearProblem::from_expressions(self.equations.clone(), options)
-                .map_err(map_solve_error)?,
-        );
+                .map_err(|error| {
+                    map_solve_error_context(error, "prepare", "nonlinear_system", &route)
+                })?
+        };
+        self.prepared = Some(prepared);
         Ok(())
     }
 
@@ -1069,6 +1344,7 @@ impl NonlinearSolver {
         parameters: Option<Vec<f64>>,
     ) -> PyResult<NonlinearSolution> {
         self.prepare()?;
+        let route = self.route();
         let prepared = self
             .prepared
             .as_ref()
@@ -1077,7 +1353,7 @@ impl NonlinearSolver {
             Some(values) => prepared.bind_values(DVector::from_vec(values)),
             None => prepared.bind_without_parameters(),
         }
-        .map_err(map_solve_error)?;
+        .map_err(|error| map_solve_error_context(error, "solve", "nonlinear_system", &route))?;
         let method = method_from_name(
             &self.method,
             &self.method_options,
@@ -1092,25 +1368,22 @@ impl NonlinearSolver {
             ..SolveOptions::default()
         };
         options.diagnostics = DiagnosticsOptions {
-            collect_history: self.telemetry,
-            telemetry_mode: if self.telemetry {
-                rustedscithe_core::numerical::SolverTelemetryMode::Detailed
-            } else {
-                rustedscithe_core::numerical::SolverTelemetryMode::Off
-            },
+            collect_history: self.telemetry.is_enabled(),
+            telemetry_mode: self.telemetry,
             enable_logging: self.logging.is_some(),
             log_level: self.logging.unwrap_or(EngineLogLevel::Info),
             enable_memory_diagnostics: false,
         };
         let result = method
             .solve(&bound, DVector::from_vec(initial_guess), options)
-            .map_err(map_solve_error)?;
+            .map_err(|error| map_solve_error_context(error, "solve", "nonlinear_system", &route))?;
         Ok(NonlinearSolution {
             solution: result.x.iter().copied().collect(),
             residual: result.residual.iter().copied().collect(),
             residual_norm: result.residual_norm,
             iterations: result.iterations,
             termination: format!("{:?}", result.termination),
+            telemetry_mode: self.telemetry,
             statistics: result.statistics,
         })
     }
@@ -1123,6 +1396,7 @@ pub struct FittingSolution {
     report: String,
     objective_function: f64,
     termination: String,
+    telemetry_mode: LeastSquaresTelemetryMode,
     statistics: SolveStatistics,
 }
 
@@ -1151,6 +1425,11 @@ impl FittingSolution {
     pub fn termination(&self) -> &str {
         &self.termination
     }
+    #[getter]
+    /// Native telemetry mode selected for this fit.
+    pub fn telemetry_mode(&self) -> &'static str {
+        least_squares_telemetry_mode_name(self.telemetry_mode)
+    }
     /// Return a compact string-valued summary of the fit and iteration counts.
     pub fn diagnostics(&self) -> HashMap<String, String> {
         HashMap::from([
@@ -1174,6 +1453,14 @@ impl FittingSolution {
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         statistics_timings(&self.statistics)
     }
+    /// Per-iteration counter rows; empty when counters or attempt history were not collected.
+    pub fn telemetry_attempt_counters(&self) -> Vec<HashMap<String, u64>> {
+        statistics_attempt_counters(&self.statistics)
+    }
+    /// Per-iteration timing rows; each duration is nested in aggregate solve timing.
+    pub fn telemetry_attempt_timings_ms(&self) -> Vec<HashMap<String, f64>> {
+        statistics_attempt_timings_ms(&self.statistics)
+    }
 }
 
 /// Prepared symbolic least-squares solver backed by `Nonlinear_systems::least_squares`.
@@ -1189,6 +1476,7 @@ impl FittingSolution {
 #[pyclass(name = "FittingSolver", module = "rustedscithe")]
 pub struct FittingSolver {
     inner: SymbolicLeastSquaresSolver,
+    telemetry_mode: LeastSquaresTelemetryMode,
     panic_state: SolverPanicState,
 }
 
@@ -1202,7 +1490,7 @@ impl FittingSolver {
     /// and `parameters` are fixed values that may later be changed by continuation.
     /// `frontend` accepts `expr_legacy` or `atom_native`; `execution_policy` accepts
     /// `sequential`, `parallel`, or `auto` (parallel execution uses `min_work`).
-    /// Telemetry accepts `off`, `counters`, or `detailed`. Optional tolerances and
+    /// Telemetry accepts `off`, `counters`, `timings`, or `detailed`. Optional tolerances and
     /// iteration/scaling controls are passed to the native least-squares solver.
     /// `positive_variables` rejects trial values outside the positive domain.
     /// Logging is disabled by default; `loglevel` selects its native verbosity.
@@ -1226,7 +1514,8 @@ impl FittingSolver {
         let mode = match telemetry.trim().to_ascii_lowercase().as_str() {
             "off" | "none" => LeastSquaresTelemetryMode::Off,
             "counters" => LeastSquaresTelemetryMode::Counters,
-            "detailed" | "timings" => LeastSquaresTelemetryMode::Detailed,
+            "timings" => LeastSquaresTelemetryMode::Timings,
+            "detailed" => LeastSquaresTelemetryMode::Detailed,
             other => {
                 return Err(InvalidConfigurationError::new_err(format!(
                     "unsupported fitting telemetry '{other}'"
@@ -1277,6 +1566,7 @@ impl FittingSolver {
         )?;
         Ok(Self {
             inner,
+            telemetry_mode: mode,
             panic_state: SolverPanicState::default(),
         })
     }
@@ -1305,6 +1595,7 @@ impl FittingSolver {
                     report: format!("{:?}", report.termination),
                     objective_function: report.objective_function,
                     termination: format!("{:?}", report.termination),
+                    telemetry_mode: self.telemetry_mode,
                     statistics: report.statistics,
                 })
             },
@@ -1337,6 +1628,7 @@ impl FittingSolver {
                     report: format!("{:?}", report.termination),
                     objective_function: report.objective_function,
                     termination: format!("{:?}", report.termination),
+                    telemetry_mode: self.telemetry_mode,
                     statistics: report.statistics,
                 })
             },

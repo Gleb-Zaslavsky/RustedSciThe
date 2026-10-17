@@ -30,7 +30,8 @@ from .facade import (
     write_table,
 )
 from .dependencies import check_dependencies
-from ._native import fit_quality, lowess_smooth, savgol_filter, spline_resample
+from ._native import fit_quality, lowess_fit, lowess_smooth, savgol_filter, spline_resample
+from ._native import BSplineInterpolator, LowessResult
 
 __all__ = [
     name for name in dir(_native) if not name.startswith("_")
@@ -43,5 +44,6 @@ __all__ = [
     "solve_ivp", "solve_nonlinear", "task", "write_table",
     "ShootingBvpSolver",
     "task_dict", "check_dependencies",
-    "fit_quality", "lowess_smooth", "savgol_filter", "spline_resample",
+    "fit_quality", "lowess_fit", "lowess_smooth", "savgol_filter", "spline_resample",
+    "BSplineInterpolator", "LowessResult",
 ]

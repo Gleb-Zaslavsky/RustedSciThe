@@ -13,6 +13,8 @@ system = SymbolicSystem(
     [Expr.parse("a*x + y - 3"), Expr.parse("x - y")],
     ["x", "y", "a"],
 )
+# `a` is declared in the symbolic system so it can appear in the equations,
+# then separated as a numeric parameter rather than a Newton unknown.
 solver = NonlinearSolver(
     system,
     method="damped_newton",

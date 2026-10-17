@@ -187,6 +187,7 @@ fn validate_route(
     options: &SolverOptions,
 ) -> PyResult<(BdfTelemetryMode, IvpLambdifyExecutionPolicy)> {
     options.validate_aot_options()?;
+    crate::contract::validate_backend_options_for(options, "bdf")?;
     if !matches!(options.frontend(), "expr_legacy" | "atom_native") {
         return Err(UnsupportedOptionError::new_err(
             "BDF supports frontend='expr_legacy' or 'atom_native'",
@@ -264,6 +265,9 @@ pub struct BdfSolution {
     counters: HashMap<String, u64>,
     timings_ms: HashMap<String, f64>,
     aot_artifact_keys: Vec<String>,
+    aot_metadata: HashMap<String, String>,
+    aot_counters: HashMap<String, u64>,
+    aot_timings_ms: HashMap<String, f64>,
 }
 
 impl BdfSolution {
@@ -277,10 +281,8 @@ impl BdfSolution {
             BdfTelemetryMode::Timings => "timings",
             BdfTelemetryMode::Detailed => "detailed",
         };
-        let aot_artifact_keys = solver
-            .preparation_backend_telemetry()
-            .map(|telemetry| telemetry.aot_artifact_keys.clone())
-            .unwrap_or_default();
+        let (aot_metadata, aot_artifact_keys, aot_counters, aot_timings_ms) =
+            crate::bvp::aot_telemetry_maps(solver.preparation_backend_telemetry());
         let states = values
             .row_iter()
             .map(|row| row.iter().copied().collect())
@@ -429,9 +431,6 @@ impl BdfSolution {
             ("residual_ms".to_owned(), statistics.residual_ms_total),
             ("jacobian_ms".to_owned(), statistics.jacobian_ms_total),
         ]);
-        if telemetry_mode == "timings" {
-            counters.clear();
-        }
         crate::telemetry::apply_collection_mode(telemetry_mode, &mut counters, &mut timings_ms);
         Self {
             times: times.iter().copied().collect(),
@@ -441,6 +440,9 @@ impl BdfSolution {
             counters,
             timings_ms,
             aot_artifact_keys,
+            aot_metadata,
+            aot_counters,
+            aot_timings_ms,
         }
     }
 }
@@ -494,6 +496,21 @@ impl BdfSolution {
     /// Artifact identities observed by the native AOT lifecycle.
     pub fn aot_artifact_keys(&self) -> Vec<String> {
         self.aot_artifact_keys.clone()
+    }
+
+    /// Return the selected execution route and native snapshot metadata.
+    pub fn telemetry_aot_metadata(&self) -> HashMap<String, String> {
+        self.aot_metadata.clone()
+    }
+
+    /// Return generated-backend lifecycle counters collected in the selected mode.
+    pub fn telemetry_aot_counters(&self) -> HashMap<String, u64> {
+        self.aot_counters.clone()
+    }
+
+    /// Return cold/warm preparation and generated-route stage timings in milliseconds.
+    pub fn telemetry_aot_timings_ms(&self) -> HashMap<String, f64> {
+        self.aot_timings_ms.clone()
     }
 
     /// Return the small solver-independent result snapshot used by batch

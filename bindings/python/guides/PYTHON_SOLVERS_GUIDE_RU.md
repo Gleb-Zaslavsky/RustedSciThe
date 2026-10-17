@@ -26,8 +26,14 @@ py -3.12 -m venv .venv-rustedscithe
 | layout | `dense`, `sparse`, `banded` | хранение и решение линейной системы |
 | политика коллбэков | `sequential`, `parallel`, `auto` | планирование вычислений там, где это поддержано |
 
-Проверяйте `capabilities("solver")`. Неподдержанный набор настроек даёт
-`UnsupportedOptionError`, а не молча переключается на другой backend.
+Проверяйте `capabilities("solver")`. Списки в metadata показывают доступные
+значения по отдельным осям, но не обещают допустимость каждой комбинации;
+общая проверка и конструктор конкретного солвера отклонят неподдержанный набор
+через `UnsupportedOptionError`. Поле `telemetry_modes` показывает реальные
+режимы сбора; у `ode_api2_nonstiff` доступен только `off`. Флаг
+`supports_logging` показывает, преобразуется ли `SolverOptions.logging_level`
+в общий Rust `log` API; отдельные настройки логгирования солвера описываются
+в его собственном разделе.
 
 ## IVP и continuation
 

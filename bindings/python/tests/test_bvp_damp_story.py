@@ -132,7 +132,7 @@ def test_bvp_damp_combustion_story_writes_compact_matrix(capsys):
                 frontend=frontend,
                 matrix_layout="dense",
                 execution="lambdify",
-                telemetry="timings",
+                telemetry="detailed",
             ),
             scheme="forward",
             tolerance=1.0e-5,

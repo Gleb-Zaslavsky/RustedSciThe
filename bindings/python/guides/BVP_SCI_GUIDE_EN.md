@@ -86,14 +86,47 @@ frontend/execution provenance and sparse factorization policy. Invalid
 boundary shapes, non-finite data, unsupported combinations and numerical
 failures use typed Python exceptions.
 
-The Python wrapper currently has a separate callback path for numerical
-boundary residuals/Jacobians; consult `capabilities` and the constructor docs
-for its narrower route. The full symbolic wrapper is the normal choice when
-equations are available as `Expr`.
+### Direct numerical RHS callbacks
+
+When the RHS is already implemented numerically, BVP_sci exposes the native
+Dense callback route without pretending that it used symbolic preparation.
+Pass empty `expressions`, select both `frontend="numerical"` and
+`execution="numerical"`, and provide `rhs_callback(x, y, parameters)`. The
+callback returns one derivative per state. `rhs_jacobian_callback` may return
+the dense `df/dy` matrix and `rhs_parameter_jacobian_callback` may return
+`df/dp`; either omitted derivative uses the native finite-difference fallback.
+The collocation boundary conditions may remain `Expr` residuals or use the
+separate boundary callbacks. This route currently supports Dense only and
+does not support AOT. Python callbacks execute under the GIL, so keep them
+small; the numerical collocation and linear solve remain in Rust.
+
+```python
+from rustedscithe import BvpSciSolver, Expr, SolverOptions
+
+solver = BvpSciSolver(
+    [], ["y"], [Expr.parse("ya_y - 1")],
+    [0.0, 0.5, 1.0], [1.0, 0.6, 0.37],
+    options=SolverOptions(
+        frontend="numerical", execution="numerical",
+        matrix_layout="dense", telemetry="detailed",
+    ),
+    rhs_callback=lambda _x, y, _p: [-y[0]],
+    rhs_jacobian_callback=lambda _x, _y, _p: [[-1.0]],
+    output="dense",
+)
+solution = solver.solve()
+print(solution.sample(1.0))
+```
+
+`capabilities("bvp_sci")` advertises this callback route and its Dense-only
+analytical-Jacobian contract. Use the symbolic wrapper whenever an `Expr` RHS
+is available so Rust can prepare exact derivatives and select other layouts.
 
 See `examples/bvp_sci_sparse.py` for the basic route and
 `examples/bvp_sci_frontend_layouts.py` for a matched exact linear BVP matrix.
 `examples/bvp_sci_aot.py` compares Lambdify and AOT on the same Sparse,
 AtomNative problem and requires `tcc` or `gcc` on `PATH`.
+`examples/bvp_sci_numerical_callbacks.py` demonstrates the Dense callback
+route with an analytical Jacobian.
 Rust/Python parity and performance claims belong to the dedicated core test
 and benchmark reports, not to example output.

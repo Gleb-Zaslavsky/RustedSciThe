@@ -331,6 +331,9 @@ fn bvp_sci_wrapper_matches_native_dense_expr_legacy_solution_and_counters() {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
         .expect("Python BVP_sci construction")
     });

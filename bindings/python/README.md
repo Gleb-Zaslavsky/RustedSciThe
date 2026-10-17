@@ -101,9 +101,16 @@ public API from `rustedscithe`; `_native` is an implementation module.
 | Text task documents | `TaskDocument`, `task`, `task_dict`, `run_task_batch` | Parse, inspect as a detached dict, and execute reusable IVP/BVP documents through the native task infrastructure. |
 
 Use `capabilities("solver_name")` to inspect the Python-supported routes.
-Native features that are not exposed by this package are not implied by a
-shared option name; unsupported combinations raise a typed error instead of
-silently selecting a different backend.
+The axis lists describe available values, not every valid Cartesian
+combination. For the method-selecting fitting facade, query
+`universal_fitting_lm`, `universal_fitting_gavin` or
+`universal_fitting_varpro` to see method-specific limits; the aggregate
+`universal_fitting` record is a union. BVP_sci additionally reports selectable
+sparse factorization policies separately from its `Sparse` matrix layout,
+including the explicitly marked experimental reusable-Faer routes. Native
+features that are not exposed by this package are not implied by a shared
+option name; unsupported combinations raise a typed error instead of silently
+selecting a different backend.
 
 ## Configuration Choices
 
@@ -116,10 +123,16 @@ documented subset of their combinations:
 | Callback execution | `lambdify`, `aot` | In-process prepared closures or generated compiled artifacts. |
 | Matrix layout | `dense`, `sparse`, `banded` | Storage and linear-system route. |
 | Callback policy | `sequential`, `parallel`, `auto` | Scheduling where the native solver supports it. |
+| Telemetry | `off`, `counters`, `timings`, `detailed` | Native collection mode; `ode_api2_nonstiff` supports only `off`. |
 | Lifecycle | fresh solve, `prepare`, continuation, restart | Whether prepared model or previous state is reused. |
 
 Check the relevant guide and `capabilities()` before combining options. A
-structured layout is useful only when the problem has exploitable structure;
+capability's axis lists show supported values, not every cross-product; the
+shared validator and concrete constructor reject unsupported combinations.
+`supports_logging` reports support for the common `SolverOptions.logging_level`
+mapping; solver-specific logging controls remain separate. Telemetry modes are
+reported per solver family. A structured layout is useful
+only when the problem has exploitable structure;
 parallel callback evaluation and AOT compilation also have workload-dependent
 break-even points. For continuation, distinguish cold preparation from warm
 solve time.
@@ -130,10 +143,14 @@ The overview guides explain shared Python conventions. Solver-specific guides
 preserve each native solver's option breadth, supported routes, limitations and
 recommended workflows.
 
+Binding design and review criteria are defined in the
+[Python architectural guideline](PYTHON_ARCHITECTURAL_GUIDELINE.md).
+
 | Family | English | Русский |
 | --- | --- | --- |
 | Python API overview | [Python solvers](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/PYTHON_SOLVERS_GUIDE_EN.md) | [Обзор Python API](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/PYTHON_SOLVERS_GUIDE_RU.md) |
 | Symbolic mathematics | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SYMBOLIC_MATH_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SYMBOLIC_MATH_GUIDE_RU.md) |
+| Data processing | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/DATA_PROCESSING_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/DATA_PROCESSING_GUIDE_RU.md) |
 | Trajectory animation | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/TRAJECTORY_ANIMATION_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/TRAJECTORY_ANIMATION_GUIDE_RU.md) |
 | Radau | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/RADAU_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/RADAU_GUIDE_RU.md) |
 | BDF | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BDF_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BDF_GUIDE_RU.md) |

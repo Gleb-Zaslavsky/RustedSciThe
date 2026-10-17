@@ -136,6 +136,16 @@ Telemetry modes are disjoint: `off` collects neither counters nor timings;
 stage durations without collecting discrete counters; and `detailed` collects
 both. The selected mode is available as `solution.telemetry_mode`, while the
 two result accessors return empty dictionaries for a disabled collection.
+The detached result also exposes `telemetry_scope_timings_ms()` and
+`telemetry_scope_events()` for solve/mesh/iteration/damping scopes,
+`telemetry_callback_counters()` and `telemetry_callback_timings_ms()` for the
+selected symbolic callback route, and `telemetry_preparation_timings_ms()`
+when the native solver published preparation snapshots. Available storage
+estimates are reported separately by `telemetry_storage_bytes()`; a missing
+key means that the backend does not expose that storage quantity, not zero
+bytes. `telemetry_storage_is_estimated()` distinguishes estimates from direct
+measurements and returns `None` when no values are available. Scope durations
+can overlap and must not be summed as independent work.
 
 ## Examples
 

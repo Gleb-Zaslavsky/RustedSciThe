@@ -53,8 +53,10 @@ Python-конструктор принимает ширины полосы яв�
 | Исполнение | `SolverOptions(execution=...)` | `lambdify` или `aot` |
 | Планирование | `SolverOptions(execution_policy=...)` | `sequential`, `parallel`, `auto` там, где поддержано |
 
-Прямой `Lsode2Solver` принимает `band_lower`/`band_upper`; другие адаптеры
-с общим layout-options могут использовать `SolverOptions.set_banded_width`.
+`Lsode2Solver` принимает `band_lower`/`band_upper` как аргументы конструктора
+или через `SolverOptions.set_banded_width(lower, upper)`. Если заданы обе формы,
+значения должны совпадать, иначе возвращается типизированная ошибка
+конфигурации. Ширины отклоняются для layout, отличного от Banded.
 
 Wrapper также предоставляет native analytical residual/Jacobian callbacks
 для поддержанных layout. Они пересекают Python-границу и удерживают GIL;

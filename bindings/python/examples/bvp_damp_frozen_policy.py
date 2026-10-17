@@ -16,13 +16,16 @@ solver = BvpDampFrozenSolver(
     initial_state=[0.0] * 5,
     parameters=["rate"],
     parameter_values=[1.0],
+    # Recompute the frozen Jacobian every two solves. This is a visible policy
+    # example, not a claim that periodic reuse is best for every BVP.
     policy="every_m",
     policy_parameters=[2.0],
     options=SolverOptions(
         frontend="atom_native",
         execution="lambdify",
         matrix_layout="dense",
-        telemetry="timings",
+        # The example reports Jacobian rebuild counts as well as timings.
+        telemetry="detailed",
     ),
 )
 
@@ -30,8 +33,12 @@ solver.prepare()
 for rate in (1.0, 2.0, 0.5):
     solver.set_parameters([rate])
     solution = solver.solve_prepared()
+    endpoint = solution.values()[0][-1]
+    counters = solution.telemetry_counters()
+    if abs(endpoint - rate) > 1e-8:
+        raise AssertionError(f"rate={rate:g}: expected y(1)={rate:g}, got {endpoint:g}")
     print(
-        f"rate={rate:g}, y(1)={solution.values()[0][-1]:.8f}, "
+        f"rate={rate:g}, y(1)={endpoint:.8f}, "
         f"policy={solver.provenance()['frozen_policy']}, "
-        f"jacobians={solution.telemetry_counters().get('jacobian_recalculations', 0)}"
+        f"jacobians={counters['jacobian_recalculations']}"
     )

@@ -8,8 +8,7 @@ use pyo3::prelude::*;
 use crate::errors::TelemetryError;
 
 /// Apply the shared Python snapshot contract without changing native timing
-/// scopes. `off` exposes no samples and `counters` exposes no timing samples;
-/// `detailed` preserves both maps.
+/// scopes. `timings` exposes durations only; `detailed` preserves both maps.
 pub(crate) fn apply_collection_mode(
     mode: &str,
     counters: &mut std::collections::HashMap<String, u64>,
@@ -21,9 +20,37 @@ pub(crate) fn apply_collection_mode(
             timings_ms.clear();
         }
         "counters" => timings_ms.clear(),
-        "timings" => {}
+        "timings" => counters.clear(),
         "detailed" => {}
         _ => unreachable!("solver adapters must normalize telemetry mode names"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_collection_mode;
+    use std::collections::HashMap;
+
+    #[test]
+    fn collection_modes_expose_only_the_requested_channels() {
+        for (mode, expect_counters, expect_timings) in [
+            ("off", false, false),
+            ("counters", true, false),
+            ("timings", false, true),
+            ("detailed", true, true),
+        ] {
+            let mut counters = HashMap::from([("measured_zero".to_owned(), 0)]);
+            let mut timings = HashMap::from([("stage_ms".to_owned(), 0.0)]);
+            apply_collection_mode(mode, &mut counters, &mut timings);
+            assert_eq!(!counters.is_empty(), expect_counters, "mode={mode}");
+            assert_eq!(!timings.is_empty(), expect_timings, "mode={mode}");
+            if expect_counters {
+                assert_eq!(counters.get("measured_zero"), Some(&0));
+            }
+            if expect_timings {
+                assert_eq!(timings.get("stage_ms"), Some(&0.0));
+            }
+        }
     }
 }
 

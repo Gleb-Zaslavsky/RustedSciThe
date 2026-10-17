@@ -43,6 +43,7 @@ impl SymbolicFrontend {
 pub enum ExecutionRoute {
     Lambdify,
     AOT,
+    Numerical,
 }
 
 impl fmt::Display for ExecutionRoute {
@@ -50,6 +51,7 @@ impl fmt::Display for ExecutionRoute {
         f.write_str(match self {
             Self::Lambdify => "Lambdify",
             Self::AOT => "AOT",
+            Self::Numerical => "Numerical",
         })
     }
 }
@@ -60,6 +62,7 @@ impl ExecutionRoute {
         match self {
             Self::Lambdify => "Lambdify",
             Self::AOT => "AOT",
+            Self::Numerical => "Numerical",
         }
     }
 
@@ -200,12 +203,19 @@ fn choose_frontend(value: Option<&str>) -> PyResult<String> {
         value,
         "expr_legacy",
         "frontend",
-        &["expr_legacy", "expr", "atom_native", "atom_view"],
+        &[
+            "expr_legacy",
+            "expr",
+            "atom_native",
+            "atom_view",
+            "numerical",
+        ],
     )?
     .as_str()
     {
         "expr_legacy" | "expr" => Ok("expr_legacy".to_owned()),
         "atom_native" | "atom_view" => Ok("atom_native".to_owned()),
+        "numerical" => Ok("numerical".to_owned()),
         _ => unreachable!("choose_frontend only accepts the four listed aliases"),
     }
 }
@@ -245,7 +255,8 @@ impl SolverOptions {
     /// AOT-specific arguments are meaningful only with `execution="aot"`.
     ///
     /// Common spellings include `expr_legacy`/`expr` and
-    /// `atom_native`/`atom_view`; `lambdify`/`aot`; `dense`/`sparse`/`banded`;
+    /// `atom_native`/`atom_view`; `lambdify`/`aot` (plus solver-specific
+    /// `numerical` callbacks); `dense`/`sparse`/`banded`;
     /// `sequential`/`parallel`/`auto`; and `off`/`counters`/`timings`/`detailed`.
     #[new]
     #[pyo3(signature = (*, frontend=None, execution=None, matrix_layout=None, execution_policy=None, telemetry=None, aot_policy=None, aot_toolchain=None, aot_profile=None, aot_output_dir=None))]
@@ -271,7 +282,12 @@ impl SolverOptions {
         };
         Ok(Self {
             frontend: choose_frontend(frontend)?,
-            execution: choose(execution, "lambdify", "execution", &["lambdify", "aot"])?,
+            execution: choose(
+                execution,
+                "lambdify",
+                "execution",
+                &["lambdify", "aot", "numerical"],
+            )?,
             matrix_layout: choose(
                 matrix_layout,
                 "dense",
@@ -312,13 +328,13 @@ impl SolverOptions {
         })
     }
 
-    /// Symbolic route: `expr_legacy` or `atom_native`.
+    /// Preparation frontend: symbolic Expr/Atom or direct numerical callbacks.
     #[getter]
     pub(crate) fn frontend(&self) -> &str {
         &self.frontend
     }
 
-    /// Numerical callback route: `lambdify` or `aot`.
+    /// Execution route: Lambdify, AOT, or a solver's direct numerical callbacks.
     #[getter]
     pub(crate) fn execution(&self) -> &str {
         &self.execution
@@ -456,8 +472,9 @@ impl SolverOptions {
     /// Validate common options against a concrete solver capability set.
     ///
     /// Use a registered name such as `bdf`, `radau`, or `bvp_sci`. This checks
-    /// common route dimensions; solver-specific numeric settings are checked
-    /// by that solver's constructor.
+    /// common route dimensions, including known frontend/execution/layout
+    /// constraints. Solver-specific numeric settings are checked by that
+    /// solver's constructor.
     pub fn validate_for(&self, solver: &str) -> PyResult<()> {
         self.validate_aot_options()?;
         let capabilities = capabilities_for(solver)?;
@@ -477,6 +494,25 @@ impl SolverOptions {
                 "options are not supported by solver '{solver}'"
             )));
         }
+        if !capabilities
+            .telemetry_modes
+            .iter()
+            .any(|v| v == &self.telemetry)
+        {
+            return Err(UnsupportedOptionError::new_err(format!(
+                "telemetry mode '{}' is not supported by solver '{solver}'",
+                self.telemetry
+            )));
+        }
+        validate_backend_options_for(self, &capabilities.solver)?;
+        if capabilities.solver == "bvp_sci"
+            && ((self.frontend == "numerical") != (self.execution == "numerical")
+                || (self.frontend == "numerical" && self.matrix_layout != "dense"))
+        {
+            return Err(UnsupportedOptionError::new_err(
+                "BVP_sci numerical callbacks require frontend='numerical', execution='numerical' and matrix_layout='dense'",
+            ));
+        }
         Ok(())
     }
 
@@ -485,7 +521,7 @@ impl SolverOptions {
     /// Keeping this check in the common contract prevents a setting from
     /// being silently accepted by one wrapper and ignored by another.
     pub(crate) fn validate_aot_options(&self) -> PyResult<()> {
-        if self.execution == "lambdify"
+        if self.execution != "aot"
             && (self.aot_policy != "build_if_missing"
                 || self.aot_toolchain != "gcc"
                 || self.aot_profile != "release"
@@ -550,17 +586,39 @@ impl SolverOptions {
     }
 }
 
+/// Reject layout/backend knobs that a selected native route would ignore.
+///
+/// This common check runs both through `SolverOptions.validate_for()` and in
+/// wrappers with additional route-specific validation.
+pub(crate) fn validate_backend_options_for(options: &SolverOptions, solver: &str) -> PyResult<()> {
+    let has_lower = options.band_lower.is_some();
+    let has_upper = options.band_upper.is_some();
+    if has_lower != has_upper {
+        return Err(InvalidConfigurationError::new_err(
+            "band_lower and band_upper must be configured together",
+        ));
+    }
+    if (has_lower || has_upper) && options.matrix_layout != "banded" {
+        return Err(UnsupportedOptionError::new_err(
+            "band_lower/band_upper are only valid for matrix_layout='banded'",
+        ));
+    }
+    if options.sparse_factorization != "standard_faer"
+        && (solver != "bvp_sci" || options.matrix_layout != "sparse")
+    {
+        return Err(UnsupportedOptionError::new_err(
+            "non-default sparse_factorization is supported only by the BVP_sci Sparse route (matrix_layout='sparse')",
+        ));
+    }
+    Ok(())
+}
+
 /// Translate common Python logging configuration to a supported native level.
 pub(crate) fn native_logging_level(
     options: &SolverOptions,
     solver: &str,
 ) -> PyResult<SolverLogLevel> {
-    if options.logging_level != "off"
-        && !matches!(
-            solver,
-            "bdf" | "backward_euler" | "lsode2" | "bvp_sci" | "shooting_bvp"
-        )
-    {
+    if options.logging_level != "off" && !supports_common_logging_level(solver) {
         return Err(UnsupportedOptionError::new_err(format!(
             "solver '{solver}' does not expose native Rust logging"
         )));
@@ -575,7 +633,21 @@ pub(crate) fn native_logging_level(
     })
 }
 
+fn supports_common_logging_level(solver: &str) -> bool {
+    matches!(
+        solver,
+        "bdf" | "backward_euler" | "lsode2" | "bvp_sci" | "shooting_bvp"
+    )
+}
+
 /// Capabilities advertised by a concrete solver family.
+///
+/// Axis lists describe values available somewhere in that route family; they
+/// are not implicitly a Cartesian product. For `universal_fitting`, the axes
+/// are the union across methods. Query `universal_fitting_lm`,
+/// `universal_fitting_gavin`, or `universal_fitting_varpro` for method-specific
+/// capabilities. `SolverOptions.validate_for()` checks shared cross-axis
+/// constraints, while concrete wrappers validate additional combinations.
 #[pyclass(name = "SolverCapabilities", module = "rustedscithe")]
 #[derive(Clone, Debug)]
 pub struct SolverCapabilities {
@@ -585,6 +657,7 @@ pub struct SolverCapabilities {
     methods: Vec<String>,
     layouts: Vec<String>,
     policies: Vec<String>,
+    telemetry_modes: Vec<String>,
     supports_continuation: bool,
     supports_analytical_callbacks: bool,
     analytical_callback_layouts: Vec<String>,
@@ -631,6 +704,19 @@ impl SolverCapabilities {
     }
 
     #[getter]
+    /// Telemetry modes actually collected by the solver route.
+    pub(crate) fn telemetry_modes(&self) -> Vec<String> {
+        self.telemetry_modes.clone()
+    }
+
+    #[getter]
+    /// Whether `SolverOptions.logging_level` maps to the native Rust `log` API.
+    /// Solver-specific logging controls are reported separately by their facade.
+    pub(crate) fn supports_logging(&self) -> bool {
+        supports_common_logging_level(&self.solver)
+    }
+
+    #[getter]
     /// Whether the solver supports parameter continuation.
     pub(crate) fn supports_continuation(&self) -> bool {
         self.supports_continuation
@@ -649,6 +735,25 @@ impl SolverCapabilities {
     #[getter]
     pub(crate) fn analytical_callback_layouts(&self) -> Vec<String> {
         self.analytical_callback_layouts.clone()
+    }
+
+    /// Selectable sparse factorization policies when the wrapper exposes them.
+    ///
+    /// These are not matrix layouts. BVP_sci is currently the only Python
+    /// route with a selectable sparse implementation; experimental policies
+    /// are named as such to avoid presenting them as production defaults.
+    #[getter]
+    pub(crate) fn sparse_factorization_policies(&self) -> Vec<String> {
+        if self.solver == "bvp_sci" {
+            vec![
+                "standard_faer".to_owned(),
+                "reusable_faer_experimental".to_owned(),
+                "reusable_faer_simplicial_experimental".to_owned(),
+                "superlu".to_owned(),
+            ]
+        } else {
+            Vec::new()
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -671,6 +776,7 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
                 "parallel".to_owned(),
                 "auto".to_owned(),
             ],
+            telemetry_modes: common_telemetry_modes(),
             supports_continuation: true,
             // The separate RadauCallbackSolver exposes the native Dense
             // callback contract; symbolic RadauSolver remains expression-only.
@@ -688,6 +794,7 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
                 "parallel".to_owned(),
                 "auto".to_owned(),
             ],
+            telemetry_modes: common_telemetry_modes(),
             supports_continuation: true,
             // BdfCallbackSolver exposes the native Dense callback contract;
             // symbolic BdfSolver remains the expression-oriented entry point.
@@ -701,6 +808,7 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
             methods: vec!["backward_euler".to_owned()],
             layouts: vec!["dense".to_owned()],
             policies: vec!["sequential".to_owned()],
+            telemetry_modes: common_telemetry_modes(),
             supports_continuation: true,
             supports_analytical_callbacks: false,
             analytical_callback_layouts: Vec::new(),
@@ -721,6 +829,7 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
                 "parallel".to_owned(),
                 "auto".to_owned(),
             ],
+            telemetry_modes: common_telemetry_modes(),
             supports_continuation: true,
             // Python callbacks are available on all native LSODE2 layouts.
             supports_analytical_callbacks: true,
@@ -737,6 +846,7 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
             methods: vec!["rk45".to_owned(), "dopri".to_owned(), "ab4".to_owned()],
             layouts: vec!["dense".to_owned()],
             policies: vec!["sequential".to_owned()],
+            telemetry_modes: vec!["off".to_owned()],
             supports_continuation: false,
             supports_analytical_callbacks: false,
             analytical_callback_layouts: Vec::new(),
@@ -748,6 +858,7 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
             methods: vec!["scalar_second_order_shooting".to_owned()],
             layouts: vec!["dense".to_owned()],
             policies: vec!["sequential".to_owned(), "parallel".to_owned()],
+            telemetry_modes: common_telemetry_modes(),
             supports_continuation: false,
             supports_analytical_callbacks: false,
             analytical_callback_layouts: Vec::new(),
@@ -763,14 +874,23 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
                 "parallel".to_owned(),
                 "auto".to_owned(),
             ],
+            telemetry_modes: common_telemetry_modes(),
             supports_continuation: true,
             supports_analytical_callbacks: false,
             analytical_callback_layouts: Vec::new(),
         }),
         "bvp_sci" | "bvpsci" | "bvp_scipy" => Ok(SolverCapabilities {
             solver: "bvp_sci".to_owned(),
-            frontends: common_frontends,
-            executions: vec!["lambdify".to_owned(), "aot".to_owned()],
+            frontends: vec![
+                "expr_legacy".to_owned(),
+                "atom_native".to_owned(),
+                "numerical".to_owned(),
+            ],
+            executions: vec![
+                "lambdify".to_owned(),
+                "aot".to_owned(),
+                "numerical".to_owned(),
+            ],
             methods: vec!["scipy_like".to_owned()],
             layouts: vec!["dense".to_owned(), "sparse".to_owned(), "banded".to_owned()],
             policies: vec![
@@ -778,14 +898,15 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
                 "parallel".to_owned(),
                 "auto".to_owned(),
             ],
+            telemetry_modes: common_telemetry_modes(),
             supports_continuation: true,
-            supports_analytical_callbacks: false,
-            analytical_callback_layouts: Vec::new(),
+            supports_analytical_callbacks: true,
+            analytical_callback_layouts: vec!["dense".to_owned()],
         }),
         "nonlinear" | "nonlinear_system" | "nonlinear_systems" => Ok(SolverCapabilities {
             solver: "nonlinear_system".to_owned(),
             frontends: common_frontends,
-            executions: vec!["lambdify".to_owned()],
+            executions: vec!["lambdify".to_owned(), "aot".to_owned()],
             methods: vec![
                 "newton".to_owned(),
                 "damped_newton".to_owned(),
@@ -805,7 +926,82 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
                 "parallel".to_owned(),
                 "auto".to_owned(),
             ],
+            telemetry_modes: common_telemetry_modes(),
             supports_continuation: true,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "gavin" | "gavin_fitting" => Ok(SolverCapabilities {
+            solver: "gavin_fitting".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned()],
+            methods: vec!["gavin_lm".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec!["sequential".to_owned(), "parallel".to_owned()],
+            telemetry_modes: common_telemetry_modes(),
+            supports_continuation: false,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "varpro" | "varpro_fitting" => Ok(SolverCapabilities {
+            solver: "varpro".to_owned(),
+            frontends: vec!["expr_legacy".to_owned()],
+            executions: vec!["lambdify".to_owned()],
+            methods: vec!["variable_projection".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec!["sequential".to_owned()],
+            telemetry_modes: common_telemetry_modes(),
+            supports_continuation: false,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "universal_fitting" | "universal_fitting_all" => Ok(SolverCapabilities {
+            solver: "universal_fitting".to_owned(),
+            // Union across methods; use the method-specific names below when
+            // validating one concrete route.
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned()],
+            methods: vec!["lm".to_owned(), "gavin".to_owned(), "varpro".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec!["sequential".to_owned(), "parallel".to_owned()],
+            telemetry_modes: common_telemetry_modes(),
+            supports_continuation: false,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "universal_fitting_lm" | "universal_lm" => Ok(SolverCapabilities {
+            solver: "universal_fitting_lm".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned()],
+            methods: vec!["lm".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec!["sequential".to_owned(), "parallel".to_owned()],
+            telemetry_modes: common_telemetry_modes(),
+            supports_continuation: false,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "universal_fitting_gavin" | "universal_gavin" => Ok(SolverCapabilities {
+            solver: "universal_fitting_gavin".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned()],
+            methods: vec!["gavin".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec!["sequential".to_owned(), "parallel".to_owned()],
+            telemetry_modes: common_telemetry_modes(),
+            supports_continuation: false,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "universal_fitting_varpro" | "universal_varpro" => Ok(SolverCapabilities {
+            solver: "universal_fitting_varpro".to_owned(),
+            frontends: vec!["expr_legacy".to_owned()],
+            executions: vec!["lambdify".to_owned()],
+            methods: vec!["varpro".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec!["sequential".to_owned()],
+            telemetry_modes: common_telemetry_modes(),
+            supports_continuation: false,
             supports_analytical_callbacks: false,
             analytical_callback_layouts: Vec::new(),
         }),
@@ -816,14 +1012,22 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
             methods: vec!["levenberg_marquardt".to_owned()],
             layouts: vec!["dense".to_owned()],
             policies: vec!["sequential".to_owned()],
+            telemetry_modes: common_telemetry_modes(),
             supports_continuation: true,
             supports_analytical_callbacks: false,
             analytical_callback_layouts: Vec::new(),
         }),
         _ => Err(InvalidConfigurationError::new_err(format!(
-            "unknown solver '{solver}'; capabilities are currently defined for radau5, bdf, backward_euler, lsode2, ode_api2_nonstiff, bvp_damp, bvp_sci, shooting_bvp, nonlinear_system and fitting"
+            "unknown solver '{solver}'; capabilities are defined for radau5, bdf, backward_euler, lsode2, ode_api2_nonstiff, bvp_damp, bvp_sci, shooting_bvp, nonlinear_system, fitting, gavin_fitting, varpro and method-specific UniversalFitting routes"
         ))),
     }
+}
+
+fn common_telemetry_modes() -> Vec<String> {
+    ["off", "counters", "timings", "detailed"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 #[pyfunction]

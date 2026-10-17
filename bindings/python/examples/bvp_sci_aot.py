@@ -20,6 +20,8 @@ if compiler is None:
     raise SystemExit("This example requires tcc or gcc on PATH.")
 toolchain = "tcc" if compiler.lower().endswith(("tcc", "tcc.exe")) else "gcc"
 mesh = np.linspace(0.0, 1.0, 18)
+# A small smooth perturbation keeps the initial guess distinct from the exact
+# solution while preserving both endpoint values.
 guess = np.exp(-mesh) * (1.0 + 0.02 * np.sin(np.pi * mesh))
 y = Expr.variable("y")
 results = {}
@@ -39,6 +41,8 @@ for execution in ("lambdify", "aot"):
             aot_profile="debug" if execution == "aot" else None,
             aot_output_dir=artifacts if execution == "aot" else None,
         )
+        # The AOT branch builds a fresh artifact in this directory. Lambdify
+        # has no compiler lifecycle, so its AOT-only fields remain unset.
         solution = solve_bvp(
             "bvp_sci",
             [-y],
@@ -55,12 +59,20 @@ for execution in ("lambdify", "aot"):
             [solution.sample(float(x))[0] for x in mesh], dtype=np.float64
         )
         exact = np.exp(-mesh)
+        exact_error = float(np.max(np.abs(results[execution] - exact)))
+        if solution.status != "success" or exact_error > 1e-6:
+            raise AssertionError(
+                f"{execution}: status={solution.status!r}, "
+                f"maximum exact-profile error={exact_error:.3e}"
+            )
         print(
             f"execution={execution:8} "
-            f"max_exact_error={np.max(np.abs(results[execution] - exact)):.3e} "
+            f"max_exact_error={exact_error:.3e} "
             f"status={solution.status}"
         )
         print("telemetry counters:", solution.telemetry_counters())
+        # Core stages overlap the Python call wall time; do not sum them into
+        # an alleged total or treat this smoke example as a benchmark.
         print("stage timings:", solution.telemetry_timings_ms())
         del solution
 

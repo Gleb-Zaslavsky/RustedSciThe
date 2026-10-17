@@ -1,4 +1,13 @@
-"""Solve and optionally animate a small harmonic-oscillator BVP by shooting."""
+"""Solve a small exact BVP with the shooting method and inspect its phase path.
+
+The second-order equation ``y''=-y`` is rewritten as the first-order system
+``y'=v, v'=-y``. Dirichlet conditions ``y(0)=0`` and ``y(pi/2)=1`` imply the
+unknown shooting slope ``v(0)=1`` and exact solution ``y=sin(x)``. Shooting is
+best suited to scalar and very small systems (roughly two or three states),
+not large coupled BVPs; each root trial invokes an IVP solve. The optional
+animation plots the state-space curve ``(y, y')`` rather than the spatial
+profile.
+"""
 
 from __future__ import annotations
 
@@ -44,6 +53,14 @@ def main() -> None:
     mesh = solution.mesh_array()
     states = solution.states_array()
     exact_error = float(np.max(np.abs(states[:, 0] - np.sin(mesh))))
+    slope_error = abs(solution.shooting_value - 1.0)
+    # The IVP tolerances and shooting root tolerance are both tight here; this
+    # gate checks the demonstrated small-system case, not large-system fitness.
+    if exact_error > 1e-6 or slope_error > 1e-6:
+        raise AssertionError(
+            f"harmonic shooting error is too large: profile={exact_error:.3e}, "
+            f"slope={slope_error:.3e}"
+        )
     print(f"inferred initial slope: {solution.shooting_value:.12g}")
     print(f"maximum |y - sin(x)|: {exact_error:.3e}")
     print(f"preparation time: {solution.preparation_ms:.3f} ms")

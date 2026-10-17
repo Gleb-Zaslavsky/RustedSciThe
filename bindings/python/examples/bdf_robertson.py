@@ -19,6 +19,9 @@ rhs = [
     Expr.constant(3.0e7) * y2 * y2,
 ]
 
+# BDF's public route here is Dense-only, so the frontend is the comparison
+# axis; asking for Sparse/Banded would be an unsupported configuration.
+reference_final = None
 for frontend in ("expr_legacy", "atom_native"):
     solution = solve_ivp(
         "bdf",
@@ -35,12 +38,20 @@ for frontend in ("expr_legacy", "atom_native"):
         ),
         rtol=1e-7,
         atol=1e-10,
+        # Robertson kinetics is stiff over [0, 100]; permit the adaptive
+        # controller enough work to resolve its fast initial transient.
         max_bdf_order=5,
         max_steps=20_000,
     )
     final = solution.states_array()[-1]
+    mass_error = abs(float(final.sum()) - 1.0)
+    if mass_error > 1e-8:
+        raise AssertionError(f"{frontend}: Robertson total mass drifted by {mass_error:.3e}")
+    if reference_final is None:
+        reference_final = final.copy()
+    elif not np.allclose(final, reference_final, rtol=1e-7, atol=1e-10):
+        raise AssertionError("BDF symbolic frontends produced different final states")
     print(
-        f"frontend={frontend:11} final={final} "
-        f"mass_error={abs(float(final.sum()) - 1.0):.3e} "
+        f"frontend={frontend:11} final={final} mass_error={mass_error:.3e} "
         f"telemetry={solution.telemetry_timings_ms()}"
     )

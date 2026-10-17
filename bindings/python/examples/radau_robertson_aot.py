@@ -40,6 +40,8 @@ with tempfile.TemporaryDirectory(
     prefix="rustedscithe-radau-robertson-aot-",
     ignore_cleanup_errors=True,
 ) as artifacts:
+    # Use a fresh location so provenance reports a real build, not an artifact
+    # left by an earlier run. The `debug` profile favors quick compilation.
     options = SolverOptions(
         frontend="atom_native",
         execution="aot",
@@ -54,12 +56,21 @@ with tempfile.TemporaryDirectory(
         "radau5", rhs, ["y1", "y2", "y3"], "t",
         np.array([1.0, 0.0, 0.0]), 0.0, 100.0, 100.0,
         options=options,
+        # Supplying the exact Jacobian avoids conflating AOT callback execution
+        # with finite-difference Jacobian work in this route demonstration.
         jacobian=jacobian,
         rtol=1e-7,
         atol=1e-10,
         max_steps=20_000,
     )
+    final_state = solution.final_state_array()
+    mass_error = abs(float(final_state.sum()) - 1.0)
+    # The slow recycle transfers mass between species but creates or destroys
+    # none; this guards the AOT callback route independently of its timings.
+    if not np.isfinite(final_state).all() or mass_error > 1e-7:
+        raise AssertionError(f"AOT Robertson mass/finiteness gate failed: {mass_error:.3e}")
     print("toolchain:", toolchain)
-    print("final state:", solution.final_state_array())
+    print("final state:", final_state)
+    print(f"mass conservation error: {mass_error:.3e}")
     print("provenance:", solution.diagnostics())
     print("stage timings:", solution.telemetry_timings_ms())

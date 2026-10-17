@@ -246,6 +246,7 @@ impl UniversalNonStiffSolver {
 }
 
 fn validate_options(options: &SolverOptions) -> PyResult<()> {
+    crate::contract::validate_backend_options_for(options, "ode_api2_nonstiff")?;
     if options.frontend() != "expr_legacy"
         || options.execution() != "lambdify"
         || options.matrix_layout() != "dense"

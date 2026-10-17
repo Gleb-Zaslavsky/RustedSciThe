@@ -32,7 +32,14 @@ These are independent choices:
 | callback policy | `sequential`, `parallel`, `auto` | callback scheduling where the native solver supports it |
 
 Use `capabilities("solver")` rather than assuming that every combination is
-valid. Unsupported combinations raise `UnsupportedOptionError`.
+valid. The metadata lists supported values per axis, not a Cartesian product;
+`SolverOptions.validate_for()` checks shared cross-axis constraints and the
+concrete constructor checks route-specific details. `telemetry_modes` reports
+the modes actually collected by that family. In particular,
+`ode_api2_nonstiff` supports only `off`, so set that explicitly when passing
+`SolverOptions` to the nonstiff adapter. The `supports_logging` flag reports
+whether `SolverOptions.logging_level` maps to the common Rust `log` API; a
+solver's separate logging controls are documented on its own facade.
 
 ## IVP
 
@@ -122,6 +129,20 @@ result: IVP states are `(time, state)`, BVP_sci values are `(mesh, state)`,
 and BVP_Damp values preserve its native `(state, mesh)` orientation. The
 facade accepts NumPy vectors and converts them before entering Rust. No
 zero-copy view is promised because prepared solvers reuse mutable workspaces.
+
+The result API follows a shared ownership and naming convention, but it does
+not invent interpolation for solvers whose native contract has none:
+
+| Result family | Detached samples | Continuous point evaluation |
+| --- | --- | --- |
+| IVP trajectories | `times_array()`, `states_array()` | Radau only, with `output="dense"`, via `RadauSolution.sample(t)` |
+| BVP_sci | `mesh_array()`, `values_array()` | With `output="dense"`, via `BvpSciSolution.sample(x)` |
+| BVP_Damp, ShootingBVP, ODE_api2 nonstiff | Native mesh/trajectory samples | No continuous interpolator is exposed by these wrappers |
+
+Dense output must be requested before solving where the solver supports it.
+Sampling outside the retained interval or calling `sample()` without dense
+output is a typed error. In particular, do not infer a shared `sample()` method
+from the common array naming convention.
 
 ## Errors and telemetry
 

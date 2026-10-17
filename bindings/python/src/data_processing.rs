@@ -11,7 +11,10 @@ use pyo3::prelude::*;
 use numpy::ndarray::Array1;
 use rustedscithe_core::numerical::data_processing::{
     LSQSplines::{BSpline as NativeBSpline, SolverKind, check_schoenberg_whitney, make_lsq_spline},
-    lowess_wrapper::{Backend as LowessBackend, LowessConfig, lowess_smooth_values},
+    bsplines::BSplineInterpolator as NativeBSplineInterpolator,
+    lowess_wrapper::{
+        Backend as LowessBackend, LowessConfig, lowess_smooth_values, lowess_smoothing,
+    },
     savgol::{SG_filter, SGInput},
     splines::{SplineKind, mae, r_squared, rmse, spline_resample},
 };
@@ -133,6 +136,218 @@ fn make_lsq_spline_native(
         .map_err(|error| SolverError::new_err(error.to_string()))
     })
     .map_err(|error| annotate(error, "least_squares_bspline", "data_processing", "native"))
+}
+
+fn checked_bspline_interpolator(
+    degree: usize,
+    control_points: Vec<f64>,
+    knots: Vec<f64>,
+) -> PyResult<NativeBSplineInterpolator<f64>> {
+    if control_points.len() <= degree {
+        return Err(InvalidConfigurationError::new_err(
+            "control_points must contain at least degree + 1 values",
+        ));
+    }
+    if knots.len() != control_points.len() + degree + 1 {
+        return Err(InvalidConfigurationError::new_err(
+            "knots length must equal len(control_points) + degree + 1",
+        ));
+    }
+    if knots.windows(2).any(|pair| pair[0] > pair[1]) {
+        return Err(InvalidConfigurationError::new_err(
+            "knots must be nondecreasing",
+        ));
+    }
+    let max_multiplicity = degree + 1;
+    let mut start = 0;
+    while start < knots.len() {
+        let mut end = start + 1;
+        while end < knots.len() && knots[end] == knots[start] {
+            end += 1;
+        }
+        if end - start > max_multiplicity {
+            return Err(InvalidConfigurationError::new_err(
+                "a knot value cannot occur more than degree + 1 times",
+            ));
+        }
+        start = end;
+    }
+    let domain_start = knots[degree];
+    let domain_end = knots[control_points.len()];
+    if domain_start >= domain_end {
+        return Err(InvalidConfigurationError::new_err(
+            "B-spline knot domain must have positive width",
+        ));
+    }
+    catch_panic(
+        "construct",
+        "data_processing",
+        "bspline_interpolator",
+        || {
+            Ok(NativeBSplineInterpolator::new(
+                degree,
+                control_points,
+                knots,
+            ))
+        },
+    )
+}
+
+/// Reusable scalar B-spline interpolator backed by the native `bsplines` module.
+///
+/// The native constructor panics for malformed knot vectors, so the binding
+/// validates the shape and knot domain first and keeps a panic boundary as a
+/// final ABI safeguard.
+#[pyclass(name = "BSplineInterpolator", module = "rustedscithe._native")]
+struct PyBSplineInterpolator {
+    spline: NativeBSplineInterpolator<f64>,
+}
+
+#[pymethods]
+impl PyBSplineInterpolator {
+    #[new]
+    fn new(
+        degree: usize,
+        control_points: PyReadonlyArray1<'_, f64>,
+        knots: PyReadonlyArray1<'_, f64>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            spline: checked_bspline_interpolator(
+                degree,
+                owned_series(&control_points, "control_points")?,
+                owned_series(&knots, "knots")?,
+            )?,
+        })
+    }
+
+    #[staticmethod]
+    fn with_uniform_knots(
+        degree: usize,
+        control_points: PyReadonlyArray1<'_, f64>,
+    ) -> PyResult<Self> {
+        let values = owned_series(&control_points, "control_points")?;
+        if values.len() <= degree {
+            return Err(InvalidConfigurationError::new_err(
+                "control_points must contain at least degree + 1 values",
+            ));
+        }
+        let spline = catch_panic(
+            "construct",
+            "data_processing",
+            "bspline_interpolator",
+            || {
+                Ok(NativeBSplineInterpolator::with_uniform_knots(
+                    degree, values,
+                ))
+            },
+        )?;
+        Ok(Self { spline })
+    }
+
+    #[getter]
+    fn degree(&self) -> usize {
+        self.spline.degree()
+    }
+
+    #[getter]
+    fn knot_domain(&self) -> (f64, f64) {
+        self.spline.knot_domain()
+    }
+
+    #[getter]
+    fn knots<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(py, self.spline.knots().to_vec())
+    }
+
+    #[getter]
+    fn control_points<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(py, self.spline.control_points().to_vec())
+    }
+
+    fn interpolate(&self, parameter: f64) -> PyResult<f64> {
+        validate_bspline_parameter(parameter, self.spline.knot_domain())?;
+        let value = catch_panic(
+            "interpolate",
+            "data_processing",
+            "bspline_interpolator",
+            || Ok(self.spline.interpolate(parameter)),
+        )?;
+        if !value.is_finite() {
+            return Err(SolverError::new_err(
+                "B-spline interpolation produced a non-finite value",
+            ));
+        }
+        Ok(value)
+    }
+
+    fn interpolate_batch<'py>(
+        &self,
+        py: Python<'py>,
+        parameters: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let parameters = owned_series(&parameters, "parameters")?;
+        let domain = self.spline.knot_domain();
+        for &parameter in &parameters {
+            validate_bspline_parameter(parameter, domain)?;
+        }
+        let values = catch_panic(
+            "interpolate",
+            "data_processing",
+            "bspline_interpolator",
+            || Ok(self.spline.interpolate_at(&parameters)),
+        )?;
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(SolverError::new_err(
+                "B-spline interpolation produced a non-finite value",
+            ));
+        }
+        Ok(PyArray1::from_vec(py, values))
+    }
+}
+
+fn validate_bspline_parameter(parameter: f64, domain: (f64, f64)) -> PyResult<()> {
+    if !parameter.is_finite() || parameter < domain.0 || parameter > domain.1 {
+        return Err(InvalidConfigurationError::new_err(format!(
+            "parameter must be finite and inside the B-spline knot domain [{}, {}]",
+            domain.0, domain.1
+        )));
+    }
+    Ok(())
+}
+
+/// Complete, detached LOWESS result with input coordinates and smoothed values.
+///
+/// The result retains the native x ordering and offers owned NumPy copies so
+/// callers can align or plot the output without relying on input-buffer lifetime.
+#[pyclass(name = "LowessResult", module = "rustedscithe._native")]
+struct PyLowessResult {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    iterations_used: Option<usize>,
+    fraction_used: f64,
+}
+
+#[pymethods]
+impl PyLowessResult {
+    #[getter]
+    fn x<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(py, self.x.clone())
+    }
+
+    #[getter]
+    fn y<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        PyArray1::from_vec(py, self.y.clone())
+    }
+
+    #[getter]
+    fn iterations_used(&self) -> Option<usize> {
+        self.iterations_used
+    }
+
+    #[getter]
+    fn fraction_used(&self) -> f64 {
+        self.fraction_used
+    }
 }
 
 /// A fitted univariate least-squares B-spline owned by Rust.
@@ -378,6 +593,70 @@ fn lowess_smooth_py<'py>(
     Ok(PyArray1::from_vec(py, smoothed))
 }
 
+/// Fit LOWESS and return both sorted x coordinates and smoothed y values.
+///
+/// Use this result-oriented variant when downstream code needs the exact
+/// coordinate order reported by the native implementation. `lowess_smooth`
+/// remains the convenience API for callers that only need the y vector.
+#[pyfunction(name = "lowess_fit")]
+#[pyo3(signature=(x, y, fraction=0.5, iterations=3, delta=0.01, parallel=true))]
+fn lowess_fit_py(
+    x: PyReadonlyArray1<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    fraction: f64,
+    iterations: usize,
+    delta: f64,
+    parallel: bool,
+) -> PyResult<PyLowessResult> {
+    let x = owned_series(&x, "x")?;
+    let y = owned_series(&y, "y")?;
+    if x.len() != y.len() {
+        return Err(InvalidConfigurationError::new_err(
+            "x and y must have the same length",
+        ));
+    }
+    if x.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(InvalidConfigurationError::new_err(
+            "x must be strictly increasing",
+        ));
+    }
+    if !fraction.is_finite() || !delta.is_finite() {
+        return Err(InvalidConfigurationError::new_err(
+            "LOWESS fraction and delta must be finite",
+        ));
+    }
+    let config = LowessConfig {
+        fraction,
+        iterations,
+        delta,
+        parallel,
+        backend: LowessBackend::CPUBack,
+    };
+    config
+        .validate()
+        .map_err(InvalidConfigurationError::new_err)?;
+    let result = catch_panic("lowess_fit", "data_processing", "native", || {
+        lowess_smoothing(&x, &y, &config).map_err(|error| SolverError::new_err(error.to_string()))
+    })
+    .map_err(|error| annotate(error, "lowess_fit", "data_processing", "native"))?;
+    if result
+        .x
+        .iter()
+        .chain(&result.y)
+        .any(|value| !value.is_finite())
+    {
+        return Err(SolverError::new_err(
+            "LOWESS produced non-finite coordinates or values",
+        ));
+    }
+    Ok(PyLowessResult {
+        x: result.x,
+        y: result.y,
+        iterations_used: result.iterations_used,
+        fraction_used: result.fraction_used,
+    })
+}
+
 /// Return `(RMSE, MAE, R-squared)` for two equal-length finite vectors.
 ///
 /// R-squared is `None` when the reference values have zero variance, rather
@@ -417,10 +696,13 @@ fn fit_quality_py(
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLeastSquaresBSpline>()?;
+    module.add_class::<PyBSplineInterpolator>()?;
+    module.add_class::<PyLowessResult>()?;
     module.add_function(wrap_pyfunction!(least_squares_bspline_py, module)?)?;
     module.add_function(wrap_pyfunction!(spline_resample_py, module)?)?;
     module.add_function(wrap_pyfunction!(savgol_filter_py, module)?)?;
     module.add_function(wrap_pyfunction!(lowess_smooth_py, module)?)?;
+    module.add_function(wrap_pyfunction!(lowess_fit_py, module)?)?;
     module.add_function(wrap_pyfunction!(fit_quality_py, module)?)?;
     Ok(())
 }

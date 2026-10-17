@@ -37,8 +37,6 @@ impl LU_nalgebra {
             Self::find_bandwidths(&matrix)
         };
 
-        println!("kl: {}, ku: {}", kl, ku);
-
         LU_nalgebra {
             A: matrix.clone(),
             lu: matrix,

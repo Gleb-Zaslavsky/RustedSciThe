@@ -14,6 +14,11 @@ from rustedscithe import Expr, GavinFittingSolver
 x_data = [index * 0.15 for index in range(40)]
 y_data = [2.4 * math.exp(-x_value / 1.7) + 0.35 for x_value in x_data]
 
+# One sample parameter supplies each x_i while the three model parameters are
+# optimized. Positive tau is a user-chosen domain constraint, not a Gavin
+# requirement; `sequential` avoids callback-worker overhead for this small fit.
+# Nielsen damping is chosen as a stable general-purpose update for this smooth
+# fit; other update policies remain available for different residual geometry.
 solver = GavinFittingSolver(
     equations=[Expr.parse("amplitude*exp(-x/tau) + offset")],
     x_data=x_data,
@@ -28,7 +33,9 @@ solver = GavinFittingSolver(
     max_iterations=500,
     gradient_tolerance=1e-8,
     parameter_step_tolerance=1e-9,
-    telemetry=True,
+    # Select the native combined telemetry mode explicitly. Preparation can be
+    # measured independently; it is off here to keep the solve report focused.
+    telemetry_mode="detailed",
     preparation_telemetry="off",
 )
 result = solver.solve()  # Gavin is a one-shot builder; create another to refit.

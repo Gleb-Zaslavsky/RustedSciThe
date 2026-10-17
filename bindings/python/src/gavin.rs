@@ -13,6 +13,7 @@ use pyo3::prelude::*;
 use rustedscithe_core::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, PreparationTelemetryMode, SymbolicLambdifyFrontend,
 };
+use rustedscithe_core::numerical::SolverTelemetryMode;
 use rustedscithe_core::numerical::optimization::gavin_fitting::GavinSymbolicFitting;
 use rustedscithe_core::numerical::optimization::lm_gavin::{
     GavinLmError, GavinLmResult, GavinLmTelemetry, GavinLmUpdatePolicy,
@@ -114,7 +115,7 @@ fn matrix_rows(matrix: &DMatrix<f64>) -> Vec<Vec<f64>> {
         .collect()
 }
 
-fn telemetry_counters(telemetry: &GavinLmTelemetry) -> HashMap<String, u64> {
+pub(crate) fn telemetry_counters(telemetry: &GavinLmTelemetry) -> HashMap<String, u64> {
     HashMap::from([
         ("iterations".to_owned(), telemetry.iterations as u64),
         (
@@ -143,7 +144,7 @@ fn duration_ms(duration: std::time::Duration) -> f64 {
     duration.as_secs_f64() * 1_000.0
 }
 
-fn telemetry_timings(telemetry: &GavinLmTelemetry) -> HashMap<String, f64> {
+pub(crate) fn telemetry_timings(telemetry: &GavinLmTelemetry) -> HashMap<String, f64> {
     HashMap::from([
         (
             "objective_ms".to_owned(),
@@ -184,11 +185,13 @@ pub struct GavinFittingSolution {
     termination: String,
     preparation: String,
     telemetry: Option<GavinLmTelemetry>,
+    telemetry_mode: SolverTelemetryMode,
 }
 
 impl GavinFittingSolution {
     fn from_native(
         result: rustedscithe_core::numerical::optimization::gavin_fitting::GavinSymbolicFitResult,
+        telemetry_mode: SolverTelemetryMode,
     ) -> Self {
         let fit: GavinLmResult = result.fit;
         Self {
@@ -206,6 +209,7 @@ impl GavinFittingSolution {
             termination: format!("{:?}", fit.termination),
             preparation: format!("{:?}", result.preparation),
             telemetry: result.telemetry,
+            telemetry_mode,
         }
     }
 }
@@ -254,6 +258,9 @@ impl GavinFittingSolution {
     }
     /// Return discrete numerical-solver counters, or an empty map when disabled.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
+        if !self.telemetry_mode.collects_counters() {
+            return HashMap::new();
+        }
         self.telemetry
             .as_ref()
             .map(telemetry_counters)
@@ -261,6 +268,9 @@ impl GavinFittingSolution {
     }
     /// Return numerical stage timings in milliseconds, or an empty map when disabled.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
+        if !self.telemetry_mode.collects_timings() {
+            return HashMap::new();
+        }
         self.telemetry
             .as_ref()
             .map(telemetry_timings)
@@ -276,12 +286,7 @@ impl GavinFittingSolution {
             ),
             (
                 "telemetry".to_owned(),
-                if self.telemetry.is_some() {
-                    "enabled"
-                } else {
-                    "off"
-                }
-                .to_owned(),
+                format!("{:?}", self.telemetry_mode).to_ascii_lowercase(),
             ),
         ])
     }
@@ -292,7 +297,9 @@ impl GavinFittingSolution {
 /// Supply the model residual equations, sample values, observations, sample-variable
 /// name, fitted unknowns and initial guess. Optional weights and positivity constraints
 /// are applied by the native fit. The default frontend is ExprLegacy; AtomView and
-/// sequential/parallel/automatic execution are selectable independently.
+/// sequential or parallel callback execution are selectable independently. Gavin's
+/// native route has no automatic execution policy; `execution_policy="auto"` is
+/// rejected rather than silently mapped to another policy.
 ///
 /// Calling `solve()` consumes the builder exactly once. Use the reusable
 /// `FittingSolver` instead when the same prepared model must be solved repeatedly for
@@ -300,12 +307,13 @@ impl GavinFittingSolution {
 #[pyclass(name = "GavinFittingSolver", module = "rustedscithe")]
 pub struct GavinFittingSolver {
     builder: Option<GavinSymbolicFitting>,
+    telemetry_mode: SolverTelemetryMode,
 }
 
 #[pymethods]
 impl GavinFittingSolver {
     #[new]
-    #[pyo3(signature=(equations, x_data, observations, sample_parameter, unknowns, initial_guess, weights=None, frontend="expr_legacy", execution_policy="sequential", min_work=1, positive_parameters=None, max_iterations=1000, gradient_tolerance=1e-3, parameter_step_tolerance=1e-3, gain_ratio_threshold=1e-1, update_policy="marquardt", telemetry=false, logging=false, preparation_telemetry="off"))]
+    #[pyo3(signature=(equations, x_data, observations, sample_parameter, unknowns, initial_guess, weights=None, frontend="expr_legacy", execution_policy="sequential", min_work=1, positive_parameters=None, max_iterations=1000, gradient_tolerance=1e-3, parameter_step_tolerance=1e-3, gain_ratio_threshold=1e-1, update_policy="marquardt", telemetry=false, logging=false, preparation_telemetry="off", telemetry_mode=None))]
     /// Configure one Gavin symbolic fit.
     ///
     /// `equations` define the model residual expressions; `x_data` and `observations`
@@ -313,12 +321,12 @@ impl GavinFittingSolver {
     /// in those expressions. `unknowns` and `initial_guess` have matching order.
     /// Optional `weights` and `positive_parameters` constrain the numerical fit.
     /// `frontend` selects `expr_legacy` (default) or `atom_native`; `execution_policy`
-    /// selects sequential, parallel, or automatic callback evaluation. Numerical
-    /// controls configure iteration, gradient, parameter-step and gain-ratio stopping.
+    /// selects sequential or parallel callback evaluation (`auto` is unsupported).
+    /// Numerical controls configure iteration, gradient, parameter-step and gain-ratio stopping.
     /// `update_policy` accepts `marquardt`, `quadratic`, or `nielsen`. Numerical
-    /// `telemetry` is a boolean: when enabled, Gavin collects its complete native
-    /// snapshot (counters and timings together). Logging and preparation telemetry
-    /// are separate opt-in controls and disabled by default.
+    /// `telemetry` preserves the original boolean switch. Prefer `telemetry_mode`
+    /// with `off`, `counters`, `timings`, or `detailed` for independent channels.
+    /// Logging and preparation telemetry are separate opt-in controls.
     pub fn new(
         equations: Vec<PyExpr>,
         x_data: Vec<f64>,
@@ -339,10 +347,26 @@ impl GavinFittingSolver {
         telemetry: bool,
         logging: bool,
         preparation_telemetry: &str,
+        telemetry_mode: Option<&str>,
     ) -> PyResult<Self> {
         let frontend = parse_frontend(frontend)?;
         let execution_policy = parse_execution_policy(execution_policy, min_work)?;
         let update_policy = parse_update_policy(update_policy)?;
+        let telemetry_mode = match telemetry_mode {
+            Some(mode) => match mode.trim().to_ascii_lowercase().as_str() {
+                "off" | "none" => SolverTelemetryMode::Off,
+                "counters" => SolverTelemetryMode::Counters,
+                "timings" => SolverTelemetryMode::Timings,
+                "detailed" => SolverTelemetryMode::Detailed,
+                other => {
+                    return Err(InvalidConfigurationError::new_err(format!(
+                        "unsupported Gavin telemetry_mode '{other}'"
+                    )));
+                }
+            },
+            None if telemetry => SolverTelemetryMode::Detailed,
+            None => SolverTelemetryMode::Off,
+        };
         let preparation_telemetry = match preparation_telemetry.trim().to_ascii_lowercase().as_str()
         {
             "detailed" | "timings" | "on" => PreparationTelemetryMode::Collect,
@@ -368,11 +392,7 @@ impl GavinFittingSolver {
                 gain_ratio_threshold,
             )
             .with_update_policy(update_policy)
-            .with_telemetry(if telemetry {
-                rustedscithe_core::numerical::SolverTelemetryMode::Detailed
-            } else {
-                rustedscithe_core::numerical::SolverTelemetryMode::Off
-            })
+            .with_telemetry(telemetry_mode)
             .with_logging(logging)
             .with_preparation_telemetry(preparation_telemetry);
         if let Some(weights) = weights {
@@ -383,11 +403,13 @@ impl GavinFittingSolver {
         }
         Ok(Self {
             builder: Some(builder),
+            telemetry_mode,
         })
     }
 
     /// Run the fit and consume this one-shot builder.
     pub fn solve(&mut self) -> PyResult<GavinFittingSolution> {
+        let telemetry_mode = self.telemetry_mode;
         catch_panic("solve", "gavin", "lambdify", || {
             let builder = self.builder.take().ok_or_else(|| {
                 SolverError::new_err(
@@ -396,7 +418,7 @@ impl GavinFittingSolver {
             })?;
             builder
                 .try_solve()
-                .map(GavinFittingSolution::from_native)
+                .map(|result| GavinFittingSolution::from_native(result, telemetry_mode))
                 .map_err(map_error)
         })
     }

@@ -13,12 +13,13 @@ use std::sync::Arc;
 
 use nalgebra::{DMatrix, DVector};
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyDict};
 
 use rustedscithe_core::numerical::Radau::api::{
     RadauConfig, RadauError, RadauErrorKind, RadauExecution, RadauExecutionPolicy, RadauFrontend,
     RadauJacobianSource, RadauMatrixLayout, RadauNativeSolver, RadauOutputPolicy, RadauProblem,
     RadauSolution as CoreRadauSolution, RadauSolver as CoreRadauSolver, RadauTelemetryMode,
+    RadauTelemetryScopeKind,
 };
 
 use crate::aot::{generated_config, provenance_fields};
@@ -187,6 +188,7 @@ fn validate_route(
     RadauMatrixLayout,
 )> {
     options.validate_aot_options()?;
+    crate::contract::validate_backend_options_for(options, "radau5")?;
     let frontend = match options.frontend() {
         "expr_legacy" => RadauFrontend::ExprLegacy,
         "atom_native" => RadauFrontend::AtomViewNative,
@@ -317,14 +319,27 @@ pub struct RadauSolution {
     telemetry_mode: String,
     counters: HashMap<String, u64>,
     timings_ms: HashMap<String, f64>,
+    aot_metadata: HashMap<String, String>,
     aot_artifact_keys: Vec<String>,
     native: CoreRadauSolution,
 }
 
 impl RadauSolution {
     fn from_native(native: CoreRadauSolution) -> Self {
+        Self::from_native_with_metadata(native, HashMap::new())
+    }
+
+    fn from_native_with_metadata(
+        native: CoreRadauSolution,
+        mut aot_metadata: HashMap<String, String>,
+    ) -> Self {
         let report = native.telemetry();
         let telemetry_mode = format!("{:?}", report.mode).to_ascii_lowercase();
+        if report.mode == RadauTelemetryMode::Off {
+            aot_metadata.clear();
+        } else {
+            aot_metadata.insert("mode".to_owned(), telemetry_mode.clone());
+        }
         let mut counters: HashMap<String, u64> = report
             .counters
             .iter()
@@ -335,9 +350,6 @@ impl RadauSolution {
             .iter()
             .map(|(key, value)| ((*key).to_owned(), *value))
             .collect();
-        if telemetry_mode == "timings" {
-            counters.clear();
-        }
         crate::telemetry::apply_collection_mode(&telemetry_mode, &mut counters, &mut timings_ms);
         Self {
             final_time: native.t,
@@ -348,6 +360,7 @@ impl RadauSolution {
             telemetry_mode,
             counters,
             timings_ms,
+            aot_metadata,
             aot_artifact_keys: report.aot_artifact_keys.clone(),
             native,
         }
@@ -405,6 +418,86 @@ impl RadauSolution {
     /// Stable measured timing names; empty unless the selected mode collects timings.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         self.timings_ms.clone()
+    }
+
+    /// Return selected AOT provenance when telemetry was enabled.
+    ///
+    /// Radau's native report stores AOT lifecycle data in its solver-specific
+    /// counter/timing maps, so the Python AOT views below are projections of
+    /// those existing measurements rather than a second instrumentation layer.
+    pub fn telemetry_aot_metadata(&self) -> HashMap<String, String> {
+        self.aot_metadata.clone()
+    }
+
+    /// Return AOT lifecycle counters without unrelated integration counters.
+    pub fn telemetry_aot_counters(&self) -> HashMap<String, u64> {
+        self.counters
+            .iter()
+            .filter(|(name, _)| name.starts_with("aot_"))
+            .map(|(name, value)| (name.clone(), *value))
+            .collect()
+    }
+
+    /// Return AOT lifecycle timings in milliseconds.
+    pub fn telemetry_aot_timings_ms(&self) -> HashMap<String, f64> {
+        self.timings_ms
+            .iter()
+            .filter(|(name, _)| name.starts_with("aot_"))
+            .map(|(name, value)| (name.clone(), *value))
+            .collect()
+    }
+
+    /// Return Radau's timing-scope hierarchy, including overlap/parent semantics.
+    pub fn telemetry_timing_scopes<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let report = self.native.telemetry();
+        report
+            .timing_scopes
+            .iter()
+            .map(|(stage, scope)| {
+                let row = PyDict::new(py);
+                let kind = match scope.kind {
+                    RadauTelemetryScopeKind::Inclusive => "inclusive",
+                    RadauTelemetryScopeKind::Child => "child",
+                    RadauTelemetryScopeKind::Standalone => "standalone",
+                };
+                row.set_item("stage", *stage)?;
+                row.set_item("kind", kind)?;
+                row.set_item("parent", scope.parent)?;
+                Ok(row)
+            })
+            .collect()
+    }
+
+    /// Return the controller's selected initial absolute step, if measured.
+    pub fn telemetry_initial_step(&self) -> Option<f64> {
+        self.native.telemetry().initial_h_abs
+    }
+
+    /// Return per-attempt adaptive-controller diagnostics when the native mode records them.
+    pub fn telemetry_adaptive_steps<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let report = self.native.telemetry();
+        report
+            .adaptive_steps
+            .iter()
+            .map(|step| {
+                let row = PyDict::new(py);
+                row.set_item("h_abs", step.h_abs)?;
+                row.set_item("error_norm", step.error_norm)?;
+                row.set_item("newton_iterations", step.newton_iterations)?;
+                row.set_item("accepted", step.accepted)?;
+                row.set_item("was_retry", step.was_retry)?;
+                row.set_item("next_h_abs", step.next_h_abs)?;
+                row.set_item("factor_invalidated", step.factor_invalidated)?;
+                row.set_item("jacobian_refreshed", step.jacobian_refreshed)?;
+                Ok(row)
+            })
+            .collect()
     }
 
     /// Artifact identities observed by the native AOT lifecycle.
@@ -865,11 +958,14 @@ impl RadauSolver {
                 parameters.len()
             )));
         }
+        let mut aot_metadata = self.aot_metadata.clone();
+        aot_metadata.insert("execution".to_owned(), self.execution.clone());
+        aot_metadata.insert("route".to_owned(), self.frontend.clone());
         self.solver
             .as_mut()
             .ok_or_else(|| InvalidConfigurationError::new_err("Radau solver is not prepared"))?
             .solve_with_parameters(&y0, &parameters)
-            .map(RadauSolution::from_native)
+            .map(|native| RadauSolution::from_native_with_metadata(native, aot_metadata))
             .map_err(map_radau_error)
     }
 }

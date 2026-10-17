@@ -147,6 +147,20 @@ def test_facade_lsode2_selects_controller_separately_from_solver_family(
         )
 
 
+def test_facade_lsoda_alias_selects_automatic_controller_by_default():
+    y = Expr.variable("y")
+    solver = create_ivp("lsoda", [-y], ["y"], "t", [1.0], 0.0, 0.1, 0.05)
+    assert isinstance(solver, Lsode2Solver)
+    assert solver.solve().controller_mode == "automatic_adams_bdf"
+
+    # The explicit controller remains authoritative when callers need to pin
+    # the LSODE2 policy while using the familiar LSODA family alias.
+    pinned = create_ivp(
+        "lsoda", [-y], ["y"], "t", [1.0], 0.0, 0.1, 0.05, controller="adams"
+    )
+    assert pinned.solve().controller_mode == "adams_only"
+
+
 def test_facade_batch_and_table_keep_later_tasks_after_failure(tmp_path):
     valid = """task
 solver: IVP

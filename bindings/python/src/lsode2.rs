@@ -179,6 +179,22 @@ fn validate_names(names: &[String], label: &str) -> PyResult<()> {
     Ok(())
 }
 
+fn merge_band_width(
+    explicit: Option<usize>,
+    configured: Option<usize>,
+    label: &str,
+) -> PyResult<Option<usize>> {
+    match (explicit, configured) {
+        (Some(explicit), Some(configured)) if explicit != configured => {
+            Err(InvalidConfigurationError::new_err(format!(
+                "conflicting {label}: constructor value {explicit} differs from SolverOptions value {configured}"
+            )))
+        }
+        (Some(value), _) | (_, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
 fn validate_route(
     options: &SolverOptions,
     band_lower: Option<usize>,
@@ -191,6 +207,7 @@ fn validate_route(
     Lsode2SymbolicExecutionMode,
 )> {
     options.validate_aot_options()?;
+    crate::contract::validate_backend_options_for(options, "lsode2")?;
     let frontend = match options.frontend() {
         "expr_legacy" => Lsode2SymbolicAssemblyBackend::ExprLegacy,
         "atom_native" => Lsode2SymbolicAssemblyBackend::AtomView,
@@ -202,9 +219,6 @@ fn validate_route(
     };
     let execution = match options.execution() {
         "lambdify" => Lsode2SymbolicExecutionMode::LambdifyExpr,
-        // The initial Python AOT surface deliberately uses the native
-        // BuildIfMissing/GCC/Release preset. Stricter lifecycle policies are
-        // not inferred from environment state and remain a later contract.
         "aot" => Lsode2SymbolicExecutionMode::Aot {
             toolchain: Lsode2AotToolchain::CGcc,
             profile: Lsode2AotProfile::Release,
@@ -409,9 +423,14 @@ pub struct Lsode2Solution {
     switch_reason: String,
     switch_uses_fallback: bool,
     telemetry_mode: String,
+    evaluation_scope: String,
+    evaluation_counter_note: String,
     counters: HashMap<String, u64>,
     timings_ms: HashMap<String, f64>,
     aot_artifact_keys: Vec<String>,
+    aot_metadata: HashMap<String, String>,
+    aot_counters: HashMap<String, u64>,
+    aot_timings_ms: HashMap<String, f64>,
 }
 
 impl Lsode2Solution {
@@ -420,7 +439,10 @@ impl Lsode2Solution {
         let (times, values) = solver.get_result();
         let statistics = summary.statistics;
         let native = summary.native_statistics;
+        let evaluation = summary.evaluation_telemetry;
         let ivp_telemetry = solver.config().telemetry.snapshot();
+        let (aot_metadata, aot_artifact_keys, aot_counters, aot_timings_ms) =
+            crate::bvp::aot_telemetry_maps(Some(&ivp_telemetry));
         let telemetry_mode = match solver.config().telemetry.mode() {
             IvpTelemetryMode::Off => "off",
             IvpTelemetryMode::Counters => "counters",
@@ -453,6 +475,26 @@ impl Lsode2Solution {
             (
                 "linear_solve_calls".to_owned(),
                 statistics.linear_solve_attempts_total as u64,
+            ),
+            (
+                "evaluation_residual_calls".to_owned(),
+                evaluation.residual_evaluations as u64,
+            ),
+            (
+                "evaluation_jacobian_calls".to_owned(),
+                evaluation.jacobian_evaluations as u64,
+            ),
+            (
+                "evaluation_linear_solves".to_owned(),
+                evaluation.linear_solves as u64,
+            ),
+            (
+                "evaluation_accepted_steps".to_owned(),
+                evaluation.accepted_steps as u64,
+            ),
+            (
+                "evaluation_rejected_steps".to_owned(),
+                evaluation.rejected_steps as u64,
             ),
             (
                 "nonlinear_solves".to_owned(),
@@ -557,6 +599,18 @@ impl Lsode2Solution {
             ("residual_ms".to_owned(), statistics.residual_ms_total),
             ("jacobian_ms".to_owned(), statistics.jacobian_ms_total),
             (
+                "evaluation_residual_ms".to_owned(),
+                evaluation.residual_ms_total,
+            ),
+            (
+                "evaluation_jacobian_ms".to_owned(),
+                evaluation.jacobian_ms_total,
+            ),
+            (
+                "evaluation_linear_solve_ms".to_owned(),
+                evaluation.linear_ms_total,
+            ),
+            (
                 "native_linear_solve_ms".to_owned(),
                 native.native_linear_solve_ms_total,
             ),
@@ -570,12 +624,6 @@ impl Lsode2Solution {
             ),
         ]);
         crate::telemetry::apply_collection_mode(telemetry_mode, &mut counters, &mut timings_ms);
-        // The shared compatibility helper still keeps counters in `timings`
-        // for BVP_Sci. LSODE2 follows the disjoint four-mode contract, so its
-        // timing-only snapshot must not expose its internally maintained stats.
-        if telemetry_mode == "timings" {
-            counters.clear();
-        }
         Self {
             times: times.iter().copied().collect(),
             states: values
@@ -590,9 +638,14 @@ impl Lsode2Solution {
             switch_reason: summary.algorithm.switch_reason.to_owned(),
             switch_uses_fallback: summary.algorithm.switch_uses_fallback,
             telemetry_mode: telemetry_mode.to_owned(),
+            evaluation_scope: evaluation.scope.label().to_owned(),
+            evaluation_counter_note: evaluation.scope.counter_note().to_owned(),
             counters,
             timings_ms,
-            aot_artifact_keys: ivp_telemetry.aot_artifact_keys,
+            aot_artifact_keys,
+            aot_metadata,
+            aot_counters,
+            aot_timings_ms,
         }
     }
 }
@@ -680,6 +733,21 @@ impl Lsode2Solution {
         &self.telemetry_mode
     }
 
+    /// Counter/timer scope used for the effective LSODE2 evaluation statistics.
+    ///
+    /// Native faithful integration and the BDF bridge count different events;
+    /// use the `evaluation_*` telemetry keys with this label when comparing runs.
+    #[getter]
+    pub fn evaluation_scope(&self) -> &str {
+        &self.evaluation_scope
+    }
+
+    /// Explain which layer the effective residual/Jacobian counters describe.
+    #[getter]
+    pub fn evaluation_counter_note(&self) -> &str {
+        &self.evaluation_counter_note
+    }
+
     /// Return discrete solver counters; the map is empty when collection is off.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         self.counters.clone()
@@ -700,6 +768,21 @@ impl Lsode2Solution {
         self.aot_artifact_keys.clone()
     }
 
+    /// Return the selected execution route and native snapshot metadata.
+    pub fn telemetry_aot_metadata(&self) -> HashMap<String, String> {
+        self.aot_metadata.clone()
+    }
+
+    /// Return generated-backend lifecycle counters collected in the selected mode.
+    pub fn telemetry_aot_counters(&self) -> HashMap<String, u64> {
+        self.aot_counters.clone()
+    }
+
+    /// Return cold/warm preparation and generated-route stage timings in milliseconds.
+    pub fn telemetry_aot_timings_ms(&self) -> HashMap<String, f64> {
+        self.aot_timings_ms.clone()
+    }
+
     /// Return a common result snapshot while retaining LSODE2-specific
     /// controller diagnostics in the same mapping.
     pub fn diagnostics(&self) -> HashMap<String, String> {
@@ -707,6 +790,11 @@ impl Lsode2Solution {
             ("solver".to_owned(), "lsode2".to_owned()),
             ("status".to_owned(), self.status.clone()),
             ("telemetry".to_owned(), self.telemetry_mode.clone()),
+            ("evaluation_scope".to_owned(), self.evaluation_scope.clone()),
+            (
+                "evaluation_counter_note".to_owned(),
+                self.evaluation_counter_note.clone(),
+            ),
             ("sample_count".to_owned(), self.times.len().to_string()),
             (
                 "state_dimension".to_owned(),
@@ -924,6 +1012,8 @@ impl Lsode2PythonSolver {
             Some(options) => options.clone(),
             None => SolverOptions::new(None, None, None, None, None, None, None, None, None)?,
         };
+        let band_lower = merge_band_width(band_lower, options.band_lower(), "band_lower")?;
+        let band_upper = merge_band_width(band_upper, options.band_upper(), "band_upper")?;
         let (frontend, structure, execution_policy, telemetry, execution) =
             validate_route(&options, band_lower, band_upper)?;
         let generated_backend = if options.execution() == "aot" {
@@ -1167,7 +1257,7 @@ impl Lsode2PythonSolver {
         let algorithm = summary.algorithm;
         if self.telemetry_mode == "off" {
             return format!(
-                "telemetry=off; method={}; status={}; controller={}; active_family={}; executed_family={}; switch_reason={}; fallback={}; evaluation_scope={}; counters: disabled timings_ms: disabled",
+                "telemetry=off; method={}; status={}; controller={}; active_family={}; executed_family={}; switch_reason={}; fallback={}; evaluation_scope={}; evaluation_counter_note={}; counters: disabled timings_ms: disabled",
                 summary.method,
                 summary.status,
                 algorithm.controller_mode,
@@ -1176,10 +1266,11 @@ impl Lsode2PythonSolver {
                 algorithm.switch_reason,
                 algorithm.switch_uses_fallback,
                 summary.evaluation_telemetry.scope.label(),
+                summary.evaluation_telemetry.scope.counter_note(),
             );
         }
         format!(
-            "telemetry={}; method={}; status={}; controller={}; active_family={}; executed_family={}; switch_reason={}; fallback={}; evaluation_scope={}; {}",
+            "telemetry={}; method={}; status={}; controller={}; active_family={}; executed_family={}; switch_reason={}; fallback={}; evaluation_scope={}; evaluation_counter_note={}; {}",
             self.telemetry_mode,
             summary.method,
             summary.status,
@@ -1189,6 +1280,7 @@ impl Lsode2PythonSolver {
             algorithm.switch_reason,
             algorithm.switch_uses_fallback,
             summary.evaluation_telemetry.scope.label(),
+            summary.evaluation_telemetry.scope.counter_note(),
             summary.statistics.table_report()
         )
     }

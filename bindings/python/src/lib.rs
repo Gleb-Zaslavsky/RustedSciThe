@@ -8,7 +8,7 @@ mod animation;
 mod aot;
 mod bdf;
 mod be;
-mod bvp;
+pub(crate) mod bvp;
 mod bvp_damp;
 mod contract;
 mod data_processing;
@@ -31,16 +31,16 @@ mod telemetry;
 mod universal_fitting;
 mod varpro;
 
-use pyo3::PyTypeInfo;
 use pyo3::prelude::*;
+use pyo3::PyTypeInfo;
 
 use crate::bdf::{BdfCallbackSolver, BdfSolution, BdfSolver};
 use crate::be::{BackwardEulerSolution, BackwardEulerSolver};
 use crate::bvp::{BvpSciSolution, BvpSciSolver};
 use crate::bvp_damp::{BvpDampFrozenSolver, BvpDampNaiveSolver, BvpDampSolution, BvpDampSolver};
 use crate::contract::{
-    ExecutionPolicy, ExecutionRoute, MatrixLayout, SolverCapabilities, SolverOptions,
-    SymbolicFrontend, TelemetryMode, capabilities,
+    capabilities, ExecutionPolicy, ExecutionRoute, MatrixLayout, SolverCapabilities, SolverOptions,
+    SymbolicFrontend, TelemetryMode,
 };
 use crate::errors::{
     AotArtifactError, AotCompilerError, AotLifecycleError, AotLinkError, AotTimeoutError, BvpError,
@@ -48,7 +48,7 @@ use crate::errors::{
     PoisonedSolverError, PreparationError, RustedSciTheError, SolverError, TaskDocumentError,
     TelemetryError, UnsupportedOptionError, UnsupportedSymbolicOperationError,
 };
-use crate::expr::{PyExpr, constant, indexed_symbols, parse_expr, symbol, symbols};
+use crate::expr::{constant, indexed_symbols, parse_expr, symbol, symbols, PyExpr};
 use crate::gavin::{GavinFittingSolution, GavinFittingSolver};
 use crate::lambdify::LambdifiedExpr;
 use crate::lsode2::{Lsode2PythonSolver, Lsode2Solution};
@@ -215,12 +215,10 @@ mod tests {
         assert!(PyExpr::variable("").is_err());
         assert!(PyExpr::constant(f64::NAN).is_err());
         assert!(PyExpr::parse("x").unwrap().evaluate(vec![]).is_err());
-        assert!(
-            PyExpr::parse("x")
-                .unwrap()
-                .evaluate(vec![f64::INFINITY])
-                .is_err()
-        );
+        assert!(PyExpr::parse("x")
+            .unwrap()
+            .evaluate(vec![f64::INFINITY])
+            .is_err());
     }
 
     #[test]
@@ -263,26 +261,32 @@ mod tests {
         );
         assert_eq!(bdf.executions(), vec!["lambdify", "aot"]);
         assert_eq!(bdf.layouts(), vec!["dense"]);
-        assert!(
-            SolverOptions::new(
-                None,
-                None,
-                Some("sparse"),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None
-            )
-            .unwrap()
-            .validate_for("be")
-            .is_err()
+        assert_eq!(
+            bdf.telemetry_modes(),
+            vec!["off", "counters", "timings", "detailed"]
         );
+        assert!(SolverOptions::new(
+            None,
+            None,
+            Some("sparse"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None
+        )
+        .unwrap()
+        .validate_for("be")
+        .is_err());
 
         let be = capabilities("backward_euler").unwrap();
         assert_eq!(be.solver(), "backward_euler");
         assert_eq!(be.layouts(), vec!["dense"]);
+        assert_eq!(
+            capabilities("nonstiff").unwrap().telemetry_modes(),
+            vec!["off"]
+        );
         assert!(capabilities("unknown").is_err());
 
         let lsode2 = capabilities("lsode2").unwrap();

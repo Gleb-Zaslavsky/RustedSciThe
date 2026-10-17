@@ -28,6 +28,9 @@ aliases = {
     "m2": Expr.constant(0.75),
 }
 
+# The aliases factor repeated pairwise distances out of the acceleration
+# expressions. Recursive substitution keeps the model readable and avoids
+# manually expanding the same nonlinear terms in every equation.
 accelerations = [
     Expr.parse("-k*(m1*(x0-x1)/R01^3 + m2*(x0-x2)/R02^3)"),
     Expr.parse("-k*(m1*(y0-y1)/R01^3 + m2*(y0-y2)/R02^3)"),
@@ -50,6 +53,8 @@ initial = np.array([
 
 solution = solve_ivp(
     "lsode2", rhs, names, "t", initial, 0.0, 0.02, 0.001,
+    # This short horizon avoids turning an API example into an orbital
+    # stability claim; BDF is selected for the strongly coupled equations.
     controller="bdf",
     options=SolverOptions(
         frontend="atom_native", execution="lambdify",

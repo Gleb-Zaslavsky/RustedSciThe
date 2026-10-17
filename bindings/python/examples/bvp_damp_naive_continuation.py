@@ -17,18 +17,26 @@ solver = BvpDampNaiveSolver(
     parameters=["rate"],
     parameter_values=[1.0],
     options=SolverOptions(
+        # AtomNative is used to demonstrate prepared symbolic rebinding; the
+        # fixed-mesh Naive route keeps this example focused on continuation.
         frontend="atom_native",
         execution="lambdify",
         matrix_layout="dense",
-        telemetry="timings",
+        # Both iteration counters and stage timings are printed below.
+        telemetry="detailed",
     ),
 )
 
+# Build the symbolic plan once; each iteration changes only the scalar rate.
 solver.prepare()
 for rate in (1.0, 2.0, 0.5):
     solver.set_parameters([rate])
     solution = solver.solve_prepared()
+    endpoint = solution.values()[0][-1]
+    counters = solution.telemetry_counters()
+    if abs(endpoint - rate) > 1e-8:
+        raise AssertionError(f"rate={rate:g}: expected y(1)={rate:g}, got {endpoint:g}")
     print(
-        f"rate={rate:g}, y(1)={solution.values()[0][-1]:.8f}, "
-        f"iterations={solution.telemetry_counters().get('iterations', 0)}"
+        f"rate={rate:g}, y(1)={endpoint:.8f}, "
+        f"iterations={counters['iterations']}"
     )

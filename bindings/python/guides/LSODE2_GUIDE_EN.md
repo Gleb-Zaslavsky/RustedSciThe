@@ -53,9 +53,10 @@ they are not inferred from an equation:
 | Execution | `SolverOptions(execution=...)` | `lambdify` or `aot` |
 | Scheduling | `SolverOptions(execution_policy=...)` | `sequential`, `parallel` or `auto` where supported |
 
-The direct `Lsode2Solver` adapter takes `band_lower`/`band_upper` constructor
-keywords; other adapters that expose common layout options may instead use
-`SolverOptions.set_banded_width(lower, upper)`.
+The direct `Lsode2Solver` adapter accepts `band_lower`/`band_upper` constructor
+keywords or `SolverOptions.set_banded_width(lower, upper)`. If both forms are
+provided, matching values are accepted and conflicting values raise a typed
+configuration error. Widths are rejected for non-Banded layouts.
 
 The Python wrapper also exposes native analytical residual/Jacobian callbacks
 for supported layouts. These callbacks cross into Python and retain the GIL;

@@ -8,7 +8,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -24,6 +24,21 @@ BvpSciSolver = _native.BvpSciSolver
 BvpDampSolver = _native.BvpDampSolver
 Lsode2Solver = _native.Lsode2Solver
 ShootingBvpSolver = _native.ShootingBvpSolver
+
+_IvpSolver = (
+    _native.UniversalNonStiffSolver
+    | _native.BdfSolver
+    | _native.RadauSolver
+    | _native.BackwardEulerSolver
+    | _native.Lsode2Solver
+)
+_IvpSolution = (
+    _native.UniversalNonStiffSolution
+    | _native.BdfSolution
+    | _native.RadauSolution
+    | _native.BackwardEulerSolution
+    | _native.Lsode2Solution
+)
 
 _ANIMATION_ERROR_PREFIX = "RUSTEDSCITHE_ANIMATION_ERROR:"
 
@@ -203,14 +218,22 @@ def _owned_sequence(value: Any) -> Any:
 def _method_name(method: str) -> str:
     normalized = method.strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
-        "bdf": "bdf", "radau": "radau5", "radau5": "radau5",
-        "be": "backward_euler", "backward_euler": "backward_euler",
-        "lsode": "lsode2", "lsode2": "lsode2",
-        "rk45": "rk45", "dopri": "dopri", "ab4": "ab4",
+        "bdf": "bdf",
+        "radau": "radau5",
+        "radau5": "radau5",
+        "be": "backward_euler",
+        "backward_euler": "backward_euler",
+        "lsode": "lsode2",
+        "lsode2": "lsode2",
+        "lsoda": "lsode2",
+        "rk45": "rk45",
+        "dopri": "dopri",
+        "ab4": "ab4",
     }
     if normalized not in aliases:
         raise ValueError(
-            "unsupported IVP method; expected rk45, dopri, ab4, bdf, radau5, backward_euler or lsode2"
+            "unsupported IVP method; expected rk45, dopri, ab4, bdf, radau5, "
+            "backward_euler, lsode2 or lsoda"
         )
     return aliases[normalized]
 
@@ -230,7 +253,7 @@ def create_ivp(
     options: SolverOptions | None = None,
     controller: str | None = None,
     **solver_options: Any,
-) -> Any:
+) -> _IvpSolver:
     """Construct a native IVP solver with one common Python signature.
 
     This convenience function normalizes solver-family names and forwards
@@ -243,7 +266,9 @@ def create_ivp(
     method:
         Solver family: ``"rk45"``, ``"dopri"``, ``"ab4"``, ``"bdf"``,
         ``"radau5"``, ``"backward_euler"`` or ``"lsode2"``. ``"radau"``,
-        ``"be"`` and ``"lsode"`` are accepted aliases.
+        ``"be"``, ``"lsode"`` and ``"lsoda"`` are accepted aliases. The
+        ``"lsoda"`` alias selects the automatic Adams/BDF controller unless
+        ``controller`` explicitly overrides it.
     expressions, state_variables, time_variable:
         Symbolic right-hand sides and their ordered state/time names.
     y0:
@@ -265,7 +290,7 @@ def create_ivp(
 
     Returns
     -------
-    Any
+    _IvpSolver
         The selected native solver wrapper; its concrete class depends on
         ``method`` and retains that solver's prepared/restart/continuation API.
 
@@ -314,9 +339,15 @@ def create_ivp(
             h=max_step, options=options, parameters=parameters,
             parameter_values=_owned_sequence(parameter_values), **solver_options,
         )
+    lsoda_alias = (
+        method.strip().lower().replace("-", "_").replace(" ", "_") == "lsoda"
+    )
+    selected_controller = (
+        controller if controller is not None else ("auto" if lsoda_alias else "bdf")
+    )
     return Lsode2Solver(
         expressions, state_variables, time_variable, _owned_sequence(y0), t0, t_end, max_step,
-        options=options, method=(controller if controller is not None else "bdf"), parameters=parameters,
+        options=options, method=selected_controller, parameters=parameters,
         parameter_values=_owned_sequence(parameter_values), **solver_options,
     )
 
@@ -336,7 +367,7 @@ def solve_ivp(
     options: SolverOptions | None = None,
     controller: str | None = None,
     **solver_options: Any,
-) -> Any:
+) -> _IvpSolution:
     """Solve one IVP and return the solver's detached native result.
 
     Arguments have the same meaning as :func:`create_ivp`. This helper is for
@@ -347,7 +378,7 @@ def solve_ivp(
 
     Returns
     -------
-    Any
+    _IvpSolution
         A detached solver-specific solution containing trajectory data and
         the telemetry snapshot selected in ``options``.
 
@@ -385,15 +416,15 @@ def _bvp_method_name(method: str) -> str:
 
 def create_bvp(
     method: str,
-    expressions: list[Expr],
-    state_variables: list[str],
-    boundary_data: Any,
+    expressions: Sequence[Expr],
+    state_variables: Sequence[str],
+    boundary_data: Sequence[Expr] | Mapping[str, Sequence[tuple[int, float]]],
     mesh: ArrayLike,
-    initial_state: Any,
+    initial_state: ArrayLike,
     *,
     options: SolverOptions | None = None,
     **solver_options: Any,
-) -> Any:
+) -> _native.BvpSciSolver | _native.BvpDampSolver:
     """Construct a BVP solver while preserving native solver options.
 
     The two solver families intentionally retain different boundary-data
@@ -410,7 +441,9 @@ def create_bvp(
     expressions, state_variables:
         Ordered symbolic RHS expressions and state names.
     boundary_data:
-        Solver-specific boundary expressions or observation mapping as above.
+        For ``bvp_sci``, a sequence of symbolic boundary residuals using
+        ``ya_<state>``/``yb_<state>`` names. For ``bvp_damp``, a mapping from
+        state name to endpoint observations ``(0, value)`` or ``(1, value)``.
     mesh:
         Initial strictly increasing mesh; array-like inputs are copied before
         entering Rust.
@@ -423,9 +456,10 @@ def create_bvp(
 
     Returns
     -------
-    Any
-        A native BVP solver object. Call ``solve()`` to compute the solution;
-        retain the solver when using its supported continuation/restart API.
+    BvpSciSolver | BvpDampSolver
+        The selected native solver object. Call ``solve()`` to compute the
+        solution; retain the solver when using its supported continuation or
+        restart API.
 
     Raises
     ------
@@ -449,15 +483,15 @@ def create_bvp(
 
 def solve_bvp(
     method: str,
-    expressions: list[Expr],
-    state_variables: list[str],
-    boundary_data: Any,
+    expressions: Sequence[Expr],
+    state_variables: Sequence[str],
+    boundary_data: Sequence[Expr] | Mapping[str, Sequence[tuple[int, float]]],
     mesh: ArrayLike,
-    initial_state: Any,
+    initial_state: ArrayLike,
     *,
     options: SolverOptions | None = None,
     **solver_options: Any,
-) -> Any:
+) -> _native.BvpSciSolution | _native.BvpDampSolution:
     """Solve one BVP using the selected native solver family.
 
     The input contract matches :func:`create_bvp`; this convenience function
@@ -467,7 +501,7 @@ def solve_bvp(
 
     Returns
     -------
-    Any
+    BvpSciSolution | BvpDampSolution
         A solver-specific result with mesh/state data and native diagnostics.
 
     Raises
@@ -496,7 +530,7 @@ def solve_nonlinear(
     *,
     parameters: ArrayLike | None = None,
     **solver_options: Any,
-) -> Any:
+) -> _native.NonlinearSolution:
     """Create and solve a square symbolic nonlinear system.
 
     ``system`` is prepared through the native nonlinear frontend and the
@@ -507,7 +541,7 @@ def solve_nonlinear(
 
     Returns
     -------
-    Any
+    NonlinearSolution
         A detached native nonlinear-solve result with solution and diagnostics.
 
     Raises
@@ -521,7 +555,9 @@ def solve_nonlinear(
     return solver.solve(_owned_sequence(initial_guess), _owned_sequence(parameters))
 
 
-def create_nonlinear(system: SymbolicSystem, **solver_options: Any) -> Any:
+def create_nonlinear(
+    system: SymbolicSystem, **solver_options: Any
+) -> _native.NonlinearSolver:
     """Construct a nonlinear solver while leaving preparation explicit.
 
     Native options are forwarded unchanged. Call ``prepare()`` before repeated
@@ -530,8 +566,8 @@ def create_nonlinear(system: SymbolicSystem, **solver_options: Any) -> Any:
 
     Returns
     -------
-    Any
-        The native ``NonlinearSolver`` wrapper with its preparation and
+    NonlinearSolver
+        The native wrapper with its preparation and
         telemetry methods.
 
     Raises
@@ -549,7 +585,7 @@ def fit(
     *,
     parameters: ArrayLike | None = None,
     **solver_options: Any,
-) -> Any:
+) -> _native.FittingSolution:
     """Solve a symbolic least-squares fitting problem.
 
     ``equations`` are residual expressions, not model predictions paired with
@@ -561,7 +597,7 @@ def fit(
 
     Returns
     -------
-    Any
+    FittingSolution
         A native fitting result with fitted values, termination and telemetry.
 
     Raises
@@ -579,17 +615,20 @@ def create_fit(
     equations: list[Expr],
     initial_guess: ArrayLike,
     **solver_options: Any,
-) -> Any:
+) -> _native.FittingSolver:
     """Construct the native symbolic least-squares fitting solver.
 
     Expressions and solver configuration are retained by the Rust object;
-    Python does not build a duplicate symbolic tree. Call ``prepare()`` and
-    ``solve()`` according to the native lifecycle. Solver-specific keywords
-    are forwarded to ``FittingSolver`` without imposing a reduced facade API.
+    Python does not build a duplicate symbolic tree. Construction performs
+    native symbolic preparation eagerly; call ``solve()`` to fit, then use
+    ``solve_with_parameters()`` for subsequent parameter rebinding. The native
+    object does not expose a separate ``prepare()`` method. Solver-specific
+    keywords are forwarded to ``FittingSolver`` without imposing a reduced
+    facade API.
 
     Returns
     -------
-    Any
+    FittingSolver
         A native fitting solver with preparation, solve, telemetry and
         parameter-rebind methods.
 
@@ -640,7 +679,7 @@ def task_dict(source_or_path: str | Path) -> dict[str, Any]:
     return task(source_or_path).to_dict()
 
 
-def capabilities(solver: str) -> Any:
+def capabilities(solver: str) -> _native.SolverCapabilities:
     """Return the native capability descriptor for a solver family.
 
     Use this before constructing a solver when configuration is selected

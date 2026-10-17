@@ -23,8 +23,25 @@ print(root.solution_array())  # при этом старте корень око
 API предоставляет Newton, damped Newton, семейство LM и trust-region методы,
 если они объявлены в `capabilities("nonlinear")`. Опции метода передаются
 через соответствующий native mapping; неизвестные ключи отклоняются, а не
-игнорируются. ExprLegacy/AtomNative выбирают символьную подготовку. AOT не
-заявляется, пока capability metadata не сообщает конкретный compiled-маршрут.
+игнорируются. ExprLegacy/AtomNative выбирают символьную подготовку. Доступен
+Dense AOT через `execution="aot"`; lifecycle настраивается параметрами
+`aot_policy`, `aot_profile` и `aot_output_dir`. По умолчанию используется
+Lambdify, а для политик сборки требуется явная выходная папка.
+
+```python
+from pathlib import Path
+from rustedscithe import Expr, NonlinearSolver, SymbolicSystem
+
+x = Expr.variable("x")
+solver = NonlinearSolver(
+    SymbolicSystem([x * x - 2.0], ["x"]),
+    execution="aot",
+    aot_policy="build_if_missing",
+    aot_profile="release",
+    aot_output_dir=str(Path("target") / "rst-nonlinear-aot"),
+)
+root = solver.solve([1.0])
+```
 
 `NonlinearSolver` охватывает все 11 native-методов, оба фронтенда ExprLegacy и
 AtomNative, sequential/parallel/thresholded-auto execution, явный повторно
@@ -34,7 +51,7 @@ detailed timings. Числовые и boolean-настройки передаю�
 только MINPACK и требует `mode=2`; `method_choices` задаёт advanced Nielsen
 `scaling_method` (`levenberg`, `marquardt`, `more`) и `reduction_ratio_method`
 (`nielsen`, `more`). Именованные частичные box bounds допускают `None` на любой
-границе. Отдельная positive-domain политика, AOT и Python callbacks для этого
+границе. Отдельная positive-domain политика и Python callbacks для этого
 square-system API не поддерживаются и не подменяются скрыто другими режимами.
 
 ## Least-squares fitting
@@ -59,11 +76,12 @@ print(result.solution_array(), result.termination)
 выборки, неизвестные параметры и начальное приближение. Это отдельный
 one-shot контракт, не prepared API `FittingSolver`. Положительные ограничения
 параметров выбирает пользователь; они не выводятся автоматически из
-химической модели. Телеметрия численного solve у Gavin бинарная и по умолчанию
-выключена: передайте `telemetry=True`, чтобы собрать полный native snapshot
-(дискретные счётчики и времена стадий вместе), либо оставьте `False`, чтобы
-не платить за эту инструментализацию. Это отдельно от `preparation_telemetry`,
-измеряющей символьную подготовку. `VarProSolver` также имеет собственный one-shot lifecycle
+химической модели. Телеметрия solve у Gavin по умолчанию выключена и следует
+общему четырёхрежимному контракту: `off`, `counters`, `timings` или `detailed`
+(оба канала). Передайте `telemetry_mode` в `GavinFittingSolver` либо вызовите
+`with_gavin_telemetry_mode(...)` у `UniversalFitting`. Старый флаг
+`telemetry=True` оставлен как сокращение для `detailed`. Это отдельно от
+`preparation_telemetry`, измеряющей символьную подготовку. `VarProSolver` также имеет собственный one-shot lifecycle
 и статистики. Не предполагайте у них continuation/rebind семантику canonical
 fitting солвера.
 
@@ -81,8 +99,8 @@ fitting солвера.
 использовать standalone-класс. Неподдерживаемые сочетания отклоняются явно:
 VarPro не поддерживает AtomNative и parallel, Gavin не поддерживает
 `f_tolerance` и `scale_diag`. Общий многоуровневый `with_telemetry("counters"|"detailed")`
-предназначен для LM и VarPro; для полного snapshot Gavin используйте
-`with_gavin_telemetry(True)`.
+применяется к выбранному маршруту, включая Gavin. `with_gavin_telemetry(True)`
+сохранён как совместимое сокращение для включения `detailed`.
 
 ```python
 from rustedscithe import UniversalFitting

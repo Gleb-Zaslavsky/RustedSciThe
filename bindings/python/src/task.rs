@@ -185,6 +185,7 @@ struct BvpContinuationSnapshot {
     prepared_reuses: usize,
     mesh_restarts: usize,
     initial_guess_restarts: usize,
+    peak_result_elements: usize,
     segment_data: Vec<(Vec<f64>, Vec<f64>, Vec<Vec<f64>>)>,
 }
 
@@ -272,6 +273,7 @@ impl BvpTaskResult {
             prepared_reuses: result.continuation_telemetry.prepared_reuses,
             mesh_restarts: result.continuation_telemetry.mesh_restarts,
             initial_guess_restarts: result.continuation_telemetry.initial_guess_restarts,
+            peak_result_elements: result.continuation_telemetry.peak_result_elements,
             segment_data: result
                 .continuation_segments
                 .into_iter()
@@ -443,6 +445,34 @@ impl BvpTaskResult {
             self.continuation.mesh_restarts,
             self.continuation.initial_guess_restarts,
         )
+    }
+
+    /// Return named continuation lifecycle counters, including the largest
+    /// detached segment retained by the native task runner.
+    pub fn continuation_telemetry(&self) -> HashMap<String, u64> {
+        HashMap::from([
+            ("segments".to_owned(), self.continuation.segments as u64),
+            (
+                "fresh_preparations".to_owned(),
+                self.continuation.fresh_preparations as u64,
+            ),
+            (
+                "prepared_reuses".to_owned(),
+                self.continuation.prepared_reuses as u64,
+            ),
+            (
+                "mesh_restarts".to_owned(),
+                self.continuation.mesh_restarts as u64,
+            ),
+            (
+                "initial_guess_restarts".to_owned(),
+                self.continuation.initial_guess_restarts as u64,
+            ),
+            (
+                "peak_result_elements".to_owned(),
+                self.continuation.peak_result_elements as u64,
+            ),
+        ])
     }
 
     /// Return `(parameter_values, mesh, values)` for each continuation segment.

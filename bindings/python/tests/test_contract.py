@@ -6,6 +6,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import textwrap
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
+import numpy.testing
 import pytest
 import rustedscithe.facade as python_facade
 
@@ -26,6 +28,7 @@ from rustedscithe import (
     BvpSciSolution,
     BvpSciSolver,
     BvpTaskResult,
+    BSplineInterpolator,
     BdfCallbackSolver,
     BdfSolver,
     BackwardEulerSolution,
@@ -44,6 +47,7 @@ from rustedscithe import (
     GavinFittingSolution,
     Lsode2Solver,
     Lsode2Solution,
+    LowessResult,
     LeastSquaresBSpline,
     NonlinearSolution,
     NonlinearSolver,
@@ -76,6 +80,7 @@ from rustedscithe import (
     fit_quality,
     indexed_symbols,
     lowess_smooth,
+    lowess_fit,
     least_squares_bspline,
     savgol_filter,
     spline_resample,
@@ -160,6 +165,46 @@ def test_animation_facade_restores_typed_child_input_errors(monkeypatch):
     monkeypatch.setattr(python_facade.subprocess, "run", fake_run)
     with pytest.raises(ValueError, match="invalid animation speed"):
         animate_trajectory_2d([[0.0, 0.0]], [0.0])
+
+
+def test_animation_worker_module_is_discoverable_in_clean_child_process(tmp_path):
+    missing_input = tmp_path / "missing-trajectory.npz"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "rustedscithe._animation_worker",
+            "--input",
+            str(missing_input),
+            "--dimension",
+            "2",
+            "--axis-names",
+            "null",
+            "--speed",
+            "1.0",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "RUSTEDSCITHE_ANIMATION_ERROR:" in result.stderr
+    assert "missing-trajectory.npz" in result.stderr
+
+
+def test_animation_renderer_initialization_failure_is_returned_to_python(monkeypatch):
+    # wgpu parses this environment variable into an empty backend set. That
+    # reliably fails adapter discovery before a window is opened, exercising
+    # the real Rust/PyO3 panic -> child marker -> facade RuntimeError path.
+    monkeypatch.setenv("WGPU_BACKEND", "rustedscithe-invalid-backend")
+    points = np.asarray([[0.0, 0.0], [1.0, 1.0]], dtype=np.float64)
+    times = np.asarray([0.0, 1.0], dtype=np.float64)
+
+    with pytest.raises(RuntimeError, match="Unable to find a GPU"):
+        animate_trajectory_2d(points, times)
 
 
 def test_solution_animation_adapter_only_reads_selected_solution_columns():
@@ -379,6 +424,14 @@ telemetry: detailed
     assert len(result.values()) == 1
     assert len(result.values()[0]) == len(result.mesh())
     assert result.continuation_info() == (1, 1, 0, 0, 0)
+    assert result.continuation_telemetry() == {
+        "segments": 1,
+        "fresh_preparations": 1,
+        "prepared_reuses": 0,
+        "mesh_restarts": 0,
+        "initial_guess_restarts": 0,
+        "peak_result_elements": len(result.mesh()),
+    }
     assert result.telemetry_counters()["linear_solves"] >= 1
     assert result.telemetry_timings_ms()["full_solve_ms"] >= 0.0
     assert result.telemetry_timings_ms()["preparation_ms"] >= 0.0
@@ -429,12 +482,35 @@ def test_bvp_capabilities_expose_frontend_execution_layout_and_continuation_cont
     assert damp.layouts == ["dense", "sparse", "banded"]
     assert damp.methods == ["damped", "naive", "frozen"]
     assert damp.supports_continuation
+    # This capability describes the shared SolverOptions.log-level mapping;
+    # BVP_Damp's independent logging controls remain available on its facade.
+    assert damp.supports_logging is False
+    assert damp.sparse_factorization_policies == []
 
     scipy_like = capabilities("bvp_sci")
-    assert scipy_like.frontends == ["expr_legacy", "atom_native"]
+    assert scipy_like.frontends == ["expr_legacy", "atom_native", "numerical"]
+    assert scipy_like.executions == ["lambdify", "aot", "numerical"]
     assert scipy_like.layouts == ["dense", "sparse", "banded"]
     assert scipy_like.methods == ["scipy_like"]
     assert scipy_like.supports_continuation
+    assert scipy_like.supports_analytical_callbacks
+    assert scipy_like.analytical_callback_layouts == ["dense"]
+    assert scipy_like.sparse_factorization_policies == [
+        "standard_faer",
+        "reusable_faer_experimental",
+        "reusable_faer_simplicial_experimental",
+        "superlu",
+    ]
+    assert scipy_like.telemetry_modes == ["off", "counters", "timings", "detailed"]
+    assert scipy_like.supports_logging is True
+    with pytest.raises(UnsupportedOptionError, match="numerical callbacks require"):
+        SolverOptions(frontend="numerical", execution="lambdify").validate_for("bvp_sci")
+    with pytest.raises(UnsupportedOptionError, match="matrix_layout='dense'"):
+        SolverOptions(
+            frontend="numerical", execution="numerical", matrix_layout="sparse"
+        ).validate_for("bvp_sci")
+    with pytest.raises(UnsupportedOptionError):
+        SolverOptions(frontend="numerical", execution="numerical").validate_for("bdf")
 
 
 def test_nonlinear_solver_exposes_prepared_symbolic_methods_and_telemetry():
@@ -449,7 +525,7 @@ def test_nonlinear_solver_exposes_prepared_symbolic_methods_and_telemetry():
     assert solver.frontend() == "atom-native"
     assert not solver.is_prepared()
     solver.prepare()
-    assert solver.is_prepared()
+    assert solver.is_prepared
     result = solver.solve([1.0])
     assert result.solution()[0] == pytest.approx(2.0, rel=1e-6)
     assert result.residual_norm < 1e-8
@@ -542,7 +618,22 @@ def test_nonlinear_full_method_frontend_and_options_contract(method, method_opti
     assert solver.frontend() in {"expr-legacy", "atom-native"}
     result = solver.solve([0.5])
     assert result.solution()[0] == pytest.approx(2.0, abs=2e-5), (method, frontend, result.diagnostics())
-    assert result.telemetry_counters()["residual_evaluations"] > 0
+    counters = result.telemetry_counters()
+    timings = result.telemetry_timings_ms()
+    assert result.telemetry_mode == "detailed"
+    assert counters["residual_evaluations"] > 0
+    assert "state_residual_evaluations" in counters
+    assert "trial_jacobian_evaluations" in counters
+    assert "trust_region_trials" in counters
+    assert "linear_system_solve_ms" in timings
+    assert "trust_region_subproblem_ms" in timings
+    attempt_rows = result.telemetry_attempt_counters()
+    assert attempt_rows
+    assert attempt_rows[0]["iteration"] == 0
+    assert "residual_evaluations" in attempt_rows[0]
+    attempt_timings = result.telemetry_attempt_timings_ms()
+    assert attempt_timings
+    assert "linear_system_solve_ms" in attempt_timings[0]
 
 
 def test_nonlinear_parallel_parameter_rebind_and_named_partial_bounds_contract():
@@ -569,6 +660,24 @@ def test_nonlinear_rejects_unknown_named_bounds_and_telemetry_modes():
         NonlinearSolver(system, bounds={"missing": (0.0, 1.0)})
     with pytest.raises(InvalidConfigurationError, match="telemetry"):
         NonlinearSolver(system, telemetry="typo")
+
+
+@pytest.mark.parametrize(
+    ("mode", "has_counters", "has_timings"),
+    [
+        ("off", False, False),
+        ("counters", True, False),
+        ("timings", False, True),
+        ("detailed", True, True),
+    ],
+)
+def test_nonlinear_solver_uses_the_four_mode_telemetry_contract(
+    mode, has_counters, has_timings
+):
+    system = SymbolicSystem([Expr.parse("x-1")], ["x"])
+    result = NonlinearSolver(system, telemetry=mode).solve([0.0])
+    assert bool(result.telemetry_counters()) is has_counters
+    assert bool(result.telemetry_timings_ms()) is has_timings
 
 
 @pytest.mark.parametrize("method,frontend", [("lm", "expr_legacy"), ("lm", "atom_native"), ("gavin", "expr_legacy"), ("gavin", "atom_native"), ("varpro", "expr_legacy")])
@@ -598,6 +707,9 @@ def test_universal_fitting_facade_dispatches_native_routes(method, frontend):
     assert isinstance(result, UniversalFittingSolution)
     assert result.method == method
     assert result.solution_map()
+    assert result.telemetry_mode == "detailed"
+    assert result.telemetry_counters()
+    assert result.telemetry_timings_ms()
     assert solver.is_built()
     with pytest.raises(SolverError, match="one-shot"):
         solver.build()
@@ -625,8 +737,17 @@ def test_universal_fitting_preserves_method_specific_options_and_rejects_unsuppo
     with pytest.raises(UnsupportedOptionError, match="f_tolerance"):
         unsupported_gavin.build()
 
-    with pytest.raises(InvalidConfigurationError, match="with_gavin_telemetry"):
-        UniversalFitting("gavin").with_telemetry("counters")
+    gavin_counters = UniversalFitting("gavin")
+    gavin_counters.with_telemetry("counters")
+    gavin_counters.with_data(x, [2.0 * value + 1.0 for value in x])
+    gavin_counters.with_arg("x")
+    gavin_counters.with_equations_str(["a*x+b"])
+    gavin_counters.with_unknowns(["a", "b"])
+    gavin_counters.with_initial_guess([1.9, 0.9])
+    gavin_result = gavin_counters.build()
+    assert gavin_result.telemetry_mode == "counters"
+    assert gavin_result.telemetry_counters()
+    assert gavin_result.telemetry_timings_ms() == {}
 
     enabled_gavin = UniversalFitting("gavin")
     enabled_gavin.with_gavin_telemetry(True)
@@ -676,6 +797,11 @@ def test_standalone_fitting_long_rebind_series_and_one_shot_failure_contracts():
             [Expr.parse("a*x")], [0.0, 1.0], [1.0, 2.0], "x", ["a"], [1.0],
             telemetry="counters",
         )
+    with pytest.raises(InvalidConfigurationError, match="auto is not a native Gavin policy"):
+        GavinFittingSolver(
+            [Expr.parse("a*x")], [0.0, 1.0], [1.0, 2.0], "x", ["a"], [1.0],
+            execution_policy="auto",
+        )
 
     missing_basis = VarProSolver("x")
     missing_basis.with_parameters(["tau"])
@@ -685,6 +811,37 @@ def test_standalone_fitting_long_rebind_series_and_one_shot_failure_contracts():
         missing_basis.solve()
     with pytest.raises(SolverError, match="one-shot"):
         missing_basis.solve()
+
+
+def test_least_squares_timings_mode_excludes_counters_for_all_python_facades():
+    fitting = FittingSolver(
+        [Expr.parse("a-1")], [0.0], variables=["a"], telemetry="timings"
+    ).solve()
+    assert fitting.telemetry_mode == "timings"
+    assert fitting.telemetry_counters() == {}
+    assert fitting.telemetry_timings_ms()
+
+    varpro = VarProSolver("x")
+    varpro.with_parameters(["tau"])
+    varpro.with_initial_parameters([1.0])
+    varpro.with_data([0.0, 1.0, 2.0], [1.0, math.exp(-1.0), math.exp(-2.0)])
+    varpro.with_basis_str("tau", "exp(-x/tau)")
+    varpro.with_telemetry("timings")
+    varpro_result = varpro.solve()
+    assert varpro_result.telemetry_mode == "timings"
+    assert varpro_result.telemetry_counters() == {}
+    assert varpro_result.telemetry_timings_ms()
+
+    universal = UniversalFitting("lm")
+    universal.with_data([0.0, 1.0], [1.0, 2.0])
+    universal.with_arg("x")
+    universal.with_equations_str(["a*x+b"])
+    universal.with_unknowns(["a", "b"])
+    universal.with_initial_guess([1.0, 1.0])
+    universal.with_telemetry("timings")
+    result = universal.build()
+    assert result.telemetry_counters() == {}
+    assert result.telemetry_timings_ms()
 
 
 def test_gavin_and_varpro_long_series_keep_route_local_statistics():
@@ -706,6 +863,26 @@ def test_gavin_and_varpro_long_series_keep_route_local_statistics():
         varpro_result = varpro.solve()
         assert varpro_result.function_evaluations > 0
         assert varpro_result.telemetry_counters()["iterations"] >= 0
+
+
+@pytest.mark.parametrize(
+    ("mode", "has_counters", "has_timings"),
+    [
+        ("off", False, False),
+        ("counters", True, False),
+        ("timings", False, True),
+        ("detailed", True, True),
+    ],
+)
+def test_gavin_telemetry_mode_channels_are_independent(mode, has_counters, has_timings):
+    x = np.linspace(0.0, 1.0, 12).tolist()
+    solver = GavinFittingSolver(
+        [Expr.parse("a*x+b")], x, [1.7 * value + 0.4 for value in x],
+        "x", ["a", "b"], [1.6, 0.3], telemetry_mode=mode,
+    )
+    result = solver.solve()
+    assert bool(result.telemetry_counters()) is has_counters
+    assert bool(result.telemetry_timings_ms()) is has_timings
 
 
 def test_fitting_solver_exposes_expr_atom_and_parameter_rebind():
@@ -821,10 +998,10 @@ def test_varpro_preserves_native_lm_exhaustion_error():
     assert captured.value.native_kind
 
 
-def test_nonlinear_capabilities_do_not_advertise_unwired_aot():
+def test_nonlinear_capabilities_advertise_native_dense_aot():
     nonlinear = capabilities("nonlinear_system")
     assert nonlinear.frontends == ["expr_legacy", "atom_native"]
-    assert nonlinear.executions == ["lambdify"]
+    assert nonlinear.executions == ["lambdify", "aot"]
     assert nonlinear.methods == [
         "newton",
         "damped_newton",
@@ -840,6 +1017,74 @@ def test_nonlinear_capabilities_do_not_advertise_unwired_aot():
     ]
     fitting = capabilities("fitting")
     assert fitting.methods == ["levenberg_marquardt"]
+
+
+def test_capability_registry_covers_standalone_and_method_specific_fitting_routes():
+    gavin = capabilities("gavin_fitting")
+    assert gavin.frontends == ["expr_legacy", "atom_native"]
+    assert gavin.executions == ["lambdify"]
+    assert gavin.layouts == ["dense"]
+    assert gavin.policies == ["sequential", "parallel"]
+    assert gavin.methods == ["gavin_lm"]
+    assert not gavin.supports_continuation
+
+    varpro = capabilities("varpro")
+    assert varpro.frontends == ["expr_legacy"]
+    assert varpro.executions == ["lambdify"]
+    assert varpro.layouts == ["dense"]
+    assert varpro.policies == ["sequential"]
+    assert varpro.methods == ["variable_projection"]
+
+    universal = capabilities("universal_fitting")
+    assert universal.methods == ["lm", "gavin", "varpro"]
+    assert universal.frontends == ["expr_legacy", "atom_native"]
+    assert capabilities("universal_fitting_lm").frontends == [
+        "expr_legacy", "atom_native"
+    ]
+    assert capabilities("universal_fitting_gavin").policies == [
+        "sequential", "parallel"
+    ]
+    assert capabilities("universal_fitting_varpro").frontends == ["expr_legacy"]
+    assert capabilities("universal_fitting_varpro").policies == ["sequential"]
+
+    for method, frontend, execution_policy in (
+        ("lm", "atom_native", "parallel"),
+        ("gavin", "atom_native", "parallel"),
+        ("varpro", "expr_legacy", "sequential"),
+    ):
+        facade = UniversalFitting(method)
+        facade.with_frontend(frontend)
+        facade.with_execution_policy(execution_policy, 1)
+        assert facade.method == method
+
+    with pytest.raises(UnsupportedOptionError):
+        SolverOptions(frontend="atom_native").validate_for("varpro")
+    with pytest.raises(UnsupportedOptionError):
+        SolverOptions(execution="aot").validate_for("gavin_fitting")
+
+
+def test_every_advertised_nonlinear_method_runs_on_both_symbolic_frontends():
+    """Keep the advertised method/frontend axes executable, not aspirational."""
+    advertised = capabilities("nonlinear_system")
+    assert advertised.frontends == ["expr_legacy", "atom_native"]
+    assert advertised.methods
+
+    for frontend in advertised.frontends:
+        for method in advertised.methods:
+            problem = SymbolicSystem([Expr.parse("x - 2")], ["x"])
+            solver = NonlinearSolver(
+                problem,
+                method=method,
+                frontend=frontend,
+                tolerance=1e-8,
+                max_iterations=100,
+            )
+            result = solver.solve([0.0])
+
+            assert result.solution()[0] == pytest.approx(2.0, abs=1e-4), (
+                f"advertised route failed: frontend={frontend}, method={method}"
+            )
+            assert math.isfinite(result.residual_norm)
 
 
 def test_task_document_runs_prepared_ivp_continuation_with_segment_timings():
@@ -1081,6 +1326,9 @@ def test_ode_api2_nonstiff_facade_and_stop_condition():
     assert result.states()[-1][0] == pytest.approx(0.05, abs=1e-12)
     assert capabilities("nonstiff").methods == ["rk45", "dopri", "ab4"]
     assert capabilities("nonstiff").supports_continuation is False
+    assert capabilities("nonstiff").telemetry_modes == ["off"]
+    with pytest.raises(UnsupportedOptionError, match="telemetry mode 'timings'"):
+        SolverOptions(telemetry="timings").validate_for("nonstiff")
     with pytest.raises(UnsupportedOptionError, match="does not expose symbolic parameter"):
         python_facade.create_ivp(
             "rk45", [Expr.parse("rate")], ["y"], "t", [0.0], 0.0, 0.1, 0.01,
@@ -1871,6 +2119,40 @@ def test_bdf_atom_native_parameter_continuation_reuses_prepared_callbacks():
     assert continued.states()[-1][0] == pytest.approx(math.exp(-1.5), rel=4e-3)
 
 
+def test_bdf_long_continuation_keeps_preparation_and_detached_results_stable():
+    y = Expr.variable("y")
+    rate = Expr.variable("rate")
+    solver = BdfSolver(
+        [-rate * y], ["y"], "t", [1.0], 0.0, 0.05, 0.01,
+        rtol=1e-5,
+        atol=1e-8,
+        options=SolverOptions(telemetry="counters"),
+        parameters=["rate"],
+        parameter_values=[0.5],
+    )
+    solver.prepare()
+    first = solver.solve()
+    first_times = first.times()
+    first_states = first.states()
+    assert solver.is_prepared()
+
+    t_end = 0.05
+    for index in range(24):
+        t_end += 0.05
+        segment = solver.continue_with_parameters([0.5 + index * 0.01], t_end)
+        assert segment.status == "finished"
+        assert len(segment.times()) == len(segment.states())
+        assert all(math.isfinite(value) for row in segment.states() for value in row)
+        assert solver.is_prepared
+
+    # Results are detached snapshots: later continuation cannot mutate earlier
+    # trajectories. This is a wrapper-visible retention contract, not a claim
+    # that Python tracemalloc observes allocations made by Rust.
+    assert first.times() == first_times
+    assert first.states() == first_states
+    assert len(first.states()) <= 32
+
+
 def test_bdf_restart_keeps_prepared_callbacks_and_uses_new_initial_state():
     y = Expr.variable("y")
     solver = BdfSolver(
@@ -1959,6 +2241,16 @@ def test_radau_telemetry_modes_have_disjoint_collection_contracts():
         assert solution.telemetry_mode == mode
         assert bool(solution.telemetry_counters()) is has_counters
         assert bool(solution.telemetry_timings_ms()) is has_timings
+        scopes = solution.telemetry_timing_scopes()
+        assert any(scope["stage"] == "newton_ms" for scope in scopes)
+        assert any(scope["kind"] == "child" for scope in scopes)
+        adaptive_steps = solution.telemetry_adaptive_steps()
+        if has_timings:
+            assert solution.telemetry_initial_step() > 0.0
+            assert adaptive_steps
+            assert all("accepted" in step for step in adaptive_steps)
+        else:
+            assert adaptive_steps == []
 
 
 def test_radau_restart_keeps_prepared_callbacks_for_a_new_interval():
@@ -1980,6 +2272,26 @@ def test_radau_restart_keeps_prepared_callbacks_for_a_new_interval():
     assert restarted.final_time == pytest.approx(1.0)
     assert restarted.final_state[0] == pytest.approx(2.0 * math.exp(-0.5), rel=4e-3)
     assert restarted.telemetry_counters()["finite_difference_probes"] > 0
+
+
+def test_radau_long_parameter_series_retains_preparation_and_detached_results():
+    y, rate = Expr.variable("y"), Expr.variable("rate")
+    solver = RadauSolver(
+        [-rate * y], ["y"], "t", 0.0, 0.05, 0.01,
+        parameters=["rate"],
+        options=SolverOptions(telemetry="counters"),
+    )
+    first = solver.solve([1.0], [0.5])
+    first_state = first.final_state
+    assert solver.is_prepared
+    for index in range(16):
+        result = solver.continue_with_parameters(
+            [1.0], [0.5 + index * 0.01]
+        )
+        assert result.final_time == pytest.approx(0.05)
+        assert all(math.isfinite(value) for value in result.final_state)
+        assert solver.is_prepared
+    assert first.final_state == first_state
 
 
 def test_radau_accepts_dense_sparse_and_banded_layouts():
@@ -2027,6 +2339,34 @@ def test_radau_accepts_dense_sparse_and_banded_layouts():
         )
 
 
+@pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
+@pytest.mark.parametrize("layout", ["dense", "sparse", "banded"])
+def test_radau_frontend_layout_capability_cross_product(frontend, layout):
+    y = Expr.variable(f"radau_{frontend}_{layout}_y")
+    options = SolverOptions(
+        frontend=frontend,
+        matrix_layout=layout,
+        telemetry="counters",
+    )
+    if layout == "banded":
+        options.set_banded_width(1, 1)
+
+    # Structured routes need an explicit layout-aware Jacobian; this matrix
+    # checks the advertised frontend/layout product rather than FD fallback.
+    solver = RadauSolver(
+        [-y], [str(y)], "t", 0.0, 0.1, 0.05,
+        options=options,
+        jacobian=[Expr.constant(-1.0)],
+    )
+    solution = solver.solve([1.0])
+
+    assert solution.final_time == pytest.approx(0.1)
+    assert solution.final_state[0] == pytest.approx(math.exp(-0.1), rel=4e-3)
+    assert solver.provenance()["frontend"] == frontend
+    assert solver.provenance()["matrix_layout"] == layout
+    assert solution.telemetry_counters()["accepted_steps"] > 0
+
+
 def test_dense_aot_routes_build_and_solve_for_radau_bdf_and_backward_euler(tmp_path):
     compiler_path = shutil.which("tcc") or shutil.which("gcc")
     if compiler_path is None:
@@ -2041,7 +2381,7 @@ def test_dense_aot_routes_build_and_solve_for_radau_bdf_and_backward_euler(tmp_p
             aot_toolchain=toolchain,
             aot_profile="debug",
             aot_output_dir=str(tmp_path / name),
-            telemetry="counters",
+            telemetry="detailed",
         )
 
     bdf = BdfSolver(
@@ -2053,6 +2393,9 @@ def test_dense_aot_routes_build_and_solve_for_radau_bdf_and_backward_euler(tmp_p
     assert bdf_solution.times()[-1] == pytest.approx(0.1)
     assert bdf_solution.telemetry_counters()["aot_build_attempts"] >= 1
     assert bdf_solution.aot_artifact_keys()
+    assert bdf_solution.telemetry_aot_metadata()["execution"] == "aot"
+    assert bdf_solution.telemetry_aot_counters()["aot_link_attempts"] >= 1
+    assert bdf_solution.telemetry_aot_timings_ms()["cold.aot_build.ms"] >= 0.0
     assert bdf.provenance()["aot_policy"] == "build_if_missing"
     assert bdf.provenance()["aot_toolchain"] == toolchain
 
@@ -2077,7 +2420,82 @@ def test_dense_aot_routes_build_and_solve_for_radau_bdf_and_backward_euler(tmp_p
     assert be_solution.times()[-1] == pytest.approx(0.1)
     assert be_solution.telemetry_counters()["aot_build_attempts"] >= 1
     assert be_solution.aot_artifact_keys()
+    assert be_solution.telemetry_aot_metadata()["execution"] == "aot"
+    assert be_solution.telemetry_aot_counters()["aot_link_attempts"] >= 1
+    assert be_solution.telemetry_aot_timings_ms()["cold.aot_build.ms"] >= 0.0
     assert backward_euler.provenance()["execution"] == "aot"
+
+    yl = Expr.variable("yl")
+    lsode2 = Lsode2Solver(
+        [-yl], ["yl"], "t", [1.0], 0.0, 0.1, 0.05,
+        options=options("lsode2"),
+    )
+    lsode2_solution = lsode2.solve()
+    assert lsode2_solution.status == "finished_native_faithful"
+    assert lsode2_solution.telemetry_aot_metadata()["execution"] == "aot"
+    assert lsode2_solution.telemetry_aot_counters()["aot_build_attempts"] >= 1
+    assert lsode2_solution.telemetry_aot_timings_ms()["cold.aot_link.ms"] >= 0.0
+
+
+def test_ivp_aot_telemetry_mode_matrix_for_all_adapters(tmp_path):
+    compiler_path = shutil.which("tcc") or shutil.which("gcc")
+    if compiler_path is None:
+        pytest.skip("no supported C compiler is available for the AOT telemetry matrix")
+    toolchain = "tcc" if compiler_path.lower().endswith(("tcc", "tcc.exe")) else "gcc"
+    modes = ("off", "counters", "timings", "detailed")
+
+    # Reuse each solver's artifact directory across modes. The first route may
+    # build; subsequent modes exercise telemetry projection on cache reuse too.
+    for solver_name in ("bdf", "backward_euler", "lsode2", "radau"):
+        for mode in modes:
+            variable = Expr.variable(f"y_{solver_name}")
+            options = SolverOptions(
+                execution="aot",
+                aot_policy="build_if_missing",
+                aot_toolchain=toolchain,
+                aot_profile="debug",
+                aot_output_dir=str(tmp_path / solver_name),
+                telemetry=mode,
+            )
+            if solver_name == "bdf":
+                solver = BdfSolver(
+                    [-variable], [f"y_{solver_name}"], "t", [1.0], 0.0, 0.05, 0.05,
+                    options=options,
+                )
+                solver.prepare()
+                solution = solver.solve()
+            elif solver_name == "backward_euler":
+                solver = BackwardEulerSolver(
+                    [-variable], [f"y_{solver_name}"], "t", [1.0], 0.0, 0.05, h=0.05,
+                    options=options,
+                )
+                solution = solver.solve()
+            elif solver_name == "lsode2":
+                solver = Lsode2Solver(
+                    [-variable], [f"y_{solver_name}"], "t", [1.0], 0.0, 0.05, 0.05,
+                    options=options,
+                )
+                solution = solver.solve()
+            else:
+                solver = RadauSolver(
+                    [-variable], [f"y_{solver_name}"], "t", 0.0, 0.05, 0.05,
+                    options=options,
+                )
+                solver.prepare()
+                solution = solver.solve([1.0])
+
+            assert solver.provenance()["execution"] == "aot"
+            metadata = solution.telemetry_aot_metadata()
+            if mode == "off":
+                assert metadata == {}
+            else:
+                assert metadata["execution"] == "aot"
+                assert metadata["mode"] == mode
+            counters = solution.telemetry_aot_counters()
+            timings = solution.telemetry_aot_timings_ms()
+            assert bool(counters) == (mode in {"counters", "detailed"}), (solver_name, mode, counters)
+            assert bool(timings) == (mode in {"timings", "detailed"}), (solver_name, mode, timings)
+            assert all(math.isfinite(value) and value >= 0.0 for value in timings.values())
 
 
 @pytest.mark.parametrize("solver_name", ["bdf", "radau", "backward_euler"])
@@ -2241,6 +2659,26 @@ def test_backward_euler_restart_keeps_prepared_callbacks_and_new_state():
     assert restarted.states()[-1][0] == pytest.approx(2.0 / (1.1 ** 5), rel=2e-3)
 
 
+def test_backward_euler_long_parameter_series_keeps_detached_results_stable():
+    y, rate = Expr.variable("y"), Expr.variable("rate")
+    solver = BackwardEulerSolver(
+        [-rate * y], ["y"], "t", [1.0], 0.0, 0.05,
+        h=0.01, parameters=["rate"], parameter_values=[0.5],
+        options=SolverOptions(telemetry="counters"),
+    )
+    first = solver.solve()
+    first_times, first_states = first.times(), first.states()
+    end_time = 0.05
+    for index in range(16):
+        end_time += 0.05
+        result = solver.continue_to(end_time, [0.5 + index * 0.01])
+        assert result.status == "finished"
+        assert all(math.isfinite(value) for row in result.states() for value in row)
+    assert first.times() == first_times
+    assert first.states() == first_states
+    assert len(first.states()) <= 8
+
+
 def test_backward_euler_supports_atom_native_and_dense_aot():
     y = Expr.variable("y")
     solver = BackwardEulerSolver(
@@ -2305,44 +2743,17 @@ def test_telemetry_collection_modes_have_consistent_map_semantics():
             ).solve(),
         )
 
-    for mode in ("off", "counters", "timings"):
-        for index, solution in enumerate(solve_family(mode)):
+    expected_modes = {
+        "off": (False, False),
+        "counters": (True, False),
+        "timings": (False, True),
+        "detailed": (True, True),
+    }
+    for mode, (has_counters, has_timings) in expected_modes.items():
+        for solution in solve_family(mode):
             assert solution.telemetry_mode == mode
-            counters = solution.telemetry_counters()
-            timings = solution.telemetry_timings_ms()
-            if mode == "off":
-                assert counters == {}
-                assert timings == {}
-            elif mode == "counters":
-                assert counters
-                assert timings == {}
-            elif mode == "timings" and index != 4:
-                assert counters == {}
-                assert timings
-            elif mode == "detailed" and index != 4:
-                assert counters, f"expected counters for mode={mode!r}, solver_index={index}"
-                assert timings, f"expected timings for mode={mode!r}, solver_index={index}"
-            else:
-                # BVP_Sci retains its combined Timings behavior pending its
-                # own telemetry migration; the other IVP solvers are disjoint.
-                assert counters
-                assert timings
-
-    detailed = SolverOptions(telemetry="detailed")
-    detailed_solutions = (
-        BdfSolver([-y], ["y"], "t", [1.0], 0.0, 0.1, 0.05, options=detailed).solve(),
-        RadauSolver([-y], ["y"], "t", 0.0, 0.1, 0.05, options=detailed).solve([1.0]),
-        BackwardEulerSolver(
-            [-y], ["y"], "t", [1.0], 0.0, 0.1, 0.05, options=detailed
-        ).solve(),
-        Lsode2Solver(
-            [-y], ["y"], "t", [1.0], 0.0, 0.1, 0.05, options=detailed
-        ).solve(),
-    )
-    for solution in detailed_solutions:
-        assert solution.telemetry_mode == "detailed"
-        assert solution.telemetry_counters()
-        assert solution.telemetry_timings_ms()
+            assert bool(solution.telemetry_counters()) is has_counters
+            assert bool(solution.telemetry_timings_ms()) is has_timings
 
 
 def test_ivp_adapters_reject_nonfinite_and_invalid_numeric_configuration_early():
@@ -2393,6 +2804,29 @@ def test_solver_contract_separates_frontend_route_and_layout():
 
     with pytest.raises(UnsupportedOptionError):
         SolverOptions(matrix_layout="sparse").validate_for("backward_euler")
+
+
+def test_backend_specific_options_are_rejected_when_the_route_cannot_consume_them():
+    y = Expr.variable("y_backend_options")
+
+    dense_with_width = SolverOptions()
+    dense_with_width.set_banded_width(1, 1)
+    with pytest.raises(UnsupportedOptionError, match="only valid for matrix_layout='banded'"):
+        BdfSolver(
+            [-y], ["y_backend_options"], "t", [1.0], 0.0, 0.1, 0.05,
+            options=dense_with_width,
+        )
+
+    sparse_factorization = SolverOptions(matrix_layout="sparse")
+    sparse_factorization.set_sparse_factorization("superlu")
+    with pytest.raises(UnsupportedOptionError, match="only by the BVP_sci Sparse route"):
+        Lsode2Solver(
+            [-y], ["y_backend_options"], "t", [1.0], 0.0, 0.1, 0.05,
+            options=sparse_factorization,
+        )
+
+    # The same policy is meaningful when the actual BVP_sci route is Sparse.
+    sparse_factorization.validate_for("bvp_sci")
 
 
 @pytest.mark.parametrize("policy", ["sequential", "parallel", "auto"])
@@ -2447,6 +2881,15 @@ def test_lsode2_dense_lambdify_lifecycle_and_restart():
     assert solution.telemetry_counters()["solve_calls"] > 0
     assert "aot_build_attempts" in solution.telemetry_counters()
     assert "aot_link_attempts" in solution.telemetry_counters()
+    assert solution.evaluation_scope in {
+        "bridge_bdf_callbacks",
+        "native_faithful_inner_loop",
+    }
+    assert "evaluations" in solution.evaluation_counter_note
+    assert "evaluation_scope" in solution.diagnostics()
+    assert solution.telemetry_counters()["evaluation_residual_calls"] >= 0
+    assert solution.telemetry_counters()["evaluation_jacobian_calls"] >= 0
+    assert solution.telemetry_counters()["evaluation_linear_solves"] >= 0
     assert solution.diagnostics()["solver"] == "lsode2"
     assert solution.diagnostics()["controller_mode"] == "bdf_only"
     assert solution.diagnostics()["active_family"] == "bdf"
@@ -2474,6 +2917,44 @@ def test_lsode2_dense_lambdify_lifecycle_and_restart():
     assert restarted.final_state[0] == pytest.approx(2.0 * math.exp(-0.5), rel=4e-3)
 
 
+def test_lsode2_effective_telemetry_is_scoped_and_distinguishes_disabled_modes():
+    y = Expr.variable("y")
+    solver = Lsode2Solver(
+        [-y], ["y"], "t", [1.0], 0.0, 0.1, 0.025,
+        options=SolverOptions(telemetry="detailed"),
+    )
+    solver.prepare()
+    result = solver.solve()
+
+    counters = result.telemetry_counters()
+    timings = result.telemetry_timings_ms()
+    assert result.evaluation_scope in {
+        "bridge_bdf_callbacks",
+        "native_faithful_inner_loop",
+    }
+    assert {
+        "evaluation_residual_calls",
+        "evaluation_jacobian_calls",
+        "evaluation_linear_solves",
+    } <= counters.keys()
+    assert {
+        "evaluation_residual_ms",
+        "evaluation_jacobian_ms",
+        "evaluation_linear_solve_ms",
+    } <= timings.keys()
+    assert "evaluation_counter_note=" in solver.telemetry_report()
+
+    off = Lsode2Solver(
+        [-y], ["y"], "t", [1.0], 0.0, 0.1, 0.025,
+        options=SolverOptions(telemetry="off"),
+    )
+    off.prepare()
+    off_result = off.solve()
+    assert off_result.evaluation_scope == result.evaluation_scope
+    assert off_result.telemetry_counters() == {}
+    assert off_result.telemetry_timings_ms() == {}
+
+
 def test_lsode2_frontend_layout_policy_and_controller_contract():
     y = Expr.variable("y")
     for layout in ("sparse", "banded"):
@@ -2495,6 +2976,19 @@ def test_lsode2_frontend_layout_policy_and_controller_contract():
         solution = solver.solve()
         assert solution.status.startswith("finished")
         assert solution.final_time == pytest.approx(0.1)
+
+    option_width = SolverOptions(matrix_layout="banded")
+    option_width.set_banded_width(1, 1)
+    option_width_solver = Lsode2Solver(
+        [-y], ["y"], "t", [1.0], 0.0, 0.1, 0.1, options=option_width
+    )
+    assert option_width_solver.provenance()["matrix_layout"] == "banded"
+
+    with pytest.raises(InvalidConfigurationError, match="conflicting band_lower"):
+        Lsode2Solver(
+            [-y], ["y"], "t", [1.0], 0.0, 0.1, 0.1,
+            options=option_width, band_lower=2, band_upper=1,
+        )
 
     assert capabilities("lsode2").analytical_callback_layouts == [
         "dense", "sparse", "banded"
@@ -2552,6 +3046,45 @@ def test_lsode2_frontend_layout_policy_and_controller_contract():
             residual_callback=lambda _t, state: [-state[0]],
             jacobian_callback=lambda _t, _state: [[-1.0]],
         )
+
+
+@pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
+@pytest.mark.parametrize("controller", ["bdf", "adams", "auto"])
+def test_lsode2_advertised_controller_frontend_cross_product(frontend, controller):
+    state = Expr.variable(f"lsode2_{frontend}_{controller}_state")
+    rate = Expr.variable("rate")
+    options = SolverOptions(
+        frontend=frontend,
+        execution="lambdify",
+        matrix_layout="dense",
+        execution_policy="sequential",
+        telemetry="counters",
+    )
+    solver = python_facade.create_ivp(
+        "lsode2",
+        [-rate * state],
+        [str(state)],
+        "t",
+        np.asarray([1.0], dtype=np.float64),
+        0.0,
+        0.1,
+        0.025,
+        parameters=["rate"],
+        parameter_values=np.asarray([0.8], dtype=np.float64),
+        options=options,
+        controller=controller,
+        rtol=1e-8,
+        atol=1e-10,
+    )
+    result = solver.solve()
+
+    assert result.status.startswith("finished")
+    assert result.final_time == pytest.approx(0.1)
+    assert result.final_state[0] == pytest.approx(math.exp(-0.08), rel=2e-5)
+    assert solver.provenance()["frontend"] == frontend
+    assert solver.provenance()["method"] == controller
+    assert solver.provenance()["execution"] == "lambdify"
+    assert result.telemetry_counters()["solve_calls"] >= 1
 
 
 def test_lsode2_require_prebuilt_reports_missing_artifact_type():
@@ -2703,6 +3236,27 @@ def test_lsode2_parameter_continuation_starts_at_last_successful_state():
     assert continued.final_state[0] != pytest.approx(fresh.final_state[0], rel=1e-2)
 
 
+def test_lsode2_long_parameter_series_retains_preparation_and_detached_results():
+    y, rate = Expr.variable("y"), Expr.variable("rate")
+    solver = Lsode2Solver(
+        [-rate * y], ["y"], "t", [1.0], 0.0, 0.05, 0.01,
+        parameters=["rate"], parameter_values=[0.5],
+        options=SolverOptions(telemetry="counters"),
+    )
+    first = solver.solve()
+    first_times, first_states = first.times(), first.states()
+    assert solver.is_prepared
+    final_time = 0.05
+    for index in range(16):
+        final_time += 0.05
+        result = solver.continue_with_parameters([0.5 + index * 0.01], final_time)
+        assert result.final_time == pytest.approx(final_time)
+        assert all(math.isfinite(value) for row in result.states() for value in row)
+        assert solver.is_prepared
+    assert first.times() == first_times
+    assert first.states() == first_states
+
+
 def test_lsode2_sparse_python_analytical_callbacks_and_typed_callback_failure():
     def residual(_t, state):
         return [-state[0]]
@@ -2812,10 +3366,22 @@ def test_bvp_sci_direct_lambdify_builder_supports_mesh_output_and_restart(tmp_pa
     assert solution.values()[0][0] == pytest.approx(1.0, rel=2e-3)
     assert solution.sample(1.0)[0] == pytest.approx(math.exp(-1.0), rel=3e-3)
     timings = solution.telemetry_timings_ms()
+    assert solution.telemetry_preparation_scope() == "bvp"
+    assert timings["reported_preparation_ms"] >= 0.0
+    scopes = solution.telemetry_timing_scopes()
+    assert scopes
+    assert all("kind" in scope and "parent" in scope for scope in scopes)
+    mesh_passes = solution.telemetry_mesh_passes()
     if telemetry == "timings":
         assert solution.telemetry_counters() == {}
+        assert mesh_passes == []
+        assert solution.telemetry_newton_trace() == []
     else:
+        assert mesh_passes
+        assert mesh_passes[0]["linear_solves"] >= 1
         assert solution.telemetry_counters()["linear_solves"] >= 1
+        assert solution.telemetry_newton_trace()
+        assert "accepted" in solution.telemetry_newton_trace()[0]
     assert timings["preparation_ms"] >= 0.0
     assert timings["collocation_ms"] >= 0.0
     assert timings["linear_solve_ms"] >= 0.0
@@ -2829,6 +3395,181 @@ def test_bvp_sci_direct_lambdify_builder_supports_mesh_output_and_restart(tmp_pa
     assert restarted.status_code == 0
     assert restarted.mesh()[0] == pytest.approx(0.0)
     assert restarted.mesh()[-1] == pytest.approx(1.0)
+
+
+def test_bvp_sci_long_parameter_series_reuses_plan_and_detaches_results():
+    rate = Expr.variable("rate")
+    solver = BvpSciSolver(
+        [rate],
+        ["y"],
+        [Expr.parse("ya_y"), Expr.parse("yb_y - 1")],
+        [index / 8.0 for index in range(9)],
+        [0.0] * 9,
+        parameters=["rate"],
+        parameter_values=[1.0],
+        options=SolverOptions(telemetry="detailed"),
+        tolerance=1e-5,
+        max_nodes=64,
+        max_mesh_refinements=6,
+    )
+    first = solver.solve()
+    first_mesh = first.mesh()
+    first_values = first.values_flat()
+    first_counters = first.telemetry_counters()
+    assert first.status_code == 0
+    assert first_counters["preparation_calls"] == 1
+
+    for index in range(20):
+        parameter_guess = 0.5 + index * 0.05
+        solver.set_parameters([parameter_guess])
+        result = solver.solve()
+        assert result.status_code == 0
+        assert result.parameters == pytest.approx([1.0], abs=1e-6)
+        assert result.values()[-1][0] == pytest.approx(1.0, abs=1e-6)
+        assert len(result.mesh()) <= 64
+        assert result.telemetry_counters()["preparation_calls"] == 1
+
+    # Same mesh/state dimensions should reuse the prepared plan and buffers.
+    # Keep the assertion tolerant of a one-time solver capacity expansion.
+    final_counters = result.telemetry_counters()
+    assert final_counters["workspace_resizes"] <= first_counters["workspace_resizes"] + 1
+    assert first.mesh() == first_mesh
+    assert first.values_flat() == first_values
+
+
+def test_bvp_sci_numerical_callbacks_support_analytic_state_and_parameter_jacobians():
+    solver = BvpSciSolver(
+        [],
+        ["y"],
+        [Expr.parse("ya_y"), Expr.parse("yb_y - 1")],
+        [0.0, 0.5, 1.0],
+        [0.0, 0.4, 0.8],
+        parameters=["rate"],
+        parameter_values=[0.8],
+        options=SolverOptions(
+            frontend="numerical", execution="numerical", matrix_layout="dense",
+            telemetry="detailed",
+        ),
+        rhs_callback=lambda _x, _y, parameters: [parameters[0]],
+        rhs_jacobian_callback=lambda _x, _y, _p: [[0.0]],
+        rhs_parameter_jacobian_callback=lambda _x, _y, _p: [[1.0]],
+    )
+    assert solver.frontend == "numerical"
+    result = solver.solve()
+    assert result.status_code == 0
+    assert result.parameters == pytest.approx([1.0], abs=1e-7)
+    assert result.values()[-1][0] == pytest.approx(1.0, abs=1e-7)
+    counters = result.telemetry_counters()
+    assert counters["residual_evaluations"] > 0
+    assert counters["jacobian_evaluations"] > 0
+
+
+def test_bvp_sci_numerical_callbacks_use_fd_jacobian_and_preserve_callback_errors():
+    solver = BvpSciSolver(
+        [], ["y"], [Expr.parse("ya_y - 1")],
+        [0.0, 0.5, 1.0], [1.0, 0.6, 0.37],
+        options=SolverOptions(frontend="numerical", execution="numerical", telemetry="counters"),
+        output="dense",
+        rhs_callback=lambda _x, y, _p: [-y[0]],
+    )
+    result = solver.solve()
+    assert solver.frontend == "numerical"
+    assert result.status_code == 0
+    assert result.sample(1.0)[0] == pytest.approx(math.exp(-1.0), rel=3e-3)
+    assert result.telemetry_counters()["jacobian_evaluations"] > 0
+
+    def failing_rhs(_x, _y, _p):
+        raise RuntimeError("numerical RHS fixture failure")
+
+    failing = BvpSciSolver(
+        [], ["y"], [Expr.parse("ya_y - 1")],
+        [0.0, 0.5, 1.0], [1.0, 0.6, 0.37],
+        options=SolverOptions(frontend="numerical", execution="numerical"),
+        rhs_callback=failing_rhs,
+    )
+    with pytest.raises(CallbackError, match="numerical RHS fixture failure") as error:
+        failing.solve()
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert str(error.value.__cause__) == "numerical RHS fixture failure"
+
+    def failing_jacobian(_x, _y, _p):
+        raise RuntimeError("numerical Jacobian fixture failure")
+
+    failing_jacobian_solver = BvpSciSolver(
+        [], ["y"], [Expr.parse("ya_y - 1")],
+        [0.0, 0.5, 1.0], [1.0, 0.6, 0.37],
+        options=SolverOptions(frontend="numerical", execution="numerical"),
+        rhs_callback=lambda _x, y, _p: [-y[0]],
+        rhs_jacobian_callback=failing_jacobian,
+    )
+    with pytest.raises(CallbackError, match="numerical Jacobian fixture failure") as error:
+        failing_jacobian_solver.solve()
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert str(error.value.__cause__) == "numerical Jacobian fixture failure"
+
+
+def test_bvp_sci_numerical_callback_route_rejects_mixed_and_non_dense_options():
+    base = dict(
+        expressions=[], state_variables=["y"],
+        boundary_expressions=[Expr.parse("ya_y - 1")],
+        mesh=[0.0, 0.5, 1.0], initial_state=[1.0, 0.6, 0.37],
+        rhs_callback=lambda _x, y, _p: [-y[0]],
+    )
+    with pytest.raises(UnsupportedOptionError, match="dense"):
+        BvpSciSolver(
+            **base,
+            options=SolverOptions(frontend="numerical", execution="numerical", matrix_layout="sparse"),
+        )
+    with pytest.raises(InvalidConfigurationError, match="cannot be mixed"):
+        BvpSciSolver(
+            **base,
+            options=SolverOptions(frontend="expr_legacy", execution="lambdify"),
+        )
+    with pytest.raises(InvalidConfigurationError, match="require rhs_callback"):
+        BvpSciSolver(
+            [-Expr.variable("y")], ["y"], [Expr.parse("ya_y - 1")], [0.0, 0.5, 1.0], [1.0, 0.6, 0.37],
+            options=SolverOptions(frontend="numerical", execution="numerical"),
+        )
+
+    handoff_options = SolverOptions(frontend="numerical", execution="numerical")
+    handoff_options.set_aot_handoff_path("unused-registry.txt")
+    with pytest.raises(UnsupportedOptionError, match="require execution='aot'"):
+        BvpSciSolver(**base, options=handoff_options)
+
+
+def test_nonlinear_dense_aot_uses_native_generated_backend(tmp_path):
+    x = Expr.variable("x")
+    solver = NonlinearSolver(
+        SymbolicSystem([x * x - 2.0], ["x"]),
+        execution="aot",
+        aot_policy="build_if_missing",
+        aot_profile="debug",
+        aot_output_dir=str(tmp_path / "nonlinear-aot"),
+        telemetry="detailed",
+        tolerance=1e-9,
+    )
+    solution = solver.solve([1.0])
+    assert solution.residual_norm < 1e-8
+    assert solution.solution()[0] == pytest.approx(math.sqrt(2.0), rel=1e-8)
+    assert solver.backend() == "aot"
+    assert "Aot" in solver.prepare_report()
+
+
+def test_nonlinear_aot_requires_artifact_or_explicit_build_directory(tmp_path):
+    x = Expr.variable("x")
+    solver = NonlinearSolver(
+        SymbolicSystem([x - 1.0], ["x"]),
+        execution="aot",
+        aot_policy="require_prebuilt",
+        aot_output_dir=str(tmp_path / "missing-artifact"),
+    )
+    with pytest.raises(PreparationError) as failure:
+        solver.prepare()
+    assert failure.value.stage == "prepare"
+    assert failure.value.solver == "nonlinear"
+    assert "aot" in failure.value.route
+    assert failure.value.native_kind
+    assert "aot" in capabilities("nonlinear_system").executions
 
 
 def test_bvp_sci_direct_aot_preserves_typed_lifecycle_failure(tmp_path):
@@ -2851,6 +3592,45 @@ def test_bvp_sci_direct_aot_preserves_typed_lifecycle_failure(tmp_path):
     assert failure.value.stage == "construct"
     assert failure.value.solver == "bvp_sci"
     assert failure.value.native_kind in {"AotPreparation", "AotHandoff"}
+
+
+def test_bvp_sci_aot_telemetry_exposes_lifecycle_and_nested_scopes(tmp_path):
+    compiler = shutil.which("tcc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("no supported C compiler is available for BVP_sci AOT telemetry")
+    toolchain = "tcc" if compiler.lower().endswith(("tcc", "tcc.exe")) else "gcc"
+    y = Expr.variable("y")
+    options = SolverOptions(
+        execution="aot",
+        telemetry="detailed",
+        aot_toolchain=toolchain,
+        aot_profile="debug",
+        aot_output_dir=str(tmp_path / "bvp-sci-aot-telemetry"),
+    )
+    solver = BvpSciSolver(
+        [-y],
+        ["y"],
+        [Expr.parse("ya_y - 1")],
+        [0.0, 0.5, 1.0],
+        [1.0, 0.6, 0.37],
+        options=options,
+        tolerance=1e-4,
+    )
+    solution = solver.solve()
+    assert solution.status_code == 0
+    assert solution.telemetry_aot_metadata()["execution"] == "aot"
+    assert solution.telemetry_aot_counters()["aot_build_attempts"] >= 1
+    assert solution.telemetry_aot_counters()["aot_link_attempts"] >= 1
+    assert solution.telemetry_aot_artifact_keys()
+    aot_times = solution.telemetry_aot_timings_ms()
+    assert aot_times["cold.aot_build.ms"] >= 0.0
+    assert aot_times["cold.aot_link.ms"] >= 0.0
+    stages = solution.telemetry_aot_stages()
+    build_stage = next(stage for stage in stages if stage["stage"] == "aot_build")
+    assert build_stage["calls"] >= 1
+    assert isinstance(build_stage["calls"], int)
+    assert solution.telemetry_timings_ms()["reported_preparation_ms"] >= 0.0
+    assert solution.telemetry_preparation_scope() == "aot_ivp"
 
 
 def test_bvp_sci_direct_atom_native_and_boundary_fd_routes_are_available():
@@ -2933,7 +3713,10 @@ def test_bvp_sci_direct_sparse_factorization_is_explicit_and_fallback_safe():
     assert solution.status_code == 0
     # With the default binding build the bridge is absent and the core falls
     # back to StandardFaer; with a SuperLU-enabled build this counter is zero.
-    assert solution.telemetry_counters().get("superlu_fallbacks", 0) >= 0
+    counters = solution.telemetry_counters()
+    assert "superlu_fallbacks" in counters
+    assert "sparse_symbolic_analyses" in counters
+    assert "sparse_symbolic_reuses" in counters
 
     with pytest.raises(UnsupportedOptionError, match="matrix_layout='sparse'"):
         dense_options = SolverOptions(matrix_layout="dense")
@@ -3030,9 +3813,19 @@ def test_bvp_damp_direct_dense_builder_returns_detached_solution_and_telemetry(c
     timings = solution.telemetry_timings_ms()
     assert counters["iterations"] >= 1
     assert counters["linear_solves"] >= 1
+    assert "scalar_evaluations" in counters
+    assert "residual_requests" in counters
+    assert "factorization_invalidations" in counters
     assert timings["total_ms"] >= 0.0
     assert timings["symbolic_operations_ms"] >= 0.0
     assert timings["linear_system_ms"] >= 0.0
+    assert solution.telemetry_scope_timings_ms()["solve_ms"] >= 0.0
+    assert solution.telemetry_scope_events()["iteration_events"] == counters["iterations"]
+    storage = solution.telemetry_storage_bytes()
+    assert isinstance(storage, dict)
+    assert (solution.telemetry_storage_is_estimated() is not None) is bool(storage)
+    if storage:
+        assert solution.telemetry_storage_is_estimated() is True
     assert capsys.readouterr().out == ""
 
 
@@ -3058,6 +3851,11 @@ def test_bvp_damp_telemetry_modes_are_disjoint(mode, has_counters, has_timings):
     assert solution.telemetry_mode == mode
     assert bool(solution.telemetry_counters()) is has_counters
     assert bool(solution.telemetry_timings_ms()) is has_timings
+    assert bool(solution.telemetry_scope_events()) is has_counters
+    assert bool(solution.telemetry_scope_timings_ms()) is has_timings
+    assert bool(solution.telemetry_callback_counters()) is has_counters
+    assert bool(solution.telemetry_callback_timings_ms()) is has_timings
+    assert has_timings or not solution.telemetry_preparation_timings_ms()
 
     detached_mesh = solution.mesh()
     detached_values = solution.values()
@@ -3096,6 +3894,11 @@ def test_bvp_damp_fixed_mesh_telemetry_modes_are_disjoint(
     assert solution.telemetry_mode == mode
     assert bool(solution.telemetry_counters()) is has_counters
     assert bool(solution.telemetry_timings_ms()) is has_timings
+    assert bool(solution.telemetry_scope_events()) is has_counters
+    assert bool(solution.telemetry_scope_timings_ms()) is has_timings
+    assert bool(solution.telemetry_callback_counters()) is has_counters
+    assert bool(solution.telemetry_callback_timings_ms()) is has_timings
+    assert has_timings or not solution.telemetry_preparation_timings_ms()
 
 
 def test_bvp_damp_direct_validation_rejects_invalid_boundary_and_scheme():
@@ -3726,6 +4529,25 @@ def test_all_exported_native_public_members_have_docstrings():
     assert not undocumented, "Missing Python-facing documentation:\n" + "\n".join(undocumented)
 
 
+def test_python_example_inventory_and_explanatory_headers_stay_complete():
+    examples_dir = Path(__file__).parents[1] / "examples"
+    scripts = {path.name for path in examples_dir.glob("*.py")}
+    readme = (examples_dir / "README.md").read_text(encoding="utf-8")
+    indexed = set(re.findall(r"\]\(([^)]+\.py)\)", readme))
+    indexed = {Path(item).name for item in indexed}
+
+    assert indexed == scripts, (
+        f"unindexed examples={sorted(scripts - indexed)}, "
+        f"stale README entries={sorted(indexed - scripts)}"
+    )
+    for script in sorted(scripts):
+        module = ast.parse((examples_dir / script).read_text(encoding="utf-8"))
+        header = ast.get_docstring(module)
+        assert header is not None and len(header.strip()) >= 60, (
+            f"{script} needs a useful opening explanation of its problem and route"
+        )
+
+
 def test_python_type_stubs_parse_and_match_runtime_exports():
     import rustedscithe
     from rustedscithe import _native
@@ -3879,6 +4701,42 @@ def test_data_processing_lowess_and_quality_metrics_have_defined_edge_semantics(
         fit_quality(np.array([1e308, -1e308]), np.array([0.0, 0.0]))
 
 
+def test_data_processing_lowess_fit_returns_detached_coordinate_and_value_arrays():
+    x = np.linspace(0.0, 2.0, 21, dtype=np.float64)
+    y = 1.5 * x + 0.2 * np.sin(8.0 * x)
+    result = lowess_fit(x, y, fraction=0.5, iterations=2, delta=0.0, parallel=False)
+    assert isinstance(result, LowessResult)
+    assert result.x.dtype == result.y.dtype == np.float64
+    assert result.x.shape == result.y.shape == x.shape
+    assert result.iterations_used is None or result.iterations_used > 0
+    assert result.fraction_used == pytest.approx(0.5)
+    assert not np.shares_memory(result.x, x)
+    assert not np.shares_memory(result.y, y)
+    np.testing.assert_allclose(result.x, x)
+    np.testing.assert_allclose(result.y, lowess_smooth(x, y, fraction=0.5, iterations=2, delta=0.0, parallel=False))
+
+
+def test_data_processing_bspline_interpolator_supports_reuse_and_validates_native_panics():
+    points = np.array([0.0, 1.0, 2.0], dtype=np.float64)
+    knots = np.array([0.0, 0.0, 1.0, 2.0, 2.0], dtype=np.float64)
+    spline = BSplineInterpolator(1, points, knots)
+    assert spline.degree == 1
+    assert spline.knot_domain == pytest.approx((0.0, 2.0))
+    assert spline.interpolate(0.5) == pytest.approx(0.5)
+    params = np.array([0.25, 1.0, 1.75], dtype=np.float64)
+    values = spline.interpolate_batch(params)
+    assert values.dtype == np.float64 and not np.shares_memory(values, params)
+    np.testing.assert_allclose(values, params, atol=1e-12)
+
+    uniform = BSplineInterpolator.with_uniform_knots(2, np.array([0.0, 1.0, 0.0]))
+    assert uniform.degree == 2
+    assert np.isfinite(uniform.interpolate_batch(np.array([0.1, 0.5, 0.9]))).all()
+    with pytest.raises(InvalidConfigurationError, match="knot domain"):
+        spline.interpolate(-0.1)
+    with pytest.raises(InvalidConfigurationError, match="nondecreasing"):
+        BSplineInterpolator(1, points, np.array([0.0, 1.0, 0.5, 2.0, 2.0]))
+
+
 def test_data_processing_lsq_bspline_dense_and_banded_routes_match():
     x = np.linspace(0.0, 1.0, 31, dtype=np.float64)
     y = np.sin(2.0 * np.pi * x)
@@ -4007,3 +4865,5 @@ def test_solver_options_expose_opt_in_native_logging_levels():
     assert options.as_dict()["logging_level"] == "info"
     with pytest.raises(UnsupportedOptionError, match="does not expose native Rust logging"):
         options.validate_for("radau")
+    assert capabilities("bdf").supports_logging is True
+    assert capabilities("nonstiff").supports_logging is False

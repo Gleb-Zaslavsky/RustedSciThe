@@ -26,12 +26,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Every body contributes (x, vx, y, vy), so positions occupy columns 0/2,
+    # 4/6 and 8/10. Keeping this order explicit makes the displayed body index
+    # easy to map back to the numerical state vector.
     names = [
         "x0", "vx0", "y0", "vy0",
         "x1", "vx1", "y1", "vy1",
         "x2", "vx2", "y2", "vy2",
     ]
     v = {name: Expr.variable(name) for name in names}
+    # Reuse pairwise distances in six accelerations via recursive substitution;
+    # this keeps the force laws readable and avoids six handwritten expansions.
     aliases = {
         "R01": Expr.parse("((x0-x1)^2 + (y0-y1)^2)^0.5"),
         "R02": Expr.parse("((x0-x2)^2 + (y0-y2)^2)^0.5"),
@@ -62,6 +67,8 @@ def main() -> None:
     ])
     solution = solve_ivp(
         "lsode2", rhs, names, "t", initial, 0.0, 0.02, 0.001,
+        # The integration interval is deliberately short: this example teaches
+        # trajectory plumbing, not long-time orbital stability.
         controller="bdf",
         options=SolverOptions(
             frontend="atom_native", execution="lambdify",
@@ -73,6 +80,8 @@ def main() -> None:
     times = solution.times_array()
     states = solution.states_array()
     assert np.isfinite(times).all() and np.isfinite(states).all()
+    # `--body` is a zero-based index; positions are the 1st and 3rd entries of
+    # each body's four-component state block.
     x_column, y_column = 4 * args.body, 4 * args.body + 2
     print("samples:", len(times))
     print(f"body {args.body} final XY:", states[-1, [x_column, y_column]])

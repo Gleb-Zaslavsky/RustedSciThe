@@ -12,15 +12,15 @@ use nalgebra::DVector;
 use pyo3::prelude::*;
 
 use rustedscithe_core::numerical::BE::{
-    BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode, BE,
+    BE, BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode,
 };
 use rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError;
 
 use crate::aot::{generated_config, map_backend_error, provenance_fields};
 use crate::contract::SolverOptions;
 use crate::errors::{
-    catch_panic, ExhaustionError, InvalidConfigurationError, SolverError, SolverPanicState,
-    UnsupportedOptionError,
+    ExhaustionError, InvalidConfigurationError, SolverError, SolverPanicState,
+    UnsupportedOptionError, catch_panic,
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
@@ -72,6 +72,7 @@ fn validate_route(
     options: &SolverOptions,
 ) -> PyResult<(BeSymbolicAssemblyBackend, BeTelemetryMode)> {
     options.validate_aot_options()?;
+    crate::contract::validate_backend_options_for(options, "backward_euler")?;
     let frontend = match options.frontend() {
         "expr_legacy" => BeSymbolicAssemblyBackend::ExprLegacy,
         "atom_native" => BeSymbolicAssemblyBackend::AtomViewNative,
@@ -154,6 +155,9 @@ pub struct BackwardEulerSolution {
     counters: std::collections::HashMap<String, u64>,
     timings_ms: std::collections::HashMap<String, f64>,
     aot_artifact_keys: Vec<String>,
+    aot_metadata: std::collections::HashMap<String, String>,
+    aot_counters: std::collections::HashMap<String, u64>,
+    aot_timings_ms: std::collections::HashMap<String, f64>,
 }
 
 impl BackwardEulerSolution {
@@ -167,10 +171,9 @@ impl BackwardEulerSolution {
             BeTelemetryMode::Timings => "timings",
             BeTelemetryMode::Detailed => "detailed",
         };
-        let aot_artifact_keys = solver
-            .symbolic_ivp_telemetry_snapshot()
-            .map(|telemetry| telemetry.aot_artifact_keys.clone())
-            .unwrap_or_default();
+        let aot_snapshot = solver.symbolic_ivp_telemetry_snapshot();
+        let (aot_metadata, aot_artifact_keys, aot_counters, aot_timings_ms) =
+            crate::bvp::aot_telemetry_maps(aot_snapshot.as_ref());
         let mut counters = std::collections::HashMap::from([
             ("accepted_steps".to_owned(), detailed.accepted_steps as u64),
             ("failed_steps".to_owned(), detailed.failed_steps as u64),
@@ -189,7 +192,7 @@ impl BackwardEulerSolution {
                 detailed.parameter_bind_attempts as u64,
             ),
         ]);
-        if let Some(telemetry) = solver.symbolic_ivp_telemetry_snapshot() {
+        if let Some(telemetry) = aot_snapshot.as_ref() {
             for (key, value) in [
                 ("aot_resolution_hits", telemetry.aot_resolution_hits),
                 ("aot_resolution_misses", telemetry.aot_resolution_misses),
@@ -202,9 +205,6 @@ impl BackwardEulerSolution {
             ] {
                 counters.insert(key.to_owned(), value);
             }
-        }
-        if telemetry_mode == "timings" {
-            counters.clear();
         }
         let mut timings_ms = std::collections::HashMap::from([
             (
@@ -235,6 +235,9 @@ impl BackwardEulerSolution {
             counters,
             timings_ms,
             aot_artifact_keys,
+            aot_metadata,
+            aot_counters,
+            aot_timings_ms,
         }
     }
 }
@@ -286,6 +289,21 @@ impl BackwardEulerSolution {
     /// Artifact identities observed by the native AOT lifecycle.
     pub fn aot_artifact_keys(&self) -> Vec<String> {
         self.aot_artifact_keys.clone()
+    }
+
+    /// Return the selected execution route and native snapshot metadata.
+    pub fn telemetry_aot_metadata(&self) -> std::collections::HashMap<String, String> {
+        self.aot_metadata.clone()
+    }
+
+    /// Return generated-backend lifecycle counters collected in the selected mode.
+    pub fn telemetry_aot_counters(&self) -> std::collections::HashMap<String, u64> {
+        self.aot_counters.clone()
+    }
+
+    /// Return cold/warm preparation and generated-route stage timings in milliseconds.
+    pub fn telemetry_aot_timings_ms(&self) -> std::collections::HashMap<String, f64> {
+        self.aot_timings_ms.clone()
     }
 
     /// Return the common solver-independent result snapshot. Detailed BE

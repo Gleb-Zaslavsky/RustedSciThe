@@ -24,6 +24,9 @@ from .facade import (
 from .facade import task_dict as task_dict
 from .dependencies import check_dependencies as check_dependencies
 from ._native import fit_quality as fit_quality
+from ._native import lowess_fit as lowess_fit
+from ._native import BSplineInterpolator as BSplineInterpolator
+from ._native import LowessResult as LowessResult
 from ._native import LeastSquaresBSpline as LeastSquaresBSpline
 from ._native import least_squares_bspline as least_squares_bspline
 from ._native import lowess_smooth as lowess_smooth
@@ -54,7 +57,8 @@ __all__ = [
     "render_table", "run_task_batch", "run_task_batch_report", "solve_bvp",
     "solve_ivp", "solve_nonlinear", "task", "task_dict", "check_dependencies",
     "superlu_feature_enabled", "write_table",
-    "fit_quality", "lowess_smooth", "savgol_filter", "spline_resample",
+    "fit_quality", "lowess_fit", "lowess_smooth", "savgol_filter", "spline_resample",
+    "BSplineInterpolator", "LowessResult",
     "LeastSquaresBSpline", "least_squares_bspline",
 ]
 

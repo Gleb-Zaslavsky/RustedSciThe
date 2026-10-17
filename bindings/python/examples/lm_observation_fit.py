@@ -16,6 +16,8 @@ y_data = [1.2, 2.1, 3.0, 3.9, 4.8, 5.7]  # exact line: y = 1.8*x + 1.2
 parameter_names: list[str] = []
 equations: list[Expr] = []
 parameter_values: list[float] = []
+# FittingSolver consumes a symbolic residual vector. Each observation becomes
+# one residual, while its x/y sample values stay numeric and are rebound below.
 for index, (x_value, y_value) in enumerate(zip(x_data, y_data)):
     x_name = f"x_{index}"
     y_name = f"y_{index}"
@@ -28,6 +30,8 @@ fit = FittingSolver(
     initial_guess=[0.0, 0.0],
     variables=["a", "b"],
     parameters=parameter_names,
+    # ExprLegacy is selected to show the conservative default-like symbolic
+    # route; the same residual model can be prepared with AtomNative instead.
     frontend="expr_legacy",
     execution_policy="sequential",
     telemetry="detailed",

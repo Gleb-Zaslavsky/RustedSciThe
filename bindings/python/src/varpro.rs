@@ -83,13 +83,13 @@ pub struct VarProSolution {
     objective_function: f64,
     function_evaluations: usize,
     statistics: rustedscithe_core::numerical::Nonlinear_systems::engine::SolveStatistics,
-    telemetry_enabled: bool,
+    telemetry_mode: LeastSquaresTelemetryMode,
 }
 
 impl VarProSolution {
     fn from_native(
         result: rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProFit,
-        telemetry_enabled: bool,
+        telemetry_mode: LeastSquaresTelemetryMode,
     ) -> Self {
         let best_fit = result
             .best_fit()
@@ -104,7 +104,7 @@ impl VarProSolution {
             objective_function: result.minimization_report.objective_function,
             function_evaluations: result.minimization_report.number_of_evaluations,
             statistics: result.minimization_report.statistics,
-            telemetry_enabled,
+            telemetry_mode,
         }
     }
 }
@@ -144,9 +144,14 @@ impl VarProSolution {
     pub fn function_evaluations(&self) -> usize {
         self.function_evaluations
     }
+    #[getter]
+    /// Native telemetry mode selected for this fit.
+    pub fn telemetry_mode(&self) -> &'static str {
+        crate::nonlinear::least_squares_telemetry_mode_name(self.telemetry_mode)
+    }
     /// Return native counters when telemetry was enabled, otherwise an empty map.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
-        if self.telemetry_enabled {
+        if self.telemetry_mode != LeastSquaresTelemetryMode::Off {
             crate::nonlinear::statistics_counters(&self.statistics)
         } else {
             HashMap::new()
@@ -154,11 +159,19 @@ impl VarProSolution {
     }
     /// Return native timing stages when detailed telemetry was enabled.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
-        if self.telemetry_enabled && self.statistics.timings_collected {
+        if self.statistics.timings_collected {
             crate::nonlinear::statistics_timings(&self.statistics)
         } else {
             HashMap::new()
         }
+    }
+    /// Per-iteration counters retained by the shared nonlinear engine.
+    pub fn telemetry_attempt_counters(&self) -> Vec<HashMap<String, u64>> {
+        crate::nonlinear::statistics_attempt_counters(&self.statistics)
+    }
+    /// Per-iteration timings, nested in the aggregate solve stages.
+    pub fn telemetry_attempt_timings_ms(&self) -> Vec<HashMap<String, f64>> {
+        crate::nonlinear::statistics_attempt_timings_ms(&self.statistics)
     }
     /// Return a compact string-valued summary of fit status and quality.
     pub fn diagnostics(&self) -> HashMap<String, String> {
@@ -358,7 +371,8 @@ impl VarProSolver {
         self.telemetry_mode = match mode.trim().to_ascii_lowercase().as_str() {
             "off" | "none" => LeastSquaresTelemetryMode::Off,
             "counters" => LeastSquaresTelemetryMode::Counters,
-            "detailed" | "timings" => LeastSquaresTelemetryMode::Detailed,
+            "timings" => LeastSquaresTelemetryMode::Timings,
+            "detailed" => LeastSquaresTelemetryMode::Detailed,
             other => {
                 return Err(InvalidConfigurationError::new_err(format!(
                     "unsupported VarPro telemetry '{other}'"
@@ -382,7 +396,7 @@ impl VarProSolver {
                 .map(|result| {
                     VarProSolution::from_native(
                         result,
-                        self.telemetry_mode != LeastSquaresTelemetryMode::Off,
+                        self.telemetry_mode,
                     )
                 })
                 .map_err(map_error)

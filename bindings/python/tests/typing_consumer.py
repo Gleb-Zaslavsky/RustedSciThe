@@ -3,7 +3,16 @@
 from numpy import float64
 from numpy.typing import NDArray
 
-from rustedscithe import Expr, RadauSolution, SolverOptions, create_ivp
+from rustedscithe import (
+    BvpDampSolver,
+    BvpSciSolver,
+    Expr,
+    Lsode2Solver,
+    RadauSolution,
+    SolverOptions,
+    create_bvp,
+    create_ivp,
+)
 
 
 def configured_radau_solve() -> tuple[RadauSolution, NDArray[float64]]:
@@ -33,3 +42,29 @@ def configured_radau_solve() -> tuple[RadauSolution, NDArray[float64]]:
     timing_scopes: dict[str, float] = solution.telemetry_timings_ms()
     assert timing_scopes is not None
     return solution, state_array
+
+
+def configured_lsoda_solver() -> Lsode2Solver:
+    """Check that the LSODA alias retains the concrete LSODE2 solver type."""
+    state = Expr.variable("y")
+    return create_ivp("lsoda", [-state], ["y"], "t", [1.0], 0.0, 1.0, 0.1)
+
+
+def configured_lsode2_solver() -> Lsode2Solver:
+    """Keep the canonical LSODE2 method literal narrowed in client code."""
+    state = Expr.variable("y")
+    return create_ivp("lsode2", [-state], ["y"], "t", [1.0], 0.0, 1.0, 0.1)
+
+
+def configured_bvp_routes() -> tuple[BvpSciSolver, BvpDampSolver]:
+    """Keep both native boundary-data schemas visible to static tooling."""
+    mesh = [0.0, 0.5, 1.0]
+    initial = [0.0, 0.0, 0.0]
+    expression = Expr.constant(0.0)
+    scipy_like = create_bvp(
+        "bvp_sci", [expression], ["y"], [Expr.parse("ya_y - 1")], mesh, initial
+    )
+    damped = create_bvp(
+        "bvp_damp", [expression], ["y"], {"y": [(0, 1.0)]}, mesh, initial
+    )
+    return scipy_like, damped

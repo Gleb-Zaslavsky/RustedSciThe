@@ -1,4 +1,11 @@
-"""Symbolic vector/matrix operations with owned NumPy evaluation results."""
+"""Build and evaluate symbolic vectors and matrices from Python.
+
+The example covers the crate's small symbolic array API: vector/matrix
+construction, arithmetic, row-major numeric evaluation, transpose and
+determinant. The evaluation point follows the expression's ordered free-symbol
+list, and returned NumPy arrays own their data rather than borrowing a Rust
+workspace. Dimension mismatches raise a typed configuration exception.
+"""
 
 import numpy as np
 
@@ -18,6 +25,14 @@ def main() -> None:
     product_value = matrix.matvec(vector).evaluate(point)
     matrix_product = matrix.matmul(right).evaluate(point)
     entrywise_product = matrix.hadamard(right).evaluate(point)
+    # Hand-computable values verify row-major evaluation and each operation
+    # independently of the display formatting below.
+    np.testing.assert_array_equal(vector_value, [5.0, 6.0])
+    np.testing.assert_array_equal(matrix_value, [[2.0, 3.0], [6.0, 4.0]])
+    np.testing.assert_array_equal(product_value, [28.0, 54.0])
+    np.testing.assert_array_equal(matrix_product, [[8.0, 12.0], [14.0, 26.0]])
+    np.testing.assert_array_equal(entrywise_product, [[2.0, 9.0], [12.0, 8.0]])
+    assert matrix.determinant().evaluate(point) == -10.0
     print("vector:", vector_value)
     print("matrix, row-major:", matrix_value)
     print("matrix-vector product:", product_value)
@@ -36,6 +51,8 @@ def main() -> None:
         matrix.matvec(ExprVector([x]))
     except InvalidConfigurationError as error:
         print("invalid dimensions:", error)
+    else:
+        raise AssertionError("matrix-vector shape mismatch was not rejected")
 
 
 if __name__ == "__main__":

@@ -86,13 +86,40 @@ frontend/execution и sparse-факторизации. Неверная форм
 данные, неподдержанный маршрут и численные ошибки представлены typed
 исключениями.
 
-Для численных boundary residual/Jacobian callbacks есть отдельный более узкий
-маршрут; смотрите `capabilities` и документацию конструктора. Если уравнения
-заданы как `Expr`, обычно выбирают полный символьный wrapper.
+Для численных boundary residual/Jacobian callbacks есть отдельный маршрут.
+Также доступен полноценный численный RHS-маршрут:
+`frontend="numerical"`, `execution="numerical"` и `rhs_callback(x, y, p)`.
+Передайте `expressions=[]`; callback возвращает производную для каждого
+состояния. Необязательные `rhs_jacobian_callback` (`df/dy`) и
+`rhs_parameter_jacobian_callback` (`df/dp`) возвращают плотные матрицы;
+отсутствующая производная вычисляется конечными разностями в Rust. Граничные
+условия по-прежнему можно задать символьными `Expr` или отдельными callbacks.
+Этот маршрут пока поддерживает только Dense и не поддерживает AOT. Python
+callbacks выполняются под GIL; коллокационный алгоритм и линейное решение
+остаются в Rust. Если RHS уже задан через `Expr`, предпочтителен символьный
+маршрут: он позволяет использовать точные производные и другие layout.
+
+```python
+from rustedscithe import BvpSciSolver, Expr, SolverOptions
+
+solver = BvpSciSolver(
+    [], ["y"], [Expr.parse("ya_y - 1")],
+    [0.0, 0.5, 1.0], [1.0, 0.6, 0.37],
+    options=SolverOptions(
+        frontend="numerical", execution="numerical",
+        matrix_layout="dense", telemetry="detailed",
+    ),
+    rhs_callback=lambda _x, y, _p: [-y[0]],
+    rhs_jacobian_callback=lambda _x, _y, _p: [[-1.0]],
+    output="dense",
+)
+print(solver.solve().sample(1.0))
+```
 
 `examples/bvp_sci_sparse.py` показывает базовый маршрут,
 `examples/bvp_sci_frontend_layouts.py` — matched-матрицу точной линейной BVP.
 `examples/bvp_sci_aot.py` сравнивает Lambdify и AOT на одной Sparse/AtomNative
 задаче; для компиляции требуется `tcc` или `gcc` в `PATH`.
+`examples/bvp_sci_numerical_callbacks.py` показывает Dense-маршрут с callback-Якобианом.
 Численные parity/performance claims относятся к тестовым отчётам основного
 crate, а не к выводу демонстрационных скриптов.

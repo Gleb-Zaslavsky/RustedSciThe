@@ -18,6 +18,8 @@ line_data = [1.7 * x_value for x_value in x_data]
 
 
 def fit_line(method: str) -> None:
+    # UniversalFitting is configured in steps because it selects a method
+    # before the shared data/equation contract is assembled by build().
     fit = UniversalFitting(method)
     fit.with_data(x_data, line_data)
     fit.with_arg("x")
@@ -38,7 +40,8 @@ def fit_line(method: str) -> None:
 fit_line("lm")
 fit_line("gavin")
 
-# VarPro has a deliberately narrower contract: ExprLegacy + sequential only.
+# VarPro solves the linear coefficients internally for each nonlinear shape
+# parameter. It deliberately has a narrower contract: ExprLegacy + sequential.
 decay_x = [index * 0.2 for index in range(30)]
 decay_y = [2.5 * math.exp(-value / 1.7) + 0.8 for value in decay_x]
 varpro = UniversalFitting("varpro")

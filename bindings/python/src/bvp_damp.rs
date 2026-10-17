@@ -12,18 +12,20 @@ use pyo3::prelude::*;
 
 use rustedscithe_core::numerical::BVP_Damp::BvpLambdifyTelemetryMode;
 use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_damped::{
-    AdaptiveGridConfig, DampedBvpStatistics, DampedSolverOptions, NRBVP, SolverParams,
+    AdaptiveGridConfig, DampedSolverOptions, NRBVP, SolverParams,
 };
 use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_frozen::{
-    FrozenBvpStatistics, FrozenSolverOptions, NRBVP as FrozenNRBVP,
+    FrozenSolverOptions, NRBVP as FrozenNRBVP,
 };
 use rustedscithe_core::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
 };
 use rustedscithe_core::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use rustedscithe_core::numerical::BVP_Damp::telemetry::{
-    BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode,
+    BvpCallbackStage, BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode,
+    BvpTelemetrySnapshot,
 };
+use rustedscithe_core::symbolic::bvp::telemetry::BvpLambdifyTelemetrySnapshot;
 use rustedscithe_core::somelinalg::banded::{
     FallbackPolicy, LinearSolverConfig, LinearSolverPolicy,
 };
@@ -479,64 +481,249 @@ fn detached_values(matrix: &DMatrix<f64>) -> Vec<Vec<f64>> {
         .collect()
 }
 
-fn snapshot_maps(stats: &DampedBvpStatistics) -> (HashMap<String, u64>, HashMap<String, f64>) {
+fn snapshot_maps(
+    telemetry: &BvpTelemetrySnapshot,
+    legacy_counters: Option<&HashMap<String, usize>>,
+) -> (HashMap<String, u64>, HashMap<String, f64>) {
+    let native = &telemetry.counters;
     let mut counters: HashMap<String, u64> = [
-        ("iterations", stats.telemetry.counters.iterations),
-        ("residual_calls", stats.telemetry.counters.residual_calls),
-        (
-            "jacobian_requests",
-            stats.telemetry.counters.jacobian_requests,
-        ),
-        (
-            "jacobian_recalculations",
-            stats.telemetry.counters.jacobian_recalculations,
-        ),
-        ("damping_trials", stats.telemetry.counters.damping_trials),
-        (
-            "damping_rejections",
-            stats.telemetry.counters.damping_rejections,
-        ),
-        ("linear_solves", stats.telemetry.counters.linear_solves),
-        ("factorizations", stats.telemetry.counters.factorizations),
-        (
-            "factorization_cache_hits",
-            stats.telemetry.counters.factorization_cache_hits,
-        ),
-        ("rhs_solves", stats.telemetry.counters.rhs_solves),
-        (
-            "grid_refinements",
-            stats.telemetry.counters.grid_refinements,
-        ),
+        ("iterations", native.iterations),
+        ("scalar_evaluations", native.scalar_evaluations),
+        ("residual_calls", native.residual_calls),
+        ("residual_requests", native.residual_requests),
+        ("jacobian_requests", native.jacobian_requests),
+        ("jacobian_recalculations", native.jacobian_recalculations),
+        ("residual_chunks", native.residual_chunks),
+        ("jacobian_chunks", native.jacobian_chunks),
+        ("conversions", native.conversions),
+        ("copies", native.copies),
+        ("damping_trials", native.damping_trials),
+        ("damping_rejections", native.damping_rejections),
+        ("linear_solves", native.linear_solves),
+        ("factorizations", native.factorizations),
+        ("factorization_cache_hits", native.factorization_cache_hits),
+        ("factorization_invalidations", native.factorization_invalidations),
+        ("rhs_solves", native.rhs_solves),
+        ("grid_refinements", native.grid_refinements),
     ]
     .into_iter()
     .map(|(name, value)| (name.to_owned(), value))
     .collect();
+    if let Some(legacy) = legacy_counters {
+        for (name, value) in legacy {
+            let stable_name = match name.as_str() {
+                "number of grid points" => "grid_points",
+                "length of y vector" => "state_vector_length",
+                "number of jacobian elements" => "jacobian_elements",
+                _ => continue,
+            };
+            counters.insert(stable_name.to_owned(), *value as u64);
+        }
+    }
     let mut timings: HashMap<String, f64> = [
-        ("total_ms", stats.telemetry.timings.total),
-        ("residual_ms", stats.telemetry.timings.residual),
-        ("jacobian_ms", stats.telemetry.timings.jacobian),
-        ("linear_system_ms", stats.telemetry.timings.linear_system),
-        ("factorization_ms", stats.telemetry.timings.factorization),
-        ("rhs_solve_ms", stats.telemetry.timings.rhs_solve),
+        ("total_ms", telemetry.timings.total),
+        ("residual_ms", telemetry.timings.residual),
+        ("jacobian_ms", telemetry.timings.jacobian),
+        ("linear_system_ms", telemetry.timings.linear_system),
+        ("factorization_ms", telemetry.timings.factorization),
+        ("rhs_solve_ms", telemetry.timings.rhs_solve),
         (
             "symbolic_operations_ms",
-            stats.telemetry.timings.symbolic_operations,
+            telemetry.timings.symbolic_operations,
         ),
         (
             "grid_refinement_ms",
-            stats.telemetry.timings.grid_refinement,
+            telemetry.timings.grid_refinement,
         ),
     ]
     .into_iter()
     .map(|(name, duration)| (name.to_owned(), duration.as_secs_f64() * 1000.0))
     .collect();
-    if !stats.telemetry.telemetry_mode.collects_counters() {
+    if !telemetry.telemetry_mode.collects_counters() {
         counters.clear();
     }
-    if !stats.telemetry.telemetry_mode.collects_timings() {
+    if !telemetry.telemetry_mode.collects_timings() {
         timings.clear();
     }
     (counters, timings)
+}
+
+fn snapshot_detail_maps(
+    telemetry: &BvpTelemetrySnapshot,
+) -> (
+    HashMap<String, f64>,
+    HashMap<String, u64>,
+    HashMap<String, u64>,
+) {
+    let timings_enabled = telemetry.telemetry_mode.collects_timings();
+    let counters_enabled = telemetry.telemetry_mode.collects_counters();
+    let mut scope_timings_ms = HashMap::new();
+    let mut scope_events = HashMap::new();
+    let scopes = [
+        ("solve", &telemetry.scopes.solve),
+        ("mesh_revision", &telemetry.scopes.mesh_revision),
+        ("iteration", &telemetry.scopes.iteration),
+        ("damping_trial", &telemetry.scopes.damping_trial),
+    ];
+    if timings_enabled {
+        for (name, scope) in scopes {
+            scope_timings_ms.insert(
+                format!("{name}_ms"),
+                scope.elapsed.as_secs_f64() * 1000.0,
+            );
+        }
+        for stage in &telemetry.timings.callback_stage_timings {
+            let name = match stage.stage {
+                BvpCallbackStage::ResidualInputPrep => "residual_input_prep",
+                BvpCallbackStage::ResidualArgs => "residual_args",
+                BvpCallbackStage::ResidualValues => "residual_values",
+                BvpCallbackStage::ResidualBoxing => "residual_boxing",
+                BvpCallbackStage::JacobianInputPrep => "jacobian_input_prep",
+                BvpCallbackStage::JacobianArgs => "jacobian_args",
+                BvpCallbackStage::JacobianValues => "jacobian_values",
+                BvpCallbackStage::JacobianAssembly => "jacobian_assembly",
+                BvpCallbackStage::Other => "other",
+            };
+            scope_timings_ms.insert(
+                format!("callback_{name}_ms"),
+                stage.elapsed.as_secs_f64() * 1000.0,
+            );
+        }
+    }
+    if counters_enabled {
+        for (name, scope) in [
+            ("mesh_revision", &telemetry.scopes.mesh_revision),
+            ("iteration", &telemetry.scopes.iteration),
+            ("damping_trial", &telemetry.scopes.damping_trial),
+        ] {
+            scope_events.insert(format!("{name}_events"), scope.events);
+        }
+    }
+
+    let mut storage_bytes = HashMap::new();
+    if telemetry.telemetry_mode != BvpTelemetryMode::Off {
+        for (name, value) in [
+            ("jacobian_values", telemetry.storage.jacobian_values),
+            ("jacobian_indices", telemetry.storage.jacobian_indices),
+            ("factor", telemetry.storage.factor),
+            ("scratch", telemetry.storage.scratch),
+        ] {
+            if let Some(value) = value {
+                storage_bytes.insert(name.to_owned(), value);
+            }
+        }
+    }
+    (scope_timings_ms, scope_events, storage_bytes)
+}
+
+fn snapshot_callback_maps(
+    telemetry: &BvpTelemetrySnapshot,
+) -> (HashMap<String, u64>, HashMap<String, f64>) {
+    let mut counters = HashMap::new();
+    let mut timings_ms = HashMap::new();
+    let mut add_lambdify = |route: &str, snapshot: Option<BvpLambdifyTelemetrySnapshot>| {
+        let Some(snapshot) = snapshot else { return };
+        if matches!(
+            snapshot.mode,
+            BvpLambdifyTelemetryMode::Counters | BvpLambdifyTelemetryMode::Detailed
+        ) {
+            counters.insert(format!("{route}_residual_calls"), snapshot.residual_calls);
+            counters.insert(format!("{route}_jacobian_calls"), snapshot.jacobian_calls);
+            counters.insert(
+                format!("{route}_parallel_dispatches"),
+                snapshot.parallel_dispatches,
+            );
+            counters.insert(
+                format!("{route}_sequential_dispatches"),
+                snapshot.sequential_dispatches,
+            );
+        }
+        if matches!(
+            snapshot.mode,
+            BvpLambdifyTelemetryMode::Timings | BvpLambdifyTelemetryMode::Detailed
+        ) {
+            timings_ms.insert(
+                format!("{route}_residual_ms"),
+                snapshot.residual_elapsed.as_secs_f64() * 1000.0,
+            );
+            timings_ms.insert(
+                format!("{route}_jacobian_ms"),
+                snapshot.jacobian_elapsed.as_secs_f64() * 1000.0,
+            );
+        }
+    };
+    add_lambdify("expr_legacy", telemetry.legacy_lambdify);
+    add_lambdify("atom_view", telemetry.atom_lambdify);
+
+    if let Some(snapshot) = telemetry.direct_banded_jacobian {
+        if telemetry.telemetry_mode.collects_counters() {
+            counters.extend([
+            ("direct_banded_calls".to_owned(), snapshot.calls),
+            ("direct_banded_work_items".to_owned(), snapshot.work_items),
+            ("direct_banded_errors".to_owned(), snapshot.errors),
+            ("direct_banded_evaluator_calls".to_owned(), snapshot.evaluator_calls),
+            ("direct_banded_storage_writes".to_owned(), snapshot.storage_writes),
+            ("direct_banded_parallel_dispatches".to_owned(), snapshot.parallel_dispatches),
+            ("direct_banded_sequential_dispatches".to_owned(), snapshot.sequential_dispatches),
+            ("direct_banded_diagonal_dispatches".to_owned(), snapshot.diagonal_dispatches),
+            ("direct_banded_entry_dispatches".to_owned(), snapshot.entry_dispatches),
+            ("direct_banded_effective_task_count".to_owned(), snapshot.effective_task_count),
+            ("prepared_atom_evaluators".to_owned(), snapshot.prepared_atom_evaluators),
+            ("prepared_atom_nodes".to_owned(), snapshot.prepared_atom_nodes),
+            ("prepared_atom_add_nodes".to_owned(), snapshot.prepared_atom_add_nodes),
+            ("prepared_atom_mul_nodes".to_owned(), snapshot.prepared_atom_mul_nodes),
+            ("prepared_atom_powi_nodes".to_owned(), snapshot.prepared_atom_powi_nodes),
+            ("prepared_atom_pow_nodes".to_owned(), snapshot.prepared_atom_pow_nodes),
+            ("prepared_atom_builtin_nodes".to_owned(), snapshot.prepared_atom_builtin_nodes),
+            ("prepared_atom_custom_nodes".to_owned(), snapshot.prepared_atom_custom_nodes),
+            ]);
+        }
+        if telemetry.telemetry_mode.collects_timings() {
+            timings_ms.extend([
+            ("direct_banded_elapsed_ms".to_owned(), snapshot.elapsed.as_secs_f64() * 1000.0),
+            ("direct_banded_argument_prepare_ms".to_owned(), snapshot.argument_prepare_elapsed.as_secs_f64() * 1000.0),
+            ("direct_banded_evaluator_ms".to_owned(), snapshot.evaluator_elapsed.as_secs_f64() * 1000.0),
+            ("direct_banded_storage_write_ms".to_owned(), snapshot.storage_write_elapsed.as_secs_f64() * 1000.0),
+            ("direct_banded_assembly_alloc_ms".to_owned(), snapshot.assembly_alloc_elapsed.as_secs_f64() * 1000.0),
+            ]);
+        }
+    }
+    (counters, timings_ms)
+}
+
+fn snapshot_preparation_timings(telemetry: &BvpTelemetrySnapshot) -> HashMap<String, f64> {
+    let mut timings = HashMap::new();
+    if !telemetry.telemetry_mode.collects_timings() {
+        return timings;
+    }
+    if let Some(snapshot) = telemetry.generation {
+        for (name, duration) in [
+            ("generation_total_ms", snapshot.total),
+            ("generation_discretization_ms", snapshot.discretization),
+            ("generation_symbolic_jacobian_ms", snapshot.symbolic_jacobian),
+            ("generation_find_bandwidth_ms", snapshot.find_bandwidth),
+            ("generation_backend_selection_ms", snapshot.backend_selection),
+            ("generation_runtime_binding_ms", snapshot.runtime_binding),
+            ("generation_lambdify_jacobian_compile_ms", snapshot.lambdify_jacobian_compile),
+            ("generation_lambdify_residual_compile_ms", snapshot.lambdify_residual_compile),
+        ] {
+            timings.insert(name.to_owned(), duration.as_secs_f64() * 1000.0);
+        }
+    }
+    if let Some(snapshot) = telemetry.atom_discretization {
+        for (name, duration) in [
+            ("atom_boundary_conditions_ms", snapshot.boundary_conditions),
+            ("atom_discretization_ms", snapshot.discretization),
+            ("atom_boundary_application_ms", snapshot.boundary_application),
+            ("atom_flat_list_ms", snapshot.flat_list),
+            ("atom_consistency_ms", snapshot.consistency),
+            ("atom_bounds_and_tolerances_ms", snapshot.bounds_and_tolerances),
+            ("atom_total_ms", snapshot.total),
+        ] {
+            timings.insert(name.to_owned(), duration.as_secs_f64() * 1000.0);
+        }
+    }
+    timings
 }
 
 fn telemetry_mode_name(mode: BvpTelemetryMode) -> &'static str {
@@ -566,6 +753,13 @@ pub struct BvpDampSolution {
     telemetry_mode: String,
     counters: HashMap<String, u64>,
     timings_ms: HashMap<String, f64>,
+    scope_timings_ms: HashMap<String, f64>,
+    scope_events: HashMap<String, u64>,
+    storage_bytes: HashMap<String, u64>,
+    callback_counters: HashMap<String, u64>,
+    callback_timings_ms: HashMap<String, f64>,
+    preparation_timings_ms: HashMap<String, f64>,
+    storage_estimated: Option<bool>,
 }
 
 #[pymethods]
@@ -618,6 +812,47 @@ impl BvpDampSolution {
         self.timings_ms.clone()
     }
 
+    /// Return elapsed time for native lifecycle scopes and callback sub-stages.
+    /// Empty maps mean that this telemetry mode did not collect timings.
+    pub fn telemetry_scope_timings_ms(&self) -> HashMap<String, f64> {
+        self.scope_timings_ms.clone()
+    }
+
+    /// Return event counts grouped by native lifecycle scope.
+    /// Empty maps mean that this telemetry mode did not collect counters.
+    pub fn telemetry_scope_events(&self) -> HashMap<String, u64> {
+        self.scope_events.clone()
+    }
+
+    /// Return available matrix/factor storage values in bytes.
+    /// Missing keys mean that the native backend does not expose that value.
+    pub fn telemetry_storage_bytes(&self) -> HashMap<String, u64> {
+        self.storage_bytes.clone()
+    }
+
+    /// Whether the available storage values are estimates rather than direct
+    /// allocator measurements; `None` means no storage values are available.
+    pub fn telemetry_storage_is_estimated(&self) -> Option<bool> {
+        self.storage_estimated
+    }
+
+    /// Return frontend-specific callback counts and dispatch decisions.
+    pub fn telemetry_callback_counters(&self) -> HashMap<String, u64> {
+        self.callback_counters.clone()
+    }
+
+    /// Return frontend-specific callback and direct Banded evaluator timings.
+    pub fn telemetry_callback_timings_ms(&self) -> HashMap<String, f64> {
+        self.callback_timings_ms.clone()
+    }
+
+    /// Return available AtomView and symbolic-generation preparation timings.
+    /// Empty maps indicate that this route did not publish such a snapshot or
+    /// that timing collection was disabled.
+    pub fn telemetry_preparation_timings_ms(&self) -> HashMap<String, f64> {
+        self.preparation_timings_ms.clone()
+    }
+
     /// Return a small stable result descriptor for notebooks and batch tools.
     ///
     /// Mesh and values remain available through their typed accessors; this
@@ -643,8 +878,16 @@ impl BvpDampSolution {
         counters.sort_by_key(|(name, _)| *name);
         let mut timings = self.timings_ms.iter().collect::<Vec<_>>();
         timings.sort_by_key(|(name, _)| *name);
+        let mut callbacks = self.callback_counters.iter().collect::<Vec<_>>();
+        callbacks.sort_by_key(|(name, _)| *name);
+        let mut callback_timings = self.callback_timings_ms.iter().collect::<Vec<_>>();
+        callback_timings.sort_by_key(|(name, _)| *name);
+        let mut scopes = self.scope_timings_ms.iter().collect::<Vec<_>>();
+        scopes.sort_by_key(|(name, _)| *name);
+        let mut storage = self.storage_bytes.iter().collect::<Vec<_>>();
+        storage.sort_by_key(|(name, _)| *name);
         format!(
-            "{} status={}; counters={}; timings_ms={}",
+            "{} status={}; counters={}; timings_ms={}; callback_counters={}; callback_timings_ms={}; scopes_ms={}; storage_bytes={}",
             self.solver_name,
             self.status,
             counters
@@ -655,6 +898,26 @@ impl BvpDampSolution {
             timings
                 .iter()
                 .map(|(name, value)| format!("{name}={value:.6}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            callbacks
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            callback_timings
+                .iter()
+                .map(|(name, value)| format!("{name}={value:.6}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            scopes
+                .iter()
+                .map(|(name, value)| format!("{name}={value:.6}"))
+                .collect::<Vec<_>>()
+                .join(","),
+            storage
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
                 .collect::<Vec<_>>()
                 .join(","),
         )
@@ -1178,7 +1441,12 @@ impl BvpDampSolver {
             SolverError::new_err("BVP_Damp completed without a detached solution")
         })?;
         let stats = self.solver.get_statistics();
-        let (counters, timings_ms) = snapshot_maps(&stats);
+        let (counters, timings_ms) = snapshot_maps(&stats.telemetry, None);
+        let (scope_timings_ms, scope_events, storage_bytes) =
+            snapshot_detail_maps(&stats.telemetry);
+        let (callback_counters, callback_timings_ms) = snapshot_callback_maps(&stats.telemetry);
+        let preparation_timings_ms = snapshot_preparation_timings(&stats.telemetry);
+        let storage_estimated = (!storage_bytes.is_empty()).then_some(stats.telemetry.storage.estimated);
         Ok(BvpDampSolution {
             solver_name: "bvp_damp".to_owned(),
             mesh: self.solver.x_mesh.iter().copied().collect(),
@@ -1188,6 +1456,13 @@ impl BvpDampSolver {
             telemetry_mode: telemetry_mode_name(stats.telemetry.telemetry_mode).to_owned(),
             counters,
             timings_ms,
+            scope_timings_ms,
+            scope_events,
+            storage_bytes,
+            callback_counters,
+            callback_timings_ms,
+            preparation_timings_ms,
+            storage_estimated,
         })
     }
 }
@@ -1527,7 +1802,12 @@ impl BvpDampNaiveSolver {
             SolverError::new_err("BVP_Damp Naive completed without a result matrix")
         })?;
         let stats = self.solver.get_statistics();
-        let (counters, timings_ms) = snapshot_frozen_maps(&stats);
+        let (counters, timings_ms) = snapshot_maps(&stats.telemetry, Some(&stats.counters));
+        let (scope_timings_ms, scope_events, storage_bytes) =
+            snapshot_detail_maps(&stats.telemetry);
+        let (callback_counters, callback_timings_ms) = snapshot_callback_maps(&stats.telemetry);
+        let preparation_timings_ms = snapshot_preparation_timings(&stats.telemetry);
+        let storage_estimated = (!storage_bytes.is_empty()).then_some(stats.telemetry.storage.estimated);
         // Frozen's compatibility postprocessor returns node-major storage;
         // preserve the stable Python solution convention `(state, node)`.
         let values = (0..matrix.ncols())
@@ -1546,6 +1826,13 @@ impl BvpDampNaiveSolver {
             telemetry_mode: telemetry_mode_name(stats.telemetry.telemetry_mode).to_owned(),
             counters,
             timings_ms,
+            scope_timings_ms,
+            scope_events,
+            storage_bytes,
+            callback_counters,
+            callback_timings_ms,
+            preparation_timings_ms,
+            storage_estimated,
         })
     }
 }
@@ -1786,59 +2073,6 @@ fn frozen_policy_parameters(
         }
     };
     Ok(HashMap::from([(policy.to_owned(), values)]))
-}
-
-fn snapshot_frozen_maps(
-    stats: &FrozenBvpStatistics,
-) -> (HashMap<String, u64>, HashMap<String, f64>) {
-    let mut counters: HashMap<String, u64> = stats
-        .counters
-        .iter()
-        .map(|(name, value)| {
-            let stable_name = match name.as_str() {
-                "number of iterations" => "iterations",
-                "number of residual calls" => "residual_calls",
-                "number of jacobians recalculations" => "jacobian_recalculations",
-                "number of solving linear systems" => "linear_solves",
-                "number of factorizations" => "factorizations",
-                "number of factorization cache hits" => "factorization_cache_hits",
-                "number of factorization invalidations" => "factorization_invalidations",
-                "number of RHS solves" => "rhs_solves",
-                "number of grid refinements" => "grid_refinements",
-                "number of grid points" => "grid_points",
-                "length of y vector" => "state_vector_length",
-                "number of jacobian elements" => "jacobian_elements",
-                other => other,
-            };
-            (stable_name.to_owned(), *value as u64)
-        })
-        .collect();
-    let mut timings: HashMap<String, f64> = [
-        ("total_ms", stats.telemetry.timings.total),
-        ("residual_ms", stats.telemetry.timings.residual),
-        ("jacobian_ms", stats.telemetry.timings.jacobian),
-        ("linear_system_ms", stats.telemetry.timings.linear_system),
-        ("factorization_ms", stats.telemetry.timings.factorization),
-        ("rhs_solve_ms", stats.telemetry.timings.rhs_solve),
-        (
-            "symbolic_operations_ms",
-            stats.telemetry.timings.symbolic_operations,
-        ),
-        (
-            "grid_refinement_ms",
-            stats.telemetry.timings.grid_refinement,
-        ),
-    ]
-    .into_iter()
-    .map(|(name, duration)| (name.to_owned(), duration.as_secs_f64() * 1000.0))
-    .collect();
-    if !stats.telemetry.telemetry_mode.collects_counters() {
-        counters.clear();
-    }
-    if !stats.telemetry.telemetry_mode.collects_timings() {
-        timings.clear();
-    }
-    (counters, timings)
 }
 
 fn finite_boundary_conditions(conditions: &HashMap<String, Vec<(usize, f64)>>) -> PyResult<()> {
