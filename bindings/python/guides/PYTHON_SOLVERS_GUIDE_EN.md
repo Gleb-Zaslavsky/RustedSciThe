@@ -90,6 +90,17 @@ result = solver.solve()
 `"lsoda"` is accepted as an LSODE2 solver-family alias for the automatic
 Adams/BDF controller. `controller=` is only valid for the LSODE2 route.
 
+The nonstiff part of `ODE_api2` is exposed separately as
+`UniversalNonStiffSolver`; `create_ivp` and `solve_ivp` also accept `"rk45"`,
+`"dopri"` and `"ab4"`. This route is intentionally narrower than the stiff
+adapters: it supports ExprLegacy/Lambdify, Dense, sequential execution, a
+positive step size, optional named-state stop conditions and a neighborhood
+tolerance. It has no native telemetry, AOT, AtomNative, parameter continuation
+or restart contract; non-default telemetry and unsupported backend selections
+are rejected. Its fixed-step loop stops after reaching or crossing `t_end`,
+so the final time can overshoot by less than one step. Stiff methods continue
+to use their dedicated solver APIs.
+
 ## BVP
 
 `solve_bvp("bvp_sci", ...)` and `solve_bvp("bvp_damp", ...)` share only the
@@ -129,6 +140,19 @@ Detached solutions expose structured mappings and compact report-file methods.
 task parser. Batch execution continues after failures and can be rendered with
 `render_table(...)`. The runnable examples in `bindings/python/examples/`
 cover Radau, BDF continuation, BVP_sci, nonlinear/fitting and task batches.
+Use `task_dict(source_or_path)` when application code needs plain Python data:
+it serializes the already parsed native specification, including equations,
+solver options, continuation and output settings, without executing the task.
+`check_dependencies()` returns structured PATH-tool and optional SuperLU
+loadability results without printing.
+
+Native `log` output is distinct from telemetry. It is disabled by default;
+solvers exposing the Rust logger accept `options.set_logging_level("info")`
+with `error`, `warn`, `info`, or `debug`. Logs are written to a timestamped
+process-level file, not returned as solver data. Set `RST_SOLVER_LOG_DIR`
+before starting Python to choose the destination directory. Solvers without
+native logging reject an enabled common logging level instead of silently
+ignoring it.
 
 ## Per-solver guides
 
@@ -148,6 +172,8 @@ to Python. Start with the relevant route:
   layouts, SuperLU and AOT.
 - [BVP_Damp](BVP_DAMP_GUIDE_EN.md): observations, bounds, mesh refinement,
   layout and symbolic/AOT choices.
+- [ShootingBVP](SHOOTING_BVP_GUIDE_EN.md): small scalar second-order BVPs,
+  two symbolic frontends, IVP selection and solve telemetry.
 - [Nonlinear systems and fitting](NONLINEAR_FITTING_GUIDE_EN.md): root,
   least-squares and fitting APIs.
 

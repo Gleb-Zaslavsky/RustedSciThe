@@ -1,6 +1,6 @@
 use super::NR::{NR, solve_linear_system};
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
-use log::info;
+use crate::numerical::logging::solver_info as info;
 use nalgebra::{DMatrix, DVector};
 
 use std::time::Instant;

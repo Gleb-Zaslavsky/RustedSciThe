@@ -236,6 +236,7 @@ fn validate_route(
         "off" => RadauTelemetryMode::Off,
         "counters" => RadauTelemetryMode::Counters,
         "timings" => RadauTelemetryMode::Timings,
+        "detailed" => RadauTelemetryMode::Detailed,
         _ => {
             return Err(InvalidConfigurationError::new_err(
                 "unknown telemetry mode in SolverOptions",
@@ -246,7 +247,7 @@ fn validate_route(
 }
 
 fn map_radau_error(error: RadauError) -> PyErr {
-    let native_kind = format!("{:?}", error.kind());
+    let native_kind = crate::errors::native_variant(&error.kind());
     let message = error.to_string();
     annotate_native(
         match error.kind() {
@@ -323,23 +324,30 @@ pub struct RadauSolution {
 impl RadauSolution {
     fn from_native(native: CoreRadauSolution) -> Self {
         let report = native.telemetry();
+        let telemetry_mode = format!("{:?}", report.mode).to_ascii_lowercase();
+        let mut counters: HashMap<String, u64> = report
+            .counters
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), *value))
+            .collect();
+        let mut timings_ms: HashMap<String, f64> = report
+            .timings_ms
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), *value))
+            .collect();
+        if telemetry_mode == "timings" {
+            counters.clear();
+        }
+        crate::telemetry::apply_collection_mode(&telemetry_mode, &mut counters, &mut timings_ms);
         Self {
             final_time: native.t,
             final_state: native.y.clone(),
             attempts: native.attempts,
             accepted_steps: native.accepted_steps,
             rejected_steps: native.rejected_steps,
-            telemetry_mode: format!("{:?}", report.mode).to_ascii_lowercase(),
-            counters: report
-                .counters
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), *value))
-                .collect(),
-            timings_ms: report
-                .timings_ms
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), *value))
-                .collect(),
+            telemetry_mode,
+            counters,
+            timings_ms,
             aot_artifact_keys: report.aot_artifact_keys.clone(),
             native,
         }
@@ -389,12 +397,12 @@ impl RadauSolution {
         &self.telemetry_mode
     }
 
-    /// Stable counter names from the native Radau telemetry report.
+    /// Stable counter names; empty unless the selected mode collects counters.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         self.counters.clone()
     }
 
-    /// Stable timing names from the native Radau telemetry report.
+    /// Stable measured timing names; empty unless the selected mode collects timings.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         self.timings_ms.clone()
     }
@@ -606,6 +614,7 @@ impl RadauSolver {
             Some(options) => options.clone(),
             None => SolverOptions::new(None, None, None, None, None, None, None, None, None)?,
         };
+        let _ = crate::contract::native_logging_level(&options, "radau5")?;
         let (frontend, telemetry_mode, execution_policy, matrix_layout) = validate_route(&options)?;
         let output = match output.trim().to_ascii_lowercase().as_str() {
             "final" | "final_only" => RadauOutputPolicy::FinalOnly,
@@ -824,6 +833,7 @@ impl RadauSolver {
             RadauTelemetryMode::Off => "off",
             RadauTelemetryMode::Counters => "counters",
             RadauTelemetryMode::Timings => "timings",
+            RadauTelemetryMode::Detailed => "detailed",
         }
     }
 
@@ -954,6 +964,7 @@ impl RadauCallbackSolver {
             Some(options) => options.clone(),
             None => SolverOptions::new(None, None, None, None, None, None, None, None, None)?,
         };
+        let _ = crate::contract::native_logging_level(&options, "radau5")?;
         let (_, telemetry, _, matrix_layout) = validate_route(&options)?;
         if options.execution() != "lambdify" {
             return Err(UnsupportedOptionError::new_err(

@@ -166,7 +166,7 @@ fn make_symbolic_case(workload: SymbolicWorkload, route: Route) -> Result<Prepar
         workload.initial_state,
     )
     .with_symbolic_assembly_backend(route.assembly().expect("symbolic route"))
-    .with_telemetry_mode(BeTelemetryMode::Timings);
+    .with_telemetry_mode(BeTelemetryMode::Detailed);
 
     let artifact_dir = if route.is_aot() {
         let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -201,7 +201,7 @@ fn make_native_case(
             be_bench_support::make_diffusion_solver(
                 dimension,
                 true,
-                BeTelemetryMode::Timings,
+                BeTelemetryMode::Detailed,
                 0.002,
                 0.02,
             )
@@ -210,13 +210,13 @@ fn make_native_case(
             be_bench_support::make_diffusion_solver(
                 dimension,
                 false,
-                BeTelemetryMode::Timings,
+                BeTelemetryMode::Detailed,
                 0.002,
                 0.02,
             )
         }
         (WorkloadKind::CombustionLike, Route::NativeAnalytic) => {
-            be_bench_support::make_combustion_solver(BeTelemetryMode::Timings)
+            be_bench_support::make_combustion_solver(BeTelemetryMode::Detailed)
         }
         _ => return Err("native route is not defined for this workload".to_owned()),
     };
@@ -397,7 +397,8 @@ fn main() {
     .unwrap();
     writeln!(report, "- dimensions: {:?}", dimensions).unwrap();
     writeln!(report, "- continuation_targets: {continuation_count}").unwrap();
-    writeln!(report, "- telemetry: Timings").unwrap();
+    writeln!(report, "- telemetry: Detailed (counters + timings)").unwrap();
+    writeln!(report, "- solve wall times include telemetry instrumentation; treat this as a diagnostic dashboard, not an uninstrumented performance baseline.").unwrap();
     writeln!(report).unwrap();
     writeln!(report, "{table}").unwrap();
     writeln!(report).unwrap();

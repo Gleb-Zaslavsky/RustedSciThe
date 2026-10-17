@@ -541,6 +541,9 @@ mod tests {
             for route in [MatrixRoute::Sparse, MatrixRoute::Banded] {
                 let mut solver = nonlinear_exact_fixture(route, frontend, 12);
                 solver.set_lambdify_telemetry_mode(BvpLambdifyTelemetryMode::Detailed);
+                solver.set_bvp_telemetry_mode(
+                    crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Detailed,
+                );
                 solver.try_eq_generate(None, None).unwrap_or_else(|error| {
                     panic!(
                         "telemetry regeneration failed for {frontend:?}/{}: {error:?}",

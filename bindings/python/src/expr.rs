@@ -6,10 +6,46 @@ use pyo3::types::{PyBool, PyDict};
 
 use rustedscithe_core::symbolic::symbolic_engine::Expr;
 
-use crate::errors::{InvalidExpressionError, UnsupportedSymbolicOperationError, annotate};
+use crate::errors::{
+    InvalidConfigurationError, InvalidExpressionError, UnsupportedSymbolicOperationError, annotate,
+};
 use crate::lambdify::LambdifiedExpr;
+use rustedscithe_core::symbolic::symbolic_integration::QuadMethod;
 
 const MAX_TAYLOR_ORDER: usize = 32;
+const MAX_GAUSS_QUADRATURE_DEGREE: usize = 4096;
+
+fn checked_gaussian_quadrature(
+    expression: &Expr,
+    method: QuadMethod,
+    method_name: &str,
+    degree: usize,
+    lower: f64,
+    upper: f64,
+    alpha: Option<f64>,
+) -> PyResult<f64> {
+    if degree == 0 || degree > MAX_GAUSS_QUADRATURE_DEGREE {
+        return Err(InvalidConfigurationError::new_err(format!(
+            "{method_name} degree must be between 1 and {MAX_GAUSS_QUADRATURE_DEGREE}"
+        )));
+    }
+    let variables = expression.extract_variables().1;
+    if variables.len() > 1 {
+        return Err(InvalidConfigurationError::new_err(format!(
+            "one-dimensional {method_name} requires at most one free variable, found {}",
+            variables.len()
+        )));
+    }
+    let result = expression
+        .quad(method, degree, lower, upper, alpha)
+        .map_err(InvalidConfigurationError::new_err)?;
+    if !result.is_finite() {
+        return Err(InvalidExpressionError::new_err(format!(
+            "{method_name} produced a non-finite result; inspect the integrand domain and singularities"
+        )));
+    }
+    Ok(result)
+}
 
 /// Python-owned immutable handle to RustedSciThe's symbolic expression tree.
 ///
@@ -404,6 +440,91 @@ impl PyExpr {
                 });
                 error
             })
+    }
+
+    /// Numerically integrate a one-variable expression with composite Simpson's rule.
+    ///
+    /// `subdivisions` must be positive and even. The interval must be finite;
+    /// this method does not detect interior singularities or certify convergence.
+    pub fn integrate_simpson(&self, lower: f64, upper: f64, subdivisions: usize) -> PyResult<f64> {
+        if !lower.is_finite() || !upper.is_finite() {
+            return Err(InvalidConfigurationError::new_err(
+                "Simpson integration bounds must be finite",
+            ));
+        }
+        if subdivisions == 0 || subdivisions % 2 != 0 {
+            return Err(InvalidConfigurationError::new_err(
+                "Simpson subdivisions must be a positive even integer",
+            ));
+        }
+        let variables = self.inner.extract_variables().1;
+        if variables.len() > 1 {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "one-dimensional Simpson integration requires at most one free variable, found {}",
+                variables.len()
+            )));
+        }
+
+        let result = self.inner.numerical_integrate(lower, upper, subdivisions);
+        if !result.is_finite() {
+            return Err(InvalidExpressionError::new_err(
+                "Simpson integration produced a non-finite result; inspect the integrand domain and singularities",
+            ));
+        }
+        Ok(result)
+    }
+
+    /// Numerically integrate an unweighted one-variable expression by Gauss-Legendre quadrature.
+    ///
+    /// The interval must be finite and `degree` must be positive. This method
+    /// does not detect interior singularities or certify convergence.
+    pub fn integrate_gauss_legendre(&self, lower: f64, upper: f64, degree: usize) -> PyResult<f64> {
+        if !lower.is_finite() || !upper.is_finite() {
+            return Err(InvalidConfigurationError::new_err(
+                "Gauss-Legendre integration bounds must be finite",
+            ));
+        }
+        checked_gaussian_quadrature(
+            &self.inner,
+            QuadMethod::GaussLegendre,
+            "Gauss-Legendre",
+            degree,
+            lower,
+            upper,
+            None,
+        )
+    }
+
+    /// Integrate `exp(-x^2) * self(x)` over the real line by Gauss-Hermite quadrature.
+    pub fn integrate_gauss_hermite(&self, degree: usize) -> PyResult<f64> {
+        checked_gaussian_quadrature(
+            &self.inner,
+            QuadMethod::GaussHermite,
+            "Gauss-Hermite",
+            degree,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            None,
+        )
+    }
+
+    /// Integrate `x^alpha * exp(-x) * self(x)` over `[0, +inf)` by Gauss-Laguerre.
+    #[pyo3(signature = (degree, alpha=0.5))]
+    pub fn integrate_gauss_laguerre(&self, degree: usize, alpha: f64) -> PyResult<f64> {
+        if !alpha.is_finite() || alpha <= -1.0 {
+            return Err(InvalidConfigurationError::new_err(
+                "Gauss-Laguerre alpha must be finite and greater than -1",
+            ));
+        }
+        checked_gaussian_quadrature(
+            &self.inner,
+            QuadMethod::GaussLaguerre,
+            "Gauss-Laguerre",
+            degree,
+            0.0,
+            f64::INFINITY,
+            Some(alpha),
+        )
     }
 
     /// Build `exp(self)`.

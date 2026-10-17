@@ -739,11 +739,12 @@ let trace = &solver.get_statistics().telemetry;
 println!("solve_id={} dropped={}", trace.solve_id, trace.log_events_dropped);
 ```
 
-`BvpTelemetryMode::Off` disables solver counters, stage timers, and callback
-stage timing without changing the numerical algorithm. It is independent from
-`BvpLoggingMode`, so a caller may retain a bounded decision trace while the
-timing/counter collection remains disabled. `Counters` is the compatibility
-default; `Detailed` additionally collects callback sub-stage timings.
+`BvpTelemetryMode::Off` disables solver counters and stage timers without
+changing the numerical algorithm. `Counters` collects discrete measurements
+without starting clocks; `Timings` collects durations without incrementing
+discrete counters; `Detailed` collects both. The telemetry mode is independent
+from `BvpLoggingMode`, so a caller may retain a bounded decision trace while
+measurement collection is disabled.
 
 `Off` is the default and retains no events. `Warnings` keeps recoverable and
 failed-decision events; `Detailed` also keeps normal adaptive decisions. The

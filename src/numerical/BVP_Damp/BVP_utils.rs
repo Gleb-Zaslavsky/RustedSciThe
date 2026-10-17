@@ -3,7 +3,7 @@ use crate::numerical::BVP_Damp::telemetry::{
     BvpCallbackStage, BvpCallbackStageTiming, BvpTelemetryMode, BvpTimingSnapshot,
 };
 
-use log::{info, warn};
+use crate::numerical::logging::{solver_info as info, solver_warn as warn};
 use nalgebra::{DMatrix, DVector};
 use regex::Regex;
 
@@ -215,12 +215,12 @@ impl CustomTimer {
         self.callback_stages_enabled = enabled;
     }
 
-    /// Applies the public telemetry policy to the timer without changing the
-    /// numerical solver. `Counters` keeps major timings but skips callback
-    /// sub-stage timing; `Detailed` enables both.
+    /// Applies the public telemetry policy without changing the numerical
+    /// solver. Only `Timings` and `Detailed` start clocks; `Counters` is a
+    /// clock-free path. Callback-stage timers follow the same timing policy.
     pub fn set_telemetry_mode(&mut self, mode: BvpTelemetryMode) {
-        self.enabled = mode != BvpTelemetryMode::Off;
-        self.callback_stages_enabled = mode == BvpTelemetryMode::Detailed;
+        self.enabled = mode.collects_timings();
+        self.callback_stages_enabled = mode.collects_timings();
     }
 
     pub fn start(&mut self) {
@@ -1076,6 +1076,22 @@ mod tests {
 
         assert_eq!(timer.snapshot(), BvpTimingSnapshot::default());
         assert!(callback_stage_timings_snapshot().is_empty());
+    }
+
+    #[test]
+    fn custom_timer_counters_mode_does_not_collect_durations() {
+        let mut timer = CustomTimer::new();
+        timer.set_telemetry_mode(BvpTelemetryMode::Counters);
+        timer.start();
+        timer.fun_tic();
+        std::thread::sleep(Duration::from_millis(1));
+        timer.fun_tac();
+        timer.finish();
+
+        assert_eq!(timer.total, Some(Duration::ZERO));
+        assert_eq!(timer.fun, Duration::ZERO);
+        assert!(!timer.enabled);
+        assert!(!timer.callback_stages_enabled);
     }
 
     #[test]

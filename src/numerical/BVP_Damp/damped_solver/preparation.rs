@@ -64,16 +64,32 @@ impl NRBVP {
         self.generated_backend_config.effective_method(&self.method)
     }
 
-    fn parse_log_level(&self) -> Result<LevelFilter, BvpBackendIntegrationError> {
+    fn parse_log_level(&self) -> Result<SolverLogLevel, BvpBackendIntegrationError> {
         match self.loglevel.as_deref() {
-            Some("debug") | Some("info") => Ok(LevelFilter::Info),
-            Some("warn") => Ok(LevelFilter::Warn),
-            Some("error") => Ok(LevelFilter::Error),
+            Some("debug") => Ok(SolverLogLevel::Debug),
+            Some("info") => Ok(SolverLogLevel::Info),
+            Some("warn") => Ok(SolverLogLevel::Warn),
+            Some("error") => Ok(SolverLogLevel::Error),
             Some(level) => Err(BvpBackendIntegrationError::InvalidLogLevel {
                 level: level.to_string(),
             }),
-            None => Ok(LevelFilter::Info),
+            None => Ok(SolverLogLevel::Off),
         }
+    }
+
+    fn effective_logging_level(&self) -> Result<SolverLogLevel, BvpBackendIntegrationError> {
+        match self.loglevel.as_deref().map(str::trim) {
+            Some(level) if level.eq_ignore_ascii_case("off") || level.eq_ignore_ascii_case("none") => {
+                return Ok(SolverLogLevel::Off);
+            }
+            Some(_) => return self.parse_log_level(),
+            None => {}
+        }
+        Ok(match self.telemetry_counters.logging_mode() {
+            BvpLoggingMode::Off => SolverLogLevel::Off,
+            BvpLoggingMode::Warnings => SolverLogLevel::Warn,
+            BvpLoggingMode::Detailed => SolverLogLevel::Info,
+        })
     }
 
     /// Creates a new NRBVP solver instance
@@ -1778,7 +1794,7 @@ impl NRBVP {
         if self.jac_recalc {
             let p = self.p;
             let y = &*self.y;
-            log::info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
+            info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
             let inv_J_k = if let Some(jac_function) = self.jac.as_mut() {
                 let jac_matrix = jac_function.call(p, y);
                 jac_function.inv(&*jac_matrix, self.abs_tolerance, self.max_iterations)

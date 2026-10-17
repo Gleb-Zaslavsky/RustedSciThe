@@ -24,8 +24,16 @@ def main() -> None:
     rate = Expr.variable("rate")
     residual = (rate * x + y).where_substitute({"rate": Expr.constant(2.0)})
     primitive = (x**3 + 2 * x).integrate("x")
+    quadratic_integral = (x**2).integrate_simpson(0.0, 1.0, 100)
+    quadratic_gauss = (x**2).integrate_gauss_legendre(0.0, 1.0, 4)
+    hermite_constant = Expr.constant(1.0).integrate_gauss_hermite(8)
+    laguerre_cubic = (x**3).integrate_gauss_laguerre(4, alpha=0.0)
     print("substituted residual:", residual)
     print("primitive:", primitive)
+    print("Simpson integral of x^2 on [0, 1]:", quadratic_integral)
+    print("Gauss-Legendre integral of x^2 on [0, 1]:", quadratic_gauss)
+    print("Gauss-Hermite integral of exp(-x^2):", hermite_constant)
+    print("Gauss-Laguerre weighted integral of x^3:", laguerre_cubic)
 
     # AtomNative converts once during preparation; the batch loop stays in Rust.
     callback = model.lambdify(

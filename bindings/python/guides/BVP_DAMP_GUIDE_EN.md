@@ -3,8 +3,9 @@
 BVP_Damp solves first-order boundary-value systems with a damped nonlinear
 iteration and mesh/refinement policies. It is not the same formulation as
 BVP_sci: its boundary input is a mapping from state names to observed endpoint
-values, with optional bounds. Frozen routes remain deferred in this Python
-wrapper; do not infer support from the broader native Rust crate.
+values, with optional bounds. The Python package exposes separate damped,
+fixed-mesh Naive and fixed-mesh Frozen routes. These select distinct native
+algorithms rather than aliases for one another.
 
 ## Model and boundary observations
 
@@ -50,17 +51,71 @@ function does not silently replace solver-specific controls with defaults.
 No matrix layout is the universal winner: compare matched equations and mesh
 sizes, and consider the global Jacobian structure.
 
+`BvpDampNaiveSolver` is a separate fixed-mesh route backed by the native Naive
+implementation; it does not pass through the damped or Frozen solver.
+It supports the same symbolic frontend and Lambdify/AOT selection with Dense,
+Sparse or Banded linear layouts, plus native telemetry and prepared parameter
+rebinding. Its mesh must be uniform. Damping controls, bounds, adaptive grid
+refinement, and explicit Banded widths are not part of this native route and
+are not accepted as if they had an effect. The prepared API currently supports
+parameter rebinding, but not replacing the initial guess or interval in place.
+
+```python
+from rustedscithe import BvpDampNaiveSolver, Expr, SolverOptions
+
+solver = BvpDampNaiveSolver(
+    [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
+    [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5,
+    parameters=["rate"], parameter_values=[1.0],
+    options=SolverOptions(frontend="atom_native", execution="lambdify",
+                          matrix_layout="dense", telemetry="timings"),
+)
+solver.prepare()
+first = solver.solve_prepared()
+solver.set_parameters([2.0])
+second = solver.solve_prepared()
+```
+
+`BvpDampFrozenSolver` uses a frozen Jacobian with a user-selected native reuse
+policy. The mesh remains fixed and uniform; parameters can be rebound after
+`prepare()`, but the initial guess and interval cannot be replaced in place.
+The supported policies are `Frozen_naive` (reuse after the first Jacobian),
+`every_m` (one positive integer period), `at_high_morm` (one positive norm
+threshold), `at_low_speed` (one speed-rate threshold no greater than 1), and
+`complex` (`[period, norm_threshold, speed_rate]`). `policy_parameters` is
+omitted for `Frozen_naive` and otherwise follows the listed shape. The class
+reports the chosen policy through `provenance()` and returns the same detached
+solution telemetry contract as the other BVP_Damp routes.
+
+```python
+from rustedscithe import BvpDampFrozenSolver, Expr, SolverOptions
+
+solver = BvpDampFrozenSolver(
+    [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
+    [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5,
+    parameters=["rate"], parameter_values=[1.0],
+    policy="every_m", policy_parameters=[2.0],
+    options=SolverOptions(frontend="atom_native", execution="lambdify",
+                          matrix_layout="dense", telemetry="counters"),
+)
+solver.prepare()
+for rate in (1.0, 2.0):
+    solver.set_parameters([rate])
+    solution = solver.solve_prepared()
+    print(rate, solution.values()[0][-1], solution.telemetry_counters())
+```
+
 The direct constructor exposes the main numerical and structural controls:
 
 | Area | Python keyword(s) | Notes |
 | --- | --- | --- |
 | Discretization | `scheme="forward"` or `"trapezoid"` | Selects the first-order scheme |
-| Strategy | `strategy="damped"` | `"frozen"` is explicitly unsupported by this wrapper |
+| Strategy | `BvpDampSolver`, `BvpDampNaiveSolver` or `BvpDampFrozenSolver` | Each selects a separate native algorithm; none is silently mapped to another |
 | Nonlinear work | `tolerance`, `max_iterations`, `max_jacobian_refreshes`, `max_damping_iterations`, `damping_factor` | Newton/damping policy |
 | Mesh | `max_refinements`, `grid_method`, `grid_parameters` | `grid_parameters` must match the selected method |
 | Linear system | `linear_sys_method`, `banded_linear_solver`, `banded_fallback`, `iterative_refinement_steps` | Backend-specific native policies |
 | Bounds/logging | `bounds`, `logging_mode`, `loglevel`, `logging_max_events` | Logging defaults off; bounds are user-specified |
-| Banded layout | `SolverOptions.set_banded_width(lower, upper)` | Width is required; never inferred from the RHS |
+| Banded layout | `SolverOptions.set_banded_width(lower, upper)` | Required by the damped route; fixed-mesh Naive/Frozen infer structure and reject explicit widths |
 
 ## Lifecycle, logging and telemetry
 
@@ -75,6 +130,12 @@ Read counters and stage timings separately. A successful status, final mesh,
 residual/iteration diagnostics and bounds should all be inspected. Catch typed
 configuration, preparation, linear-backend and convergence exceptions; do not
 parse human-readable log output for program control.
+
+Telemetry modes are disjoint: `off` collects neither counters nor timings;
+`counters` records discrete events without starting clocks; `timings` measures
+stage durations without collecting discrete counters; and `detailed` collects
+both. The selected mode is available as `solution.telemetry_mode`, while the
+two result accessors return empty dictionaries for a disabled collection.
 
 ## Examples
 

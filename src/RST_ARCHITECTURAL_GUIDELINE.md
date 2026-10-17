@@ -34,9 +34,36 @@ publication. A parent scope and its child scopes are diagnostic scopes and
 must not be added together unless the report explicitly says that they are
 disjoint.
 
+The normative collection levels are `Off`, `Counters`, `Timings` and
+`Detailed`. Their meanings are fixed across solver APIs:
+
+- `Off` performs no counter updates or clock reads;
+- `Counters` records discrete events without starting timers;
+- `Timings` records durations without updating discrete counters;
+- `Detailed` records both counters and timings.
+
+Preparation telemetry is a separate lifecycle scope when it has a separate
+owner; its enablement and cost must be named explicitly rather than silently
+folded into numerical-solve telemetry. A solver that cannot distinguish one
+of the four levels must reject or explicitly document that unsupported level,
+not silently alias it to a different collection policy.
+
+The shared Rust API type is `numerical::SolverTelemetryMode`. The nonlinear
+systems engine and Gavin LM use this contract and default to `Off`. Existing
+solver-specific telemetry enums remain supported during migration, but their
+variant semantics must be documented and audited against this contract rather
+than assumed equivalent from similar names.
+
+Migration note (2026-10-16): the nonlinear systems engine, Gavin LM, and
+ShootingBVP implement all four levels. ShootingBVP exposes the selected mode
+in its telemetry snapshot, leaves unrequested channels untouched, and its
+builder and symbolic/native solve routes use the shared enum. Python currently
+exposes `off`/`counters`/`timings` for this solver; adding Python's `detailed`
+spelling belongs to the broader binding-contract migration.
+
 Telemetry must be:
 
-- disabled by default or available through an explicit low-overhead mode;
+- off by default, with each additional collection level selected explicitly;
 - non-invasive on the hot path when disabled;
 - safe to enable for correctness and performance diagnostics;
 - typed and stable enough for story tests and report consumers;
@@ -50,7 +77,64 @@ Process-wide allocator measurements must not be represented by a logical
 workspace or materialization counter. If allocator statistics are not
 available, the report must say so.
 
-### 2. Every Solver Has A Broad Evidence Corpus
+### 2. Logging Is An Explicit, Persistent Output Channel
+
+Logging uses the `log` facade with a concrete backend such as `simplelog`.
+It is distinct from telemetry: telemetry is a typed in-memory snapshot of
+discrete counters and/or durations, while logging is a human-readable event
+stream. Enabling one must not silently enable the other.
+
+Logging must be disabled by default and explicitly configurable by the caller.
+`Off` emits no solver log. Any enabled severity (`Debug`, `Info`, `Warn` or
+`Error`) must have a persistent text-log destination; writing only to an
+in-memory event buffer or relying on console output is not sufficient. A
+timestamped file per process is the default lifecycle: enabled solvers share
+that process log rather than each creating a competing global logger. Its
+location must be discoverable by the caller. If logging is configured but
+the file cannot be created, report that setup failure rather than silently
+discarding the requested log.
+
+For complex solvers, `Info` or a more verbose mode may include a concise
+`tabled` or `prettytable-rs` summary at selected iterations or at solve
+completion. Such summaries should expose the useful subset of timings and
+discrete counters, not dump every internal field. Iteration-level detail is
+appropriate for diagnosing convergence; an end-of-solve summary is preferred
+for routine runs. Warnings and errors should preserve actionable context and
+must also reach the configured text log.
+
+### 3. Ported Algorithms Require An Auditable Parity Reference
+
+When a solver ports a mathematical algorithm from another language, keep a
+small, attributed subset of the upstream implementation in a local
+`*_reference` directory. Record the upstream project and exact version or
+revision, and include only the modules needed to establish the algorithmic
+reference. Do not make the reference copy a runtime dependency of the Rust
+solver.
+
+Instrument the reference route and the Rust route with clearly defined,
+semantically matched telemetry. Parity checks should prioritize discrete
+algorithmic counters such as residual and Jacobian evaluations, accepted or
+rejected steps, Newton iterations, LU factorizations and linear solves.
+Counter definitions must be documented before comparing values: equal names
+do not imply equal semantics. Stage timings are useful to explain performance
+differences, but are diagnostic evidence rather than a requirement for exact
+timing equality. Compare equivalent lifecycle scopes and workloads.
+
+The port should preserve the source algorithm's mathematical controller and
+numerical decisions unless a deviation is deliberate, justified and recorded
+in a stage-by-stage parity ledger. Unexplained counter or behavior differences
+are gaps to investigate, not presumed optimizations.
+
+The reference boundary is the mathematical algorithm, not every implementation
+detail of the source language. Rust routes should use the crate's native
+symbolic and numerical infrastructure: Lambdify/AOT for residuals and
+Jacobians where supported, and established Rust linear algebra backends such
+as nalgebra Dense, Faer Sparse and the crate's Banded solvers. Do not copy a
+source-language linear algebra backend merely to claim parity. Backend
+differences are acceptable when correctness is established and their effect
+on counters, stability and performance is measured and explained.
+
+### 4. Every Solver Has A Broad Evidence Corpus
 
 Each solver should have both ordinary story tests and Criterion benchmarks.
 The corpus should cover the solver's real axes rather than only one scalar
@@ -90,7 +174,7 @@ A policy matrix is a correctness/performance diagnostic, not permission to
 assert that Parallel is universally faster. Thread startup, scheduling and
 chunk materialization can dominate small systems.
 
-### 3. Compact Tables Are The Primary Human-Readable Output
+### 5. Compact Tables Are The Primary Human-Readable Output
 
 Story tests and release-oriented benchmarks must collect their meaningful
 values and print a compact `tabled` summary. The table should contain stable
@@ -120,7 +204,7 @@ Correctness tables should retain the numerical evidence needed to audit the
 claim: maximum difference, drift, invariant residual, endpoint values or
 checksums. A status-only `ok` is not sufficient for a numerical parity gate.
 
-### 4. Reports And Technical Logs Are Separate Artifacts
+### 6. Reports And Technical Logs Are Separate Artifacts
 
 The useful table and the technical process transcript have different users and
 must be stored separately.
@@ -141,7 +225,7 @@ unless table generation failed and the failure itself needs investigation.
 An interrupted or empty campaign is not a passing gate. The summary must
 distinguish `passed`, `failed`, `planned`, `interrupted` and `not applicable`.
 
-### 5. Long Campaigns Must Be Non-Fail-Fast
+### 7. Long Campaigns Must Be Non-Fail-Fast
 
 Every solver with a substantial release corpus should have one or more scripts
 that run the important tests and benchmarks sequentially. The script may
@@ -168,7 +252,7 @@ The orchestration contract is:
 This is especially important for overnight runs. A single failure should be
 investigated, but it should not discard evidence from the other workloads.
 
-### 6. Compact Release Evidence And Statistical Baselines Are Different
+### 8. Compact Release Evidence And Statistical Baselines Are Different
 
 Compact release matrices answer questions about coverage, absolute wall-clock
 cost, lifecycle correctness and numerical outcomes. They are usually one
@@ -197,11 +281,15 @@ measurement window are controlled by `RADAU_BENCH_SAMPLE_SIZE` and
 `RADAU_BENCH_MEASUREMENT_SECONDS`. Its compact release counterpart is
 `scripts/radau_release_matrix.ps1`.
 
-### 7. Review Checklist
+### 9. Review Checklist
 
 Before declaring a solver production-ready, check that:
 
 - telemetry is disabled cheaply and enabled with documented semantics;
+- logging is off by default, and every enabled severity writes a discoverable
+  text log;
+- ported algorithms have a versioned local reference and an auditable parity
+  ledger for matched counter semantics and intentional deviations;
 - counters and timing scopes are covered by tests;
 - all important routes have correctness and parity evidence;
 - compact tables are written to reviewable files;

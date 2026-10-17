@@ -14,6 +14,9 @@ use rustedscithe_core::numerical::BVP_Damp::BvpLambdifyTelemetryMode;
 use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_damped::{
     AdaptiveGridConfig, DampedBvpStatistics, DampedSolverOptions, NRBVP, SolverParams,
 };
+use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_frozen::{
+    FrozenBvpStatistics, FrozenSolverOptions, NRBVP as FrozenNRBVP,
+};
 use rustedscithe_core::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
 };
@@ -35,7 +38,7 @@ use rustedscithe_core::symbolic::codegen::codegen_provider_api::MatrixBackend;
 
 use crate::contract::SolverOptions;
 use crate::errors::{
-    InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
+    ExhaustionError, InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
     UnsupportedOptionError, annotate_native, catch_panic, native_variant,
 };
 use crate::expr::PyExpr;
@@ -101,7 +104,8 @@ fn map_telemetry(value: &str) -> PyResult<(BvpTelemetryMode, BvpLambdifyTelemetr
             BvpTelemetryMode::Counters,
             BvpLambdifyTelemetryMode::Counters,
         )),
-        "timings" => Ok((
+        "timings" => Ok((BvpTelemetryMode::Timings, BvpLambdifyTelemetryMode::Timings)),
+        "detailed" => Ok((
             BvpTelemetryMode::Detailed,
             BvpLambdifyTelemetryMode::Detailed,
         )),
@@ -476,7 +480,7 @@ fn detached_values(matrix: &DMatrix<f64>) -> Vec<Vec<f64>> {
 }
 
 fn snapshot_maps(stats: &DampedBvpStatistics) -> (HashMap<String, u64>, HashMap<String, f64>) {
-    let counters = [
+    let mut counters: HashMap<String, u64> = [
         ("iterations", stats.telemetry.counters.iterations),
         ("residual_calls", stats.telemetry.counters.residual_calls),
         (
@@ -507,7 +511,7 @@ fn snapshot_maps(stats: &DampedBvpStatistics) -> (HashMap<String, u64>, HashMap<
     .into_iter()
     .map(|(name, value)| (name.to_owned(), value))
     .collect();
-    let timings = [
+    let mut timings: HashMap<String, f64> = [
         ("total_ms", stats.telemetry.timings.total),
         ("residual_ms", stats.telemetry.timings.residual),
         ("jacobian_ms", stats.telemetry.timings.jacobian),
@@ -526,7 +530,22 @@ fn snapshot_maps(stats: &DampedBvpStatistics) -> (HashMap<String, u64>, HashMap<
     .into_iter()
     .map(|(name, duration)| (name.to_owned(), duration.as_secs_f64() * 1000.0))
     .collect();
+    if !stats.telemetry.telemetry_mode.collects_counters() {
+        counters.clear();
+    }
+    if !stats.telemetry.telemetry_mode.collects_timings() {
+        timings.clear();
+    }
     (counters, timings)
+}
+
+fn telemetry_mode_name(mode: BvpTelemetryMode) -> &'static str {
+    match mode {
+        BvpTelemetryMode::Off => "off",
+        BvpTelemetryMode::Counters => "counters",
+        BvpTelemetryMode::Timings => "timings",
+        BvpTelemetryMode::Detailed => "detailed",
+    }
 }
 
 /// Detached result for one BVP_Damp solve.
@@ -539,10 +558,12 @@ fn snapshot_maps(stats: &DampedBvpStatistics) -> (HashMap<String, u64>, HashMap<
 #[pyclass(name = "BvpDampSolution", module = "rustedscithe")]
 #[derive(Clone)]
 pub struct BvpDampSolution {
+    solver_name: String,
     mesh: Vec<f64>,
     values: Vec<Vec<f64>>,
     parameters: Vec<f64>,
     status: String,
+    telemetry_mode: String,
     counters: HashMap<String, u64>,
     timings_ms: HashMap<String, f64>,
 }
@@ -581,6 +602,12 @@ impl BvpDampSolution {
         &self.status
     }
 
+    #[getter]
+    /// Native telemetry collection policy used for this solve.
+    pub fn telemetry_mode(&self) -> &str {
+        &self.telemetry_mode
+    }
+
     /// Return the counter snapshot collected during this solve.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         self.counters.clone()
@@ -598,8 +625,9 @@ impl BvpDampSolution {
     /// matrix into a second representation.
     pub fn diagnostics(&self) -> HashMap<String, String> {
         HashMap::from([
-            ("solver".to_owned(), "bvp_damp".to_owned()),
+            ("solver".to_owned(), self.solver_name.clone()),
             ("status".to_owned(), self.status.clone()),
+            ("telemetry_mode".to_owned(), self.telemetry_mode.clone()),
             ("nodes".to_owned(), self.mesh.len().to_string()),
             ("state_dimension".to_owned(), self.values.len().to_string()),
             (
@@ -616,7 +644,8 @@ impl BvpDampSolution {
         let mut timings = self.timings_ms.iter().collect::<Vec<_>>();
         timings.sort_by_key(|(name, _)| *name);
         format!(
-            "BVP_Damp status={}; counters={}; timings_ms={}",
+            "{} status={}; counters={}; timings_ms={}",
+            self.solver_name,
             self.status,
             counters
                 .iter()
@@ -1151,14 +1180,665 @@ impl BvpDampSolver {
         let stats = self.solver.get_statistics();
         let (counters, timings_ms) = snapshot_maps(&stats);
         Ok(BvpDampSolution {
+            solver_name: "bvp_damp".to_owned(),
             mesh: self.solver.x_mesh.iter().copied().collect(),
             values: detached_values(&result),
             parameters: self.solver.param_values.clone().unwrap_or_default(),
             status: "finished".to_owned(),
+            telemetry_mode: telemetry_mode_name(stats.telemetry.telemetry_mode).to_owned(),
             counters,
             timings_ms,
         })
     }
+}
+
+/// Direct Python adapter for the native fixed-mesh Naive Newton BVP route.
+///
+/// Unlike [`BvpDampSolver`], this route uses the separate Frozen solver core:
+/// it accepts a uniform mesh, has no damping/bounds/adaptive-refinement policy,
+/// and retains the native prepared parameter-rebind lifecycle.
+#[pyclass(name = "BvpDampNaiveSolver", module = "rustedscithe", unsendable)]
+pub struct BvpDampNaiveSolver {
+    solver: FrozenNRBVP,
+    frontend: String,
+    execution: String,
+    matrix_layout: String,
+    prepared: bool,
+    panic_state: SolverPanicState,
+}
+
+#[pymethods]
+impl BvpDampNaiveSolver {
+    /// Create a fixed-mesh Naive Newton BVP.
+    ///
+    /// `mesh` must be strictly increasing and uniformly spaced because that is
+    /// the mesh contract of the native Frozen/Naive implementation. Initial
+    /// values are node-major `(mesh_node, state)` and boundary locations use
+    /// the native endpoint selector `0` or `1`.
+    #[new]
+    #[pyo3(signature=(expressions, state_variables, boundary_conditions, mesh, initial_state, *, parameters=None, parameter_values=None, options=None, independent_variable="x", scheme="forward", tolerance=1e-6, max_iterations=25, logging_mode="off", logging_max_events=256, linear_sys_method=None))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        expressions: Vec<PyExpr>,
+        state_variables: Vec<String>,
+        boundary_conditions: HashMap<String, Vec<(usize, f64)>>,
+        mesh: Vec<f64>,
+        initial_state: Vec<f64>,
+        parameters: Option<Vec<String>>,
+        parameter_values: Option<Vec<f64>>,
+        options: Option<PyRef<'_, SolverOptions>>,
+        independent_variable: &str,
+        scheme: &str,
+        tolerance: f64,
+        max_iterations: usize,
+        logging_mode: &str,
+        logging_max_events: usize,
+        linear_sys_method: Option<&str>,
+    ) -> PyResult<Self> {
+        validate_names(&state_variables, "state_variables", false)?;
+        let parameters = parameters.unwrap_or_default();
+        validate_names(&parameters, "parameters", true)?;
+        if state_variables
+            .iter()
+            .any(|state| parameters.contains(state))
+        {
+            return Err(InvalidConfigurationError::new_err(
+                "state_variables and parameters must not contain the same symbol names",
+            ));
+        }
+        if independent_variable.trim().is_empty()
+            || state_variables
+                .iter()
+                .chain(parameters.iter())
+                .any(|name| name == independent_variable)
+        {
+            return Err(InvalidConfigurationError::new_err(
+                "independent_variable must be non-empty and distinct from states and parameters",
+            ));
+        }
+        if expressions.len() != state_variables.len() {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "expected one RHS expression per state variable, got {} expressions for {} variables",
+                expressions.len(),
+                state_variables.len()
+            )));
+        }
+        if !matches!(scheme, "forward" | "trapezoid") {
+            return Err(UnsupportedOptionError::new_err(
+                "BVP_Damp Naive scheme must be 'forward' or 'trapezoid'",
+            ));
+        }
+        if !tolerance.is_finite() || tolerance <= 0.0 || max_iterations == 0 {
+            return Err(InvalidConfigurationError::new_err(
+                "tolerance must be finite and positive and max_iterations must be non-zero",
+            ));
+        }
+        if mesh.len() < 2 || !mesh.windows(2).all(|pair| pair[1] > pair[0]) {
+            return Err(InvalidConfigurationError::new_err(
+                "mesh must contain at least two strictly increasing nodes",
+            ));
+        }
+        finite_values(&mesh, "mesh")?;
+        let step = (mesh[mesh.len() - 1] - mesh[0]) / (mesh.len() - 1) as f64;
+        if mesh.windows(2).any(|pair| {
+            let local = pair[1] - pair[0];
+            (local - step).abs() > 1e-10 * step.abs().max(1.0)
+        }) {
+            return Err(UnsupportedOptionError::new_err(
+                "BVP_Damp Naive currently requires a uniform mesh; the native Frozen core constructs its mesh from endpoints and point count",
+            ));
+        }
+        finite_boundary_conditions(&boundary_conditions)?;
+        if boundary_conditions.len() != state_variables.len()
+            || boundary_conditions
+                .keys()
+                .any(|name| !state_variables.contains(name))
+        {
+            return Err(InvalidConfigurationError::new_err(
+                "boundary_conditions must provide endpoint constraints for declared state variables",
+            ));
+        }
+        let expected_symbols = std::iter::once(independent_variable.to_owned())
+            .chain(state_variables.iter().cloned())
+            .chain(parameters.iter().cloned())
+            .collect::<std::collections::HashSet<_>>();
+        for (index, expression) in expressions.iter().enumerate() {
+            if let Some(unknown) = expression
+                .inner
+                .extract_variables()
+                .1
+                .iter()
+                .find(|name| !expected_symbols.contains(*name))
+            {
+                return Err(InvalidConfigurationError::new_err(format!(
+                    "RHS expression {index} references undeclared symbol '{unknown}'"
+                )));
+            }
+        }
+        if linear_sys_method.is_some_and(|value| value.trim().is_empty()) {
+            return Err(InvalidConfigurationError::new_err(
+                "linear_sys_method must not be empty",
+            ));
+        }
+        let logging_mode = match logging_mode.trim().to_ascii_lowercase().as_str() {
+            "off" => BvpLoggingMode::Off,
+            "warnings" | "warn" => BvpLoggingMode::Warnings,
+            "detailed" | "debug" => BvpLoggingMode::Detailed,
+            other => {
+                return Err(UnsupportedOptionError::new_err(format!(
+                    "unsupported BVP_Damp logging_mode '{other}'; expected off, warnings or detailed"
+                )));
+            }
+        };
+        let parameter_values = parameter_values.unwrap_or_else(|| vec![0.0; parameters.len()]);
+        if parameter_values.len() != parameters.len() {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "parameter_values must contain {} values, got {}",
+                parameters.len(),
+                parameter_values.len()
+            )));
+        }
+        finite_values(&parameter_values, "parameter_values")?;
+        let options = match options {
+            Some(value) => value.clone(),
+            None => SolverOptions::new(None, None, None, None, None, None, None, None, None)?,
+        };
+        options.validate_for("bvp_damp")?;
+        let (method, _) = matrix_backend(options.matrix_layout())?;
+        if options.band_lower().is_some() || options.band_upper().is_some() {
+            return Err(UnsupportedOptionError::new_err(
+                "BVP_Damp Naive infers its band structure from the generated Jacobian and does not consume explicit band widths",
+            ));
+        }
+        let config = backend_config(&options, logging_mode, logging_max_events, None, None, 0)?;
+        let mut native_options = FrozenSolverOptions::dense_naive();
+        native_options.method = method;
+        native_options.scheme = scheme.to_owned();
+        native_options.tolerance = tolerance;
+        native_options.max_iterations = max_iterations;
+        native_options.linear_sys_method = linear_sys_method.map(str::to_owned);
+        native_options.generated_backend_config = config;
+        let initial_guess = flatten_node_major(initial_state, mesh.len(), state_variables.len())?;
+        let route = format!(
+            "{}:{}:{}",
+            options.frontend(),
+            options.execution(),
+            options.matrix_layout()
+        );
+        let mut solver = catch_panic("construct", "bvp_damp_naive", &route, || {
+            let mut solver = FrozenNRBVP::new_with_options(
+                expressions
+                    .into_iter()
+                    .map(|expression| expression.inner)
+                    .collect(),
+                initial_guess,
+                state_variables,
+                independent_variable.to_owned(),
+                boundary_conditions,
+                mesh[0],
+                mesh[mesh.len() - 1],
+                mesh.len(),
+                native_options,
+            );
+            if !parameters.is_empty() {
+                let parameter_refs = parameters.iter().map(String::as_str).collect::<Vec<_>>();
+                solver
+                    .try_set_params(Some(parameter_refs.as_slice()))
+                    .map_err(map_native_error)?;
+                solver
+                    .try_set_param_values(Some(parameter_values))
+                    .map_err(map_native_error)?;
+            }
+            Ok(solver)
+        })?;
+        solver.dont_save_log(true);
+        Ok(Self {
+            solver,
+            frontend: options.frontend().to_owned(),
+            execution: options.execution().to_owned(),
+            matrix_layout: options.matrix_layout().to_owned(),
+            prepared: false,
+            panic_state: SolverPanicState::default(),
+        })
+    }
+
+    /// Prepare symbolic callbacks and the native linear runtime.
+    pub fn prepare(&mut self) -> PyResult<()> {
+        let route = self.route();
+        let panic_state = self.panic_state.clone();
+        panic_state.run("prepare", "bvp_damp_naive", &route, || {
+            self.solver.try_eq_generate().map_err(map_native_error)?;
+            self.prepared = true;
+            Ok(())
+        })
+    }
+
+    /// Solve from the configured initial guess, preparing callbacks if needed.
+    pub fn solve(&mut self) -> PyResult<BvpDampSolution> {
+        let route = self.route();
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "bvp_damp_naive", &route, || {
+            let result = self.solver.try_solver().map_err(map_native_error)?;
+            self.prepared = true;
+            self.finish_solution(result, "bvp_damp_naive")
+        })
+    }
+
+    /// Solve using a previously prepared symbolic/runtime plan.
+    pub fn solve_prepared(&mut self) -> PyResult<BvpDampSolution> {
+        let route = self.route();
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "bvp_damp_naive", &route, || {
+            if !self.prepared {
+                return Err(SolverError::new_err(
+                    "BVP_Damp Naive has no prepared plan; call prepare() first",
+                ));
+            }
+            let result = self
+                .solver
+                .try_solver_prepared()
+                .map_err(map_native_error)?;
+            self.finish_solution(result, "bvp_damp_naive")
+        })
+    }
+
+    /// Rebind numeric parameters without rebuilding the symbolic plan.
+    pub fn set_parameters(&mut self, values: Vec<f64>) -> PyResult<()> {
+        finite_values(&values, "parameter_values")?;
+        if values.len() != self.solver.param_names.len() {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "parameter_values must contain {} values, got {}",
+                self.solver.param_names.len(),
+                values.len()
+            )));
+        }
+        let route = self.route();
+        let panic_state = self.panic_state.clone();
+        panic_state.run("continuation", "bvp_damp_naive", &route, || {
+            self.solver
+                .try_set_param_values(Some(values))
+                .map_err(map_native_error)
+        })
+    }
+
+    #[getter]
+    /// Names of the declared numeric parameters, in binding order.
+    pub fn parameter_names(&self) -> Vec<String> {
+        self.solver.param_names.clone()
+    }
+
+    #[getter]
+    /// Current numeric values corresponding to `parameter_names`.
+    pub fn parameter_values(&self) -> Vec<f64> {
+        self.solver.param_values.clone().unwrap_or_default()
+    }
+
+    #[getter]
+    /// Symbolic preparation frontend selected for this solver.
+    pub fn frontend(&self) -> &str {
+        &self.frontend
+    }
+
+    #[getter]
+    /// Callback execution route selected for this solver.
+    pub fn execution(&self) -> &str {
+        &self.execution
+    }
+
+    #[getter]
+    /// Linear algebra layout selected for the generated BVP system.
+    pub fn matrix_layout(&self) -> &str {
+        &self.matrix_layout
+    }
+
+    /// Describe the selected native algorithm and current lifecycle state.
+    pub fn provenance(&self) -> HashMap<String, String> {
+        HashMap::from([
+            ("solver".to_owned(), "bvp_damp_naive".to_owned()),
+            ("strategy".to_owned(), "Naive".to_owned()),
+            ("frontend".to_owned(), self.frontend.clone()),
+            ("execution".to_owned(), self.execution.clone()),
+            ("matrix_layout".to_owned(), self.matrix_layout.clone()),
+            ("prepared".to_owned(), self.prepared.to_string()),
+        ])
+    }
+}
+
+impl BvpDampNaiveSolver {
+    fn route(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        )
+    }
+
+    fn finish_solution(
+        &self,
+        result: Option<nalgebra::DVector<f64>>,
+        solver_name: &str,
+    ) -> PyResult<BvpDampSolution> {
+        if result.is_none() || self.solver.result.is_none() {
+            return Err(ExhaustionError::new_err(format!(
+                "BVP_Damp Naive did not converge in {} iterations",
+                self.solver.max_iterations
+            )));
+        }
+        let matrix = self.solver.get_result().ok_or_else(|| {
+            SolverError::new_err("BVP_Damp Naive completed without a result matrix")
+        })?;
+        let stats = self.solver.get_statistics();
+        let (counters, timings_ms) = snapshot_frozen_maps(&stats);
+        // Frozen's compatibility postprocessor returns node-major storage;
+        // preserve the stable Python solution convention `(state, node)`.
+        let values = (0..matrix.ncols())
+            .map(|state| {
+                (0..matrix.nrows())
+                    .map(|node| matrix[(node, state)])
+                    .collect()
+            })
+            .collect();
+        Ok(BvpDampSolution {
+            solver_name: solver_name.to_owned(),
+            mesh: self.solver.x_mesh.iter().copied().collect(),
+            values,
+            parameters: self.solver.param_values.clone().unwrap_or_default(),
+            status: "finished".to_owned(),
+            telemetry_mode: telemetry_mode_name(stats.telemetry.telemetry_mode).to_owned(),
+            counters,
+            timings_ms,
+        })
+    }
+}
+
+/// Direct Python adapter for BVP_Damp's Frozen-Jacobian Newton strategy.
+///
+/// This is a distinct native strategy from both the damped solver and Naive
+/// Newton. It shares the fixed uniform-mesh, symbolic, layout and prepared
+/// parameter lifecycle of the native Frozen solver core.
+#[pyclass(name = "BvpDampFrozenSolver", module = "rustedscithe", unsendable)]
+pub struct BvpDampFrozenSolver {
+    inner: BvpDampNaiveSolver,
+    policy: String,
+}
+
+#[pymethods]
+impl BvpDampFrozenSolver {
+    /// Create a fixed-mesh Frozen Newton BVP with an explicit Jacobian reuse policy.
+    ///
+    /// `policy` selects one native strategy: `Frozen_naive`, `every_m`,
+    /// `at_high_morm`, `at_low_speed`, or `complex`. Policy values are passed
+    /// in `policy_parameters` using the native order and shape.
+    #[new]
+    #[pyo3(signature=(expressions, state_variables, boundary_conditions, mesh, initial_state, *, parameters=None, parameter_values=None, options=None, independent_variable="x", scheme="forward", tolerance=1e-6, max_iterations=25, logging_mode="off", logging_max_events=256, linear_sys_method=None, policy="Frozen_naive", policy_parameters=None))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        expressions: Vec<PyExpr>,
+        state_variables: Vec<String>,
+        boundary_conditions: HashMap<String, Vec<(usize, f64)>>,
+        mesh: Vec<f64>,
+        initial_state: Vec<f64>,
+        parameters: Option<Vec<String>>,
+        parameter_values: Option<Vec<f64>>,
+        options: Option<PyRef<'_, SolverOptions>>,
+        independent_variable: &str,
+        scheme: &str,
+        tolerance: f64,
+        max_iterations: usize,
+        logging_mode: &str,
+        logging_max_events: usize,
+        linear_sys_method: Option<&str>,
+        policy: &str,
+        policy_parameters: Option<Vec<f64>>,
+    ) -> PyResult<Self> {
+        let strategy_params = frozen_policy_parameters(policy, policy_parameters)?;
+        let mut inner = BvpDampNaiveSolver::new(
+            expressions,
+            state_variables,
+            boundary_conditions,
+            mesh,
+            initial_state,
+            parameters,
+            parameter_values,
+            options,
+            independent_variable,
+            scheme,
+            tolerance,
+            max_iterations,
+            logging_mode,
+            logging_max_events,
+            linear_sys_method,
+        )?;
+        // The native struct exposes these fields for its legacy API. Set them
+        // before preparation so the generated plan captures the Frozen route.
+        inner.solver.strategy = "Frozen".to_owned();
+        inner.solver.strategy_params = Some(strategy_params);
+        Ok(Self {
+            inner,
+            policy: policy.to_owned(),
+        })
+    }
+
+    /// Prepare symbolic callbacks and the Frozen linear-runtime plan.
+    pub fn prepare(&mut self) -> PyResult<()> {
+        let route = self.inner.route();
+        let panic_state = self.inner.panic_state.clone();
+        panic_state.run("prepare", "bvp_damp_frozen", &route, || {
+            self.inner
+                .solver
+                .try_eq_generate()
+                .map_err(map_native_error)?;
+            self.inner.prepared = true;
+            Ok(())
+        })
+    }
+
+    /// Solve from the configured initial guess, preparing the native plan if needed.
+    pub fn solve(&mut self) -> PyResult<BvpDampSolution> {
+        let route = self.inner.route();
+        let panic_state = self.inner.panic_state.clone();
+        panic_state.run("solve", "bvp_damp_frozen", &route, || {
+            let result = self.inner.solver.try_solver().map_err(map_native_error)?;
+            self.inner.prepared = true;
+            self.inner.finish_solution(result, "bvp_damp_frozen")
+        })
+    }
+
+    /// Solve with the previously prepared callbacks and numeric structure.
+    pub fn solve_prepared(&mut self) -> PyResult<BvpDampSolution> {
+        let route = self.inner.route();
+        let panic_state = self.inner.panic_state.clone();
+        panic_state.run("solve", "bvp_damp_frozen", &route, || {
+            if !self.inner.prepared {
+                return Err(SolverError::new_err(
+                    "BVP_Damp Frozen has no prepared plan; call prepare() first",
+                ));
+            }
+            let result = self
+                .inner
+                .solver
+                .try_solver_prepared()
+                .map_err(map_native_error)?;
+            self.inner.finish_solution(result, "bvp_damp_frozen")
+        })
+    }
+
+    /// Rebind numeric parameters while retaining the symbolic prepared plan.
+    pub fn set_parameters(&mut self, values: Vec<f64>) -> PyResult<()> {
+        finite_values(&values, "parameter_values")?;
+        if values.len() != self.inner.solver.param_names.len() {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "parameter_values must contain {} values, got {}",
+                self.inner.solver.param_names.len(),
+                values.len()
+            )));
+        }
+        let route = self.inner.route();
+        let panic_state = self.inner.panic_state.clone();
+        panic_state.run("continuation", "bvp_damp_frozen", &route, || {
+            self.inner
+                .solver
+                .try_set_param_values(Some(values))
+                .map_err(map_native_error)
+        })
+    }
+
+    #[getter]
+    /// Names of the declared numeric parameters, in binding order.
+    pub fn parameter_names(&self) -> Vec<String> {
+        self.inner.solver.param_names.clone()
+    }
+
+    #[getter]
+    /// Current numeric values corresponding to `parameter_names`.
+    pub fn parameter_values(&self) -> Vec<f64> {
+        self.inner.solver.param_values.clone().unwrap_or_default()
+    }
+
+    #[getter]
+    /// Symbolic frontend selected for this Frozen problem.
+    pub fn frontend(&self) -> &str {
+        &self.inner.frontend
+    }
+
+    #[getter]
+    /// Callback execution route selected for this Frozen problem.
+    pub fn execution(&self) -> &str {
+        &self.inner.execution
+    }
+
+    #[getter]
+    /// Matrix layout selected for the generated BVP system.
+    pub fn matrix_layout(&self) -> &str {
+        &self.inner.matrix_layout
+    }
+
+    /// Describe the selected Frozen policy and current native route.
+    pub fn provenance(&self) -> HashMap<String, String> {
+        let mut data = self.inner.provenance();
+        data.insert("solver".to_owned(), "bvp_damp_frozen".to_owned());
+        data.insert("strategy".to_owned(), "Frozen".to_owned());
+        data.insert("frozen_policy".to_owned(), self.policy.clone());
+        data
+    }
+}
+
+fn frozen_policy_parameters(
+    policy: &str,
+    parameters: Option<Vec<f64>>,
+) -> PyResult<HashMap<String, Option<Vec<f64>>>> {
+    let expected_len = match policy {
+        "Frozen_naive" => None,
+        "every_m" | "at_high_morm" | "at_low_speed" => Some(1),
+        "complex" => Some(3),
+        other => {
+            return Err(UnsupportedOptionError::new_err(format!(
+                "unsupported Frozen policy '{other}'; expected Frozen_naive, every_m, at_high_morm, at_low_speed or complex"
+            )));
+        }
+    };
+    let values = match expected_len {
+        None if parameters.is_none() => None,
+        None => {
+            return Err(InvalidConfigurationError::new_err(
+                "Frozen_naive does not accept policy_parameters",
+            ));
+        }
+        Some(expected) => {
+            let values = parameters.ok_or_else(|| {
+                InvalidConfigurationError::new_err(format!(
+                    "Frozen policy '{policy}' requires {expected} policy parameter(s)"
+                ))
+            })?;
+            if values.len() != expected || values.iter().any(|value| !value.is_finite()) {
+                return Err(InvalidConfigurationError::new_err(format!(
+                    "Frozen policy '{policy}' requires {expected} finite policy parameter(s)"
+                )));
+            }
+            match policy {
+                "every_m" if values[0] <= 0.0 || values[0].fract() != 0.0 => {
+                    return Err(InvalidConfigurationError::new_err(
+                        "every_m requires a positive integer iteration period",
+                    ));
+                }
+                "at_high_morm" if values[0] <= 0.0 => {
+                    return Err(InvalidConfigurationError::new_err(
+                        "at_high_morm requires a positive norm threshold",
+                    ));
+                }
+                "at_low_speed" if values[0] > 1.0 => {
+                    return Err(InvalidConfigurationError::new_err(
+                        "at_low_speed requires a speed rate no greater than 1",
+                    ));
+                }
+                "complex"
+                    if values[0] <= 0.0
+                        || values[0].fract() != 0.0
+                        || values[1] <= 0.0
+                        || values[2] > 1.0 =>
+                {
+                    return Err(InvalidConfigurationError::new_err(
+                        "complex expects [positive integer period, positive norm threshold, speed rate <= 1]",
+                    ));
+                }
+                _ => {}
+            }
+            Some(values)
+        }
+    };
+    Ok(HashMap::from([(policy.to_owned(), values)]))
+}
+
+fn snapshot_frozen_maps(
+    stats: &FrozenBvpStatistics,
+) -> (HashMap<String, u64>, HashMap<String, f64>) {
+    let mut counters: HashMap<String, u64> = stats
+        .counters
+        .iter()
+        .map(|(name, value)| {
+            let stable_name = match name.as_str() {
+                "number of iterations" => "iterations",
+                "number of residual calls" => "residual_calls",
+                "number of jacobians recalculations" => "jacobian_recalculations",
+                "number of solving linear systems" => "linear_solves",
+                "number of factorizations" => "factorizations",
+                "number of factorization cache hits" => "factorization_cache_hits",
+                "number of factorization invalidations" => "factorization_invalidations",
+                "number of RHS solves" => "rhs_solves",
+                "number of grid refinements" => "grid_refinements",
+                "number of grid points" => "grid_points",
+                "length of y vector" => "state_vector_length",
+                "number of jacobian elements" => "jacobian_elements",
+                other => other,
+            };
+            (stable_name.to_owned(), *value as u64)
+        })
+        .collect();
+    let mut timings: HashMap<String, f64> = [
+        ("total_ms", stats.telemetry.timings.total),
+        ("residual_ms", stats.telemetry.timings.residual),
+        ("jacobian_ms", stats.telemetry.timings.jacobian),
+        ("linear_system_ms", stats.telemetry.timings.linear_system),
+        ("factorization_ms", stats.telemetry.timings.factorization),
+        ("rhs_solve_ms", stats.telemetry.timings.rhs_solve),
+        (
+            "symbolic_operations_ms",
+            stats.telemetry.timings.symbolic_operations,
+        ),
+        (
+            "grid_refinement_ms",
+            stats.telemetry.timings.grid_refinement,
+        ),
+    ]
+    .into_iter()
+    .map(|(name, duration)| (name.to_owned(), duration.as_secs_f64() * 1000.0))
+    .collect();
+    if !stats.telemetry.telemetry_mode.collects_counters() {
+        counters.clear();
+    }
+    if !stats.telemetry.telemetry_mode.collects_timings() {
+        timings.clear();
+    }
+    (counters, timings)
 }
 
 fn finite_boundary_conditions(conditions: &HashMap<String, Vec<(usize, f64)>>) -> PyResult<()> {

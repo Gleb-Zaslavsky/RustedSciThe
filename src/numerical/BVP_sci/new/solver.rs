@@ -1,5 +1,6 @@
 //! Public solve boundary for the new BVP architecture.
 
+use crate::numerical::logging::SolverLogGuard;
 use std::sync::Arc;
 
 use super::{
@@ -391,6 +392,7 @@ impl BvpSciSolver {
     /// defect away from collocation points.  Refinement only replaces numeric
     /// storage; the prepared symbolic plan and its evaluators remain intact.
     pub fn solve(&mut self) -> Result<BvpSciSolution, BvpSciNewError> {
+        let _logging_scope = SolverLogGuard::enter(self.options.logging_level);
         let _full_solve_timer = self.plan.telemetry().start_full_solve();
         if self.continuation_pending {
             self.plan.telemetry().record_continuation_solve();
@@ -1702,7 +1704,7 @@ mod tests {
             &["y".into()],
             &[],
             "x",
-            BvpSciTelemetry::timings(),
+            BvpSciTelemetry::detailed(),
         )
         .unwrap();
         let boundary = BvpSciBoundaryCallbacks::new(
@@ -1851,7 +1853,7 @@ mod tests {
             &["y0".into(), "y1".into()],
             &[],
             "x",
-            BvpSciTelemetry::timings(),
+            BvpSciTelemetry::detailed(),
         )
         .unwrap();
         let telemetry = plan.telemetry().clone();

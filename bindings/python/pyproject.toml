@@ -36,6 +36,7 @@ profile = "release"
 editable-profile = "dev"
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
 markers = [
     "slow: explicit solver story outside the fast Python contract suite",
 ]

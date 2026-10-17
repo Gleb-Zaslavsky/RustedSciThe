@@ -214,10 +214,10 @@ let config = RadauConfig {
 };
 ```
 
-`Counters` нужны для числа residual/Jacobian calls, accepted/rejected steps,
-Newton iterations, factorizations и linear solves. `Timings` включайте для
-расследования performance. Preparation и runtime scopes разделены; parent и
-child timings диагностические и не должны складываться.
+`Counters` собирает residual/Jacobian calls, accepted/rejected steps, Newton
+iterations, factorizations и linear solves без чтения часов. `Timings` собирает
+только длительности, а `Detailed` — и счётчики, и времена. Preparation и runtime
+scopes разделены; parent и child timings диагностические и не должны складываться.
 
 Важные группы telemetry: preparation, residual/Jacobian, Newton, linear
 factorization/solve, output, parameter rebind и AOT build/link/publication.

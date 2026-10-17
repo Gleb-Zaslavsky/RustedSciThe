@@ -199,7 +199,7 @@ fn dense_backend_dispatch_reports_assembly_factor_and_solve_scopes() {
     let mut workspace = backend.create_workspace(2).unwrap();
     let coefficients = RadauIia5::new();
     let jacobian = [-1.0, 0.0, 0.0, -2.0];
-    let mut telemetry = RadauTelemetry::new(RadauTelemetryMode::Timings);
+    let mut telemetry = RadauTelemetry::new(RadauTelemetryMode::Detailed);
 
     backend
         .assemble_shifted_into(

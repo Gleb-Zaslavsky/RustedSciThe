@@ -518,7 +518,7 @@ mod tests {
             &["y".into()],
             &["p".into()],
             "x",
-            BvpSciTelemetry::timings(),
+            BvpSciTelemetry::detailed(),
         )
         .expect("ExprLegacy preparation should succeed");
         let mut arguments = [0.0; 3];
@@ -534,7 +534,7 @@ mod tests {
         assert_eq!(jacobian, [4.0]);
         assert_eq!(plan.jacobian_nnz(), 1);
         let snapshot = plan.telemetry_snapshot();
-        assert_eq!(snapshot.mode, BvpSciTelemetryMode::Timings);
+        assert_eq!(snapshot.mode, BvpSciTelemetryMode::Detailed);
         assert_eq!(snapshot.rhs_calls, 1);
         assert_eq!(snapshot.jacobian_calls, 1);
         assert_eq!(snapshot.argument_bindings, 2);

@@ -200,7 +200,7 @@ impl NRBVP {
             self.error_old = error;
             info!(" \n \n error = {:?} \n \n", &error);
             if error < self.tolerance {
-                log::info!("converged in {} iterations, error = {}", i, error);
+                info!("converged in {} iterations, error = {}", i, error);
                 self.result = Some(new_y.to_DVectorType());
                 self.max_error = error;
                 self.telemetry_counters
@@ -222,6 +222,12 @@ impl NRBVP {
     /// typed backend and execution errors but do not need the higher-level
     /// logging wrapper provided by [`NRBVP::try_solve`].
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        let log_level = match self.telemetry_counters.logging_mode() {
+            BvpLoggingMode::Off => SolverLogLevel::Off,
+            BvpLoggingMode::Warnings => SolverLogLevel::Warn,
+            BvpLoggingMode::Detailed => SolverLogLevel::Info,
+        };
+        let _logging_scope = SolverLogGuard::enter(log_level);
         // TODO! СЃСЂР°РІРЅРёС‚СЊ СЏРІРЅС‹Р№ РјСЌС€ СЃ РЅРµСЏРІРЅС‹Рј
         // let test_mesh = Some((0..100).map(|x| 0.01 * x as f64).collect::<Vec<f64>>());
         self.telemetry_counters.begin_solve();
@@ -256,6 +262,12 @@ impl NRBVP {
     pub fn try_solver_prepared(
         &mut self,
     ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        let log_level = match self.telemetry_counters.logging_mode() {
+            BvpLoggingMode::Off => SolverLogLevel::Off,
+            BvpLoggingMode::Warnings => SolverLogLevel::Warn,
+            BvpLoggingMode::Detailed => SolverLogLevel::Info,
+        };
+        let _logging_scope = SolverLogGuard::enter(log_level);
         let prepared_fingerprint = self.prepared_plan_fingerprint();
         if !self
             .prepared_runtime_revision
@@ -282,44 +294,11 @@ impl NRBVP {
 
     /// Main public fallible solve entrypoint with logging support.
     ///
-    /// This is the preferred production-facing solve path.
+    /// This is the preferred production-facing solve path. Logging is disabled
+    /// by default; the generated-backend configuration may explicitly enable
+    /// solver messages to the shared timestamped file logger.
     pub fn try_solve(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
-        let logger_instance = if self.no_reports {
-            let logger_instance = CombinedLogger::init(vec![TermLogger::new(
-                LevelFilter::Info,
-                Config::default(),
-                TerminalMode::Mixed,
-                ColorChoice::Auto,
-            )]);
-            logger_instance
-        } else {
-            let date_and_time = Local::now().format("%Y-%m-%d_%H-%M");
-            let name = format!("log_{}.txt", date_and_time);
-            let file = File::create(&name).map_err(|err| {
-                BvpBackendIntegrationError::LogFileCreationFailed {
-                    path: name.clone(),
-                    message: err.to_string(),
-                }
-            })?;
-            let logger_instance = CombinedLogger::init(vec![
-                TermLogger::new(
-                    LevelFilter::Info,
-                    Config::default(),
-                    TerminalMode::Mixed,
-                    ColorChoice::Auto,
-                ),
-                WriteLogger::new(LevelFilter::Info, Config::default(), file),
-            ]);
-            logger_instance
-        };
-        match logger_instance {
-            Ok(()) => {
-                let res = self.try_solver()?;
-                log::info!("Program ended");
-                Ok(res)
-            }
-            Err(_) => self.try_solver(),
-        }
+        self.try_solver()
     }
     /// Compatibility-only wrapper over [`NRBVP::try_solve`].
     ///

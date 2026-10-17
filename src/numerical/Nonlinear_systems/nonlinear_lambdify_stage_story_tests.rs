@@ -353,7 +353,7 @@ mod tests {
                     max_iterations: 80,
                     diagnostics: crate::numerical::Nonlinear_systems::engine::DiagnosticsOptions {
                         collect_history: false,
-                        collect_statistics: true,
+                        telemetry_mode: crate::numerical::SolverTelemetryMode::Detailed,
                         enable_logging: false,
                         ..Default::default()
                     },

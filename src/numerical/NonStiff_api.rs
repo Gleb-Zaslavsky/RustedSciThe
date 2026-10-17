@@ -462,38 +462,47 @@ impl DormandPrince {
     }
 
     pub fn _step_impl(&mut self) -> bool {
-        // Butcher tableau coefficients for Dormand-Prince
+        // Dormand-Prince 5(4) tableau. This API currently uses the fifth-order
+        // weights with a caller-supplied fixed step; it does not adapt the step
+        // from the embedded fourth-order error estimate.
         let a: [[f64; 6]; 6] = [
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             [1.0 / 5.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             [3.0 / 40.0, 9.0 / 40.0, 0.0, 0.0, 0.0, 0.0],
-            [44.0 / 45.0, -56.0 / 45.0, 32.0 / 45.0, 0.0, 0.0, 0.0],
+            [44.0 / 45.0, -56.0 / 15.0, 32.0 / 9.0, 0.0, 0.0, 0.0],
             [
                 19372.0 / 6561.0,
-                -25360.0 / 6561.0,
+                -25360.0 / 2187.0,
                 64448.0 / 6561.0,
-                -212.0 / 6561.0,
+                -212.0 / 729.0,
                 0.0,
                 0.0,
             ],
             [
                 9017.0 / 3168.0,
-                -3556.0 / 3168.0,
-                46732.0 / 3168.0,
-                -4275.0 / 3168.0,
-                2187.0 / 6561.0,
+                -355.0 / 33.0,
+                46732.0 / 5247.0,
+                49.0 / 176.0,
+                -5103.0 / 18656.0,
                 0.0,
+            ],
+            [
+                35.0 / 384.0,
+                0.0,
+                500.0 / 1113.0,
+                125.0 / 192.0,
+                -2187.0 / 6784.0,
+                11.0 / 84.0,
             ],
         ];
         let c = [0.0, 1.0 / 5.0, 3.0 / 10.0, 4.0 / 5.0, 8.0 / 9.0, 1.0, 1.0];
         let b = [
-            19.0 / 216.0,
+            35.0 / 384.0,
             0.0,
-            16.0 / 216.0,
-            512.0 / 1083.0,
-            256.0 / 1083.0,
-            -212.0 / 6561.0,
-            1.0 / 8.0,
+            500.0 / 1113.0,
+            125.0 / 192.0,
+            -2187.0 / 6784.0,
+            11.0 / 84.0,
+            0.0,
         ];
 
         let mut t = self.t;
@@ -501,10 +510,10 @@ impl DormandPrince {
         let f = &self.f;
         let h = self.h;
 
-        let mut k = vec![DVector::zeros(y.len()); 6];
+        let mut k = vec![DVector::zeros(y.len()); 7];
 
         k[0] = h * f(t, &y);
-        for i in 1..6 {
+        for i in 1..7 {
             let mut y_temp = y.clone();
             for j in 0..i {
                 y_temp += a[i - 1][j] * &k[j];
@@ -513,7 +522,7 @@ impl DormandPrince {
         }
 
         let mut y_next = y.clone();
-        for i in 0..6 {
+        for i in 0..7 {
             y_next += b[i] * &k[i];
         }
 
@@ -624,6 +633,21 @@ mod tests_nonstiff_api {
     use crate::symbolic::symbolic_engine::Expr;
     use approx::assert_relative_eq;
     use nalgebra::DVector;
+
+    #[test]
+    fn test_dopri_step_preserves_constant_rhs_solution() {
+        let mut solver = DormandPrince::new();
+        solver.set_initial(
+            Box::new(|_, y| DVector::from_element(y.len(), 1.0)),
+            DVector::from_element(1, 0.0),
+            0.0,
+            0.125,
+        );
+
+        assert!(solver._step_impl());
+        assert_relative_eq!(solver.t, 0.125, epsilon = 1e-15);
+        assert_relative_eq!(solver.y[0], 0.125, epsilon = 1e-14);
+    }
 
     #[test]
     fn test_RK45_api_simple_linear_ode() {

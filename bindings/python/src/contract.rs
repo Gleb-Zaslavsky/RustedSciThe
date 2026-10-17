@@ -4,6 +4,7 @@ use std::fmt;
 use pyo3::prelude::*;
 
 use crate::errors::{InvalidConfigurationError, UnsupportedOptionError};
+use rustedscithe_core::numerical::logging::SolverLogLevel;
 
 /// Symbolic preparation route understood by the native solver APIs.
 #[pyclass(name = "SymbolicFrontend", module = "rustedscithe")]
@@ -142,6 +143,7 @@ pub enum TelemetryMode {
     Off,
     Counters,
     Timings,
+    Detailed,
 }
 
 impl fmt::Display for TelemetryMode {
@@ -150,6 +152,7 @@ impl fmt::Display for TelemetryMode {
             Self::Off => "Off",
             Self::Counters => "Counters",
             Self::Timings => "Timings",
+            Self::Detailed => "Detailed",
         })
     }
 }
@@ -161,6 +164,7 @@ impl TelemetryMode {
             Self::Off => "Off",
             Self::Counters => "Counters",
             Self::Timings => "Timings",
+            Self::Detailed => "Detailed",
         }
     }
 
@@ -218,6 +222,7 @@ pub struct SolverOptions {
     matrix_layout: String,
     execution_policy: String,
     telemetry: String,
+    logging_level: String,
     aot_policy: String,
     aot_toolchain: String,
     aot_profile: String,
@@ -241,7 +246,7 @@ impl SolverOptions {
     ///
     /// Common spellings include `expr_legacy`/`expr` and
     /// `atom_native`/`atom_view`; `lambdify`/`aot`; `dense`/`sparse`/`banded`;
-    /// `sequential`/`parallel`/`auto`; and `off`/`counters`/`timings`.
+    /// `sequential`/`parallel`/`auto`; and `off`/`counters`/`timings`/`detailed`.
     #[new]
     #[pyo3(signature = (*, frontend=None, execution=None, matrix_layout=None, execution_policy=None, telemetry=None, aot_policy=None, aot_toolchain=None, aot_profile=None, aot_output_dir=None))]
     pub fn new(
@@ -283,8 +288,9 @@ impl SolverOptions {
                 telemetry,
                 "timings",
                 "telemetry",
-                &["off", "counters", "timings"],
+                &["off", "counters", "timings", "detailed"],
             )?,
+            logging_level: "off".to_owned(),
             aot_policy: choose(
                 aot_policy,
                 "build_if_missing",
@@ -330,10 +336,30 @@ impl SolverOptions {
         &self.execution_policy
     }
 
-    /// Telemetry level: off, counters, or timings.
+    /// Telemetry level: off, counters, timings, or detailed.
     #[getter]
     pub(crate) fn telemetry(&self) -> &str {
         &self.telemetry
+    }
+
+    /// Rust `log` verbosity requested for solvers that expose native logging.
+    #[getter]
+    pub(crate) fn logging_level(&self) -> &str {
+        &self.logging_level
+    }
+
+    /// Select native Rust logging verbosity; logging remains disabled by default.
+    pub fn set_logging_level(&mut self, level: &str) -> PyResult<()> {
+        self.logging_level = choose(
+            Some(level),
+            "off",
+            "logging_level",
+            &["off", "error", "warn", "warning", "info", "debug"],
+        )?;
+        if self.logging_level == "warning" {
+            self.logging_level = "warn".to_owned();
+        }
+        Ok(())
     }
 
     #[getter]
@@ -435,6 +461,7 @@ impl SolverOptions {
     pub fn validate_for(&self, solver: &str) -> PyResult<()> {
         self.validate_aot_options()?;
         let capabilities = capabilities_for(solver)?;
+        let _ = native_logging_level(self, &capabilities.solver)?;
         if !capabilities.frontends.iter().any(|v| v == &self.frontend)
             || !capabilities.executions.iter().any(|v| v == &self.execution)
             || !capabilities
@@ -483,6 +510,7 @@ impl SolverOptions {
             ("matrix_layout".to_owned(), self.matrix_layout.clone()),
             ("execution_policy".to_owned(), self.execution_policy.clone()),
             ("telemetry".to_owned(), self.telemetry.clone()),
+            ("logging_level".to_owned(), self.logging_level.clone()),
             ("aot_policy".to_owned(), self.aot_policy.clone()),
             ("aot_toolchain".to_owned(), self.aot_toolchain.clone()),
             ("aot_profile".to_owned(), self.aot_profile.clone()),
@@ -504,12 +532,13 @@ impl SolverOptions {
 
     fn __repr__(&self) -> String {
         format!(
-            "SolverOptions(frontend='{}', execution='{}', matrix_layout='{}', execution_policy='{}', telemetry='{}', aot_policy='{}', aot_toolchain='{}', aot_profile='{}', aot_output_dir={:?}, aot_handoff_path={:?}, band_lower={:?}, band_upper={:?})",
+            "SolverOptions(frontend='{}', execution='{}', matrix_layout='{}', execution_policy='{}', telemetry='{}', logging_level='{}', aot_policy='{}', aot_toolchain='{}', aot_profile='{}', aot_output_dir={:?}, aot_handoff_path={:?}, band_lower={:?}, band_upper={:?})",
             self.frontend,
             self.execution,
             self.matrix_layout,
             self.execution_policy,
             self.telemetry,
+            self.logging_level,
             self.aot_policy,
             self.aot_toolchain,
             self.aot_profile,
@@ -519,6 +548,31 @@ impl SolverOptions {
             self.band_upper,
         )
     }
+}
+
+/// Translate common Python logging configuration to a supported native level.
+pub(crate) fn native_logging_level(
+    options: &SolverOptions,
+    solver: &str,
+) -> PyResult<SolverLogLevel> {
+    if options.logging_level != "off"
+        && !matches!(
+            solver,
+            "bdf" | "backward_euler" | "lsode2" | "bvp_sci" | "shooting_bvp"
+        )
+    {
+        return Err(UnsupportedOptionError::new_err(format!(
+            "solver '{solver}' does not expose native Rust logging"
+        )));
+    }
+    Ok(match options.logging_level.as_str() {
+        "off" => SolverLogLevel::Off,
+        "error" => SolverLogLevel::Error,
+        "warn" | "warning" => SolverLogLevel::Warn,
+        "info" => SolverLogLevel::Info,
+        "debug" => SolverLogLevel::Debug,
+        _ => unreachable!("logging level validated by SolverOptions"),
+    })
 }
 
 /// Capabilities advertised by a concrete solver family.
@@ -676,14 +730,33 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
                 "banded".to_owned(),
             ],
         }),
+        "ode_api2_nonstiff" | "nonstiff" => Ok(SolverCapabilities {
+            solver: "ode_api2_nonstiff".to_owned(),
+            frontends: vec!["expr_legacy".to_owned()],
+            executions: vec!["lambdify".to_owned()],
+            methods: vec!["rk45".to_owned(), "dopri".to_owned(), "ab4".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec!["sequential".to_owned()],
+            supports_continuation: false,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "shooting_bvp" | "shooting" => Ok(SolverCapabilities {
+            solver: "shooting_bvp".to_owned(),
+            frontends: common_frontends,
+            executions: vec!["lambdify".to_owned()],
+            methods: vec!["scalar_second_order_shooting".to_owned()],
+            layouts: vec!["dense".to_owned()],
+            policies: vec!["sequential".to_owned(), "parallel".to_owned()],
+            supports_continuation: false,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
         "bvp" | "bvp_damp" | "bvp_damped" => Ok(SolverCapabilities {
             solver: "bvp_damp".to_owned(),
             frontends: common_frontends,
             executions: vec!["lambdify".to_owned(), "aot".to_owned()],
-            // The direct Python class owns the Damped solver only. Frozen is
-            // still available through native/task routes but is deliberately
-            // not advertised as a complete direct Python API.
-            methods: vec!["damped".to_owned()],
+            methods: vec!["damped".to_owned(), "naive".to_owned(), "frozen".to_owned()],
             layouts: vec!["dense".to_owned(), "sparse".to_owned(), "banded".to_owned()],
             policies: vec![
                 "sequential".to_owned(),
@@ -748,7 +821,7 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
             analytical_callback_layouts: Vec::new(),
         }),
         _ => Err(InvalidConfigurationError::new_err(format!(
-            "unknown solver '{solver}'; capabilities are currently defined for radau5, bdf, backward_euler, lsode2, bvp_damp, bvp_sci, nonlinear_system and fitting"
+            "unknown solver '{solver}'; capabilities are currently defined for radau5, bdf, backward_euler, lsode2, ode_api2_nonstiff, bvp_damp, bvp_sci, shooting_bvp, nonlinear_system and fitting"
         ))),
     }
 }

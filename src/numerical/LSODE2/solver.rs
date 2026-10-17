@@ -11,31 +11,34 @@ use super::config::{
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
+    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
     run_native_integration, run_native_integration_for_method,
     run_native_integration_for_method_with_policy_and_optional_callbacks,
-    run_native_integration_for_method_with_prepared_callbacks, Lsode2NativeIntegrationLimits,
-    Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
+    run_native_integration_for_method_with_prepared_callbacks,
 };
 use super::native_jacobian::{
-    compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
+    NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
     compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy,
-    NativeJacobianStorage,
 };
 use super::native_preflight::{
-    run_native_step_preflight, run_native_step_preflight_with_prepared_callbacks,
-    Lsode2NativeStepProbeSummary,
+    Lsode2NativeStepProbeSummary, run_native_step_preflight,
+    run_native_step_preflight_with_prepared_callbacks,
 };
 use super::native_step_engine::{
     Lsode2NativeStepEngine, Lsode2NativeStepMethod, PreparedNativeCallbacks,
 };
 use super::statistics::Lsode2NativeStatistics;
-use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
-use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetrySnapshot, IvpWarmStage};
-use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
-use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
 use crate::Utils::postprocessing::{
     PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
 };
+use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
+use crate::numerical::logging::SolverLogGuard;
+pub use crate::numerical::logging::SolverLogLevel;
+use crate::symbolic::ivp_telemetry::{
+    IvpColdStage, IvpTelemetryExecution, IvpTelemetrySnapshot, IvpWarmStage,
+};
+use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
+use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fmt;
@@ -295,6 +298,7 @@ pub struct Lsode2Solver {
     native_override_result: Option<(DVector<f64>, DMatrix<f64>)>,
     last_native_switch_telemetry: Option<Lsode2SwitchTelemetry>,
     switch_telemetry_hints: Lsode2SwitchTelemetryHints,
+    logging_level: SolverLogLevel,
 }
 
 impl Lsode2Solver {
@@ -364,7 +368,26 @@ impl Lsode2Solver {
             native_override_result: None,
             last_native_switch_telemetry: None,
             switch_telemetry_hints: Lsode2SwitchTelemetryHints::default(),
+            logging_level: SolverLogLevel::Off,
         })
+    }
+
+    /// Sets the Rust-side message threshold for this solver. Enabled messages
+    /// are persisted to the shared timestamped solver log.
+    pub fn set_logging_level(&mut self, level: SolverLogLevel) {
+        self.logging_level = level;
+        self.inner.set_logging_level(level);
+    }
+
+    /// Builder-style per-instance logging configuration.
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        self.set_logging_level(level);
+        self
+    }
+
+    /// Returns the per-instance Rust logging threshold.
+    pub fn logging_level(&self) -> SolverLogLevel {
+        self.logging_level
     }
 
     pub fn config(&self) -> &Lsode2ProblemConfig {
@@ -455,6 +478,7 @@ impl Lsode2Solver {
     /// Repeated calls are cheap no-ops unless a future mutator invalidates the
     /// prepared backend.
     pub fn prepare(&mut self) -> Result<(), Lsode2Error> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         if !self.backend_prepared {
             let _prepare_scope = self
                 .config
@@ -479,6 +503,13 @@ impl Lsode2Solver {
             if bridge_required_before_solve {
                 self.prepare_bridge()?;
             }
+            // Callback preparation may update the shared snapshot while
+            // compiling individual residual/Jacobian components. Publish the
+            // selected route only after the complete native preparation so a
+            // later compatibility callback cannot overwrite AOT provenance.
+            self.config
+                .telemetry
+                .set_execution(telemetry_execution_for_config(&self.config));
             self.native_statistics
                 .record_backend_prepare_duration(started.elapsed());
             self.native_statistics
@@ -517,6 +548,7 @@ impl Lsode2Solver {
     }
 
     pub fn solve(&mut self) -> Result<(), Lsode2Error> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         self.native_integration_preview = None;
         self.native_integration_solve = None;
         self.native_override_status = None;
@@ -1249,6 +1281,19 @@ impl Lsode2Solver {
     fn absorb_native_switch_telemetry(&mut self, telemetry: Lsode2SwitchTelemetry) {
         self.last_native_switch_telemetry = Some(telemetry);
         self.switch_telemetry_hints.absorb(telemetry);
+    }
+}
+
+pub(super) fn telemetry_execution_for_config(
+    config: &Lsode2ProblemConfig,
+) -> IvpTelemetryExecution {
+    match config.residual_jacobian_source {
+        Lsode2ResidualJacobianSource::Symbolic {
+            execution: Lsode2SymbolicExecutionMode::Aot { .. },
+            ..
+        } => IvpTelemetryExecution::Aot,
+        Lsode2ResidualJacobianSource::Symbolic { .. }
+        | Lsode2ResidualJacobianSource::Analytical => IvpTelemetryExecution::Lambdify,
     }
 }
 

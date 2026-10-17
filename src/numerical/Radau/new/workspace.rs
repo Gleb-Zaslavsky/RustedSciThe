@@ -94,7 +94,10 @@ impl RadauWorkspace {
         layout: RadauMatrixLayout,
         sparse_pattern: &[(usize, usize)],
     ) -> Result<(), RadauError> {
-        let started = (self.telemetry.mode() == super::telemetry::RadauTelemetryMode::Timings)
+        let started = self
+            .telemetry
+            .mode()
+            .collects_timings()
             .then(std::time::Instant::now);
         self.telemetry.count_workspace_resize();
         let result = self.resize_for_layout_inner(dimension, layout, sparse_pattern);
@@ -178,23 +181,22 @@ impl RadauWorkspace {
         // Resizing is a preparation/reconfiguration operation, not part of a
         // normal Newton step.  Avoid even capacity reads when telemetry is
         // Off so the default path remains genuinely low overhead.
-        let capacities_before =
-            (self.telemetry.mode() != super::telemetry::RadauTelemetryMode::Off).then(|| {
-                [
-                    self.stage_states.capacity(),
-                    self.stage_rhs.capacity(),
-                    self.correction.capacity(),
-                    self.scale.capacity(),
-                    self.jacobian.capacity(),
-                    self.rollback_state.capacity(),
-                    self.base_rhs.capacity(),
-                    self.real_rhs.capacity(),
-                    self.complex_rhs_real.capacity(),
-                    self.complex_rhs_imag.capacity(),
-                    self.transformed_state.capacity(),
-                    self.transformed_correction.capacity(),
-                ]
-            });
+        let capacities_before = self.telemetry.mode().collects_counters().then(|| {
+            [
+                self.stage_states.capacity(),
+                self.stage_rhs.capacity(),
+                self.correction.capacity(),
+                self.scale.capacity(),
+                self.jacobian.capacity(),
+                self.rollback_state.capacity(),
+                self.base_rhs.capacity(),
+                self.real_rhs.capacity(),
+                self.complex_rhs_real.capacity(),
+                self.complex_rhs_imag.capacity(),
+                self.transformed_state.capacity(),
+                self.transformed_correction.capacity(),
+            ]
+        });
         let stage_len = dimension
             .checked_mul(3)
             .ok_or(RadauError::WorkspaceSizeOverflow { dimension })?;

@@ -73,9 +73,12 @@ not a batch of independent solves.
 
 ## Telemetry and AOT
 
-Use the structured counters/timings and compact report on the detached
-solution. Stage durations may overlap and therefore should not always be
-summed. AOT supports the shared BuildIfMissing, RequirePrebuilt and
+Choose `telemetry="off"`, `"counters"`, `"timings"`, or `"detailed"` in
+`SolverOptions`. `counters` collects discrete counts only; `timings` collects
+durations only; `detailed` collects both. Read the detached snapshot with
+`solution.telemetry_counters()`, `solution.telemetry_timings_ms()`, and
+`solution.telemetry_report()`. Stage durations may overlap and therefore
+should not always be summed. AOT supports the shared BuildIfMissing, RequirePrebuilt and
 RebuildAlways lifecycle, including process handoff and provenance. A cold
 compile may only amortize over repeated work; report preparation, callbacks
 and full-solve time separately.

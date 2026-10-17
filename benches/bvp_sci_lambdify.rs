@@ -310,7 +310,7 @@ fn frontend_callback_row(
     repeats: usize,
     warm_rayon: bool,
 ) -> FrontendCallbackRow {
-    let telemetry = BvpSciTelemetry::timings();
+    let telemetry = BvpSciTelemetry::detailed();
     let state_names = workload.state_names();
     let parameters = workload.parameter(0);
     let state = vec![0.25; state_names.len()];
@@ -951,7 +951,7 @@ fn parameterized_plan(frontend: Frontend) -> Result<BvpSciLambdifyPlan, String> 
         &["y".into()],
         &["p".into()],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .map_err(|error| error.to_string())
 }
@@ -1297,7 +1297,7 @@ fn build_solver_with_sparse_factorization(
 ) -> Result<(BvpSciSolver, Arc<AtomicU64>), String> {
     let parameter_names = workload.parameter_names();
     let parameter = workload.parameter(parameter_index);
-    let telemetry = BvpSciTelemetry::timings();
+    let telemetry = BvpSciTelemetry::detailed();
     let plan = BvpSciLambdifyPlan::prepare(
         frontend.assembly(),
         &workload.equations(),
@@ -1934,7 +1934,7 @@ fn main() {
             .map(|value| value != "0")
             .unwrap_or(false);
         let body = format!(
-            "# BVP_sci Lambdify frontend callback microbench\n\n- phase: frontend-callback\n- workloads: {:?}\n- repeats per row: {repeats}\n- rayon_warmup: {warm_rayon}\n- no mesh, Newton or linear backend work is included\n- callback buffers are caller-owned and reused\n- timing scopes are diagnostic and non-additive\n\n{}",
+            "# BVP_sci Lambdify frontend callback microbench\n\n- phase: frontend-callback\n- workloads: {:?}\n- repeats per row: {repeats}\n- rayon_warmup: {warm_rayon}\n- telemetry: `Detailed` collects counters, timings and detailed traces; measured callback durations include instrumentation and are diagnostic, not an uninstrumented speed baseline\n- no mesh, Newton or linear backend work is included\n- callback buffers are caller-owned and reused\n- timing scopes are diagnostic and non-additive\n\n{}",
             workloads
                 .iter()
                 .map(|workload| workload.label())
@@ -1962,7 +1962,7 @@ fn main() {
             .and_then(|value| value.parse().ok())
             .unwrap_or_else(rayon::current_num_threads);
         let body = format!(
-            "# BVP_sci Lambdify full-solve execution-policy matrix\n\n- phase: policy-full-solve\n- workers_requested: {workers}\n- workers_observed: dispatch-dependent; `0` means no parallel callback was selected\n- workloads: {:?}\n- nodes: {:?}\n- frontends: {:?}\n- layouts: {:?}\n- repeats: {repeats}; rows report medians\n- break-even criterion: at least 5% and at least 0.01 ms faster than the same frontend/workload/layout sequential row\n- callback policy affects independent residual/Jacobian entries; numerical workspace remains single-owner\n- timing scopes are diagnostic and non-additive\n\n{}",
+            "# BVP_sci Lambdify full-solve execution-policy matrix\n\n- phase: policy-full-solve\n- workers_requested: {workers}\n- workers_observed: dispatch-dependent; `0` means no parallel callback was selected\n- workloads: {:?}\n- nodes: {:?}\n- frontends: {:?}\n- layouts: {:?}\n- repeats: {repeats}; rows report medians\n- telemetry: `Detailed` collects counters, timings and detailed traces; measured solve durations include instrumentation and are diagnostic, not an uninstrumented speed baseline\n- break-even criterion: at least 5% and at least 0.01 ms faster than the same frontend/workload/layout sequential row\n- callback policy affects independent residual/Jacobian entries; numerical workspace remains single-owner\n- timing scopes are diagnostic and non-additive\n\n{}",
             workloads
                 .iter()
                 .map(|workload| workload.label())

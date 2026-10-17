@@ -140,7 +140,7 @@ impl NRBVP {
         };
         for el in undamped_step_k.iterate() {
             if !el.is_finite() {
-                log::error!("\n \n NaN in damped step deltaY \n \n");
+                error!("\n \n NaN in damped step deltaY \n \n");
                 return Err(BvpBackendIntegrationError::LinearSolveFailed {
                     backend: "legacy-matrix".to_string(),
                     matrix_rows,
@@ -263,7 +263,7 @@ impl NRBVP {
         // step0 points out of the allowed domain. In this case, the Newton
         // algorithm fails, so return an error condition.
         if fbound < 1e-10 {
-            log::warn!(
+            warn!(
                 "\n  No damped step can be taken without violating solution component bounds."
             );
             return Ok((-3, None));
@@ -639,12 +639,12 @@ impl NRBVP {
                 let mut res = match adaptive_config.version {
                     1 => {
                         if self.number_of_refined_intervals == 0 {
-                            log::info!(
+                            info!(
                                 "\n \n number of marked intervals is 0, no new grid is needed \n \n"
                             );
                             false
                         } else {
-                            log::info!(
+                            info!(
                                 "\n \n number of marked intervals is {}, new grid is needed \n \n",
                                 self.number_of_refined_intervals
                             );
@@ -703,7 +703,7 @@ impl NRBVP {
             DMatrix::from_column_slice(number_of_Ys, n_steps + 1, full_result_vector.as_slice());
         for (value, row) in self.values.iter().zip(y_DMatrix.clone().row_iter()) {
             let row: Vec<f64> = row.iter().cloned().collect();
-            log::debug!(
+            debug!(
                 "Initial guess for {}: {:?} of len {}",
                 value,
                 row,
@@ -858,6 +858,7 @@ impl NRBVP {
     /// typed backend and execution errors but do not need the higher-level
     /// logging wrapper provided by [`NRBVP::try_solve`].
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        let _logging_scope = SolverLogGuard::enter(self.effective_logging_level()?);
         self.telemetry_counters.begin_solve();
         self.custom_timer.start();
         let begin = Instant::now();
@@ -897,6 +898,7 @@ impl NRBVP {
     pub fn try_solver_prepared(
         &mut self,
     ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        let _logging_scope = SolverLogGuard::enter(self.effective_logging_level()?);
         let prepared_fingerprint = self.prepared_plan_fingerprint();
         if !self
             .prepared_runtime_revision
@@ -948,55 +950,7 @@ impl NRBVP {
     /// # Returns
     /// Solution vector if successful, None if failed
     pub fn try_solve(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
-        let is_logging_disabled = self
-            .loglevel
-            .as_ref()
-            .map(|level| level == "off" || level == "none")
-            .unwrap_or(false);
-
-        if is_logging_disabled {
-            self.try_solver()
-        } else {
-            let log_option = self.parse_log_level()?;
-            let logger_instance = if self.no_reports {
-                // don't want to save txt report
-                let logger_instance = CombinedLogger::init(vec![TermLogger::new(
-                    log_option,
-                    Config::default(),
-                    TerminalMode::Mixed,
-                    ColorChoice::Auto,
-                )]);
-                logger_instance
-            } else {
-                // want to save txt report
-                let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
-                let name = format!("log_{}.txt", date_and_time);
-                let file = File::create(&name).map_err(|err| {
-                    BvpBackendIntegrationError::LogFileCreationFailed {
-                        path: name.clone(),
-                        message: err.to_string(),
-                    }
-                })?;
-                let logger_instance = CombinedLogger::init(vec![
-                    TermLogger::new(
-                        log_option,
-                        Config::default(),
-                        TerminalMode::Mixed,
-                        ColorChoice::Auto,
-                    ),
-                    WriteLogger::new(log_option, Config::default(), file),
-                ]);
-                logger_instance
-            };
-            match logger_instance {
-                Ok(()) => {
-                    let res = self.try_solver()?;
-                    info!(" \n \n Program ended");
-                    Ok(res)
-                }
-                Err(_) => self.try_solver(), //end Error
-            } // end mat
-        }
+        self.try_solver()
     }
 
     /// Compatibility-only wrapper over [`NRBVP::try_solve`].

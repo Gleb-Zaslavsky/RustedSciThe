@@ -1,4 +1,6 @@
-use log::{error, info, warn};
+use crate::numerical::logging::{
+    solver_debug as debug, solver_error as error, solver_info as info, solver_warn as warn,
+};
 
 use super::BVP_utils::checkmem;
 

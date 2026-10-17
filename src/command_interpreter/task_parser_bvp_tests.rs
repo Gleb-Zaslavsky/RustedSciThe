@@ -383,6 +383,44 @@ singular_term_matrix: [0.25]
 }
 
 #[test]
+fn bvp_sci_parser_keeps_all_four_telemetry_modes_distinct() {
+    let template = r#"
+task
+solver: BVP_sci
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 4
+
+initial_guess
+y: 1.0
+
+solver_options
+telemetry: MODE
+"#;
+    for (mode, expected) in [
+        ("off", BvpSciTelemetryMode::Off),
+        ("counters", BvpSciTelemetryMode::Counters),
+        ("timings", BvpSciTelemetryMode::Timings),
+        ("detailed", BvpSciTelemetryMode::Detailed),
+    ] {
+        let input = template.replace("MODE", mode);
+        let spec = parse_bvp_task_from_str(&input).expect("telemetry mode should parse");
+        assert_eq!(spec.solver_options.telemetry, Some(expected));
+    }
+}
+
+#[test]
 fn bvp_task_parser_rejects_options_for_the_wrong_solver_family_or_layout() {
     let base = r#"
 task

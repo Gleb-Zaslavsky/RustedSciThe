@@ -427,7 +427,7 @@ fn bench_lambdify_realistic_end_to_end(c: &mut Criterion) {
             max_iterations: 80,
             diagnostics: DiagnosticsOptions {
                 collect_history: false,
-                collect_statistics: false,
+                telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Off,
                 enable_logging: false,
                 ..DiagnosticsOptions::default()
             },
@@ -717,7 +717,7 @@ fn bench_large_lambdify_legacy_vs_prepared(c: &mut Criterion) {
             max_iterations: 20,
             diagnostics: DiagnosticsOptions {
                 collect_history: false,
-                collect_statistics: false,
+                telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Off,
                 enable_logging: false,
                 ..DiagnosticsOptions::default()
             },
@@ -974,7 +974,7 @@ fn bench_large_lambdify_corpus(c: &mut Criterion) {
                 max_iterations: 20,
                 diagnostics: DiagnosticsOptions {
                     collect_history: false,
-                    collect_statistics: false,
+                    telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Off,
                     enable_logging: false,
                     ..DiagnosticsOptions::default()
                 },
@@ -1111,7 +1111,7 @@ fn bench_full_newton(c: &mut Criterion) {
             max_iterations: 8,
             diagnostics: DiagnosticsOptions {
                 collect_history: false,
-                collect_statistics: false,
+                telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Off,
                 ..DiagnosticsOptions::default()
             },
             ..SolveOptions::default()
@@ -1139,7 +1139,7 @@ fn bench_telemetry_overhead(c: &mut Criterion) {
             "enabled",
             DiagnosticsOptions {
                 collect_history: true,
-                collect_statistics: true,
+                telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Detailed,
                 enable_logging: false,
                 enable_memory_diagnostics: false,
                 ..DiagnosticsOptions::default()
@@ -1149,7 +1149,7 @@ fn bench_telemetry_overhead(c: &mut Criterion) {
             "disabled",
             DiagnosticsOptions {
                 collect_history: false,
-                collect_statistics: false,
+                telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Off,
                 enable_logging: false,
                 enable_memory_diagnostics: false,
                 ..DiagnosticsOptions::default()
@@ -1263,7 +1263,11 @@ fn hot_path_options(collect_statistics: bool, collect_history: bool) -> SolveOpt
         tolerance: 1e-8,
         max_iterations: 64,
         diagnostics: DiagnosticsOptions {
-            collect_statistics,
+            telemetry_mode: if collect_statistics {
+                RustedSciThe::numerical::SolverTelemetryMode::Detailed
+            } else {
+                RustedSciThe::numerical::SolverTelemetryMode::Off
+            },
             collect_history,
             enable_logging: false,
             ..DiagnosticsOptions::default()

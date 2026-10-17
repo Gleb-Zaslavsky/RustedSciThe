@@ -1,7 +1,7 @@
 use super::NR::{NR, solve_linear_system};
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
 use crate::numerical::Nonlinear_systems::dogleg::{DoglegSolver, Powell_dogleg_method};
-use log::{error, info};
+use crate::numerical::logging::{solver_error as error, solver_info as info};
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::LM_utils::{

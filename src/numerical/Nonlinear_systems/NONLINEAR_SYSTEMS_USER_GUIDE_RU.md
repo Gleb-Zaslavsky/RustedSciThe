@@ -8,6 +8,7 @@
 ```rust
 use nalgebra::DVector;
 use RustedSciThe::numerical::Nonlinear_systems::prelude::*;
+use RustedSciThe::numerical::SolverTelemetryMode;
 
 let prepared = PreparedSymbolicNonlinearProblem::from_strings(
     vec!["a*x + y - 3".into(), "x - y".into()],
@@ -22,7 +23,7 @@ let options = SolveOptions {
     max_iterations: 64,
     diagnostics: DiagnosticsOptions {
         collect_history: false,
-        collect_statistics: true,
+        telemetry_mode: SolverTelemetryMode::Detailed,
         ..DiagnosticsOptions::default()
     },
     ..SolveOptions::default()
@@ -301,7 +302,8 @@ break_even_solves ~=
 ### Стоимость телеметрии
 
 Solver statistics и preparation telemetry отвечают на разные вопросы.
-`collect_statistics` дает solver-level counters и stage timers, а
+`telemetry_mode` выбирает `Off`, `Counters`, `Timings` или `Detailed`, а
+`Counters` не читает часы, `Timings` не обновляет дискретные счетчики.
 `collect_history` дополнительно сохраняет снимки итераций и может увеличить
 расход памяти. Подробная телеметрия подготовки отдельно включается через
 `PreparationTelemetryMode::Collect`. Release-аудит подготовки показал лишь
@@ -323,7 +325,7 @@ let options = SolveOptions {
 };
 ```
 
-При `collect_statistics: true` поле `SolveResult::statistics` содержит
+При `telemetry_mode: SolverTelemetryMode::Detailed` поле `SolveResult::statistics` содержит
 счетчики вызовов невязки, якобиана и линейного этапа, принятых и отвергнутых
 шагов, а также суммарные времена стадий. `collect_history` включается
 отдельно и может увеличивать память и количество аллокаций. Для измерения

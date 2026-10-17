@@ -1,5 +1,32 @@
 use super::*;
 
+#[test]
+fn backward_euler_logging_is_off_by_default_and_can_be_enabled_without_logger_setup() {
+    let default = one_state_be(0.1, Some(0.05));
+    assert_eq!(default.logging_level(), SolverLogLevel::Off);
+    assert_eq!(default.newton.logging_level(), SolverLogLevel::Off);
+
+    let mut configured = BE::new();
+    configured.set_logging_level(SolverLogLevel::Info);
+    assert_eq!(configured.logging_level(), SolverLogLevel::Info);
+    assert_eq!(configured.newton.logging_level(), SolverLogLevel::Info);
+
+    let options = BeSolverOptions::new(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".to_string()],
+        "t".to_string(),
+        1e-8,
+        10,
+        Some(0.05),
+        0.0,
+        0.1,
+        DVector::from_vec(vec![1.0]),
+    )
+    .with_logging_level(SolverLogLevel::Warn);
+    let options_solver = BE::try_new_with_options(options).unwrap();
+    assert_eq!(options_solver.logging_level(), SolverLogLevel::Warn);
+}
+
 fn one_state_be(t_bound: f64, h: Option<f64>) -> BE {
     let mut solver = BE::new();
     solver
@@ -391,30 +418,84 @@ fn be_symbolic_ivp_telemetry_is_absent_when_off_and_cleared_for_native_callbacks
 }
 
 #[test]
-fn be_symbolic_ivp_telemetry_timings_mode_uses_detailed_shared_stream() {
+fn be_symbolic_ivp_timings_mode_records_durations_without_discrete_counts() {
     let mut solver = one_state_be(0.2, Some(0.1));
     solver
         .try_set_telemetry_mode(BeTelemetryMode::Timings)
         .unwrap();
     solver.try_solve().unwrap();
+    solver.try_continue_to(0.3).unwrap();
 
+    let snapshot = solver.symbolic_ivp_telemetry_snapshot().unwrap();
+    assert_eq!(
+        snapshot.mode,
+        crate::symbolic::ivp_telemetry::IvpTelemetryMode::Timings
+    );
+    assert_eq!(
+        snapshot
+            .cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicJacobian)
+            .calls,
+        0
+    );
+    assert!(
+        snapshot
+            .cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicJacobian)
+            .elapsed
+            > std::time::Duration::ZERO
+    );
+    assert_eq!(
+        snapshot
+            .warm_stage(crate::symbolic::ivp_telemetry::IvpWarmStage::ResidualCallback)
+            .calls,
+        0
+    );
+    assert!(
+        snapshot
+            .warm_stage(crate::symbolic::ivp_telemetry::IvpWarmStage::ResidualCallback)
+            .elapsed
+            > std::time::Duration::ZERO
+    );
+    let stats = solver.get_statistics();
+    assert_eq!(stats.solve_calls, 0);
+    assert_eq!(stats.step_calls, 0);
+    assert_eq!(stats.backend_prepare_calls, 0);
+    assert_eq!(stats.residual_calls, 0);
+    assert_eq!(stats.jacobian_calls, 0);
+    assert!(stats.solve_ms_total > 0.0);
+    assert!(stats.residual_ms_total > 0.0);
+    assert!(stats.jacobian_ms_total > 0.0);
+    assert_eq!(solver.continuation_statistics().attempts, 0);
+    assert!(solver.continuation_statistics().elapsed_ms_total > 0.0);
+    let detailed = solver.detailed_statistics();
+    assert_eq!(detailed.factorization_calls, 0);
+    assert_eq!(detailed.accepted_steps, 0);
+    assert!(detailed.factorization_ms_total > 0.0);
+    assert!(detailed.linear_solve_ms_total > 0.0);
+    assert_eq!(detailed.output_assembly_calls, 0);
+    assert!(detailed.output_assembly_ms_total > 0.0);
+}
+
+#[test]
+fn be_detailed_mode_collects_counters_and_timings_together() {
+    let mut solver = one_state_be(0.25, Some(0.125));
+    solver
+        .try_set_telemetry_mode(BeTelemetryMode::Detailed)
+        .unwrap();
+    solver.try_solve().unwrap();
+
+    let stats = solver.get_statistics();
+    let detailed = solver.detailed_statistics();
     let snapshot = solver.symbolic_ivp_telemetry_snapshot().unwrap();
     assert_eq!(
         snapshot.mode,
         crate::symbolic::ivp_telemetry::IvpTelemetryMode::Detailed
     );
-    assert!(
-        snapshot
-            .cold_stage(crate::symbolic::ivp_telemetry::IvpColdStage::SymbolicJacobian)
-            .calls
-            > 0
-    );
-    assert!(
-        snapshot
-            .warm_stage(crate::symbolic::ivp_telemetry::IvpWarmStage::ResidualCallback)
-            .calls
-            > 0
-    );
+    assert!(stats.solve_calls > 0);
+    assert!(stats.solve_ms_total > 0.0);
+    assert!(stats.residual_calls > 0);
+    assert!(stats.residual_ms_total > 0.0);
+    assert!(detailed.factorization_calls > 0);
+    assert!(detailed.factorization_ms_total > 0.0);
 }
 
 #[test]

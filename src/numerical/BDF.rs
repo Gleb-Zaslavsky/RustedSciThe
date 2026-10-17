@@ -15,6 +15,7 @@ pub mod prelude {
         BdfConfigurationError, BdfJacobian, BdfJacobianCallbackError, BdfJacobianSource,
         BdfOperationCounters, BdfStepError,
     };
+    pub use crate::numerical::logging::SolverLogLevel;
     pub use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
     pub use crate::symbolic::symbolic_ivp::{IvpBackendError, IvpSymbolicAssemblyBackend};
     pub use crate::symbolic::symbolic_ivp_generated::{

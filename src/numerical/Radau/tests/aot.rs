@@ -226,7 +226,7 @@ fn aot_frontend_layout_matrix_solves_and_reports_provenance() {
             execution: RadauExecution::Aot,
             frontend,
             matrix_layout,
-            telemetry: RadauTelemetryMode::Timings,
+            telemetry: RadauTelemetryMode::Detailed,
             execution_policy: RadauExecutionPolicy::Parallel { min_work: 1 },
             // This is a cold matrix story. RebuildAlways prevents an earlier
             // ignored test from satisfying BuildIfMissing through the
@@ -794,7 +794,7 @@ fn aot_stage_breakdown_workload_matrix_reports_cold_warm_and_continuation() {
                 execution: RadauExecution::Aot,
                 frontend,
                 matrix_layout,
-                telemetry: RadauTelemetryMode::Timings,
+                telemetry: RadauTelemetryMode::Detailed,
                 execution_policy: RadauExecutionPolicy::Sequential,
                 aot: Some(rebuild_aot_config(output_dir.path().to_path_buf())),
                 ..RadauConfig::default()

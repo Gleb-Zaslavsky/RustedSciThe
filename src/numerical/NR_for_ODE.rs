@@ -1,6 +1,8 @@
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-use log::info;
+use crate::numerical::logging::{
+    solver_info as info, SolverLogGuard, SolverLogLevel,
+};
 use nalgebra::{DMatrix, DVector, Matrix};
 // solve algebraic nonlinear system with free parameter t
 pub struct NRODE {
@@ -17,6 +19,7 @@ pub struct NRODE {
     jac: Option<Box<dyn FnMut(f64, &DVector<f64>) -> DMatrix<f64>>>,
     t: f64,
     y: DVector<f64>,
+    logging_level: SolverLogLevel,
 }
 
 impl NRODE {
@@ -44,12 +47,24 @@ impl NRODE {
             jac: None,
             t: 0.0,
             y: initial_guess.clone(),
+            logging_level: SolverLogLevel::Off,
         }
+    }
+
+    /// Sets the Rust-side log threshold for this solver instance.
+    pub fn set_logging_level(&mut self, level: SolverLogLevel) {
+        self.logging_level = level;
+    }
+
+    /// Returns the Rust-side log threshold for this solver instance.
+    pub fn logging_level(&self) -> SolverLogLevel {
+        self.logging_level
     }
     /// Basic methods to set the equation system
 
     ///Set system of equations with vector of symbolic expressions
     pub fn eq_generate(&mut self) {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         let mut jacobian_instance = Jacobian::new();
         jacobian_instance.generate_IVP_ODEsolver(
             self.eq_system.clone(),
@@ -81,6 +96,7 @@ impl NRODE {
     ///Newton-Raphson method
     /// realize iteration of Newton-Raphson - calculate new iteration vector by using Jacobian matrix
     pub fn iteration(&mut self) -> DVector<f64> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         let t = self.t;
         let y = &self.y;
         info!("Newton-Raphson iteration {}", &y);
@@ -102,6 +118,7 @@ impl NRODE {
     // main function to solve the system of equations
 
     pub fn solve(&mut self) -> Option<DVector<f64>> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         info!("solving system of equations with Newton-Raphson method");
         let mut y: DVector<f64> = self.initial_guess.clone();
         let mut i = 0;

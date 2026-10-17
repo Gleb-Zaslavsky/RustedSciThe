@@ -3,7 +3,11 @@
 //! This module is intentionally separate from backend correctness and
 //! evaluator-policy stories. Report formatting remains outside solver timing.
 
-use super::{Lsode2ProblemConfig, Lsode2Solver};
+use super::solver::telemetry_execution_for_config;
+use super::{
+    Lsode2AotProfile, Lsode2AotToolchain, Lsode2ProblemConfig, Lsode2ResidualJacobianSource,
+    Lsode2Solver, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
+};
 use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpTelemetryExecution};
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::DVector;
@@ -100,4 +104,32 @@ fn lsode2_telemetry_schema_contract_story() {
     }
     println!("[LSODE2 telemetry schema] required cold/warm stages and counters present");
     println!("{report}");
+}
+
+#[test]
+fn lsode2_native_telemetry_execution_provenance_matches_selected_route() {
+    let lambdify = exponential_decay_config().with_residual_jacobian_source(
+        Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::ExprLegacy,
+            execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
+        },
+    );
+    assert_eq!(
+        telemetry_execution_for_config(&lambdify),
+        IvpTelemetryExecution::Lambdify
+    );
+
+    let aot = exponential_decay_config().with_residual_jacobian_source(
+        Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+            execution: Lsode2SymbolicExecutionMode::Aot {
+                toolchain: Lsode2AotToolchain::CTcc,
+                profile: Lsode2AotProfile::Debug,
+            },
+        },
+    );
+    assert_eq!(
+        telemetry_execution_for_config(&aot),
+        IvpTelemetryExecution::Aot
+    );
 }

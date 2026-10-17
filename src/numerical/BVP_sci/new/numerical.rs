@@ -88,6 +88,14 @@ impl BvpSciNumericalPlan {
         self
     }
 
+    /// Replace the telemetry handle before the numerical plan is prepared.
+    /// This lets higher-level builders apply their selected mode consistently
+    /// to RHS, boundary and collocation stages.
+    pub fn with_telemetry(mut self, telemetry: BvpSciTelemetry) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
     pub fn dimension(&self) -> usize {
         self.dimension
     }

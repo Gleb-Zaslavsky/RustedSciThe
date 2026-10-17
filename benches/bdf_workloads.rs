@@ -267,7 +267,7 @@ fn run_compact_report() {
                     workload,
                     dimension,
                     route.assembly,
-                    BdfTelemetryMode::Timings,
+                    BdfTelemetryMode::Detailed,
                     route_lambdify_policy(route),
                 );
                 solver = attach_route(
@@ -349,7 +349,7 @@ fn run_compact_report() {
                                 workload,
                                 dimension,
                                 route.assembly,
-                                BdfTelemetryMode::Timings,
+                                BdfTelemetryMode::Detailed,
                                 route_lambdify_policy(route),
                             );
                         continuation_solver = attach_route(
@@ -448,7 +448,7 @@ fn run_compact_report() {
     }
 
     let metadata = format!(
-        "profile=bench; compact=true; routes={:?}; workloads={:?}; continuation_counts={:?}; telemetry=timings; scopes=diagnostic/non-additive",
+        "profile=bench; compact=true; routes={:?}; workloads={:?}; continuation_counts={:?}; telemetry=Detailed(counters+timings); solve wall times include instrumentation; scopes=diagnostic/non-additive",
         std::env::var("BDF_BENCH_COMPACT_ROUTES").unwrap_or_else(|_| "lambdify".to_owned()),
         std::env::var("BDF_BENCH_COMPACT_WORKLOADS").unwrap_or_else(|_| "default".to_owned()),
         continuation_counts()

@@ -281,7 +281,7 @@ fn options(collect_history: bool) -> SolveOptions {
         tolerance: 1e-8,
         max_iterations: 64,
         diagnostics: DiagnosticsOptions {
-            collect_statistics: false,
+            telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Off,
             collect_history,
             enable_logging: false,
             ..DiagnosticsOptions::default()
@@ -383,7 +383,7 @@ fn trust_region_ownership_rows() -> Vec<AuditRow> {
                     SolveOptions {
                         max_iterations: 128,
                         diagnostics: DiagnosticsOptions {
-                            collect_statistics: true,
+                            telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Detailed,
                             ..DiagnosticsOptions::default()
                         },
                         ..options(false)
@@ -461,7 +461,7 @@ fn main() {
             rejected_initial.clone(),
             SolveOptions {
                 diagnostics: DiagnosticsOptions {
-                    collect_statistics: true,
+                    telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Detailed,
                     ..DiagnosticsOptions::default()
                 },
                 ..options(false)

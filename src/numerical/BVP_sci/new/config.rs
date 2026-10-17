@@ -1,6 +1,7 @@
 //! Validated policy inputs for the new BVP lifecycle.
 
 use super::{output::BvpSciOutputPolicy, singular::BvpSciSingularTerm};
+pub use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::bvp::telemetry::BvpLambdifyExecutionPolicy;
 
 /// Execution policy for independent warm Lambdify callback entries.
@@ -103,6 +104,9 @@ pub struct BvpSciOptions {
     pub max_backtracking_steps: usize,
     /// Disabled by default; enabled modes add counters or timings only.
     pub telemetry: super::telemetry::BvpSciTelemetryMode,
+    /// Maximum solver log level; enabled messages go to the shared timestamped
+    /// solver log. Logging is off by default.
+    pub logging_level: SolverLogLevel,
     /// Warm callback dispatch policy; sequential is the safe default.
     pub execution_policy: BvpSciExecutionPolicy,
     /// Output retention policy. Dense output is built only when requested.
@@ -125,6 +129,7 @@ impl Default for BvpSciOptions {
             max_mesh_refinements: SCIPY_MAX_MESH_ITERATIONS,
             max_backtracking_steps: SCIPY_MAX_BACKTRACKING_TRIALS,
             telemetry: super::telemetry::BvpSciTelemetryMode::Off,
+            logging_level: SolverLogLevel::Off,
             execution_policy: BvpSciExecutionPolicy::Sequential,
             output_policy: BvpSciOutputPolicy::MeshAndValues,
             singular_term: None,
@@ -133,6 +138,12 @@ impl Default for BvpSciOptions {
 }
 
 impl BvpSciOptions {
+    /// Set the maximum Rust log level emitted by the solver.
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        self.logging_level = level;
+        self
+    }
+
     /// Set the symbolic frontend family used by the prepared model.
     pub fn with_execution(mut self, execution: BvpSciExecution) -> Self {
         self.execution = execution;
@@ -204,5 +215,21 @@ impl BvpSciOptions {
     pub fn with_singular_term(mut self, singular_term: BvpSciSingularTerm) -> Self {
         self.singular_term = Some(singular_term);
         self
+    }
+}
+
+#[cfg(test)]
+mod logging_tests {
+    use super::{BvpSciOptions, SolverLogLevel};
+
+    #[test]
+    fn bvp_sci_logging_defaults_off_and_is_configurable() {
+        assert_eq!(BvpSciOptions::default().logging_level, SolverLogLevel::Off);
+        assert_eq!(
+            BvpSciOptions::default()
+                .with_logging_level(SolverLogLevel::Debug)
+                .logging_level,
+            SolverLogLevel::Debug
+        );
     }
 }

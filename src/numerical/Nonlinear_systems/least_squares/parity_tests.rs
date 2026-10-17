@@ -407,6 +407,17 @@ fn staged_lm_counter_and_detailed_telemetry_have_distinct_semantics() {
         std::time::Duration::ZERO
     );
 
+    let (_problem, timings) = LevenbergMarquardt::new()
+        .with_telemetry(LeastSquaresTelemetryMode::Timings)
+        .minimize(make_problem());
+    assert_eq!(
+        timings.statistics.availability,
+        crate::numerical::Nonlinear_systems::engine::StatisticsAvailability::NotCollected
+    );
+    assert!(timings.statistics.timings_collected);
+    assert_eq!(timings.statistics.residual_evaluations, 0);
+    assert!(timings.statistics.total_duration > std::time::Duration::ZERO);
+
     let (_problem, detailed) = LevenbergMarquardt::new()
         .with_telemetry(LeastSquaresTelemetryMode::Detailed)
         .minimize(make_problem());

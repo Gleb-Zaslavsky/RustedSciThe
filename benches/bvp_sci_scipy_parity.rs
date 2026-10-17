@@ -704,7 +704,7 @@ fn run_route_diagnostic(
     String,
 > {
     let (problem, _) = prepare_problem(case, route.uses_symbolic_frontend())?;
-    let telemetry = BvpSciTelemetry::timings();
+    let telemetry = BvpSciTelemetry::detailed();
     if matches!(route, RustRoute::ExactNumerical) && layout == BvpSciMatrixLayout::Dense {
         telemetry.enable_linear_system_capture(1000);
     }
@@ -1320,7 +1320,7 @@ fn run_rust_linear_kernel(
     layout: BvpSciMatrixLayout,
     repeats: usize,
 ) -> Result<LinearKernelRow, String> {
-    let telemetry = BvpSciTelemetry::timings();
+    let telemetry = BvpSciTelemetry::detailed();
     let mut backend = NativeLinearBackend::new_for_collocation(
         layout,
         capture.dimension,

@@ -44,9 +44,11 @@ NumPy-массивах.
 
 AOT использует общий lifecycle сборки и cache. Компилятор не нужен для
 Lambdify и требуется только при выборе AOT. Сохраняйте выбранный execution
-route и provenance артефакта. Counter/timing telemetry включается через
-`SolverOptions`; обработку ошибок подготовки и исчерпания бюджета делайте по
-типам исключений, а не по строке сообщения.
+route и provenance артефакта. Режим телеметрии задаётся через
+`SolverOptions(telemetry=...)`: `off`, `counters`, `timings` или `detailed`.
+`timings` возвращает длительности без дискретных счётчиков, а `detailed` — оба
+набора данных. Ошибки подготовки и исчерпания бюджета обрабатывайте по типам
+исключений, а не по строке сообщения.
 
 См. `examples/backward_euler_basic.py` для уточнения шага и
 `examples/backward_euler_routes.py` для matched-сравнения ExprLegacy/AtomNative.

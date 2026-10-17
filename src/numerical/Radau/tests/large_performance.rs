@@ -224,7 +224,7 @@ fn config(frontend: RadauFrontend, layout: RadauMatrixLayout, kind: WorkloadKind
         max_retries: 24,
         frontend,
         matrix_layout: layout,
-        telemetry: RadauTelemetryMode::Timings,
+        telemetry: RadauTelemetryMode::Detailed,
         output: RadauOutputPolicy::Dense,
         ..RadauConfig::default()
     }
@@ -559,7 +559,7 @@ fn dense_aot_full_solve_attribution_story() {
                 config.first_step = Some(step);
                 config.max_step = step;
             }
-            config.telemetry = RadauTelemetryMode::Timings;
+            config.telemetry = RadauTelemetryMode::Detailed;
             let route_name = format!("lambdify/{frontend:?}");
             let started = Instant::now();
             let mut solver = RadauSolver::prepare(problem, config.clone())
@@ -647,7 +647,7 @@ fn dense_aot_full_solve_attribution_story() {
                 config.first_step = Some(step);
                 config.max_step = step;
             }
-            config.telemetry = RadauTelemetryMode::Timings;
+            config.telemetry = RadauTelemetryMode::Detailed;
             let artifact_directory = tempfile::tempdir().expect("diagnostic AOT directory");
             config.aot = Some(rebuild_aot_config(artifact_directory.path()));
             let route_name = format!("aot/{frontend:?}");

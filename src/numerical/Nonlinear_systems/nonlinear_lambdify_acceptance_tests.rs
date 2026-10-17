@@ -45,7 +45,11 @@ mod tests {
             max_iterations: 50,
             diagnostics: DiagnosticsOptions {
                 collect_history: false,
-                collect_statistics,
+                telemetry_mode: if collect_statistics {
+                    crate::numerical::SolverTelemetryMode::Detailed
+                } else {
+                    crate::numerical::SolverTelemetryMode::Off
+                },
                 enable_logging: false,
                 ..DiagnosticsOptions::default()
             },

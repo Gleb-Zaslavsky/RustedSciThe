@@ -1,5 +1,17 @@
 # Optimization TODO
 
+## 2026-10-16 Shared Telemetry Mode Contract
+
+- [x] Replace Gavin's binary telemetry switch with the shared
+  `SolverTelemetryMode::{Off, Counters, Timings, Detailed}` API.
+- [x] Keep all four modes independently meaningful: Counters avoids clock
+  reads; Timings does not update discrete work counters; Detailed collects both.
+- [x] Keep symbolic preparation telemetry separate from numerical solve
+  telemetry, preserving its independent lifecycle and configuration.
+- [x] Route `GavinSymbolicFitting` and the Gavin branch of `UniversalFitting`
+  through the same explicit telemetry mode.
+- [x] Add contract tests for counters-only and timings-only Gavin runs.
+
 ## 2026-10-11 Gavin LM Typed API and Symbolic Adapter
 
 ### Architecture decision

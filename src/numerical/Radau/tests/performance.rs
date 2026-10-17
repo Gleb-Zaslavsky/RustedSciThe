@@ -23,6 +23,32 @@ fn telemetry_off_keeps_counters_and_timings_empty() {
 }
 
 #[test]
+fn telemetry_collection_modes_keep_counters_and_timings_disjoint() {
+    use super::super::new::telemetry::RadauCallbackStage;
+
+    let mut counters = RadauTelemetry::new(RadauTelemetryMode::Counters);
+    counters.measure_callback(RadauCallbackStage::ResidualEvaluation, || {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    });
+    assert_eq!(counters.counters.residual_evaluations, 1);
+    assert_eq!(counters.timings.callback_ms, 0.0);
+
+    let mut timings = RadauTelemetry::new(RadauTelemetryMode::Timings);
+    timings.measure_callback(RadauCallbackStage::ResidualEvaluation, || {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    });
+    assert_eq!(timings.counters.residual_evaluations, 0);
+    assert!(timings.timings.callback_ms > 0.0);
+
+    let mut detailed = RadauTelemetry::new(RadauTelemetryMode::Detailed);
+    detailed.measure_callback(RadauCallbackStage::ResidualEvaluation, || {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    });
+    assert_eq!(detailed.counters.residual_evaluations, 1);
+    assert!(detailed.timings.callback_ms > 0.0);
+}
+
+#[test]
 fn telemetry_marks_parallel_applicability_without_fabricating_dispatches() {
     let mut telemetry = RadauTelemetry::new(RadauTelemetryMode::Counters);
 
@@ -42,7 +68,7 @@ fn telemetry_marks_parallel_applicability_without_fabricating_dispatches() {
 #[test]
 fn workspace_resize_reports_one_optional_scope() {
     let mut workspace = RadauWorkspace::default();
-    workspace.telemetry.set_mode(RadauTelemetryMode::Timings);
+    workspace.telemetry.set_mode(RadauTelemetryMode::Detailed);
     workspace
         .resize_for_layout(8, RadauMatrixLayout::Dense)
         .unwrap();
@@ -54,7 +80,7 @@ fn workspace_resize_reports_one_optional_scope() {
 }
 
 #[test]
-fn lambdify_preparation_is_reported_only_when_timing_is_enabled() {
+fn timing_mode_collects_durations_without_operation_counts() {
     let residual = vec![Expr::Add(
         Box::new(Expr::Var("y1".to_string())),
         Box::new(Expr::Var("p".to_string())),
@@ -81,7 +107,7 @@ fn lambdify_preparation_is_reported_only_when_timing_is_enabled() {
     assert_eq!(telemetry.counters.residual_calls, 0);
     assert_eq!(telemetry.counters.jacobian_calls, 0);
     telemetry.count_stage(RadauStage::Residual);
-    assert_eq!(telemetry.counters.residual_calls, 1);
+    assert_eq!(telemetry.counters.residual_calls, 0);
 }
 
 #[test]
@@ -111,7 +137,7 @@ fn lambdify_warm_callback_story_reports_residual_and_jacobian_cost() {
             }
         })
         .collect::<Vec<_>>();
-    let mut preparation_telemetry = RadauTelemetry::new(RadauTelemetryMode::Timings);
+    let mut preparation_telemetry = RadauTelemetry::new(RadauTelemetryMode::Detailed);
     let callbacks =
         super::super::new::callbacks::PreparedSymbolicCallbacks::prepare_with_telemetry(
             super::super::new::config::RadauAssembly::ExprLegacy,
@@ -123,7 +149,7 @@ fn lambdify_warm_callback_story_reports_residual_and_jacobian_cost() {
             &mut preparation_telemetry,
         )
         .unwrap();
-    let mut session = callbacks.session_with_telemetry(RadauTelemetryMode::Timings);
+    let mut session = callbacks.session_with_telemetry(RadauTelemetryMode::Detailed);
     let state = vec![2.0; dimension];
     let parameters = [3.0];
     session.rebind_parameters(&parameters).unwrap();
@@ -244,7 +270,7 @@ fn symbolic_structured_projection_reports_output_assembly_for_both_frontends() {
                 &mut preparation_telemetry,
             )
             .unwrap();
-            let mut session = callbacks.session_with_telemetry(RadauTelemetryMode::Timings);
+            let mut session = callbacks.session_with_telemetry(RadauTelemetryMode::Detailed);
             session.rebind_parameters(&[3.0]).unwrap();
             let output_len = match layout {
                 RadauMatrixLayout::Sparse => callbacks.jacobian_pattern().len(),
@@ -286,7 +312,7 @@ fn symbolic_step_reports_callback_linear_and_workspace_stages() {
         rtol: 1.0e-9,
         atol: 1.0e-11,
         max_newton_iterations: 8,
-        telemetry: RadauTelemetryMode::Timings,
+        telemetry: RadauTelemetryMode::Detailed,
         ..RadauConfig::default()
     };
 
@@ -295,7 +321,7 @@ fn symbolic_step_reports_callback_linear_and_workspace_stages() {
             RadauAssembly::ExprLegacy => Some(jacobian.clone()),
             RadauAssembly::AtomViewNative => None,
         };
-        let mut preparation_telemetry = RadauTelemetry::new(RadauTelemetryMode::Timings);
+        let mut preparation_telemetry = RadauTelemetry::new(RadauTelemetryMode::Detailed);
         let callbacks = PreparedSymbolicCallbacks::prepare_with_telemetry(
             assembly,
             residual.clone(),
@@ -306,7 +332,7 @@ fn symbolic_step_reports_callback_linear_and_workspace_stages() {
             &mut preparation_telemetry,
         )
         .unwrap();
-        let mut callback_session = callbacks.session_with_telemetry(RadauTelemetryMode::Timings);
+        let mut callback_session = callbacks.session_with_telemetry(RadauTelemetryMode::Detailed);
         callback_session.rebind_parameters(&[1.0]).unwrap();
         let mut workspace = RadauWorkspace::default();
         let mut output = [0.0];
@@ -374,7 +400,7 @@ fn atom_native_warm_callback_story_reports_native_preparation_and_callback_cost(
             )
         })
         .collect::<Vec<_>>();
-    let mut preparation_telemetry = RadauTelemetry::new(RadauTelemetryMode::Timings);
+    let mut preparation_telemetry = RadauTelemetry::new(RadauTelemetryMode::Detailed);
     let callbacks = PreparedSymbolicCallbacks::prepare_with_telemetry(
         RadauAssembly::AtomViewNative,
         residual,
@@ -385,7 +411,7 @@ fn atom_native_warm_callback_story_reports_native_preparation_and_callback_cost(
         &mut preparation_telemetry,
     )
     .unwrap();
-    let mut session = callbacks.session_with_telemetry(RadauTelemetryMode::Timings);
+    let mut session = callbacks.session_with_telemetry(RadauTelemetryMode::Detailed);
     session.rebind_parameters(&[3.0]).unwrap();
 
     let state = vec![2.0; dimension];

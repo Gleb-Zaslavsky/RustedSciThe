@@ -500,7 +500,7 @@ fn execute(
         .with_initial_guess(vec![1.9, 0.55, 0.9, 1.9])
         .with_gavin_frontend(frontend)
         .with_gavin_update_policy(update_policy)
-        .with_gavin_telemetry(true)
+        .with_gavin_telemetry(crate::numerical::SolverTelemetryMode::Detailed)
         .build()
         .expect("Gavin fit should complete");
     let full_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -602,7 +602,7 @@ fn gavin_python_controller_history_parity_story() {
     for golden in python_controller_goldens() {
         let mut solver = LevenbergMarquardt::new(ExponentialSinusoidalModel)
             .with_update_policy(golden.policy)
-            .with_telemetry(true);
+            .with_telemetry(crate::numerical::SolverTelemetryMode::Detailed);
         let result = solver
             .lm_detailed(
                 nalgebra::DVector::from_column_slice(&golden.initial),
@@ -728,7 +728,8 @@ fn gavin_python_active_coefficient_bounds_parity_story() {
     );
     let t = nalgebra::DVector::from_iterator(201, (0..201).map(|index| index as f64 * 0.1));
     let observations = t.map(|sample| 2.0 * (-sample / 0.5_f64).exp() + (sample / 2.0).sin());
-    let mut solver = LevenbergMarquardt::new(ExponentialSinusoidalModel).with_telemetry(true);
+    let mut solver = LevenbergMarquardt::new(ExponentialSinusoidalModel)
+        .with_telemetry(crate::numerical::SolverTelemetryMode::Detailed);
     let result = solver
         .lm_detailed(
             nalgebra::DVector::from_column_slice(&[0.01, 0.55, 0.9, 1.9]),

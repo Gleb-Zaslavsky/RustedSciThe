@@ -100,11 +100,11 @@ extern crate sprs;
 
 use na::{DMatrix, DVector, Dyn, LU};
 
-use log::info;
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel, solver_info};
 use std::f64;
 
 use crate::numerical::BDF::common::{
-    newton_tol, norm, try_select_initial_step, validate_tol, NumberOrVec,
+    NumberOrVec, newton_tol, norm, try_select_initial_step, validate_tol,
 };
 use crate::somelinalg::banded::storage::Banded;
 use faer::sparse::Triplet;
@@ -1229,6 +1229,9 @@ pub struct BDF {
     linear_factorization_ms_total: f64,
     operation_timing_scopes: BdfTimingScopes,
     collect_operation_counters: bool,
+    /// Per-instance logging threshold; off by default. Enabled messages are
+    /// written to the shared timestamped solver log.
+    logging_level: SolverLogLevel,
     pub direction: f64,
 }
 
@@ -1272,6 +1275,7 @@ impl Debug for BDF {
                 "collect_operation_counters",
                 &self.collect_operation_counters,
             )
+            .field("logging_level", &self.logging_level)
             .field("direction", &self.direction)
             .finish()
     }
@@ -1350,6 +1354,7 @@ impl BDF {
             linear_factorization_ms_total: 0.0,
             operation_timing_scopes: BdfTimingScopes::default(),
             collect_operation_counters: false,
+            logging_level: SolverLogLevel::Off,
             n: 0,
             t_old: None,
         }
@@ -1362,6 +1367,26 @@ impl BDF {
             detailed.jacobian_evaluations,
             detailed.factorization_attempts,
         )
+    }
+
+    /// Sets this BDF instance's maximum emitted log level.
+    ///
+    /// The first enabled solver scope creates a shared timestamped file log.
+    /// Set `RST_SOLVER_LOG_DIR` to choose its directory; otherwise it is placed
+    /// in the current working directory. The default is [`SolverLogLevel::Off`].
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        self.logging_level = level;
+        self
+    }
+
+    /// Updates the maximum emitted log level without rebuilding the solver.
+    pub fn set_logging_level(&mut self, level: SolverLogLevel) {
+        self.logging_level = level;
+    }
+
+    /// Returns the current per-instance log threshold.
+    pub fn logging_level(&self) -> SolverLogLevel {
+        self.logging_level
     }
 
     pub fn operation_counters(&self) -> BdfOperationCounters {
@@ -1699,6 +1724,7 @@ impl BDF {
         vectorized: bool,
         first_step: Option<f64>,
     ) -> Result<(), BdfConfigurationError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         if !t0.is_finite() || !t_bound.is_finite() {
             return Err(BdfConfigurationError::NonFiniteTime);
         }
@@ -1912,7 +1938,7 @@ impl BDF {
         };
         // prelude imitates super class in python package
         self.prelude(fun, t0, y0, t_bound);
-        info!("prelude done");
+        solver_info!("prelude done");
         // initialize parameters, if some parameters are not provided by the user then we will use special functions
         // All public validation is completed by `try_set_initial_with_jacobian_source`
         // before this private initializer is entered. Keep this commit-free
@@ -1920,7 +1946,7 @@ impl BDF {
         self.max_step = max_step;
         self.rtol = rtol.clone();
         self.atol = atol;
-        info!("tolerance validation: done");
+        solver_info!("tolerance validation: done");
         let f = initial_rhs;
         self.h_abs = initial_h_abs;
         self.h_abs_old = None;
@@ -1962,7 +1988,7 @@ impl BDF {
             D.nrows() >= MAX_ORDER + 3,
             "D matrix must have at least MAX_ORDER + 3 rows"
         );
-        info!("created matrix of size: {:?} x {:?}", D.nrows(), D.ncols());
+        solver_info!("created matrix of size: {:?} x {:?}", D.nrows(), D.ncols());
 
         D.set_row(0, &self.y.transpose());
         D.set_row(1, &(f * initial_h_abs * self.direction).transpose());
@@ -1990,7 +2016,7 @@ impl BDF {
         // Newton matrix cache, so LSODE2 can install sparse/banded backends
         // without rewriting the BDF stepper.
         self.linear_backend = Box::new(DenseNalgebraLinearBackend);
-        info!("linear backend creation: dense nalgebra");
+        solver_info!("linear backend creation: dense nalgebra");
     }
     /// Performs initial setup and validation of solver parameters.
     ///
@@ -2067,7 +2093,7 @@ impl BDF {
 
         match source {
             PreparedBdfJacobianSource::StateDependent { callback, initial } => {
-                info!("state-dependent analytical jacobian used");
+                solver_info!("state-dependent analytical jacobian used");
                 self.jac_factor = None;
                 if self.collect_operation_counters {
                     self.njev += 1;
@@ -2081,7 +2107,7 @@ impl BDF {
                 initial,
                 workspace,
             } => {
-                info!("state-dependent in-place dense analytical jacobian used");
+                solver_info!("state-dependent in-place dense analytical jacobian used");
                 self.jac_factor = None;
                 if self.collect_operation_counters {
                     self.njev += 1;
@@ -2093,7 +2119,7 @@ impl BDF {
                 self.J = initial;
             }
             PreparedBdfJacobianSource::Constant(jacobian) => {
-                info!("constant analytical jacobian used");
+                solver_info!("constant analytical jacobian used");
                 self.jac = None;
                 self.jac_into = None;
                 self.jacobian_workspace = None;
@@ -2114,7 +2140,7 @@ impl BDF {
             }
         };
 
-        info!("jac validation: done");
+        solver_info!("jac validation: done");
     }
 
     /// Performs one BDF integration step with adaptive order and step size control.

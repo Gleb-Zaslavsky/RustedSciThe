@@ -216,6 +216,7 @@ fn validate_route(
         "off" => BdfTelemetryMode::Off,
         "counters" => BdfTelemetryMode::Counters,
         "timings" => BdfTelemetryMode::Timings,
+        "detailed" => BdfTelemetryMode::Detailed,
         _ => Err(InvalidConfigurationError::new_err(
             "unknown telemetry mode in SolverOptions",
         ))?,
@@ -270,6 +271,12 @@ impl BdfSolution {
         let (times, values) = solver.get_result_ref();
         let statistics = solver.get_statistics();
         let preparation = solver.preparation_timings();
+        let telemetry_mode = match solver.telemetry_mode() {
+            BdfTelemetryMode::Off => "off",
+            BdfTelemetryMode::Counters => "counters",
+            BdfTelemetryMode::Timings => "timings",
+            BdfTelemetryMode::Detailed => "detailed",
+        };
         let aot_artifact_keys = solver
             .preparation_backend_telemetry()
             .map(|telemetry| telemetry.aot_artifact_keys.clone())
@@ -339,7 +346,7 @@ impl BdfSolution {
                 counters.insert(key.to_owned(), value);
             }
         }
-        let timings_ms = HashMap::from([
+        let mut timings_ms = HashMap::from([
             (
                 "preparation_configuration_ms".to_owned(),
                 preparation.configuration_ms,
@@ -422,16 +429,15 @@ impl BdfSolution {
             ("residual_ms".to_owned(), statistics.residual_ms_total),
             ("jacobian_ms".to_owned(), statistics.jacobian_ms_total),
         ]);
+        if telemetry_mode == "timings" {
+            counters.clear();
+        }
+        crate::telemetry::apply_collection_mode(telemetry_mode, &mut counters, &mut timings_ms);
         Self {
             times: times.iter().copied().collect(),
             states,
             status: solver.get_status().to_owned(),
-            telemetry_mode: match solver.telemetry_mode() {
-                BdfTelemetryMode::Off => "off",
-                BdfTelemetryMode::Counters => "counters",
-                BdfTelemetryMode::Timings => "timings",
-            }
-            .to_owned(),
+            telemetry_mode: telemetry_mode.to_owned(),
             counters,
             timings_ms,
             aot_artifact_keys,
@@ -473,13 +479,14 @@ impl BdfSolution {
         &self.telemetry_mode
     }
 
-    /// Detached operation counters for this BDF result.
+    /// Detached operation counters; empty in off or timings-only mode.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         self.counters.clone()
     }
 
-    /// Detached preparation and numerical-stage timings in milliseconds.
-    /// Nested scopes retain their native names and are not additive.
+    /// Measured preparation and numerical-stage timings in milliseconds.
+    /// Empty when telemetry is off or counters-only; nested scopes retain
+    /// their native names and are not additive.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         self.timings_ms.clone()
     }
@@ -712,6 +719,7 @@ impl BdfSolver {
             None => SolverOptions::new(None, None, None, None, None, None, None, None, None)?,
         };
         let (telemetry_mode, execution_policy) = validate_route(&options)?;
+        let logging_level = crate::contract::native_logging_level(&options, "bdf")?;
         let native_expressions = expressions
             .into_iter()
             .map(|expression| expression.inner)
@@ -735,7 +743,8 @@ impl BdfSolver {
         .with_max_steps(max_steps)
         .with_symbolic_assembly_backend(symbolic_backend(&options))
         .with_lambdify_execution_policy(execution_policy)
-        .with_telemetry_mode(telemetry_mode);
+        .with_telemetry_mode(telemetry_mode)
+        .with_logging_level(logging_level);
         if options.execution() == "aot" {
             native_options =
                 native_options.with_generated_backend_config(generated_config(&options)?);
@@ -904,6 +913,7 @@ impl BdfSolver {
             BdfTelemetryMode::Off => "off",
             BdfTelemetryMode::Counters => "counters",
             BdfTelemetryMode::Timings => "timings",
+            BdfTelemetryMode::Detailed => "detailed",
         }
     }
 
@@ -1073,7 +1083,8 @@ impl BdfCallbackSolver {
         .with_max_bdf_order(max_bdf_order)
         .with_max_steps(max_steps)
         .with_lambdify_execution_policy(execution_policy)
-        .with_telemetry_mode(telemetry_mode);
+        .with_telemetry_mode(telemetry_mode)
+        .with_logging_level(crate::contract::native_logging_level(&options, "bdf")?);
         let mut solver = ODEsolver::new_with_options(native_options);
         let jacobian_source = if let Some(jacobian) = jacobian {
             let residual_callback = move |time: f64, state: &DVector<f64>| residual(time, state);

@@ -64,8 +64,10 @@ step, `max_step` caps it, and `max_steps`, `max_newton_iterations` and
 otherwise use the returned accepted trajectory. Result arrays are owned
 NumPy `float64` arrays, not views into a reusable Rust workspace.
 
-Choose `telemetry="counters"` or `"timings"` in `SolverOptions`, then inspect
-`telemetry_counters()`, `telemetry_timings_ms()` and `telemetry_report()`. A
+Choose `telemetry="counters"`, `"timings"` or `"detailed"` in `SolverOptions`.
+`counters` collects discrete operation counts only, `timings` collects durations
+only, and `detailed` collects both. Then inspect `telemetry_counters()`,
+`telemetry_timings_ms()` and `telemetry_report()`. A
 timing snapshot describes only the scopes the native solver measured; absent
 and zero-valued scopes must not be treated as equivalent. Catch the typed
 configuration, preparation, callback, AOT and exhaustion exceptions. Native

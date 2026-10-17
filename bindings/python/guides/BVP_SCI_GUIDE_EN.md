@@ -77,9 +77,11 @@ to force a particular linear layout.
 
 ## Telemetry and errors
 
-Enable counters or timings through `SolverOptions`; inspect preparation,
-collocation, factorization, solve and refinement scopes separately where
-reported. Timing scopes can overlap. The result also reports selected layout,
+Select `telemetry="off"`, `"counters"`, `"timings"` or `"detailed"` through
+`SolverOptions`. Counters measure discrete work without clock reads; timings
+measure durations without discrete counters; detailed combines both and keeps
+per-mesh/Newton diagnostics. Inspect preparation, collocation, factorization,
+solve and refinement scopes separately where reported. Timing scopes can overlap. The result also reports selected layout,
 frontend/execution provenance and sparse factorization policy. Invalid
 boundary shapes, non-finite data, unsupported combinations and numerical
 failures use typed Python exceptions.

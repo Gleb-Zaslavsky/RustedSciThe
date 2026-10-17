@@ -9,8 +9,7 @@
 
 use crate::numerical::BVP_sci::new::{
     BvpSciBandedFactorPhase, BvpSciBandedRoute, BvpSciMatrixLayout, BvpSciTelemetry,
-    BvpSciTelemetryMode, BvpSciTelemetrySnapshot, error::BvpSciNewError,
-    linear::LinearSystemBackend,
+    BvpSciTelemetrySnapshot, error::BvpSciNewError, linear::LinearSystemBackend,
 };
 use crate::somelinalg::banded::{
     Banded, BandedError, BorderedBlockTridiagonal, GeneralBandedLuPartialPivot,
@@ -512,7 +511,7 @@ impl BandedBackend {
                 *scalar_fallback_factorized = false;
                 *use_sparse_fallback = false;
                 let structured_started = telemetry.start_timing();
-                let structured_result = if telemetry.mode() == BvpSciTelemetryMode::Timings {
+                let structured_result = if telemetry.mode().collects_timings() {
                     let result = system.factor_with_timings_and_refinement_steps(
                         self.collocation_border_refinement_steps,
                     );
@@ -945,7 +944,7 @@ mod tests {
 
     #[test]
     fn detailed_factorization_telemetry_splits_bordered_phases() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         let mut backend = BandedBackend::new_for_collocation(3, 2, 2, 1, 3, 0, telemetry.clone())
             .expect("small bordered system should initialize");
         let entries = [(0, 0, 2.0), (1, 1, 3.0), (2, 2, 4.0)];

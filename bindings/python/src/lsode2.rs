@@ -259,7 +259,8 @@ fn validate_route(
     let telemetry = match options.telemetry() {
         "off" => IvpTelemetry::disabled(),
         "counters" => IvpTelemetry::counters(),
-        "timings" => IvpTelemetry::detailed(),
+        "timings" => IvpTelemetry::timings(),
+        "detailed" => IvpTelemetry::detailed(),
         _ => {
             return Err(InvalidConfigurationError::new_err(
                 "unknown telemetry mode in SolverOptions",
@@ -423,9 +424,9 @@ impl Lsode2Solution {
         let telemetry_mode = match solver.config().telemetry.mode() {
             IvpTelemetryMode::Off => "off",
             IvpTelemetryMode::Counters => "counters",
-            IvpTelemetryMode::Detailed => "timings",
+            IvpTelemetryMode::Timings => "timings",
+            IvpTelemetryMode::Detailed => "detailed",
         };
-        let telemetry_enabled = telemetry_mode != "off";
         let mut counters = HashMap::from([
             (
                 "backend_prepare_calls".to_owned(),
@@ -568,9 +569,12 @@ impl Lsode2Solution {
                 native.native_jacobian_ms_total,
             ),
         ]);
-        if !telemetry_enabled {
-            counters.values_mut().for_each(|value| *value = 0);
-            timings_ms.values_mut().for_each(|value| *value = 0.0);
+        crate::telemetry::apply_collection_mode(telemetry_mode, &mut counters, &mut timings_ms);
+        // The shared compatibility helper still keeps counters in `timings`
+        // for BVP_Sci. LSODE2 follows the disjoint four-mode contract, so its
+        // timing-only snapshot must not expose its internally maintained stats.
+        if telemetry_mode == "timings" {
+            counters.clear();
         }
         Self {
             times: times.iter().copied().collect(),
@@ -681,7 +685,8 @@ impl Lsode2Solution {
         self.counters.clone()
     }
 
-    /// Return measured stage durations in milliseconds, if timing telemetry was enabled.
+    /// Return measured stage durations in milliseconds; empty when telemetry
+    /// is off or counters-only.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         self.timings_ms.clone()
     }
@@ -995,9 +1000,11 @@ impl Lsode2PythonSolver {
             options.execution(),
             options.matrix_layout()
         );
-        let solver = catch_panic("construct", "lsode2", &route, || {
+        let logging_level = crate::contract::native_logging_level(&options, "lsode2")?;
+        let mut solver = catch_panic("construct", "lsode2", &route, || {
             Lsode2Solver::new(config).map_err(map_lsode2_error)
         })?;
+        solver.set_logging_level(logging_level);
         Ok(Self {
             solver,
             parameter_count,

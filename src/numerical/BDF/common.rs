@@ -7,7 +7,6 @@ use nalgebra_sparse::CsrMatrix;
 use std::cmp::{PartialEq, PartialOrd};
 
 extern crate num;
-use log::{error, info};
 use num::traits::Float;
 use std::error::Error;
 use std::fmt::{Debug, Display};
@@ -95,7 +94,7 @@ pub fn validate_first_step(first_step: f64, t0: f64, t_bound: f64) -> Result<f64
     if first_step > (t_bound - t0).abs() {
         return Err("`first_step` exceeds bounds.");
     }
-    info!("first step validation: done");
+    crate::numerical::logging::solver_info!("first step validation: done");
     Ok(first_step)
 }
 
@@ -313,7 +312,7 @@ pub fn validate_tol(
         // rtol is a number
         NumberOrVec::Number(rtol_i) => {
             if rtol_i < 100.0 * f64::EPSILON {
-                error!(
+                crate::numerical::logging::solver_warn!(
                     "At least one element of `rtol` is too small. Setting `rtol = std::f64::max(rtol, 100.0 * std::f64::EPSILON)`."
                 );
                 NumberOrVec::Number(f64::max(rtol_i, 100.0 * f64::EPSILON))
@@ -325,7 +324,7 @@ pub fn validate_tol(
             let mut fixed_rtol = rtol.clone();
             for i in 0..rtol.len() {
                 if rtol[i] < 100.0 * f64::EPSILON {
-                    eprintln!(
+                    crate::numerical::logging::solver_warn!(
                         "At least one element of `rtol` is too small. Setting `rtol = std::f64::max(rtol, 100.0 * std::f64::EPSILON)`."
                     );
                     fixed_rtol[i] = f64::max(rtol[i], 100.0 * f64::EPSILON);

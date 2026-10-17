@@ -88,7 +88,7 @@ fn solve_options() -> SolveOptions {
         max_iterations: 30,
         diagnostics: DiagnosticsOptions {
             collect_history: false,
-            collect_statistics: true,
+            telemetry_mode: crate::numerical::SolverTelemetryMode::Detailed,
             ..DiagnosticsOptions::default()
         },
         ..SolveOptions::default()

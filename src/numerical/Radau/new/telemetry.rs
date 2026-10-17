@@ -5,8 +5,9 @@
 //! allocations, copies, continuation, and publication.
 //!
 //! `Off` is the production default: it does not read the clock, inspect Vec
-//! capacities, or maintain counters.  `Counters` records operation counts
-//! without `Instant` calls.  `Timings` adds wall-clock scopes.  Parent scopes
+//! capacities, or maintain counters. `Counters` records operation counts
+//! without `Instant` calls. `Timings` records durations only; `Detailed`
+//! records both. Parent scopes
 //! such as `linear_ms` are inclusive diagnostics and must not be added to
 //! child scopes such as factorization and solve time by report consumers.
 
@@ -52,6 +53,17 @@ pub(crate) enum RadauTelemetryMode {
     Off,
     Counters,
     Timings,
+    Detailed,
+}
+
+impl RadauTelemetryMode {
+    pub(crate) const fn collects_counters(self) -> bool {
+        matches!(self, Self::Counters | Self::Detailed)
+    }
+
+    pub(crate) const fn collects_timings(self) -> bool {
+        matches!(self, Self::Timings | Self::Detailed)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -359,7 +371,7 @@ impl RadauTelemetry {
 
     /// Count a high-level solver stage when instrumentation is enabled.
     pub(crate) fn count_stage(&mut self, stage: RadauStage) {
-        if self.mode == RadauTelemetryMode::Off {
+        if !self.mode.collects_counters() {
             return;
         }
         match stage {
@@ -372,7 +384,7 @@ impl RadauTelemetry {
 
     /// Count an accepted or rejected step attempt.
     pub(crate) fn count_step(&mut self, accepted: bool) {
-        if self.mode == RadauTelemetryMode::Off {
+        if !self.mode.collects_counters() {
             return;
         }
         if accepted {
@@ -384,21 +396,21 @@ impl RadauTelemetry {
 
     /// Retain one adaptive controller decision in the diagnostic trace.
     pub(crate) fn record_adaptive_step(&mut self, trace: RadauAdaptiveStepTrace) {
-        if self.mode == RadauTelemetryMode::Timings {
+        if self.mode.collects_timings() {
             self.adaptive_steps.push(trace);
         }
     }
 
     /// Record the actual initial absolute step used by the controller.
     pub(crate) fn record_initial_step(&mut self, h_abs: f64) {
-        if self.mode == RadauTelemetryMode::Timings {
+        if self.mode.collects_timings() {
             self.initial_h_abs = Some(h_abs);
         }
     }
 
     /// Count one callback operation by its detailed stage.
     pub(crate) fn count_callback(&mut self, stage: RadauCallbackStage) {
-        if self.mode == RadauTelemetryMode::Off {
+        if !self.mode.collects_counters() {
             return;
         }
         match stage {
@@ -414,14 +426,14 @@ impl RadauTelemetry {
 
     /// Count a residual probe performed by finite-difference Jacobian code.
     pub(crate) fn record_finite_difference_probe(&mut self) {
-        if self.mode != RadauTelemetryMode::Off {
+        if self.mode.collects_counters() {
             self.counters.finite_difference_probes += 1;
         }
     }
 
     /// Count one linear backend operation by its detailed stage.
     pub(crate) fn count_linear(&mut self, stage: RadauLinearStage) {
-        if self.mode == RadauTelemetryMode::Off {
+        if !self.mode.collects_counters() {
             return;
         }
         match stage {
@@ -441,49 +453,49 @@ impl RadauTelemetry {
 
     /// Count one Newton iteration without reading the clock in counter mode.
     pub(crate) fn count_newton_iteration(&mut self) {
-        if self.mode != RadauTelemetryMode::Off {
+        if self.mode.collects_counters() {
             self.counters.newton_iterations += 1;
         }
     }
 
     /// Count one embedded error estimate.
     pub(crate) fn count_error_estimate(&mut self) {
-        if self.mode != RadauTelemetryMode::Off {
+        if self.mode.collects_counters() {
             self.counters.error_estimates += 1;
         }
     }
 
     /// Count successful writes into caller-owned output storage.
     pub(crate) fn count_output_writes(&mut self, count: usize) {
-        if self.mode != RadauTelemetryMode::Off {
+        if self.mode.collects_counters() {
             self.counters.output_writes = self.counters.output_writes.saturating_add(count as u64);
         }
     }
 
     /// Count a materialized buffer copy.
     pub(crate) fn count_copy(&mut self) {
-        if self.mode != RadauTelemetryMode::Off {
+        if self.mode.collects_counters() {
             self.counters.copies += 1;
         }
     }
 
     /// Count one observed capacity growth or materialization allocation.
     pub(crate) fn count_allocation(&mut self) {
-        if self.mode != RadauTelemetryMode::Off {
+        if self.mode.collects_counters() {
             self.counters.allocations += 1;
         }
     }
 
     /// Count a workspace resize operation.
     pub(crate) fn count_workspace_resize(&mut self) {
-        if self.mode != RadauTelemetryMode::Off {
+        if self.mode.collects_counters() {
             self.counters.workspace_resizes += 1;
         }
     }
 
     /// Count one symbolic frontend preparation.
     pub(crate) fn count_frontend_preparation(&mut self) {
-        if self.mode != RadauTelemetryMode::Off {
+        if self.mode.collects_counters() {
             self.counters.frontend_preparations += 1;
         }
     }
@@ -497,7 +509,7 @@ impl RadauTelemetry {
         work: usize,
         tasks: usize,
     ) {
-        if self.mode == RadauTelemetryMode::Off {
+        if !self.mode.collects_counters() {
             return;
         }
         if tasks > 1 {
@@ -524,28 +536,28 @@ impl RadauTelemetry {
 
     /// Add optional workspace timing to the current snapshot.
     pub(crate) fn add_workspace_timing_ms(&mut self, elapsed_ms: f64) {
-        if self.mode == RadauTelemetryMode::Timings {
+        if self.mode.collects_timings() {
             self.timings.workspace_ms += elapsed_ms;
         }
     }
 
     /// Add optional Newton timing to the current snapshot.
     pub(crate) fn add_newton_timing_ms(&mut self, elapsed_ms: f64) {
-        if self.mode == RadauTelemetryMode::Timings {
+        if self.mode.collects_timings() {
             self.timings.newton_ms += elapsed_ms;
         }
     }
 
     /// Add optional output assembly timing to the current snapshot.
     pub(crate) fn add_output_timing_ms(&mut self, elapsed_ms: f64) {
-        if self.mode == RadauTelemetryMode::Timings {
+        if self.mode.collects_timings() {
             self.timings.output_ms += elapsed_ms;
         }
     }
 
     /// Add optional embedded error/control timing to the current snapshot.
     pub(crate) fn add_step_control_timing_ms(&mut self, elapsed_ms: f64) {
-        if self.mode == RadauTelemetryMode::Timings {
+        if self.mode.collects_timings() {
             self.timings.step_control_ms += elapsed_ms;
         }
     }
@@ -562,39 +574,43 @@ impl RadauTelemetry {
         }
         use crate::symbolic::ivp_telemetry::IvpColdStage;
         let ms = |stage| snapshot.cold_stage(stage).elapsed.as_secs_f64() * 1_000.0;
-        self.timings.atom_conversion_ms += ms(IvpColdStage::ExprToAtom);
-        self.timings.atom_pattern_ms += ms(IvpColdStage::SparsePattern);
-        self.timings.layout_ms += ms(IvpColdStage::LayoutPlanning);
-        self.timings.atom_dependency_ms += ms(IvpColdStage::AtomDependencyAnalysis);
-        self.timings.symbolic_jacobian_ms += ms(IvpColdStage::SymbolicJacobian);
-        self.timings.atom_differentiation_ms += ms(IvpColdStage::SymbolicDifferentiation);
-        self.timings.simplification_ms += ms(IvpColdStage::Simplification);
-        self.timings.atom_residual_prepare_ms += ms(IvpColdStage::AtomResidualPreparation);
-        self.timings.atom_jacobian_prepare_ms += ms(IvpColdStage::AtomJacobianPreparation);
-        self.timings.atom_evaluator_compile_ms +=
-            ms(IvpColdStage::NativeJacobianEvaluatorPreparation);
-        self.timings.backend_binding_ms += ms(IvpColdStage::BackendBinding);
-        self.timings.aot_cache_lookup_ms += ms(IvpColdStage::AotCacheLookup);
-        self.timings.aot_lowering_ms += ms(IvpColdStage::AotLowering);
-        self.timings.aot_source_generation_ms += ms(IvpColdStage::AotSourceGeneration);
-        self.timings.aot_materialize_ms += ms(IvpColdStage::AotMaterialization);
-        self.timings.aot_build_ms += ms(IvpColdStage::AotBuild);
-        self.timings.aot_link_ms += ms(IvpColdStage::AotLink);
-        self.timings.aot_publication_ms += ms(IvpColdStage::AotPublication);
-        self.timings.aot_input_abi_ms += ms(IvpColdStage::AotInputAbiPreparation);
-        self.timings.aot_problem_key_ms += ms(IvpColdStage::AotProblemKeyConstruction);
-        self.timings.aot_atom_plan_ms += ms(IvpColdStage::AotAtomPlanPreparation);
-        self.counters.aot_resolution_hits += snapshot.aot_resolution_hits;
-        self.counters.aot_resolution_misses += snapshot.aot_resolution_misses;
-        self.counters.aot_reconnects += snapshot.aot_reconnects;
-        self.counters.aot_build_attempts += snapshot.aot_build_attempts;
-        self.counters.aot_build_retries += snapshot.aot_build_retries;
-        self.counters.aot_build_successes += snapshot.aot_build_successes;
-        self.counters.aot_build_failures += snapshot.aot_build_failures;
-        self.counters.aot_link_attempts += snapshot.aot_link_attempts;
-        self.counters.aot_link_successes += snapshot.aot_link_successes;
-        self.counters.aot_link_failures += snapshot.aot_link_failures;
-        self.counters.aot_runtime_ready += snapshot.aot_runtime_ready;
+        if self.mode.collects_timings() {
+            self.timings.atom_conversion_ms += ms(IvpColdStage::ExprToAtom);
+            self.timings.atom_pattern_ms += ms(IvpColdStage::SparsePattern);
+            self.timings.layout_ms += ms(IvpColdStage::LayoutPlanning);
+            self.timings.atom_dependency_ms += ms(IvpColdStage::AtomDependencyAnalysis);
+            self.timings.symbolic_jacobian_ms += ms(IvpColdStage::SymbolicJacobian);
+            self.timings.atom_differentiation_ms += ms(IvpColdStage::SymbolicDifferentiation);
+            self.timings.simplification_ms += ms(IvpColdStage::Simplification);
+            self.timings.atom_residual_prepare_ms += ms(IvpColdStage::AtomResidualPreparation);
+            self.timings.atom_jacobian_prepare_ms += ms(IvpColdStage::AtomJacobianPreparation);
+            self.timings.atom_evaluator_compile_ms +=
+                ms(IvpColdStage::NativeJacobianEvaluatorPreparation);
+            self.timings.backend_binding_ms += ms(IvpColdStage::BackendBinding);
+            self.timings.aot_cache_lookup_ms += ms(IvpColdStage::AotCacheLookup);
+            self.timings.aot_lowering_ms += ms(IvpColdStage::AotLowering);
+            self.timings.aot_source_generation_ms += ms(IvpColdStage::AotSourceGeneration);
+            self.timings.aot_materialize_ms += ms(IvpColdStage::AotMaterialization);
+            self.timings.aot_build_ms += ms(IvpColdStage::AotBuild);
+            self.timings.aot_link_ms += ms(IvpColdStage::AotLink);
+            self.timings.aot_publication_ms += ms(IvpColdStage::AotPublication);
+            self.timings.aot_input_abi_ms += ms(IvpColdStage::AotInputAbiPreparation);
+            self.timings.aot_problem_key_ms += ms(IvpColdStage::AotProblemKeyConstruction);
+            self.timings.aot_atom_plan_ms += ms(IvpColdStage::AotAtomPlanPreparation);
+        }
+        if self.mode.collects_counters() {
+            self.counters.aot_resolution_hits += snapshot.aot_resolution_hits;
+            self.counters.aot_resolution_misses += snapshot.aot_resolution_misses;
+            self.counters.aot_reconnects += snapshot.aot_reconnects;
+            self.counters.aot_build_attempts += snapshot.aot_build_attempts;
+            self.counters.aot_build_retries += snapshot.aot_build_retries;
+            self.counters.aot_build_successes += snapshot.aot_build_successes;
+            self.counters.aot_build_failures += snapshot.aot_build_failures;
+            self.counters.aot_link_attempts += snapshot.aot_link_attempts;
+            self.counters.aot_link_successes += snapshot.aot_link_successes;
+            self.counters.aot_link_failures += snapshot.aot_link_failures;
+            self.counters.aot_runtime_ready += snapshot.aot_runtime_ready;
+        }
         for key in &snapshot.aot_artifact_keys {
             if !self
                 .aot_artifact_keys
@@ -618,43 +634,45 @@ impl RadauTelemetry {
         if self.mode == RadauTelemetryMode::Off {
             return;
         }
-        self.counters.linear_solves += snapshot.counters.linear_solves;
-        self.counters.newton_iterations += snapshot.counters.newton_iterations;
-        self.counters.error_estimates += snapshot.counters.error_estimates;
-        self.counters.allocations += snapshot.counters.allocations;
-        self.counters.copies += snapshot.counters.copies;
-        self.counters.jacobian_assemblies += snapshot.counters.jacobian_assemblies;
-        self.counters.factorizations += snapshot.counters.factorizations;
-        self.counters.real_solves += snapshot.counters.real_solves;
-        self.counters.complex_solves += snapshot.counters.complex_solves;
-        self.counters.invalidations += snapshot.counters.invalidations;
-        self.counters.output_writes += snapshot.counters.output_writes;
-        self.counters.workspace_resizes += snapshot.counters.workspace_resizes;
-        self.counters.parallel_dispatches += snapshot.counters.parallel_dispatches;
-        self.counters.sequential_dispatches += snapshot.counters.sequential_dispatches;
-        self.counters.worker_count = self
-            .counters
-            .worker_count
-            .max(snapshot.counters.worker_count);
-        self.counters.configured_worker_count = self
-            .counters
-            .configured_worker_count
-            .max(snapshot.counters.configured_worker_count);
-        self.counters.aot_chunk_dispatches += snapshot.counters.aot_chunk_dispatches;
-        self.counters.aot_parallel_dispatches += snapshot.counters.aot_parallel_dispatches;
-        self.counters.aot_chunks += snapshot.counters.aot_chunks;
-        self.counters.aot_worker_callbacks += snapshot.counters.aot_worker_callbacks;
-        self.timings.newton_ms += snapshot.timings.newton_ms;
-        self.timings.linear_ms += snapshot.timings.linear_ms;
-        self.timings.output_ms += snapshot.timings.output_ms;
-        self.timings.step_control_ms += snapshot.timings.step_control_ms;
-        self.timings.jacobian_assembly_ms += snapshot.timings.jacobian_assembly_ms;
-        self.timings.factorization_ms += snapshot.timings.factorization_ms;
-        self.timings.real_solve_ms += snapshot.timings.real_solve_ms;
-        self.timings.complex_solve_ms += snapshot.timings.complex_solve_ms;
-        self.timings.invalidate_ms += snapshot.timings.invalidate_ms;
-        self.timings.workspace_ms += snapshot.timings.workspace_ms;
-        if self.mode == RadauTelemetryMode::Timings {
+        if self.mode.collects_counters() {
+            self.counters.linear_solves += snapshot.counters.linear_solves;
+            self.counters.newton_iterations += snapshot.counters.newton_iterations;
+            self.counters.error_estimates += snapshot.counters.error_estimates;
+            self.counters.allocations += snapshot.counters.allocations;
+            self.counters.copies += snapshot.counters.copies;
+            self.counters.jacobian_assemblies += snapshot.counters.jacobian_assemblies;
+            self.counters.factorizations += snapshot.counters.factorizations;
+            self.counters.real_solves += snapshot.counters.real_solves;
+            self.counters.complex_solves += snapshot.counters.complex_solves;
+            self.counters.invalidations += snapshot.counters.invalidations;
+            self.counters.output_writes += snapshot.counters.output_writes;
+            self.counters.workspace_resizes += snapshot.counters.workspace_resizes;
+            self.counters.parallel_dispatches += snapshot.counters.parallel_dispatches;
+            self.counters.sequential_dispatches += snapshot.counters.sequential_dispatches;
+            self.counters.worker_count = self
+                .counters
+                .worker_count
+                .max(snapshot.counters.worker_count);
+            self.counters.configured_worker_count = self
+                .counters
+                .configured_worker_count
+                .max(snapshot.counters.configured_worker_count);
+            self.counters.aot_chunk_dispatches += snapshot.counters.aot_chunk_dispatches;
+            self.counters.aot_parallel_dispatches += snapshot.counters.aot_parallel_dispatches;
+            self.counters.aot_chunks += snapshot.counters.aot_chunks;
+            self.counters.aot_worker_callbacks += snapshot.counters.aot_worker_callbacks;
+        }
+        if self.mode.collects_timings() {
+            self.timings.newton_ms += snapshot.timings.newton_ms;
+            self.timings.linear_ms += snapshot.timings.linear_ms;
+            self.timings.output_ms += snapshot.timings.output_ms;
+            self.timings.step_control_ms += snapshot.timings.step_control_ms;
+            self.timings.jacobian_assembly_ms += snapshot.timings.jacobian_assembly_ms;
+            self.timings.factorization_ms += snapshot.timings.factorization_ms;
+            self.timings.real_solve_ms += snapshot.timings.real_solve_ms;
+            self.timings.complex_solve_ms += snapshot.timings.complex_solve_ms;
+            self.timings.invalidate_ms += snapshot.timings.invalidate_ms;
+            self.timings.workspace_ms += snapshot.timings.workspace_ms;
             if self.initial_h_abs.is_none() {
                 self.initial_h_abs = snapshot.initial_h_abs;
             }
@@ -672,13 +690,17 @@ impl RadauTelemetry {
         if self.mode == RadauTelemetryMode::Off {
             return;
         }
-        self.counters.residual_calls += snapshot.counters.residual_calls;
-        self.counters.jacobian_calls += snapshot.counters.jacobian_calls;
-        self.counters.residual_evaluations += snapshot.counters.residual_evaluations;
-        self.counters.jacobian_evaluations += snapshot.counters.jacobian_evaluations;
-        self.timings.callback_ms += snapshot.timings.callback_ms;
-        self.timings.residual_evaluation_ms += snapshot.timings.residual_evaluation_ms;
-        self.timings.jacobian_evaluation_ms += snapshot.timings.jacobian_evaluation_ms;
+        if self.mode.collects_counters() {
+            self.counters.residual_calls += snapshot.counters.residual_calls;
+            self.counters.jacobian_calls += snapshot.counters.jacobian_calls;
+            self.counters.residual_evaluations += snapshot.counters.residual_evaluations;
+            self.counters.jacobian_evaluations += snapshot.counters.jacobian_evaluations;
+        }
+        if self.mode.collects_timings() {
+            self.timings.callback_ms += snapshot.timings.callback_ms;
+            self.timings.residual_evaluation_ms += snapshot.timings.residual_evaluation_ms;
+            self.timings.jacobian_evaluation_ms += snapshot.timings.jacobian_evaluation_ms;
+        }
     }
 
     /// Import warm execution counters from the shared generated-IVP runtime.
@@ -695,22 +717,24 @@ impl RadauTelemetry {
         // The shared AOT runtime also exposes these fields, but importing them
         // here would count the same decision twice. Import only AOT-specific
         // chunk/worker activity below.
-        self.counters.aot_chunk_dispatches += snapshot.aot_chunk_dispatches;
-        self.counters.aot_parallel_dispatches += snapshot.aot_parallel_dispatches;
-        self.counters.aot_chunks += snapshot.aot_chunks;
-        self.counters.aot_worker_callbacks += snapshot.aot_worker_callbacks;
-        self.counters.worker_count = self
-            .counters
-            .worker_count
-            .max(snapshot.lambdify_worker_count as u64);
-        if snapshot.aot_chunks > 0 {
-            self.counters.aot_chunking_applicable = 1;
+        if self.mode.collects_counters() {
+            self.counters.aot_chunk_dispatches += snapshot.aot_chunk_dispatches;
+            self.counters.aot_parallel_dispatches += snapshot.aot_parallel_dispatches;
+            self.counters.aot_chunks += snapshot.aot_chunks;
+            self.counters.aot_worker_callbacks += snapshot.aot_worker_callbacks;
+            self.counters.worker_count = self
+                .counters
+                .worker_count
+                .max(snapshot.lambdify_worker_count as u64);
+            if snapshot.aot_chunks > 0 {
+                self.counters.aot_chunking_applicable = 1;
+            }
+            if snapshot.aot_parallel_dispatches > 0 {
+                self.counters.parallel_dispatch_applicable = 1;
+            }
+            self.counters.copies = self.counters.copies.saturating_add(snapshot.copies);
         }
-        if snapshot.aot_parallel_dispatches > 0 {
-            self.counters.parallel_dispatch_applicable = 1;
-        }
-        self.counters.copies = self.counters.copies.saturating_add(snapshot.copies);
-        if self.mode == RadauTelemetryMode::Timings {
+        if self.mode.collects_timings() {
             use crate::symbolic::ivp_telemetry::IvpWarmStage;
             let ms = |stage| snapshot.warm_stage(stage).elapsed.as_secs_f64() * 1_000.0;
             self.timings.binding_ms += ms(IvpWarmStage::ArgumentBinding);
@@ -725,7 +749,7 @@ impl RadauTelemetry {
         F: FnOnce() -> T,
     {
         self.count_callback(stage);
-        if self.mode != RadauTelemetryMode::Timings {
+        if !self.mode.collects_timings() {
             return operation();
         }
         let started = std::time::Instant::now();
@@ -754,7 +778,7 @@ impl RadauTelemetry {
         F: FnOnce() -> T,
     {
         self.count_linear(stage);
-        if self.mode != RadauTelemetryMode::Timings {
+        if !self.mode.collects_timings() {
             return operation();
         }
         let started = std::time::Instant::now();
@@ -773,7 +797,7 @@ impl RadauTelemetry {
 
     /// Add a high-level timing scope while preserving inclusive-scope semantics.
     pub(crate) fn add_timing_ms(&mut self, stage: RadauStage, elapsed_ms: f64) {
-        if self.mode != RadauTelemetryMode::Timings {
+        if !self.mode.collects_timings() {
             return;
         }
         match stage {
@@ -792,10 +816,10 @@ impl RadauTelemetry {
     where
         F: FnOnce() -> T,
     {
-        if self.mode != RadauTelemetryMode::Off {
+        if self.mode.collects_counters() {
             self.counters.frontend_preparations += 1;
         }
-        if self.mode != RadauTelemetryMode::Timings {
+        if !self.mode.collects_timings() {
             return operation();
         }
         let started = std::time::Instant::now();

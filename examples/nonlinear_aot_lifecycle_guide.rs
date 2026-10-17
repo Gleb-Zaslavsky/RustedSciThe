@@ -24,7 +24,7 @@ fn solve_options() -> SolveOptions {
         tolerance: 1e-11,
         max_iterations: 50,
         diagnostics: DiagnosticsOptions {
-            collect_statistics: true,
+            telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Detailed,
             ..DiagnosticsOptions::default()
         },
         ..SolveOptions::default()

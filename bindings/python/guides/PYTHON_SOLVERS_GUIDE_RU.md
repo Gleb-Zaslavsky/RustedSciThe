@@ -73,6 +73,17 @@ result = solver.solve()
 `"lsoda"` принимается как alias семейства LSODE2 для автоматического
 контроллера Adams/BDF. Аргумент `controller=` допустим только для LSODE2.
 
+Nonstiff-часть `ODE_api2` доступна отдельно через `UniversalNonStiffSolver`;
+`create_ivp` и `solve_ivp` также принимают методы `"rk45"`, `"dopri"` и
+`"ab4"`. Этот маршрут намеренно уже stiff-адаптеров: ExprLegacy/Lambdify,
+Dense, последовательное выполнение, положительный шаг, optional stop
+conditions по именам состояний и neighborhood tolerance. Native telemetry,
+AOT, AtomNative, parameter continuation и restart здесь отсутствуют;
+неподдерживаемая конфигурация отклоняется явно. Fixed-step цикл заканчивает
+после достижения или пересечения `t_end`, поэтому последняя точка может выйти
+за границу менее чем на один шаг. Для stiff-методов используются их отдельные
+нативные API.
+
 ## BVP
 
 `solve_bvp("bvp_sci", ...)` и `solve_bvp("bvp_damp", ...)` имеют общий
@@ -106,6 +117,19 @@ Facade принимает NumPy-векторы и преобразует их п
 `TaskDocument.parse(...)`, `task(...)` и `run_task_batch(...)` используют
 общий Rust task parser. Batch продолжает выполнение после ошибки и может
 вывести компактную таблицу через `render_table(...)`.
+Если приложению нужны обычные Python-данные, используйте
+`task_dict(source_or_path)`: функция сериализует уже разобранную native-
+спецификацию, включая уравнения, настройки солвера, continuation и output,
+не запуская решение. `check_dependencies()` возвращает структурированные
+результаты проверки PATH-инструментов и загрузки опциональной библиотеки
+SuperLU без печати в консоль.
+
+Нативный `log` — это не телеметрия. По умолчанию он выключен; солверы с
+поддержкой логгера Rust принимают `options.set_logging_level("info")`, а также
+уровни `error`, `warn` и `debug`. Лог сохраняется в timestamped-файл на процесс,
+а не возвращается как часть решения. Каталог задаётся через `RST_SOLVER_LOG_DIR`
+до запуска Python. Если солвер не поддерживает нативное логирование, включённый
+общий уровень будет отклонён, а не проигнорирован молча.
 
 Примеры в `bindings/python/examples/` показывают Radau, BDF continuation,
 BVP_sci, nonlinear/fitting и batch-задачи. Они используют уже проверенную
@@ -126,6 +150,8 @@ BVP_sci, nonlinear/fitting и batch-задачи. Они используют у
   SuperLU и AOT.
 - [BVP_Damp](BVP_DAMP_GUIDE_RU.md): наблюдения, bounds, уточнение сетки,
   layout и символьные/AOT-маршруты.
+- [ShootingBVP](SHOOTING_BVP_GUIDE_RU.md): небольшие скалярные BVP второго
+  порядка, два символьных фронтенда, выбор IVP-солвера и телеметрия.
 - [Нелинейные системы и fitting](NONLINEAR_FITTING_GUIDE_RU.md): root,
   least-squares и fitting API.
 

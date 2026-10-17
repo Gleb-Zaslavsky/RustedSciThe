@@ -44,7 +44,7 @@ fn measured_solver(
         Some(max_step),
     )
     .with_symbolic_assembly_backend(assembly)
-    .with_telemetry_mode(BdfTelemetryMode::Timings);
+    .with_telemetry_mode(BdfTelemetryMode::Detailed);
     if !workload.parameter_names.is_empty() {
         options = options
             .with_equation_parameters(workload.parameter_names)
@@ -445,7 +445,7 @@ fn bdf_dense_size_preparation_and_solver_matrix_story() {
     for dimension in dimensions {
         let mut results = Vec::new();
         for (assembly, route) in routes {
-            let mut solver = dense_coupled_solver(dimension, assembly, BdfTelemetryMode::Timings);
+            let mut solver = dense_coupled_solver(dimension, assembly, BdfTelemetryMode::Detailed);
             solver
                 .try_solve()
                 .unwrap_or_else(|error| panic!("dense-coupled n={dimension} {route}: {error}"));
@@ -480,7 +480,7 @@ fn bdf_dense_size_preparation_and_solver_matrix_story() {
             );
             let symbolic = solver
                 .preparation_backend_telemetry()
-                .expect("timings mode should retain symbolic preparation stages");
+                .expect("detailed mode should retain symbolic preparation stages");
             assert_eq!(
                 symbolic.mode,
                 crate::symbolic::ivp_telemetry::IvpTelemetryMode::Detailed

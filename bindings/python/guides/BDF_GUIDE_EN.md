@@ -51,9 +51,10 @@ native lifecycle supports BuildIfMissing, RequirePrebuilt and RebuildAlways;
 configure its compiler, profile and artifact directory through `SolverOptions`.
 Inspect provenance and AOT counters before claiming an artifact was reused.
 
-Telemetry is detached from mutable solver workspaces. Use counters or timings
-explicitly and compare preparation, callback and numerical solve scopes
-separately. The callback API does not make Python callbacks a parallel hot
+Telemetry is detached from mutable solver workspaces. Choose `off`, `counters`,
+`timings`, or `detailed` explicitly: counters and timings are separate
+collections, and `detailed` enables both. Compare preparation, callback and
+numerical solve scopes separately. The callback API does not make Python callbacks a parallel hot
 path. Invalid options and numerical exhaustion produce typed errors.
 
 ## Examples

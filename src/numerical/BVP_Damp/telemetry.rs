@@ -59,17 +59,26 @@ pub enum BvpLoggingMode {
 
 /// Collection policy for solver counters and stage timings.
 ///
-/// `Off` is a real fast path: no solver counters are incremented and the
-/// stage timer is not started. `Counters` preserves the historical default
-/// and collects cheap typed counters and major timings. `Detailed` is for
-/// diagnostic runs that also need callback-stage timings. Decision logging is
-/// controlled independently by [`BvpLoggingConfig`].
+/// Counters and time measurements are independent: `Counters` never reads the
+/// clock, `Timings` never increments discrete counters, and `Detailed` enables
+/// both. Decision logging is controlled independently by [`BvpLoggingConfig`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BvpTelemetryMode {
     Off,
     #[default]
     Counters,
+    Timings,
     Detailed,
+}
+
+impl BvpTelemetryMode {
+    pub const fn collects_counters(self) -> bool {
+        matches!(self, Self::Counters | Self::Detailed)
+    }
+
+    pub const fn collects_timings(self) -> bool {
+        matches!(self, Self::Timings | Self::Detailed)
+    }
 }
 
 /// Bounded configuration for the typed decision trace.
@@ -489,8 +498,13 @@ impl BvpTelemetryRecorder {
     }
 
     #[inline]
-    fn telemetry_enabled(&self) -> bool {
-        self.telemetry_mode.get() != BvpTelemetryMode::Off
+    fn counters_enabled(&self) -> bool {
+        self.telemetry_mode.get().collects_counters()
+    }
+
+    #[inline]
+    fn timings_enabled(&self) -> bool {
+        self.telemetry_mode.get().collects_timings()
     }
 
     /// Configures event retention without changing numerical behaviour.
@@ -534,13 +548,13 @@ impl BvpTelemetryRecorder {
     /// The `Option` keeps the disabled path free of `Instant::now()` calls.
     #[inline]
     pub(crate) fn start_iteration_scope(&self) -> Option<Instant> {
-        self.telemetry_enabled().then(Instant::now)
+        self.timings_enabled().then(Instant::now)
     }
 
     /// Completes an iteration scope and accumulates its elapsed duration.
     #[inline]
     pub(crate) fn finish_iteration_scope(&self, started: Option<Instant>) {
-        if self.telemetry_enabled() {
+        if self.timings_enabled() {
             if let Some(started) = started {
                 self.iteration_elapsed.set(
                     self.iteration_elapsed
@@ -554,13 +568,13 @@ impl BvpTelemetryRecorder {
     /// Starts a damping-trial scope without allocating or locking.
     #[inline]
     pub(crate) fn start_damping_trial_scope(&self) -> Option<Instant> {
-        self.telemetry_enabled().then(Instant::now)
+        self.timings_enabled().then(Instant::now)
     }
 
     /// Completes a damping-trial scope and accumulates its elapsed duration.
     #[inline]
     pub(crate) fn finish_damping_trial_scope(&self, started: Option<Instant>) {
-        if self.telemetry_enabled() {
+        if self.timings_enabled() {
             if let Some(started) = started {
                 self.damping_trial_elapsed.set(
                     self.damping_trial_elapsed
@@ -677,7 +691,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_iteration(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.iterations.set(self.iterations.get() + 1);
@@ -685,7 +699,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_scalar_evaluation(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.scalar_evaluations
@@ -694,7 +708,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_residual_call(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.residual_calls.set(self.residual_calls.get() + 1);
@@ -703,7 +717,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_residual_request(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.residual_requests.set(self.residual_requests.get() + 1);
@@ -711,7 +725,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_jacobian_request(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.jacobian_requests.set(self.jacobian_requests.get() + 1);
@@ -719,7 +733,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_residual_chunk(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.residual_chunks.set(self.residual_chunks.get() + 1);
@@ -727,7 +741,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_jacobian_chunk(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.jacobian_chunks.set(self.jacobian_chunks.get() + 1);
@@ -735,7 +749,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_conversion(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.conversions.set(self.conversions.get() + 1);
@@ -743,7 +757,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_copy(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.copies.set(self.copies.get() + 1);
@@ -760,7 +774,7 @@ impl BvpTelemetryRecorder {
         damping_coefficient: f64,
         residual_norm: f64,
     ) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.damping_trials.set(self.damping_trials.get() + 1);
@@ -786,7 +800,7 @@ impl BvpTelemetryRecorder {
         damping_coefficient: f64,
         residual_norm: f64,
     ) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.damping_rejections
@@ -864,7 +878,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_jacobian_recalculation(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.jacobian_recalculations
@@ -883,7 +897,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_linear_solve(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.linear_solves.set(self.linear_solves.get() + 1);
@@ -891,7 +905,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_factorization(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.factorizations.set(self.factorizations.get() + 1);
@@ -908,7 +922,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_factorization_cache_hit(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.factorization_cache_hits
@@ -926,7 +940,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_factorization_invalidation(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.factorization_invalidations
@@ -944,7 +958,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_rhs_solve(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.rhs_solves.set(self.rhs_solves.get() + 1);
@@ -952,7 +966,7 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_grid_refinement(&self) {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return;
         }
         self.grid_refinements.set(self.grid_refinements.get() + 1);
@@ -968,7 +982,7 @@ impl BvpTelemetryRecorder {
     }
 
     pub(crate) fn snapshot(&self) -> BvpTelemetryCounters {
-        if !self.telemetry_enabled() {
+        if !self.counters_enabled() {
             return BvpTelemetryCounters::default();
         }
         BvpTelemetryCounters {
@@ -999,7 +1013,7 @@ impl BvpTelemetryRecorder {
         counters: &BvpTelemetryCounters,
     ) -> BvpTelemetryScopes {
         let mut scopes = BvpTelemetryScopes::from_snapshot(timings, counters);
-        if self.telemetry_enabled() {
+        if self.timings_enabled() {
             scopes.iteration.elapsed = self.iteration_elapsed.get();
             scopes.damping_trial.elapsed = self.damping_trial_elapsed.get();
         }
@@ -1308,6 +1322,7 @@ mod tests {
     #[test]
     fn iteration_and_damping_scopes_report_real_elapsed_time() {
         let recorder = BvpTelemetryRecorder::default();
+        recorder.set_telemetry_mode(BvpTelemetryMode::Timings);
         let iteration_started = recorder.start_iteration_scope();
         std::thread::sleep(Duration::from_millis(1));
         recorder.finish_iteration_scope(iteration_started);
@@ -1342,6 +1357,7 @@ mod tests {
     #[test]
     fn begin_solve_resets_iteration_and_damping_scope_elapsed() {
         let recorder = BvpTelemetryRecorder::default();
+        recorder.set_telemetry_mode(BvpTelemetryMode::Timings);
         let iteration_started = recorder.start_iteration_scope();
         let damping_trial_started = recorder.start_damping_trial_scope();
         // The assertion is about reset semantics, not timer resolution. A
@@ -1359,5 +1375,29 @@ mod tests {
         let after = recorder.scopes_snapshot(&BvpTimingSnapshot::default(), &recorder.snapshot());
         assert_eq!(after.iteration.elapsed, Duration::ZERO);
         assert_eq!(after.damping_trial.elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn counters_and_timings_modes_collect_disjoint_data() {
+        let counters = BvpTelemetryRecorder::default();
+        counters.set_telemetry_mode(BvpTelemetryMode::Counters);
+        assert!(counters.start_iteration_scope().is_none());
+        assert!(counters.start_damping_trial_scope().is_none());
+        counters.record_iteration();
+        counters.record_linear_solve();
+        assert_eq!(counters.snapshot().iterations, 1);
+        assert_eq!(counters.snapshot().linear_solves, 1);
+
+        let timings = BvpTelemetryRecorder::default();
+        timings.set_telemetry_mode(BvpTelemetryMode::Timings);
+        let started = timings.start_iteration_scope();
+        assert!(started.is_some());
+        timings.record_iteration();
+        timings.finish_iteration_scope(started);
+        let snapshot = timings.snapshot();
+        let scopes = timings.scopes_snapshot(&BvpTimingSnapshot::default(), &snapshot);
+        assert_eq!(snapshot, BvpTelemetryCounters::default());
+        assert!(scopes.iteration.elapsed > Duration::ZERO);
+        assert_eq!(scopes.iteration.events, 0);
     }
 }

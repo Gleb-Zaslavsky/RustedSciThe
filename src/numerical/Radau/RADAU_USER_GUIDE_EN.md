@@ -241,9 +241,10 @@ let config = RadauConfig {
 ```
 
 Use `Counters` for calls, accepted/rejected steps, Newton iterations,
-factorizations, and linear solves. Use `Timings` when investigating a staging
-or performance question. The report separates preparation and runtime scopes;
-parent and child timings are diagnostic and must not be added together.
+factorizations, and linear solves without clock reads. `Timings` collects only
+wall-clock durations; `Detailed` collects both counters and durations. The
+report separates preparation and runtime scopes; parent and child timings are
+diagnostic and must not be added together.
 
 Important fields include residual/Jacobian calls, factorization and solve
 counts, callback timing, Newton timing, linear timing, output timing, parameter

@@ -221,7 +221,7 @@ mod tests {
             max_iterations: 80,
             diagnostics: DiagnosticsOptions {
                 collect_history: false,
-                collect_statistics: true,
+                telemetry_mode: crate::numerical::SolverTelemetryMode::Detailed,
                 ..DiagnosticsOptions::default()
             },
             ..SolveOptions::default()

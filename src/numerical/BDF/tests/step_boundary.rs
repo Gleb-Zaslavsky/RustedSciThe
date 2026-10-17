@@ -1,6 +1,6 @@
 use super::*;
 use crate::numerical::BDF::common::{
-    check_arguments, scale_func, select_initial_step, ArgumentValidationError,
+    ArgumentValidationError, check_arguments, scale_func, select_initial_step,
 };
 
 #[test]
@@ -130,9 +130,7 @@ fn read_only_step_state_getters_track_low_level_accepted_steps() {
             0.1,
             NumberOrVec::Number(1e-8),
             NumberOrVec::Number(1e-10),
-            BdfJacobianSource::Constant(BdfJacobian::from_dense(DMatrix::from_element(
-                1, 1, -1.0,
-            ))),
+            BdfJacobianSource::Constant(BdfJacobian::from_dense(DMatrix::from_element(1, 1, -1.0))),
             None,
             false,
             Some(0.05),
@@ -1328,10 +1326,12 @@ fn finite_difference_jacobian_scales_steps_per_component() {
     );
     assert!(result.matrix[(0, 1)].abs() < 1e-12);
     assert!(result.matrix[(1, 0)].abs() < 1e-12);
-    assert!(result
-        .factor
-        .iter()
-        .all(|value| value.is_finite() && *value > 0.0));
+    assert!(
+        result
+            .factor
+            .iter()
+            .all(|value| value.is_finite() && *value > 0.0)
+    );
 }
 
 #[test]

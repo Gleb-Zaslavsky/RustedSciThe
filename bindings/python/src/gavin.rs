@@ -305,7 +305,7 @@ pub struct GavinFittingSolver {
 #[pymethods]
 impl GavinFittingSolver {
     #[new]
-    #[pyo3(signature=(equations, x_data, observations, sample_parameter, unknowns, initial_guess, weights=None, frontend="expr_legacy", execution_policy="sequential", min_work=1, positive_parameters=None, max_iterations=1000, gradient_tolerance=1e-3, parameter_step_tolerance=1e-3, gain_ratio_threshold=1e-1, update_policy="marquardt", telemetry="off", logging=false, preparation_telemetry="off"))]
+    #[pyo3(signature=(equations, x_data, observations, sample_parameter, unknowns, initial_guess, weights=None, frontend="expr_legacy", execution_policy="sequential", min_work=1, positive_parameters=None, max_iterations=1000, gradient_tolerance=1e-3, parameter_step_tolerance=1e-3, gain_ratio_threshold=1e-1, update_policy="marquardt", telemetry=false, logging=false, preparation_telemetry="off"))]
     /// Configure one Gavin symbolic fit.
     ///
     /// `equations` define the model residual expressions; `x_data` and `observations`
@@ -316,7 +316,9 @@ impl GavinFittingSolver {
     /// selects sequential, parallel, or automatic callback evaluation. Numerical
     /// controls configure iteration, gradient, parameter-step and gain-ratio stopping.
     /// `update_policy` accepts `marquardt`, `quadratic`, or `nielsen`. Numerical
-    /// `telemetry`, `logging`, and `preparation_telemetry` are disabled by default.
+    /// `telemetry` is a boolean: when enabled, Gavin collects its complete native
+    /// snapshot (counters and timings together). Logging and preparation telemetry
+    /// are separate opt-in controls and disabled by default.
     pub fn new(
         equations: Vec<PyExpr>,
         x_data: Vec<f64>,
@@ -334,17 +336,13 @@ impl GavinFittingSolver {
         parameter_step_tolerance: f64,
         gain_ratio_threshold: f64,
         update_policy: &str,
-        telemetry: &str,
+        telemetry: bool,
         logging: bool,
         preparation_telemetry: &str,
     ) -> PyResult<Self> {
         let frontend = parse_frontend(frontend)?;
         let execution_policy = parse_execution_policy(execution_policy, min_work)?;
         let update_policy = parse_update_policy(update_policy)?;
-        let telemetry = !matches!(
-            telemetry.trim().to_ascii_lowercase().as_str(),
-            "off" | "none"
-        );
         let preparation_telemetry = match preparation_telemetry.trim().to_ascii_lowercase().as_str()
         {
             "detailed" | "timings" | "on" => PreparationTelemetryMode::Collect,
@@ -370,7 +368,11 @@ impl GavinFittingSolver {
                 gain_ratio_threshold,
             )
             .with_update_policy(update_policy)
-            .with_telemetry(telemetry)
+            .with_telemetry(if telemetry {
+                rustedscithe_core::numerical::SolverTelemetryMode::Detailed
+            } else {
+                rustedscithe_core::numerical::SolverTelemetryMode::Off
+            })
             .with_logging(logging)
             .with_preparation_telemetry(preparation_telemetry);
         if let Some(weights) = weights {

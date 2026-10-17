@@ -8,8 +8,8 @@
 //! parameter update into the usual Newton-like step `x_{k+1} = x_k - p`.
 
 use crate::numerical::Nonlinear_systems::engine::{
-    eval_residual_with_runtime, measure_linear_operation, scaled_norm, scaling_vector,
     IterationState, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome,
+    eval_residual_with_runtime, measure_linear_operation, scaled_norm, scaling_vector,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::least_squares::trust_region::determine_lambda_and_parameter_update;
@@ -174,9 +174,9 @@ impl NonlinearMethod for TrustRegionLMMethod {
             }
         }
 
-        runtime.linear_solves += 1;
+        runtime.count_linear_solve();
         let parameter =
-            measure_linear_operation(runtime, options.diagnostics.collect_statistics, || {
+            measure_linear_operation(runtime, options.diagnostics.telemetry_mode, || {
                 solve_trust_region_subproblem(
                     &state.jacobian,
                     &state.residual,
@@ -224,7 +224,7 @@ impl NonlinearMethod for TrustRegionLMMethod {
             problem,
             &trial_x,
             runtime,
-            options.diagnostics.collect_statistics,
+            options.diagnostics.telemetry_mode,
         )?;
         let trial_norm = trial_residual.norm();
 
@@ -271,13 +271,13 @@ impl NonlinearMethod for TrustRegionLMMethod {
         }
 
         if ratio >= self.acceptance_threshold {
-            runtime.accepted_steps += 1;
+            runtime.count_accepted_step();
             Ok(StepOutcome::Continue {
                 next_x: trial_x,
                 accepted: true,
             })
         } else {
-            runtime.rejected_steps += 1;
+            runtime.count_rejected_step();
             if method_state.delta <= options.tolerance.max(1.0e-14) {
                 return Ok(StepOutcome::Terminated(TerminationReason::Stagnation));
             }

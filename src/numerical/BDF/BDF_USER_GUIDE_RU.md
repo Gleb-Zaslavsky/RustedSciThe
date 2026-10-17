@@ -61,10 +61,11 @@ cargo run --no-default-features --example rus_bdf_aot_guide
 
 ## Телеметрия и ошибки
 
-Телеметрия по умолчанию выключена. `BdfTelemetryMode::Counters` дает
-низкозатратные счетчики работы, а `BdfTelemetryMode::Timings` добавляет
-диагностические таймеры стадий. Вложенные timing scopes являются inclusive и
-их нельзя складывать.
+Телеметрия по умолчанию выключена. `BdfTelemetryMode::Counters` собирает
+дискретные счетчики без чтения часов. `BdfTelemetryMode::Timings` собирает
+времена стадий без дискретных счетчиков, а `BdfTelemetryMode::Detailed`
+собирает оба набора. Вложенные timing scopes являются inclusive и их нельзя
+складывать.
 
 В прикладном коде предпочтителен типизированный API `try_*`, включая
 `try_solve`, continuation и методы конфигурации. Он сообщает типизированными

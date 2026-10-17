@@ -35,8 +35,8 @@ use super::new::finite_difference::FiniteDifferenceJacobianCallback;
 use super::new::native_callbacks::{NativeJacobianFn, NativeResidualCallback, NativeResidualFn};
 use super::new::output::{RadauOutput, RadauOutputPolicy as InternalOutputPolicy};
 use super::new::solver::{
-    try_solve_dense_with_callbacks_with_output, try_solve_symbolic_dense_with_output,
-    RadauSolveResult,
+    RadauSolveResult, try_solve_dense_with_callbacks_with_output,
+    try_solve_symbolic_dense_with_output,
 };
 use super::new::telemetry::{RadauTelemetry, RadauTelemetryMode as InternalTelemetryMode};
 
@@ -81,12 +81,17 @@ pub enum RadauJacobianSource {
     FiniteDifference,
 }
 
-/// Cost policy for optional telemetry.
+/// Collection policy for optional Radau telemetry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RadauTelemetryMode {
+    /// Disable counters and timing scopes.
     Off,
+    /// Collect discrete operation counts without reading the clock.
     Counters,
+    /// Collect wall-clock durations without discrete operation counts.
     Timings,
+    /// Collect both discrete counters and wall-clock durations.
+    Detailed,
 }
 
 /// Runtime policy for independent residual/Jacobian callback work.
@@ -495,6 +500,7 @@ impl RadauTelemetryReport {
             InternalTelemetryMode::Off => RadauTelemetryMode::Off,
             InternalTelemetryMode::Counters => RadauTelemetryMode::Counters,
             InternalTelemetryMode::Timings => RadauTelemetryMode::Timings,
+            InternalTelemetryMode::Detailed => RadauTelemetryMode::Detailed,
         };
         let c = telemetry.counters;
         let t = telemetry.timings;
@@ -1088,6 +1094,7 @@ impl RadauTelemetryMode {
             Self::Off => InternalTelemetryMode::Off,
             Self::Counters => InternalTelemetryMode::Counters,
             Self::Timings => InternalTelemetryMode::Timings,
+            Self::Detailed => InternalTelemetryMode::Detailed,
         }
     }
 }
@@ -1098,6 +1105,7 @@ impl InternalTelemetryMode {
             Self::Off => RadauTelemetryMode::Off,
             Self::Counters => RadauTelemetryMode::Counters,
             Self::Timings => RadauTelemetryMode::Timings,
+            Self::Detailed => RadauTelemetryMode::Detailed,
         }
     }
 }

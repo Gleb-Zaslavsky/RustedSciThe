@@ -22,9 +22,10 @@ wall-clock assertions. Reports are written through the shared
 | `be_accepted_state_continuation_after_parameter_change_matches_segmented_reference_story` | Continues an accepted trajectory from `t=0.5` to `1.0` after changing the rate from 1 to 2 | Matches a separately solved two-segment reference, preserves preparation, and records successful continuation telemetry |
 | `borrowed_trajectory_matches_legacy_owned_result` | Compares borrowed `trajectory()` with compatibility `get_result()` | Exact time/state equality and documented sample-row/state-column layout |
 | `be_streamed_output_assembly_preserves_multistate_sample_rows` | BE trajectory assembly after streaming-history change | Exact `(samples, states)` row layout |
-| `be_symbolic_ivp_telemetry_*` unit gates | Shared cold/warm lifecycle snapshot through BE; Off, Counters, Timings, typed preparation failure and route invalidation | Correct mode/stages, no stale snapshot, partial failure report remains inspectable |
+| `be_symbolic_ivp_telemetry_*` unit gates | Shared cold/warm lifecycle snapshot through BE; Off, Counters, Timings, Detailed, typed preparation failure and route invalidation | Disjoint collection semantics, no stale snapshot, partial failure report remains inspectable |
 
-Timing stories use Timings mode and report outside production code. Their
+Timing stories that also print work counts use Detailed mode; timing-only
+contract tests use Timings mode. Their
 numbers are diagnostic and should be compared only for the same build profile,
 machine, workload, step count, telemetry mode and revision. Debug results must
 not replace release baselines.
@@ -87,7 +88,7 @@ correctness stories do not impose or report a performance threshold.
 The real AOT lifecycle gate is excluded from the default suite because it
 requires `tcc`. It also prints a one-shot cold E2E comparison against
 AtomViewNative Lambdify on the common diffusion fixture. The comparison is
-diagnostic only: Lambdify runs first, both routes collect timing telemetry,
+diagnostic only: Lambdify runs first, both routes collect Detailed telemetry,
 and it does not isolate processes or alternate route order. Run it explicitly in release after confirming `tcc` is on
 `PATH`:
 

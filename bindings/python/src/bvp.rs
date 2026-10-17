@@ -162,6 +162,7 @@ fn map_telemetry(value: &str) -> PyResult<BvpSciTelemetryMode> {
         "off" => Ok(BvpSciTelemetryMode::Off),
         "counters" => Ok(BvpSciTelemetryMode::Counters),
         "timings" => Ok(BvpSciTelemetryMode::Timings),
+        "detailed" => Ok(BvpSciTelemetryMode::Detailed),
         other => Err(InvalidConfigurationError::new_err(format!(
             "unknown BVP telemetry mode '{other}'"
         ))),
@@ -258,7 +259,7 @@ fn snapshot_maps(
     snapshot: &rustedscithe_core::numerical::BVP_sci::new::BvpSciTelemetrySnapshot,
 ) -> (String, HashMap<String, u64>, HashMap<String, f64>) {
     let mode = format!("{:?}", snapshot.mode).to_ascii_lowercase();
-    let counters = [
+    let mut counters: HashMap<String, u64> = [
         ("rhs_calls", snapshot.rhs_calls),
         ("boundary_calls", snapshot.boundary_calls),
         ("jacobian_calls", snapshot.jacobian_calls),
@@ -283,10 +284,9 @@ fn snapshot_maps(
         ),
     ]
     .into_iter()
-    .filter(|(_, value)| *value != 0)
     .map(|(name, value)| (name.to_owned(), value))
     .collect();
-    let timings = [
+    let mut timings: HashMap<String, f64> = [
         ("preparation_ms", snapshot.preparation_ms),
         ("expr_to_atom_ms", snapshot.expr_to_atom_ms),
         ("symbolic_jacobian_ms", snapshot.symbolic_jacobian_ms),
@@ -313,6 +313,16 @@ fn snapshot_maps(
     .into_iter()
     .filter_map(|(name, value)| value.map(|value| (name.to_owned(), value)))
     .collect();
+    match mode.as_str() {
+        "off" => {
+            counters.clear();
+            timings.clear();
+        }
+        "counters" => timings.clear(),
+        "timings" => counters.clear(),
+        "detailed" => {}
+        _ => unreachable!("native BVP telemetry enum must map to a known mode"),
+    }
     (mode, counters, timings)
 }
 
@@ -441,12 +451,13 @@ impl BvpSciSolution {
         &self.telemetry_mode
     }
 
-    /// Return discrete stage counters from the completed solve.
+    /// Return measured discrete stage counters; empty when telemetry is off.
     pub fn telemetry_counters(&self) -> HashMap<String, u64> {
         self.counters.clone()
     }
 
-    /// Return stage timings in milliseconds; scopes may overlap.
+    /// Return measured stage timings in milliseconds. Unmeasured/inapplicable
+    /// scopes are absent, and scopes may overlap. Empty in off/counters modes.
     pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
         self.timings_ms.clone()
     }
@@ -690,6 +701,7 @@ impl BvpSciSolver {
             .map(|value| value.clone())
             .unwrap_or(default_options()?);
         options.validate_for("bvp_sci")?;
+        let logging_level = crate::contract::native_logging_level(&options, "bvp_sci")?;
         let assembly = match options.frontend() {
             "expr_legacy" => BvpSciAssembly::ExprLegacy,
             "atom_native" => BvpSciAssembly::AtomViewNative,
@@ -737,6 +749,7 @@ impl BvpSciSolver {
             .with_execution_policy(policy)
             .with_telemetry(telemetry_mode)
             .with_output_policy(output_policy);
+        builder = builder.with_logging_level(logging_level);
         if options.execution() == "aot" {
             builder = builder.with_aot_generated_backend(generated_config(&options)?);
         }

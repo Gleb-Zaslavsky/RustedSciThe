@@ -915,7 +915,8 @@ fn prepare_aot_benchmark(
         execution: RadauExecution::Aot,
         frontend,
         matrix_layout: layout,
-        telemetry: RadauTelemetryMode::Counters,
+        // Criterion measures wall time here and does not consume counters.
+        telemetry: RadauTelemetryMode::Off,
         execution_policy,
         aot: Some(
             if std::env::var("RADAU_BENCH_COMPACT_REPORT").as_deref() == Ok("1") {

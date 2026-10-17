@@ -12,15 +12,15 @@ use nalgebra::DVector;
 use pyo3::prelude::*;
 
 use rustedscithe_core::numerical::BE::{
-    BE, BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode,
+    BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode, BE,
 };
 use rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError;
 
 use crate::aot::{generated_config, map_backend_error, provenance_fields};
 use crate::contract::SolverOptions;
 use crate::errors::{
-    ExhaustionError, InvalidConfigurationError, SolverError, SolverPanicState,
-    UnsupportedOptionError, catch_panic,
+    catch_panic, ExhaustionError, InvalidConfigurationError, SolverError, SolverPanicState,
+    UnsupportedOptionError,
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
@@ -100,6 +100,7 @@ fn validate_route(
         "off" => BeTelemetryMode::Off,
         "counters" => BeTelemetryMode::Counters,
         "timings" => BeTelemetryMode::Timings,
+        "detailed" => BeTelemetryMode::Detailed,
         _ => {
             return Err(InvalidConfigurationError::new_err(
                 "unknown telemetry mode in SolverOptions",
@@ -160,6 +161,12 @@ impl BackwardEulerSolution {
         let (times, states) = solver.trajectory();
         let detailed = solver.detailed_statistics();
         let common = solver.get_statistics();
+        let telemetry_mode = match solver.telemetry_mode() {
+            BeTelemetryMode::Off => "off",
+            BeTelemetryMode::Counters => "counters",
+            BeTelemetryMode::Timings => "timings",
+            BeTelemetryMode::Detailed => "detailed",
+        };
         let aot_artifact_keys = solver
             .symbolic_ivp_telemetry_snapshot()
             .map(|telemetry| telemetry.aot_artifact_keys.clone())
@@ -196,7 +203,10 @@ impl BackwardEulerSolution {
                 counters.insert(key.to_owned(), value);
             }
         }
-        let timings_ms = std::collections::HashMap::from([
+        if telemetry_mode == "timings" {
+            counters.clear();
+        }
+        let mut timings_ms = std::collections::HashMap::from([
             (
                 "factorization_ms".to_owned(),
                 detailed.factorization_ms_total,
@@ -213,6 +223,7 @@ impl BackwardEulerSolution {
             ("residual_ms".to_owned(), common.residual_ms_total),
             ("jacobian_ms".to_owned(), common.jacobian_ms_total),
         ]);
+        crate::telemetry::apply_collection_mode(telemetry_mode, &mut counters, &mut timings_ms);
         Self {
             times: times.iter().copied().collect(),
             states: states
@@ -220,12 +231,7 @@ impl BackwardEulerSolution {
                 .map(|row| row.iter().copied().collect())
                 .collect(),
             status: solver.get_status(),
-            telemetry_mode: match solver.telemetry_mode() {
-                BeTelemetryMode::Off => "off",
-                BeTelemetryMode::Counters => "counters",
-                BeTelemetryMode::Timings => "timings",
-            }
-            .to_owned(),
+            telemetry_mode: telemetry_mode.to_owned(),
             counters,
             timings_ms,
             aot_artifact_keys,
@@ -458,6 +464,7 @@ impl BackwardEulerSolver {
             None => SolverOptions::new(None, None, None, None, None, None, None, None, None)?,
         };
         let (frontend, telemetry_mode) = validate_route(&options)?;
+        let logging_level = crate::contract::native_logging_level(&options, "backward_euler")?;
         let mut native_options = BeSolverOptions::new(
             expressions
                 .into_iter()
@@ -473,7 +480,8 @@ impl BackwardEulerSolver {
             DVector::from_vec(y0),
         )
         .with_symbolic_assembly_backend(frontend)
-        .with_telemetry_mode(telemetry_mode);
+        .with_telemetry_mode(telemetry_mode)
+        .with_logging_level(logging_level);
         if options.execution() == "aot" {
             native_options =
                 native_options.with_generated_backend_config(generated_config(&options)?);
@@ -619,6 +627,7 @@ impl BackwardEulerSolver {
             BeTelemetryMode::Off => "off",
             BeTelemetryMode::Counters => "counters",
             BeTelemetryMode::Timings => "timings",
+            BeTelemetryMode::Detailed => "detailed",
         }
     }
 

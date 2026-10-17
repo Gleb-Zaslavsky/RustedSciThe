@@ -89,9 +89,12 @@ instances or benchmark scopes.
 
 ## Telemetry And Errors
 
-Telemetry is off by default. `BdfTelemetryMode::Counters` is a low-overhead
-choice for work counts; `BdfTelemetryMode::Timings` adds diagnostic stage
-timers. Nested timing scopes are inclusive and must not be added together.
+Telemetry is off by default. `BdfTelemetryMode::Counters` collects discrete
+work counts without reading the clock. `BdfTelemetryMode::Timings` collects
+stage durations without discrete counters, while `BdfTelemetryMode::Detailed`
+collects both. Nested timing scopes are inclusive and must not be added
+together. Use `Detailed` for diagnostic tables that need both counts and stage
+attribution.
 
 Prefer the typed `try_*` API (`try_solve`, continuation and configuration
 methods) in applications. It reports invalid dimensions, missing callbacks,

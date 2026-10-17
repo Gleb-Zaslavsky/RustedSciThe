@@ -1,5 +1,7 @@
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::{Bounds, JacobianProvider};
+use crate::numerical::SolverTelemetryMode;
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use log::{debug, info, warn};
 use nalgebra::{DMatrix, DVector};
 use std::cell::Cell;
@@ -35,9 +37,10 @@ pub enum EngineLogLevel {
 
 /// States whether aggregate solve counters were actually collected.
 ///
-/// The numeric fields in [`SolveStatistics`] intentionally remain zero when
-/// collection is disabled for compatibility. Callers must inspect this flag
-/// before interpreting those zeros as measurements.
+/// Counter fields in [`SolveStatistics`] remain zero when counters are not
+/// requested, including timing-only mode. Callers must inspect this flag
+/// before interpreting those zeros as measured work counts; timing availability
+/// is reported independently by `timings_collected`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StatisticsAvailability {
     /// Statistics were not collected for this solve attempt.
@@ -59,8 +62,8 @@ impl StatisticsAvailability {
 pub struct DiagnosticsOptions {
     /// Stores per-iteration history in the result.
     pub collect_history: bool,
-    /// Collects aggregate counters.
-    pub collect_statistics: bool,
+    /// Selects which solver telemetry channels are collected.
+    pub telemetry_mode: SolverTelemetryMode,
     /// Enables `log` output.
     pub enable_logging: bool,
     /// Logging level when logging is enabled.
@@ -73,7 +76,7 @@ impl Default for DiagnosticsOptions {
     fn default() -> Self {
         Self {
             collect_history: true,
-            collect_statistics: true,
+            telemetry_mode: SolverTelemetryMode::Off,
             enable_logging: false,
             log_level: EngineLogLevel::Info,
             enable_memory_diagnostics: false,
@@ -82,6 +85,12 @@ impl Default for DiagnosticsOptions {
 }
 
 impl DiagnosticsOptions {
+    /// Selects the telemetry channels for one solve.
+    pub fn with_telemetry(mut self, mode: SolverTelemetryMode) -> Self {
+        self.telemetry_mode = mode;
+        self
+    }
+
     /// Enables solver log records at the requested level.
     ///
     /// The setting is consumed only by a solver invocation that receives
@@ -372,8 +381,10 @@ pub enum StepOutcome {
 }
 
 /// Mutable counters updated by a concrete method.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RuntimeDiagnostics {
+    /// Collection policy inherited from the owning solve.
+    pub telemetry_mode: SolverTelemetryMode,
     /// Trial residual evaluations performed inside a method step.
     pub residual_evaluations: usize,
     /// Trial Jacobian evaluations performed inside a method step.
@@ -399,6 +410,90 @@ pub struct RuntimeDiagnostics {
     pub linear_system_solve_duration: Duration,
     /// Trial points written into a reusable method workspace.
     pub reusable_trial_points: usize,
+}
+
+impl Default for RuntimeDiagnostics {
+    fn default() -> Self {
+        Self::new(SolverTelemetryMode::Off)
+    }
+}
+
+impl RuntimeDiagnostics {
+    /// Creates per-solve runtime storage with independently gated channels.
+    pub fn new(telemetry_mode: SolverTelemetryMode) -> Self {
+        Self {
+            telemetry_mode,
+            ..Self::default_fields()
+        }
+    }
+
+    fn default_fields() -> Self {
+        Self {
+            telemetry_mode: SolverTelemetryMode::Off,
+            residual_evaluations: 0,
+            jacobian_evaluations: 0,
+            residual_duration: Duration::ZERO,
+            jacobian_duration: Duration::ZERO,
+            linear_solves: 0,
+            linear_factorizations: 0,
+            accepted_steps: 0,
+            rejected_steps: 0,
+            linear_solve_duration: Duration::ZERO,
+            linear_factorization_duration: Duration::ZERO,
+            linear_system_solve_duration: Duration::ZERO,
+            reusable_trial_points: 0,
+        }
+    }
+
+    #[inline]
+    /// Adds one residual callback to the discrete telemetry channel, if enabled.
+    pub fn count_residual(&mut self) {
+        if self.telemetry_mode.collects_counters() {
+            self.residual_evaluations += 1;
+        }
+    }
+    #[inline]
+    /// Adds one Jacobian callback to the discrete telemetry channel, if enabled.
+    pub fn count_jacobian(&mut self) {
+        if self.telemetry_mode.collects_counters() {
+            self.jacobian_evaluations += 1;
+        }
+    }
+    #[inline]
+    /// Adds one linear-system solve to the discrete telemetry channel, if enabled.
+    pub fn count_linear_solve(&mut self) {
+        if self.telemetry_mode.collects_counters() {
+            self.linear_solves += 1;
+        }
+    }
+    #[inline]
+    /// Adds one factorization to the discrete telemetry channel, if enabled.
+    pub fn count_factorization(&mut self) {
+        if self.telemetry_mode.collects_counters() {
+            self.linear_factorizations += 1;
+        }
+    }
+    #[inline]
+    /// Records one accepted nonlinear step when counters are enabled.
+    pub fn count_accepted_step(&mut self) {
+        if self.telemetry_mode.collects_counters() {
+            self.accepted_steps += 1;
+        }
+    }
+    #[inline]
+    /// Records one rejected nonlinear step when counters are enabled.
+    pub fn count_rejected_step(&mut self) {
+        if self.telemetry_mode.collects_counters() {
+            self.rejected_steps += 1;
+        }
+    }
+    #[inline]
+    /// Adds reusable workspace writes to the discrete telemetry channel.
+    pub fn count_reusable_trial_points(&mut self, count: usize) {
+        if self.telemetry_mode.collects_counters() {
+            self.reusable_trial_points += count;
+        }
+    }
 }
 
 /// Cumulative telemetry values captured at the beginning of one outer step.
@@ -647,26 +742,24 @@ impl<M: NonlinearMethod> SolverEngine<M> {
             bounds.validate(&x0)?;
         }
 
-        let collect_statistics = self.options.diagnostics.collect_statistics;
-        // Do not even read the clock when statistics are disabled. The
-        // numerical path remains identical; this keeps telemetry-off solves
-        // free of timing work rather than merely discarding the result.
-        let solve_started = collect_statistics.then(Instant::now);
+        let telemetry_mode = self.options.diagnostics.telemetry_mode;
+        // Read the clock only for timing modes; counter-only runs stay clock-free.
+        let solve_started = telemetry_mode.collects_timings().then(Instant::now);
         let mut stats = SolveStatistics::default();
-        stats.availability = if collect_statistics {
+        stats.availability = if telemetry_mode.collects_counters() {
             StatisticsAvailability::Collected
         } else {
             StatisticsAvailability::NotCollected
         };
-        stats.timings_collected = collect_statistics;
+        stats.timings_collected = telemetry_mode.collects_timings();
         let mut history = if self.options.diagnostics.collect_history {
             Vec::with_capacity(self.options.max_iterations + 1)
         } else {
             Vec::new()
         };
         let x = x0;
-        let residual = eval_residual(problem, &x, &mut stats, collect_statistics)?;
-        let jacobian = eval_jacobian(problem, &x, &mut stats, collect_statistics)?;
+        let residual = eval_residual(problem, &x, &mut stats, telemetry_mode)?;
+        let jacobian = eval_jacobian(problem, &x, &mut stats, telemetry_mode)?;
         let residual_norm = residual.norm();
         let mut state = IterationState {
             iteration: 0,
@@ -679,7 +772,7 @@ impl<M: NonlinearMethod> SolverEngine<M> {
         let mut method_workspace = self.method.supports_step_workspace().then(|| {
             MethodWorkspace::with_usage_tracking_and_residual(
                 problem.dimension(),
-                collect_statistics,
+                telemetry_mode.collects_counters(),
                 self.method.supports_trial_residual_workspace() && problem.supports_residual_into(),
             )
         });
@@ -719,12 +812,13 @@ impl<M: NonlinearMethod> SolverEngine<M> {
             &state.residual,
             &state.jacobian,
         )?;
-        let mut runtime = RuntimeDiagnostics::default();
+        let mut runtime = RuntimeDiagnostics::new(telemetry_mode);
 
         for iteration in 0..self.options.max_iterations {
             state.iteration = iteration;
-            let attempt_start =
-                collect_statistics.then(|| AttemptTelemetryStart::capture(&stats, &runtime));
+            let attempt_start = telemetry_mode
+                .is_enabled()
+                .then(|| AttemptTelemetryStart::capture(&stats, &runtime));
             if self.options.diagnostics.enable_logging
                 && self.options.diagnostics.log_level == EngineLogLevel::Debug
             {
@@ -747,14 +841,14 @@ impl<M: NonlinearMethod> SolverEngine<M> {
                 method_workspace.as_mut(),
             )?;
             if let Some(workspace) = method_workspace.as_mut() {
-                runtime.reusable_trial_points += workspace.take_reusable_trial_points();
+                runtime.count_reusable_trial_points(workspace.take_reusable_trial_points());
             }
 
             match outcome {
                 StepOutcome::Converged => {
                     stats.iterations = iteration;
                     record_attempt(&mut stats, attempt_start, &runtime, iteration, false);
-                    merge_runtime(&mut stats, &runtime, collect_statistics);
+                    merge_runtime(&mut stats, &runtime, telemetry_mode);
                     return Ok(build_result(
                         state.x,
                         state.residual,
@@ -771,7 +865,7 @@ impl<M: NonlinearMethod> SolverEngine<M> {
                 StepOutcome::Terminated(reason) => {
                     stats.iterations = iteration;
                     record_attempt(&mut stats, attempt_start, &runtime, iteration, false);
-                    merge_runtime(&mut stats, &runtime, collect_statistics);
+                    merge_runtime(&mut stats, &runtime, telemetry_mode);
                     return Ok(build_result(
                         state.x,
                         state.residual,
@@ -802,12 +896,12 @@ impl<M: NonlinearMethod> SolverEngine<M> {
                             &state.x,
                             residual,
                             &mut stats,
-                            collect_statistics,
+                            telemetry_mode,
                         )?;
                         std::mem::swap(&mut state.residual, residual);
                     } else {
                         state.residual =
-                            eval_residual(problem, &state.x, &mut stats, collect_statistics)?;
+                            eval_residual(problem, &state.x, &mut stats, telemetry_mode)?;
                     }
                     if problem.supports_jacobian_into() {
                         let jacobian = workspace
@@ -819,12 +913,12 @@ impl<M: NonlinearMethod> SolverEngine<M> {
                             &state.x,
                             jacobian,
                             &mut stats,
-                            collect_statistics,
+                            telemetry_mode,
                         )?;
                         std::mem::swap(&mut state.jacobian, jacobian);
                     } else {
                         state.jacobian =
-                            eval_jacobian(problem, &state.x, &mut stats, collect_statistics)?;
+                            eval_jacobian(problem, &state.x, &mut stats, telemetry_mode)?;
                     }
                     state.residual_norm = state.residual.norm();
                     push_history(
@@ -837,7 +931,7 @@ impl<M: NonlinearMethod> SolverEngine<M> {
                     );
                     stats.iterations = iteration + 1;
                     record_attempt(&mut stats, attempt_start, &runtime, iteration, false);
-                    merge_runtime(&mut stats, &runtime, collect_statistics);
+                    merge_runtime(&mut stats, &runtime, telemetry_mode);
                     return Ok(build_result(
                         state.x,
                         state.residual,
@@ -869,12 +963,12 @@ impl<M: NonlinearMethod> SolverEngine<M> {
                                 &state.x,
                                 residual,
                                 &mut stats,
-                                collect_statistics,
+                                telemetry_mode,
                             )?;
                             std::mem::swap(&mut state.residual, residual);
                         } else {
                             state.residual =
-                                eval_residual(problem, &state.x, &mut stats, collect_statistics)?;
+                                eval_residual(problem, &state.x, &mut stats, telemetry_mode)?;
                         }
                         if problem.supports_jacobian_into() {
                             let jacobian = workspace
@@ -886,12 +980,12 @@ impl<M: NonlinearMethod> SolverEngine<M> {
                                 &state.x,
                                 jacobian,
                                 &mut stats,
-                                collect_statistics,
+                                telemetry_mode,
                             )?;
                             std::mem::swap(&mut state.jacobian, jacobian);
                         } else {
                             state.jacobian =
-                                eval_jacobian(problem, &state.x, &mut stats, collect_statistics)?;
+                                eval_jacobian(problem, &state.x, &mut stats, telemetry_mode)?;
                         }
                         state.residual_norm = state.residual.norm();
                     }
@@ -906,7 +1000,7 @@ impl<M: NonlinearMethod> SolverEngine<M> {
                     record_attempt(&mut stats, attempt_start, &runtime, iteration, !accepted);
                     if state.residual_norm < self.options.tolerance {
                         stats.iterations = iteration + 1;
-                        merge_runtime(&mut stats, &runtime, collect_statistics);
+                        merge_runtime(&mut stats, &runtime, telemetry_mode);
                         return Ok(build_result(
                             state.x,
                             state.residual,
@@ -925,7 +1019,7 @@ impl<M: NonlinearMethod> SolverEngine<M> {
         }
 
         stats.iterations = self.options.max_iterations;
-        merge_runtime(&mut stats, &runtime, collect_statistics);
+        merge_runtime(&mut stats, &runtime, telemetry_mode);
         Ok(build_result(
             state.x,
             state.residual,
@@ -965,18 +1059,18 @@ impl NonlinearMethod for NewtonMethod {
         options: &SolveOptions,
         runtime: &mut RuntimeDiagnostics,
     ) -> Result<StepOutcome, SolveError> {
-        runtime.linear_solves += 1;
+        runtime.count_linear_solve();
         let step = measure_linear_system_operation(
             options.linear_solver,
             &state.jacobian,
             &state.residual,
             runtime,
-            options.diagnostics.collect_statistics,
+            options.diagnostics.telemetry_mode,
         )?;
         if step.norm() < options.tolerance {
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
         }
-        runtime.accepted_steps += 1;
+        runtime.count_accepted_step();
         Ok(StepOutcome::Continue {
             next_x: &state.x - step,
             accepted: true,
@@ -1016,9 +1110,12 @@ pub(crate) fn solve_linear_system_with_stage_timing(
     matrix: &DMatrix<f64>,
     rhs: &DVector<f64>,
     runtime: &mut RuntimeDiagnostics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) -> Result<DVector<f64>, SolveError> {
-    if !collect_statistics {
+    if !telemetry_mode.collects_timings() {
+        if telemetry_mode.collects_counters() {
+            runtime.count_factorization();
+        }
         return solve_linear_system(solver, matrix, rhs);
     }
 
@@ -1026,7 +1123,7 @@ pub(crate) fn solve_linear_system_with_stage_timing(
         LinearSolverKind::Lu => {
             let factor_started = Instant::now();
             let lu = matrix.clone().lu();
-            runtime.linear_factorizations += 1;
+            runtime.count_factorization();
             runtime.linear_factorization_duration += factor_started.elapsed();
 
             let solve_started = Instant::now();
@@ -1037,7 +1134,7 @@ pub(crate) fn solve_linear_system_with_stage_timing(
         LinearSolverKind::Inverse => {
             let factor_started = Instant::now();
             let inverse = matrix.clone().try_inverse();
-            runtime.linear_factorizations += 1;
+            runtime.count_factorization();
             runtime.linear_factorization_duration += factor_started.elapsed();
             let inverse = inverse.ok_or(SolveError::SingularJacobian)?;
 
@@ -1059,9 +1156,12 @@ pub(crate) fn solve_linear_system_owned_with_stage_timing(
     matrix: DMatrix<f64>,
     rhs: &DVector<f64>,
     runtime: &mut RuntimeDiagnostics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) -> Result<DVector<f64>, SolveError> {
-    if !collect_statistics {
+    if !telemetry_mode.collects_timings() {
+        if telemetry_mode.collects_counters() {
+            runtime.count_factorization();
+        }
         return solve_linear_system_owned(solver, matrix, rhs);
     }
 
@@ -1069,7 +1169,7 @@ pub(crate) fn solve_linear_system_owned_with_stage_timing(
         LinearSolverKind::Lu => {
             let factor_started = Instant::now();
             let lu = matrix.lu();
-            runtime.linear_factorizations += 1;
+            runtime.count_factorization();
             runtime.linear_factorization_duration += factor_started.elapsed();
 
             let solve_started = Instant::now();
@@ -1080,7 +1180,7 @@ pub(crate) fn solve_linear_system_owned_with_stage_timing(
         LinearSolverKind::Inverse => {
             let factor_started = Instant::now();
             let inverse = matrix.try_inverse();
-            runtime.linear_factorizations += 1;
+            runtime.count_factorization();
             runtime.linear_factorization_duration += factor_started.elapsed();
             let inverse = inverse.ok_or(SolveError::SingularJacobian)?;
 
@@ -1113,13 +1213,17 @@ pub(crate) fn measure_linear_system_operation(
     matrix: &DMatrix<f64>,
     rhs: &DVector<f64>,
     runtime: &mut RuntimeDiagnostics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) -> Result<DVector<f64>, SolveError> {
-    if !collect_statistics {
+    if !telemetry_mode.is_enabled() {
         return solve_linear_system(solver, matrix, rhs);
     }
+    if !telemetry_mode.collects_timings() {
+        return solve_linear_system_with_stage_timing(solver, matrix, rhs, runtime, telemetry_mode);
+    }
     let started = Instant::now();
-    let result = solve_linear_system_with_stage_timing(solver, matrix, rhs, runtime, true);
+    let result =
+        solve_linear_system_with_stage_timing(solver, matrix, rhs, runtime, telemetry_mode);
     runtime.linear_solve_duration += started.elapsed();
     result
 }
@@ -1130,13 +1234,23 @@ pub(crate) fn measure_linear_system_operation_owned(
     matrix: DMatrix<f64>,
     rhs: &DVector<f64>,
     runtime: &mut RuntimeDiagnostics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) -> Result<DVector<f64>, SolveError> {
-    if !collect_statistics {
+    if !telemetry_mode.is_enabled() {
         return solve_linear_system_owned(solver, matrix, rhs);
     }
+    if !telemetry_mode.collects_timings() {
+        return solve_linear_system_owned_with_stage_timing(
+            solver,
+            matrix,
+            rhs,
+            runtime,
+            telemetry_mode,
+        );
+    }
     let started = Instant::now();
-    let result = solve_linear_system_owned_with_stage_timing(solver, matrix, rhs, runtime, true);
+    let result =
+        solve_linear_system_owned_with_stage_timing(solver, matrix, rhs, runtime, telemetry_mode);
     runtime.linear_solve_duration += started.elapsed();
     result
 }
@@ -1164,16 +1278,20 @@ fn eval_residual<P: JacobianProvider>(
     problem: &P,
     x: &DVector<f64>,
     stats: &mut SolveStatistics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) -> Result<DVector<f64>, SolveError> {
-    if !collect_statistics {
+    if telemetry_mode == SolverTelemetryMode::Off {
         return problem.residual(x);
     }
-    stats.residual_evaluations += 1;
-    stats.state_residual_evaluations += 1;
-    let started = Instant::now();
+    if telemetry_mode.collects_counters() {
+        stats.residual_evaluations += 1;
+        stats.state_residual_evaluations += 1;
+    }
+    let started = telemetry_mode.collects_timings().then(Instant::now);
     let result = problem.residual(x);
-    stats.residual_duration += started.elapsed();
+    if let Some(started) = started {
+        stats.residual_duration += started.elapsed();
+    }
     result
 }
 
@@ -1182,16 +1300,20 @@ fn eval_jacobian<P: JacobianProvider>(
     problem: &P,
     x: &DVector<f64>,
     stats: &mut SolveStatistics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) -> Result<DMatrix<f64>, SolveError> {
-    if !collect_statistics {
+    if telemetry_mode == SolverTelemetryMode::Off {
         return problem.jacobian(x);
     }
-    stats.jacobian_evaluations += 1;
-    stats.state_jacobian_evaluations += 1;
-    let started = Instant::now();
+    if telemetry_mode.collects_counters() {
+        stats.jacobian_evaluations += 1;
+        stats.state_jacobian_evaluations += 1;
+    }
+    let started = telemetry_mode.collects_timings().then(Instant::now);
     let result = problem.jacobian(x);
-    stats.jacobian_duration += started.elapsed();
+    if let Some(started) = started {
+        stats.jacobian_duration += started.elapsed();
+    }
     result
 }
 
@@ -1201,16 +1323,20 @@ fn eval_residual_into<P: JacobianProvider>(
     x: &DVector<f64>,
     out: &mut DVector<f64>,
     stats: &mut SolveStatistics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) -> Result<(), SolveError> {
-    if !collect_statistics {
+    if telemetry_mode == SolverTelemetryMode::Off {
         return problem.residual_into(x, out);
     }
-    stats.residual_evaluations += 1;
-    stats.state_residual_evaluations += 1;
-    let started = Instant::now();
+    if telemetry_mode.collects_counters() {
+        stats.residual_evaluations += 1;
+        stats.state_residual_evaluations += 1;
+    }
+    let started = telemetry_mode.collects_timings().then(Instant::now);
     let result = problem.residual_into(x, out);
-    stats.residual_duration += started.elapsed();
+    if let Some(started) = started {
+        stats.residual_duration += started.elapsed();
+    }
     result
 }
 
@@ -1220,16 +1346,20 @@ fn eval_jacobian_into<P: JacobianProvider>(
     x: &DVector<f64>,
     out: &mut DMatrix<f64>,
     stats: &mut SolveStatistics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) -> Result<(), SolveError> {
-    if !collect_statistics {
+    if telemetry_mode == SolverTelemetryMode::Off {
         return problem.jacobian_into(x, out);
     }
-    stats.jacobian_evaluations += 1;
-    stats.state_jacobian_evaluations += 1;
-    let started = Instant::now();
+    if telemetry_mode.collects_counters() {
+        stats.jacobian_evaluations += 1;
+        stats.state_jacobian_evaluations += 1;
+    }
+    let started = telemetry_mode.collects_timings().then(Instant::now);
     let result = problem.jacobian_into(x, out);
-    stats.jacobian_duration += started.elapsed();
+    if let Some(started) = started {
+        stats.jacobian_duration += started.elapsed();
+    }
     result
 }
 
@@ -1238,15 +1368,17 @@ pub(crate) fn eval_residual_with_runtime<P: JacobianProvider>(
     problem: &P,
     x: &DVector<f64>,
     runtime: &mut RuntimeDiagnostics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) -> Result<DVector<f64>, SolveError> {
-    if !collect_statistics {
+    if telemetry_mode == SolverTelemetryMode::Off {
         return problem.residual(x);
     }
-    runtime.residual_evaluations += 1;
-    let started = Instant::now();
+    runtime.count_residual();
+    let started = telemetry_mode.collects_timings().then(Instant::now);
     let result = problem.residual(x);
-    runtime.residual_duration += started.elapsed();
+    if let Some(started) = started {
+        runtime.residual_duration += started.elapsed();
+    }
     result
 }
 
@@ -1256,25 +1388,27 @@ pub(crate) fn eval_residual_norm_with_runtime<P: JacobianProvider>(
     problem: &P,
     x: &DVector<f64>,
     runtime: &mut RuntimeDiagnostics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
     output: Option<&mut DVector<f64>>,
 ) -> Result<f64, SolveError> {
     if problem.supports_residual_into() {
         if let Some(output) = output {
-            if !collect_statistics {
+            if telemetry_mode == SolverTelemetryMode::Off {
                 problem.residual_into(x, output)?;
                 return Ok(output.norm());
             }
-            runtime.residual_evaluations += 1;
-            let started = Instant::now();
+            runtime.count_residual();
+            let started = telemetry_mode.collects_timings().then(Instant::now);
             let result = problem.residual_into(x, output);
-            runtime.residual_duration += started.elapsed();
+            if let Some(started) = started {
+                runtime.residual_duration += started.elapsed();
+            }
             result?;
             return Ok(output.norm());
         }
     }
 
-    Ok(eval_residual_with_runtime(problem, x, runtime, collect_statistics)?.norm())
+    Ok(eval_residual_with_runtime(problem, x, runtime, telemetry_mode)?.norm())
 }
 
 /// Evaluates a trial Jacobian and records method-local callback telemetry.
@@ -1282,15 +1416,17 @@ pub(crate) fn eval_jacobian_with_runtime<P: JacobianProvider>(
     problem: &P,
     x: &DVector<f64>,
     runtime: &mut RuntimeDiagnostics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) -> Result<DMatrix<f64>, SolveError> {
-    if !collect_statistics {
+    if telemetry_mode == SolverTelemetryMode::Off {
         return problem.jacobian(x);
     }
-    runtime.jacobian_evaluations += 1;
-    let started = Instant::now();
+    runtime.count_jacobian();
+    let started = telemetry_mode.collects_timings().then(Instant::now);
     let result = problem.jacobian(x);
-    runtime.jacobian_duration += started.elapsed();
+    if let Some(started) = started {
+        runtime.jacobian_duration += started.elapsed();
+    }
     result
 }
 
@@ -1361,13 +1497,13 @@ fn record_attempt(
 /// Measures one linear step or trust-region subproblem without changing its result.
 pub(crate) fn measure_linear_operation<T, F>(
     runtime: &mut RuntimeDiagnostics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
     operation: F,
 ) -> T
 where
     F: FnOnce() -> T,
 {
-    if !collect_statistics {
+    if !telemetry_mode.collects_timings() {
         return operation();
     }
     let started = Instant::now();
@@ -1399,25 +1535,26 @@ fn push_history(
 fn merge_runtime(
     stats: &mut SolveStatistics,
     runtime: &RuntimeDiagnostics,
-    collect_statistics: bool,
+    telemetry_mode: SolverTelemetryMode,
 ) {
-    if !collect_statistics {
-        return;
+    if telemetry_mode.collects_counters() {
+        stats.linear_solves = runtime.linear_solves;
+        stats.linear_factorizations = runtime.linear_factorizations;
+        stats.accepted_steps = runtime.accepted_steps;
+        stats.rejected_steps = runtime.rejected_steps;
+        stats.residual_evaluations += runtime.residual_evaluations;
+        stats.jacobian_evaluations += runtime.jacobian_evaluations;
+        stats.trial_residual_evaluations = runtime.residual_evaluations;
+        stats.trial_jacobian_evaluations = runtime.jacobian_evaluations;
+        stats.reusable_trial_points = runtime.reusable_trial_points;
     }
-    stats.linear_solves = runtime.linear_solves;
-    stats.linear_factorizations = runtime.linear_factorizations;
-    stats.accepted_steps = runtime.accepted_steps;
-    stats.rejected_steps = runtime.rejected_steps;
-    stats.linear_solve_duration = runtime.linear_solve_duration;
-    stats.residual_evaluations += runtime.residual_evaluations;
-    stats.jacobian_evaluations += runtime.jacobian_evaluations;
-    stats.trial_residual_evaluations = runtime.residual_evaluations;
-    stats.trial_jacobian_evaluations = runtime.jacobian_evaluations;
-    stats.residual_duration += runtime.residual_duration;
-    stats.jacobian_duration += runtime.jacobian_duration;
-    stats.linear_factorization_duration = runtime.linear_factorization_duration;
-    stats.linear_system_solve_duration = runtime.linear_system_solve_duration;
-    stats.reusable_trial_points = runtime.reusable_trial_points;
+    if telemetry_mode.collects_timings() {
+        stats.linear_solve_duration = runtime.linear_solve_duration;
+        stats.residual_duration += runtime.residual_duration;
+        stats.jacobian_duration += runtime.jacobian_duration;
+        stats.linear_factorization_duration = runtime.linear_factorization_duration;
+        stats.linear_system_solve_duration = runtime.linear_system_solve_duration;
+    }
 }
 
 /// Builds the final solver result.
@@ -1496,6 +1633,7 @@ thread_local! {
 /// solves can independently enable or disable diagnostic records.
 struct LoggingGuard {
     previous: Option<EngineLogLevel>,
+    _file_sink: SolverLogGuard,
 }
 
 impl LoggingGuard {
@@ -1509,7 +1647,16 @@ impl LoggingGuard {
             level.set(requested);
             previous
         });
-        Self { previous }
+        let file_level = match requested {
+            Some(EngineLogLevel::Debug) => SolverLogLevel::Debug,
+            Some(EngineLogLevel::Info) => SolverLogLevel::Info,
+            Some(EngineLogLevel::Warn) => SolverLogLevel::Warn,
+            None => SolverLogLevel::Off,
+        };
+        Self {
+            previous,
+            _file_sink: SolverLogGuard::enter(file_level),
+        }
     }
 }
 
@@ -1879,9 +2026,18 @@ mod tests {
 
     #[test]
     fn newton_engine_converges_for_scalar_problem() {
-        let result = SolverEngine::new(NewtonMethod, SolveOptions::default())
-            .solve(&ScalarQuadraticProblem, DVector::from_vec(vec![1.5]))
-            .expect("solve");
+        let result = SolverEngine::new(
+            NewtonMethod,
+            SolveOptions {
+                diagnostics: DiagnosticsOptions {
+                    telemetry_mode: SolverTelemetryMode::Detailed,
+                    ..DiagnosticsOptions::default()
+                },
+                ..SolveOptions::default()
+            },
+        )
+        .solve(&ScalarQuadraticProblem, DVector::from_vec(vec![1.5]))
+        .expect("solve");
         assert_eq!(result.termination, TerminationReason::Converged);
         assert_eq!(
             result.statistics.availability,
@@ -1959,6 +2115,10 @@ mod tests {
             SolveOptions {
                 tolerance: 1e-8,
                 max_iterations: 64,
+                diagnostics: DiagnosticsOptions {
+                    telemetry_mode: SolverTelemetryMode::Detailed,
+                    ..DiagnosticsOptions::default()
+                },
                 ..SolveOptions::default()
             },
         )
@@ -1994,7 +2154,7 @@ mod tests {
     fn statistics_can_be_disabled_without_publishing_runtime_metrics() {
         let options = SolveOptions {
             diagnostics: DiagnosticsOptions {
-                collect_statistics: false,
+                telemetry_mode: SolverTelemetryMode::Off,
                 ..DiagnosticsOptions::default()
             },
             ..SolveOptions::default()
@@ -2051,7 +2211,7 @@ mod tests {
         }
 
         for solver in [LinearSolverKind::Lu, LinearSolverKind::Inverse] {
-            let mut runtime = RuntimeDiagnostics::default();
+            let mut runtime = RuntimeDiagnostics::new(SolverTelemetryMode::Detailed);
             let mut result = None;
             for _ in 0..8 {
                 result = Some(
@@ -2060,7 +2220,7 @@ mod tests {
                         &matrix,
                         &rhs,
                         &mut runtime,
-                        true,
+                        SolverTelemetryMode::Detailed,
                     )
                     .expect("nonsingular system"),
                 );
@@ -2075,22 +2235,22 @@ mod tests {
             assert!(runtime.linear_system_solve_duration > Duration::ZERO);
             assert_eq!(runtime.linear_factorizations, 8);
 
-            let mut borrowed_runtime = RuntimeDiagnostics::default();
+            let mut borrowed_runtime = RuntimeDiagnostics::new(SolverTelemetryMode::Detailed);
             let borrowed = solve_linear_system_with_stage_timing(
                 solver,
                 &matrix,
                 &rhs,
                 &mut borrowed_runtime,
-                true,
+                SolverTelemetryMode::Detailed,
             )
             .expect("borrowed solve");
-            let mut owned_runtime = RuntimeDiagnostics::default();
+            let mut owned_runtime = RuntimeDiagnostics::new(SolverTelemetryMode::Detailed);
             let owned = solve_linear_system_owned_with_stage_timing(
                 solver,
                 matrix.clone(),
                 &rhs,
                 &mut owned_runtime,
-                true,
+                SolverTelemetryMode::Detailed,
             )
             .expect("owned solve");
             assert!((borrowed - owned).norm() < 1e-12);
@@ -2103,7 +2263,13 @@ mod tests {
         let problem = CountingScalarQuadraticProblem::new();
         let result = SolverEngine::new(
             crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod::default(),
-            SolveOptions::default(),
+            SolveOptions {
+                diagnostics: DiagnosticsOptions {
+                    telemetry_mode: SolverTelemetryMode::Detailed,
+                    ..DiagnosticsOptions::default()
+                },
+                ..SolveOptions::default()
+            },
         )
         .solve(&problem, DVector::from_vec(vec![1.5]))
         .expect("solve");
@@ -2152,7 +2318,13 @@ mod tests {
         let problem = CountingScalarQuadraticProblem::new();
         let result = SolverEngine::new(
             crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod::default(),
-            SolveOptions::default(),
+            SolveOptions {
+                diagnostics: DiagnosticsOptions {
+                    telemetry_mode: SolverTelemetryMode::Detailed,
+                    ..DiagnosticsOptions::default()
+                },
+                ..SolveOptions::default()
+            },
         )
         .solve(&problem, DVector::from_vec(vec![1.5]))
         .expect("solve");
@@ -2163,6 +2335,49 @@ mod tests {
         );
         assert!(result.statistics.reusable_trial_points > 0);
         assert!(result.statistics.reusable_trial_points <= result.statistics.residual_evaluations);
+    }
+
+    #[test]
+    fn telemetry_modes_keep_counter_and_timing_channels_independent() {
+        let solve_with = |mode| {
+            let result = SolverEngine::new(
+                crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod::default(),
+                SolveOptions {
+                    diagnostics: DiagnosticsOptions {
+                        telemetry_mode: mode,
+                        ..DiagnosticsOptions::default()
+                    },
+                    ..SolveOptions::default()
+                },
+            )
+            .solve(
+                &CountingScalarQuadraticProblem::new(),
+                DVector::from_vec(vec![1.5]),
+            )
+            .expect("solve");
+            result.statistics
+        };
+
+        let counters = solve_with(SolverTelemetryMode::Counters);
+        assert_eq!(counters.availability, StatisticsAvailability::Collected);
+        assert!(!counters.timings_collected);
+        assert!(counters.residual_evaluations > 0);
+        assert_eq!(counters.residual_duration, Duration::ZERO);
+        assert_eq!(counters.total_duration, Duration::ZERO);
+
+        let timings = solve_with(SolverTelemetryMode::Timings);
+        assert_eq!(timings.availability, StatisticsAvailability::NotCollected);
+        assert!(timings.timings_collected);
+        assert_eq!(timings.residual_evaluations, 0);
+        assert_eq!(timings.linear_solves, 0);
+        assert!(timings.residual_duration > Duration::ZERO);
+        assert!(timings.total_duration > Duration::ZERO);
+
+        let detailed = solve_with(SolverTelemetryMode::Detailed);
+        assert_eq!(detailed.availability, StatisticsAvailability::Collected);
+        assert!(detailed.timings_collected);
+        assert!(detailed.residual_evaluations > 0);
+        assert!(detailed.residual_duration > Duration::ZERO);
     }
 
     #[test]

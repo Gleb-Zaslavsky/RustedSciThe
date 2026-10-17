@@ -99,7 +99,7 @@ fn ensure_compiled_aot() {
     }
 
     let route = ROUTES[2];
-    let mut solver = make_solver(route, 0.8, BeTelemetryMode::Timings);
+    let mut solver = make_solver(route, 0.8, BeTelemetryMode::Detailed);
     solver
         .try_solve()
         .expect("AOT warm-up build should succeed");

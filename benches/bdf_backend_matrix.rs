@@ -123,7 +123,7 @@ fn prepare_aot_context(
         workload,
         dimension,
         assembly,
-        BdfTelemetryMode::Timings,
+        BdfTelemetryMode::Detailed,
     )
     .with_generated_backend_config(config);
     solver.try_generate().unwrap_or_else(|error| {
@@ -175,7 +175,7 @@ fn prepare_dense_aot_context(dimension: usize, assembly: IvpSymbolicAssemblyBack
     let mut solver = bdf_bench_support::make_dense_coupled_solver(
         dimension,
         assembly,
-        BdfTelemetryMode::Timings,
+        BdfTelemetryMode::Detailed,
     )
     .with_generated_backend_config(config);
     solver

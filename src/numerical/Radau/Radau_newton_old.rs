@@ -10,7 +10,7 @@ use crate::symbolic::symbolic_ivp_generated::{
     DenseIvpGeneratedBackendMode, SymbolicIvpGeneratedBackendConfig,
     prepare_generated_symbolic_ivp_problem,
 };
-use log::info;
+use crate::numerical::logging::solver_info as info;
 use nalgebra::{DMatrix, DVector, Matrix};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

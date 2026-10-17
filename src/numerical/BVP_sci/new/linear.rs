@@ -374,7 +374,7 @@ mod tests {
     #[cfg(not(feature = "superlu"))]
     #[test]
     fn superlu_policy_without_feature_falls_back_to_standard_faer() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         let result = BvpSciLinearBackend::new_for_collocation(
             BvpSciMatrixLayout::Sparse,
             2,
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn superlu_fallback_is_sparse_and_observable() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         let backend = BvpSciLinearBackend::superlu_fallback(
             BvpSciMatrixLayout::Sparse,
             3,
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn reusable_sparse_backend_refactors_same_pattern_and_solves_in_place() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         let mut backend = BvpSciLinearBackend::new_for_collocation(
             BvpSciMatrixLayout::Sparse,
             3,

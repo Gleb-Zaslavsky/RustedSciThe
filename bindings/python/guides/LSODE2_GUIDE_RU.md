@@ -71,11 +71,15 @@ Wrapper также предоставляет native analytical residual/Jacobia
 
 ## Телеметрия и AOT
 
-Читайте структурированные counters/timings и компактный отчёт результата.
-Временные scopes могут перекрываться и не всегда аддитивны. AOT поддерживает
-общий lifecycle BuildIfMissing, RequirePrebuilt и RebuildAlways, handoff между
-процессами и provenance. Холодная компиляция окупается лишь при повторной
-работе; измеряйте подготовку, callback и full solve отдельно.
+В `SolverOptions` доступны режимы `telemetry="off"`, `"counters"`,
+`"timings"` и `"detailed"`. `counters` собирает только дискретные счётчики,
+`timings` — только длительности, а `detailed` — оба набора. Читайте snapshot
+через `solution.telemetry_counters()`, `solution.telemetry_timings_ms()` и
+`solution.telemetry_report()`. Временные scopes могут перекрываться и не всегда
+аддитивны. AOT поддерживает общий lifecycle BuildIfMissing, RequirePrebuilt и
+RebuildAlways, handoff между процессами и provenance. Холодная компиляция
+окупается лишь при повторной работе; измеряйте подготовку, callback и full
+solve отдельно.
 
 ## Большие примеры
 

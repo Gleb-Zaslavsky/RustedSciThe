@@ -73,8 +73,9 @@ legacy solver will be exported.
 - [x] Expose the current supported function set: trigonometric, inverse
   trigonometric, exponential, logarithmic and power operations.
 - [x] Expose explicit simplification and precedence-preserving formatting.
-- [ ] Expose vector and matrix expression construction where the core API is
-  stable enough for a public contract.
+- [x] Expose vector and matrix expression construction through the native
+  `ExprVector` and `ExprMatrix` bindings, preserving rectangular shape and
+  rejecting ragged input before native construction.
 - [x] Expose recursive `where`/substitution semantics used by task documents,
   including cycle and duplicate-definition diagnostics.
 - [x] Expose symbolic systems and Jacobians without copying the expression
@@ -190,8 +191,10 @@ contract.
   repeating symbolic preparation.
 - [x] Expose `ExprLegacy` and `AtomNative` routes and advertise both through
   `capabilities("bdf")`.
-- [ ] Expose Dense, Sparse and Banded linear backend selection through the
-  existing BDF backend bridge.
+- [x] Record the BDF matrix-layout contract: the native BDF route exposed by
+  this adapter is Dense-only; Sparse and Banded are rejected rather than
+  silently translated or defaulted. This is a native capability limit, not a
+  missing Python selector.
 - [x] Expose dense AOT configuration and lifecycle through the shared native
   generated-backend bridge. Parallel/Auto policies are forwarded through the
   native dense callback scheduler; structured BDF matrix layouts remain outside
@@ -281,13 +284,27 @@ concrete adapter.
   callback speedup.
 - [x] Publish solver-specific method/controller values through
   `SolverCapabilities.methods` and document the IVP capability matrix.
-- [ ] Expose nonstiff solvers through a smaller common API where this does not
-  erase solver-specific controls.
-- [ ] Keep the Universal API as a convenience layer and retain native solver
-  APIs for complete configuration.
+- [x] Expose nonstiff solvers through a smaller common API where this does not
+  erase solver-specific controls. `UniversalNonStiffSolver` is the dedicated
+  ODE_api2 adapter and validates its narrower native contract.
+- [x] Keep the Universal API as a convenience layer and retain native solver
+  APIs for complete configuration; stiff solvers remain on their direct
+  wrappers.
 - [x] Add a decision table documenting which Python entry point supports each
   solver and option. The table is kept in `README.md`; `capabilities(name)` is
   the machine-readable source for the same contract.
+- [x] Expose the `ODE_api2` nonstiff solver family through a dedicated
+  `UniversalNonStiffSolver` and the common `create_ivp`/`solve_ivp` facade.
+  RK45/DOPRI/AB4 retain their method identity; the wrapper validates their
+  ExprLegacy/Lambdify, Dense, Sequential contract and forwards step size,
+  stop conditions and neighborhood tolerance. It rejects unsupported AOT,
+  AtomNative, parallelism, telemetry, parameter rebinding and stiff methods.
+  The result is detached and NumPy-capable. Native ODE_api2 has no telemetry or
+  restart/continuation API; the fixed-step loop may overshoot `t_end` by less
+  than one step, which is documented and tested. The contract test exposed an
+  incorrect Dormand-Prince tableau in the native DOPRI implementation; its
+  seven-stage fifth-order weights are corrected and covered by a core test.
+  Stiff methods remain on their native direct APIs.
 
 ## 5. BVP solver family
 
@@ -313,10 +330,12 @@ concrete adapter.
   generated-backend lifecycle and typed artifact failures.
 - [x] Expose explicit Python boundary residual callbacks with optional
   analytical endpoint Jacobians and native finite-difference fallback.
-- [ ] Add matched Rust/Python numerical-core tests. The direct wrapper already
-  exposes the native preparation, callback, collocation, linear and full-solve
-  timing scopes through `BvpSciSolution.telemetry_timings_ms()`; parity against
-  a separately constructed native BVP fixture remains to be added.
+- [x] Add matched Rust/Python numerical-core tests. The direct wrapper exposes
+  native preparation, callback, collocation, linear and full-solve timing
+  scopes through `BvpSciSolution.telemetry_timings_ms()`. A matched dense
+  ExprLegacy fixture compares the Python adapter with a directly built native
+  solver for status, trajectory, exact solution and common counters; optional
+  SuperLU availability does not affect this parity gate.
 - [x] Add a thin `create_bvp`/`solve_bvp` facade over BVP_sci and BVP_Damp
   without flattening their different boundary-data and option contracts.
 
@@ -354,14 +373,30 @@ concrete adapter.
 - [x] Expand the direct BVP_Damp wrapper to forward all applicable native
   options: refinement method/configuration, banded widths and linear policy,
   damping/Jacobian budgets, AOT toolchain/build/handoff settings, structured
-  logging, compact diagnostics and CSV/TXT output. `Frozen` remains a
-  deliberate direct-API stub and is rejected with `UnsupportedOptionError`.
+  logging, compact diagnostics and CSV/TXT output. The separate Frozen route
+  is exposed below with its own class and strategy policy.
   Native BVP_Damp currently has no output-directory field in
   `GeneratedBackendConfig`; `aot_output_dir` is therefore rejected explicitly
   rather than silently ignored.
 - [x] Audit every existing Python solver wrapper for the same class of gap.
   The audit below records supported, intentionally unsupported and native-gap
   settings; unsupported combinations are rejected by typed exceptions.
+- [x] Expose `Naive` as a distinct `BvpDampNaiveSolver` using the native
+  Frozen/Naive core, not the damped solver. It forwards ExprLegacy/AtomNative,
+  Lambdify/AOT, Dense/Sparse/Banded, scheme, tolerance, iteration limit,
+  telemetry/logging policy, linear method, and prepared parameter rebinds.
+  The adapter rejects nonuniform meshes and explicit band widths because the
+  native route generates a uniform mesh and infers its structure. It does not
+  claim damping, bounds, adaptive refinement, or in-place initial-state/mesh
+  restart, which the native Naive contract does not expose.
+- [x] Expose the native `Frozen` strategy as an independent
+  `BvpDampFrozenSolver`, with all five Jacobian-reuse policies, typed policy
+  validation, native telemetry/provenance and prepared parameter rebinding.
+  It is not mapped to `Naive` or the damped solver. It shares the fixed,
+  uniform-mesh and no in-place guess/interval restart limits of this native
+  core; broader logging/output controls remain those available from the core.
+  This Frozen adapter is implemented independently from the dedicated
+  `ODE_api2` nonstiff adapter below.
 
 #### Python wrapper option audit (2026-10-14)
 
@@ -372,7 +407,8 @@ concrete adapter.
 | `BackwardEulerSolver` | ExprLegacy/AtomNative, Dense, sequential Lambdify/AOT, tolerance/step/iteration, continuation/restart, AOT output/handoff | Sparse/Banded, parallel and callback routes are rejected; preparation is intentionally lazy until solve | explicit `prepare()` can wait for a native BE preparation boundary |
 | `Lsode2Solver` | ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded widths, Sequential/Parallel/Auto, BDF/Adams/auto controller, callbacks, continuation, lifecycle/provenance | Python callbacks are Lambdify-only; the wrapper does not claim AOT embedding of Python closures | matched callback performance evidence and configurable worker thresholds remain follow-up |
 | `BvpSciSolver` | ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded widths, sparse factorization including opt-in SuperLU, continuation/restart, output, singular terms, boundary callbacks, AOT lifecycle | SuperLU remains opt-in and can fall back to StandardFaer; callback boundaries retain their own contract | add any future native output/worker policy only when the core exposes it |
-| `BvpDampSolver` | ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded, execution policies, damping/Jacobian budgets, six grid methods, banded linear policy, log/structured telemetry, continuation/restart, compact output | direct `Frozen` is an explicit stub; non-standard sparse factorization belongs to BVP_sci and is typed-rejected here | native `GeneratedBackendConfig` still lacks a direct AOT output-directory field |
+| `BvpDampSolver` / `BvpDampNaiveSolver` / `BvpDampFrozenSolver` | Damped route: ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded, execution policies, damping/Jacobian budgets, six grid methods, bounds and adaptive refinement. Naive and Frozen routes: symbolic frontend/execution/layout axes, fixed uniform mesh, native prepare and parameter rebind, telemetry; Frozen also exposes all five native reuse policies | Non-standard sparse factorization belongs to BVP_sci and is typed-rejected here; Naive/Frozen do not claim adaptive mesh or in-place guess/interval restart | Native `GeneratedBackendConfig` lacks direct AOT output-directory support; fixed-mesh routes cannot replace their initial guess/interval in place |
+| `UniversalNonStiffSolver` | ODE_api2 RK45/DOPRI/AB4; ExprLegacy/Lambdify, Dense, Sequential; step size and named stop conditions | No AOT, AtomNative, parallel mode, telemetry, parameters, restart or continuation; fixed-step end may overshoot by less than one step | Stiff methods use their direct solver wrappers; do not route stiff workloads through ODE_api2 |
 
 The policy is now explicit: a convenience constructor may choose native
 defaults, but every accepted option is applied, and every route that the
@@ -430,8 +466,47 @@ they do not silently flatten the two BVP APIs.
   define them; generic residual fitting still does not invent these metrics.
 - [x] Add Python/native parity coverage for representative Gavin and VarPro
   fits, including termination/statistics and typed one-shot lifecycle data.
-- [ ] Extend failure matrices and long-series statistics coverage to every
-  solver-specific fitting branch.
+- [x] Audit the three standalone optimization routes (`FittingSolver`,
+  `GavinFittingSolver` and `VarProSolver`) against their native Rust APIs.
+  Verify that every meaningful solver setting, frontend choice, lifecycle
+  operation, diagnostic/telemetry field and typed failure is either exposed
+  or explicitly documented as unsupported; add a route-by-route contract
+  matrix and close any gaps found. The completed matrix below records deliberate
+  route differences and newly exposed VarPro controls/statistics.
+- [x] Audit and expose `UniversalFitting` as a separate public Python facade,
+  rather than treating its existence as implied by the three standalone
+  solver classes. Preserve its method selection and method-specific options,
+  report unsupported combinations explicitly, and test each supported route
+  against the Rust `UniversalFitting` contract. A public PyO3 builder now
+  delegates directly to the native Rust dispatcher; it does not reproduce
+  dispatch or option rejection in Python.
+- [x] Extend failure matrices and long-series statistics coverage to every
+  solver-specific fitting branch, including reusable Fitting rebinds and
+  repeated one-shot Gavin/VarPro constructions.
+
+- [x] Audit `NonlinearSolver` against the complete `Nonlinear_systems` Rust
+  surface: all solver methods, ExprLegacy/AtomNative frontends, preparation
+  and execution routes, method-specific settings/flags, bounds and domain
+  policies, parallel policy, logging, telemetry and typed errors. Record each
+  capability as exposed, intentionally unsupported or missing, then add
+  contract tests for every exposed solver/frontend/settings combination.
+
+### Completed Contract Matrix (2026-10-16)
+
+| Route | Frontend / execution | Lifecycle and native controls | Diagnostics / failures | Explicitly unsupported or intentionally different |
+| --- | --- | --- | --- | --- |
+| `FittingSolver` | ExprLegacy and AtomNative; sequential/parallel/auto threshold policy | Prepares during construction; repeat `solve()` and `solve_with_parameters()` rebinds; xtol/ftol/gtol, max iterations, diagonal scaling, positive-variable policy, log level | Objective, termination, counters/timings; native error variant is retained on typed Python exceptions | AOT, arbitrary Python callbacks, covariance/R2 and observation weights are not part of the canonical residual-equation contract |
+| `GavinFittingSolver` | ExprLegacy and AtomNative; sequential/parallel/auto; separate preparation telemetry | One-shot solve; weights, positive parameters, Marquardt/quadratic/Nielsen, iteration/gradient/step/gain-ratio controls, binary numerical telemetry and preparation telemetry, logging | R2, chi-square, standard errors/correlation, preparation report and solve counters/timings | No prepared rebind lifecycle; instantiate again for new data. No AOT. Preparation and solve are intentionally combined in this native builder |
+| `VarProSolver` | ExprLegacy only; sequential only | One-shot; basis/invariants; underlying native LM ftol/xtol/gtol, iteration/evaluation budgets, step bound, scaling and telemetry are exposed | Objective, evaluation count, termination, R2, fitted values and telemetry; nested LM errors retain their typed source, and source-less budget exhaustion carries a native typed flag rather than being inferred from diagnostic text | AtomNative, parallel execution, logging, prepared rebind and separate preparation telemetry are absent from `SymbolicVarProBuilder` |
+| `UniversalFitting` | Public native-backed builder selects LM/Gavin/VarPro. LM/Gavin support ExprLegacy/AtomNative and execution policy; VarPro is ExprLegacy/sequential only | Shared builder controls plus polynomial LM, VarPro basis/invariants, Gavin-specific policy/weights/positive constraints/controls; `build()` is one-shot | Common native result map/R2; route-specific rich telemetry remains on the standalone result classes | Unsupported combinations return `UnsupportedOptionError` (`AtomNative` or parallel VarPro, Gavin `f_tolerance`/`scale_diag`). This facade does not flatten route-specific result telemetry |
+| `NonlinearSolver` | All 11 `NonlinearSolverMethod` variants; ExprLegacy/AtomNative; sequential/parallel/auto threshold policy | Explicit idempotent prepare plus lazy solve; parameter rebind; ordered named partial box bounds; common tolerance/iteration cap; per-method numeric, boolean, vector (`MINPACK diag`) and enum (`advanced Nielsen`) options | Termination/residual, discrete counters and stage timings; typed configuration/preparation/callback/numerical/exhaustion/panic classes | Lambdify only (no AOT), no Python callbacks, dense layout only. Positive-domain declarations are not in the square-problem native contract; use supported box bounds. `auto` is the native thresholded parallel policy, not a separate worker pool |
+
+Contract tests now cross every one of the 11 nonlinear methods with both
+symbolic frontends, exercise parallel dispatch, method-specific settings,
+MINPACK user scaling, advanced Nielsen enum choices, bounds, parameter rebind,
+and telemetry. VarPro's previously hidden native LM settings and solve
+statistics are now surfaced. Unknown telemetry/configuration values fail
+instead of silently falling back to defaults.
 
 Completed nonlinear binding slice (2026-10-14): `NonlinearSolver` owns a
 deferred ExprLegacy/AtomNative Lambdify model, supports sequential/thresholded
@@ -477,8 +552,11 @@ their native symbolic builders; they are not presented as prepared models.
 
 - [x] Create the initial stable Python exception hierarchy rooted at
   `RustedSciTheError`.
-- [ ] Map parser, symbolic, preparation, lowering, compile, link, artifact,
-  callback, domain, linear algebra, convergence and exhaustion errors.
+- [x] Map the principal parser/task, symbolic, preparation/AOT lifecycle,
+  callback, domain/configuration, linear algebra, convergence and exhaustion
+  errors to the stable Python exception hierarchy. Native enum variants are
+  mapped explicitly to `native_kind`; generic input-validation errors created
+  in the binding correctly have no fabricated native variant.
 - [x] Preserve stable `stage`, `solver` and `route` attributes on native-mapped
   Python exceptions; source/frontend-specific fields remain follow-up where
   the native error already carries them.
@@ -492,8 +570,8 @@ their native symbolic builders; they are not presented as prepared models.
   and fitting now add a typed `PanicError` boundary with `stage`, `solver`,
   `route` and `category` metadata where a native operation can panic.
 - [x] Add a representative failure/telemetry matrix for callback, configuration,
-  exhaustion and telemetry-off/counters/timings paths. Constructor-only failures
-  still need a later pass to attach solver context consistently.
+  exhaustion and telemetry-off/counters/timings paths. Constructor and
+  operation-boundary failures retain authoritative stage/solver/route context.
 - [x] Preserve line/column positions for task-parser parse and semantic
   diagnostics when the native error carries them. Generic expression
   diagnostics without native source coordinates remain a separate core-error
@@ -506,14 +584,21 @@ their native symbolic builders; they are not presented as prepared models.
   provides Python mappings through `telemetry_counters()` and
   `telemetry_timings_ms()`; the compact text form remains available through
   `telemetry_report()`.
-- [ ] Cover symbolic preparation, differentiation, simplification, lowering,
-  compilation, linking, publication, callbacks, Jacobians, residuals,
-  factorization, linear solves, mesh refinement and continuation.
-- [ ] Preserve scope hierarchy and distinguish zero from not measured.
-- [ ] Keep telemetry disabled or low-overhead by default according to the
-  native solver policy.
-- [ ] Keep logging disabled by default and enable it through explicit Python
-  configuration.
+- [ ] Cover every native stage uniformly across all solver adapters: the
+  current wrappers expose solver-specific preparation/AOT lifecycle, callback,
+  Jacobian/residual, factorization/solve, refinement and continuation fields,
+  but there is not yet one cross-solver stage schema.
+- [x] Distinguish a measured zero from a stage that was disabled or
+  inapplicable. Across BDF, Radau, Backward Euler, LSODE2 and BVP_sci,
+  telemetry `off` returns empty maps, `counters` returns counters only (keeping
+  measured zero counts), and `timings` returns both. Optional BVP timing scopes
+  remain absent when the native snapshot did not measure them.
+- [x] Keep telemetry disabled or low-overhead by default according to the
+  native solver policy; the Python options preserve native `off` defaults and
+  do not add a second measurement layer.
+- [x] Keep logging disabled by default and enable it through explicit Python
+  configuration for solver routes whose native APIs support logging; reject
+  enabled logging on routes without native logging rather than claiming it ran.
 - [x] Add deterministic compact telemetry report file export without compiler
   noise through `solution.write_telemetry_report(path)`.
 - [x] Add a dependency-free compact table renderer and batch summary export
@@ -526,12 +611,10 @@ their native symbolic builders; they are not presented as prepared models.
 - [ ] Compare Python wall clock with Rust numerical-core time using matched
   prepared workloads.
 
-Status note (2026-10-14): the structured solution-level snapshot is implemented
-for the current IVP bindings, including the available AOT provenance counters.
-The remaining items are intentionally open: they require a common scope tree,
-compact table/file export, boundary benchmarks, worker-count break-even data and
-full preparation/lifecycle coverage. In particular, the current binding does
-not claim that every native telemetry stage is exposed uniformly yet.
+Status note (updated 2026-10-16): per-solver structured snapshots, compact
+reports and AOT lifecycle counters are implemented. Remaining telemetry work is
+cross-solver normalization, complete stage coverage and measured performance
+evidence; native scope names and overlapping timing semantics remain visible.
 
 ## 10. Task parser and executable integration
 
@@ -567,6 +650,19 @@ not claim that every native telemetry stage is exposed uniformly yet.
   executable batch policy remain owned by the command-interpreter layer.
 - [ ] Add package-local reference task files if the first wheel release needs
   to ship copies rather than linking users to the core crate corpus.
+- [x] Keep task parsing and semantic validation in the existing Rust
+  `TaskDocument`/command-interpreter parser, exposed through the PyO3 binding.
+  `TaskDocument.parse()` and `.from_file()` already use that native path, and
+  the Python `task()` helper only distinguishes a path from inline source; no
+  Python lexer/parser or duplicate task DSL is to be introduced.
+- [x] Add a structured `dict` inspection view as an extension of the native
+  `TaskDocument` binding. PyO3 `to_dict()` serializes the already parsed
+  `ParsedTaskSpec`; the thin Python `task_dict()` helper only resolves a path
+  versus inline source. The versioned mapping includes nested solver selection
+  and options, canonical expression strings, initial/boundary data,
+  continuation grids and restart metadata, and output settings. It never
+  reparses DSL in Python or executes the task. Existing `TaskDocument` methods
+  remain available.
 
 Status note (2026-10-14): the parser and IVP/BVP execution Python slice is now available as
 `TaskDocument.parse(...)` and `TaskDocument.from_file(...)`. It uses the core
@@ -602,11 +698,24 @@ preserved on task-parser exceptions where available.
   is now complete; cross-platform and cross-version coverage remain release
   work.
 - [ ] Test the stable `abi3-py310` wheel against supported CPython versions.
-- [ ] On Windows, set `PYO3_PYTHON` and verify the Python import library and
-  runtime DLL path for direct Rust-test linking; the wheel build itself is
-  already validated through the extension-module path.
+- [x] On Windows, set `PYO3_PYTHON` and verify the Python import library and
+  runtime DLL path for direct Rust-test linking. The Python 3.14 development
+  import library was located and binding-crate Rust unit tests linked and ran;
+  this is separate from the extension-module wheel build.
 - [ ] On Linux, install and verify Python development headers and linker files.
-- [ ] Add optional native backend checks for TCC, GCC, Zig and SuperLU.
+- [x] Add optional backend preflight for TCC, GCC, Zig and SuperLU: executable
+  availability/version is reported for command-line tools, and the PyO3
+  extension reports whether SuperLU support was compiled in.
+- [x] Expose a cross-platform Python dependency preflight for `gnuplot`,
+  `tcc`, `gcc`, `zig` and `pandoc`, resolving executable commands from `PATH`
+  on Windows and Linux and returning structured availability/details rather
+  than printing unstructured output. Check SuperLU separately as an optional
+  native bridge: report whether the binding has SuperLU support compiled in
+  and whether the configured `SUPERLU_LIBRARY` can be loaded; it is a shared
+  library, not normally a `PATH` executable. Test missing tools and library,
+  valid installations, and platform-specific executable/library names. The
+  SuperLU load probe confirms dynamic loadability only, not bridge ABI or solve
+  correctness.
 - [x] Test clean wheel installation in a new Windows virtual environment
   outside the checkout without relying on repository sources. Cross-version
   and cross-platform clean installs remain release work.
@@ -638,7 +747,7 @@ preserved on task-parser exceptions where available.
 - [x] Python integration tests for expressions, solvers, errors and outputs in
   the initial BDF/Radau5/Backward Euler vertical slice.
 - [x] Matched correctness tests against native Rust APIs for the initial dense
-  BDF/Radau5/Backward Euler routes.
+  BDF/Radau5/Backward Euler routes and BVP_sci dense ExprLegacy route.
 - [ ] Numerical fidelity tests for exact and representative workloads.
 - [ ] Frontend/backend matrix tests for every supported combination.
 - [ ] Continuation, restart and memory-retention tests.
@@ -655,6 +764,12 @@ preserved on task-parser exceptions where available.
   passed the public `Expr`/NumPy import smoke test.
 - [ ] Verify root crate publication and binding package publication policies
   independently.
+
+Python contract evidence (2026-10-16): the editable Windows extension passed
+the complete package test suite with `202 passed, 2 skipped`. Both skipped
+tests require the intentionally opt-in `test-panic-probe` feature. Rust binding
+unit tests passed `22/22`, including BVP_sci adapter/native parity and the
+VarPro typed-exhaustion mapping contract.
 
 ## Explicit non-goals
 
@@ -769,8 +884,10 @@ matching wheel exists.
 - [x] Install the Windows `0.1.0` package from TestPyPI in a clean environment;
   other supported platforms remain open.
 - [x] Upload and clean-install the corrected Windows `0.1.1` artifacts.
-- [ ] Run the installed-package smoke and representative parity matrix,
-  including both default and explicitly selected telemetry modes.
+- [x] Run the installed-package smoke with explicitly selected telemetry and
+  solver APIs. The exact production Windows `0.1.2` wheel passed a clean
+  environment import/NumPy/Expr smoke; the full production-wheel contract suite
+  remains a separate open gate below.
 - [ ] Check that optional native dependencies fail with typed diagnostics or
   documented fallback rather than making the base package uninstallable.
 - [x] Record the corrected Windows `0.1.1` artifact hashes and exact
@@ -809,7 +926,9 @@ matching wheel exists.
 
 ## 14. Post-publication audit and next work (2026-10-15)
 
-Windows `0.1.1` has been published and clean-installed successfully. This is
+Windows `0.1.2` has been published and clean-installed successfully. The
+`0.1.1` evidence below is retained as release history, not the current version.
+This is
 the current Windows-first milestone, not evidence that every facade route or
 failure mode is complete. Linux wheels remain explicitly deferred and are not
 a blocker for stabilizing the published Windows package.
@@ -828,9 +947,10 @@ a blocker for stabilizing the published Windows package.
 - [ ] Reconcile README, guides, examples and facade behavior. The stale claim
   that Python LSODE2 rejected Adams/Auto has been corrected in the README and
   both solver guides; continue the full documentation/API audit.
-- [ ] Reconcile stale wrapper TODO items with intentional native-core policy:
-  BDF remains Dense-only by design; do not treat Sparse/Banded BDF as a Python
-  binding omission. Keep Frozen paths clearly marked as deferred/stubbed.
+- [x] Reconcile wrapper TODO items with intentional native-core policy: BDF
+  remains Dense-only by design; Sparse/Banded BDF are not Python omissions.
+  ShootingBVP is now exposed by `PyShootingBvpSolver` with native telemetry,
+  typed failures, examples and RU/EN guides; its old deferred note is obsolete.
 
 ### 14.2 Error boundaries, panic safety and diagnostics
 
@@ -867,8 +987,8 @@ a blocker for stabilizing the published Windows package.
 - [ ] Inject a panic through a representative production numerical wrapper.
   No public solver currently exposes a deterministic safe panic trigger; do
   not add a production panic hook merely to satisfy this test. The shared
-  guard's direct Rust unit test remains available but `cargo test --lib`
-  cannot link on this Windows setup without `python3.lib`.
+  guard's direct Rust unit tests do link and pass with the installed Python
+  3.14 development import library; only the production-trigger test is absent.
 - [x] Preserve Python callback exceptions as `CallbackError.__cause__` across
   BDF, Radau, LSODE2 and BVP_sci callback adapters. Shape/finiteness failures
   remain typed callback errors without inventing an underlying cause.
@@ -878,6 +998,9 @@ a blocker for stabilizing the published Windows package.
   as the primary contract; `native_kind` supplements them without parsing
   display text. Least-squares iteration/evaluation budget failures now map to
   `ExhaustionError`, consistent with the other solver budget APIs.
+- [x] Verify explicit native `native_kind` metadata on a representative
+  BVP_sci AOT lifecycle failure in addition to the cross-solver enum mapping
+  tests.
 - [x] Make operation-boundary metadata authoritative for ordinary errors as
   well as panics. Shared native error mappers may classify exception types and
   `native_kind`, but `catch_panic` now reattaches the exact public `stage`,
@@ -895,9 +1018,9 @@ a blocker for stabilizing the published Windows package.
   feature. Import path was under the temporary venv's `site-packages`, not the
   checkout. This is a local source wheel, not the immutable published PyPI
   artifact; the production-wheel gate below remains open.
-- [ ] Run the Rust binding crate's unit test for panic metadata when a Windows
-  `python3.lib` is available; `cargo test --lib` currently reaches link and
-  fails because that library is absent, while the extension build succeeds.
+- [x] Run the Rust binding crate's unit tests for panic metadata with a Windows
+  Python development import library. The Python 3.14 SDK linker path is
+  configured in the recorded local test setup; this no longer blocks tests.
 
 ### 14.3 GIL, ownership and concurrency contract
 
@@ -934,18 +1057,17 @@ a blocker for stabilizing the published Windows package.
   the published extension exports `Lsode2Solver`. The source fix is present in
   the working tree, not in immutable `0.1.1`.
 - [ ] Run the complete Python contract suite against the exact production
-  `0.1.2` wheel and require zero failures. The production artifact hashes and
-  clean-install import smoke test passed; the earlier `0.1.1` failures do not
-  count as a `0.1.2` full-suite result.
+  `0.1.2` wheel and require zero failures. Its production artifact hashes and
+  clean-install import smoke passed; the full-suite result is still outstanding.
 - [ ] Cover representative single solves, prepared reuse, restart with new
   initial data, parameter continuation, long-series behavior and typed failure
   paths. Check that optional AOT/compiler cases are either exercised or
   clearly reported as skipped.
 - [ ] Check the supported CPython range for the published ABI3 wheel and record
   the exact interpreter, NumPy, Rust package and artifact versions.
-- [ ] Keep native Python-versus-Rust parity gates for BVP_sci visible as an
-  open validation item; do not imply that package smoke tests establish that
-  numerical parity.
+- [x] Keep native Python-versus-Rust parity gates for BVP_sci visible as a
+  distinct validation item. The direct Rust binding test now compares matched
+  numerical results and shared counters; package smoke tests remain separate.
 - [ ] Keep Linux build, wheel and clean-install validation in the deferred
   platform section; begin it only after the Windows contract is stable.
 
@@ -1069,7 +1191,7 @@ a blocker for stabilizing the published Windows package.
   Euler, LSODE2, BVP_sci, BVP_Damp, and nonlinear systems/fitting. The Python
   guides retain each native family's algorithm/configuration distinctions,
   while converting examples to facade syntax and stating wrapper-only limits
-  (including deferred Frozen BVP_Damp and the one-observation-per-unknown
+  (including the distinct Frozen BVP_Damp strategy and the one-observation-per-unknown
   BVP_Damp boundary contract). The common RU/EN overview remains intact.
 - [ ] Measure wrapper overhead separately from numerical-core time: Python/Rust
   crossings, input/output conversion, callback calls, preparation, one solve
@@ -1180,17 +1302,34 @@ release timing checks belong at the end.
   supports selected elementary forms and returns a primitive without an
   integration constant. Definite integration and quadrature remain separate
   pending domain and input validation.
-- [ ] Validate returned primitives by differentiating them on supported
-  domains, supplemented by numerical probes and known exact examples.
-  Inspect negative-domain logarithms explicitly: native `integrate(1/x)`
-  returns `ln(x)`, not a general real-domain `ln(abs(x))` representation.
-- [ ] Define definite-integration semantics for remaining free parameters,
-  reversed bounds, singularities and non-finite values. Native endpoint
-  subtraction alone does not establish convergence across a singularity.
-- [ ] Keep numerical quadrature explicit and separate from symbolic
-  integration. Validate Simpson's positive even subdivision count, Gaussian
-  degree, interval and weight/alpha conventions before calling native code;
-  current low-level paths contain `panic!`/`unwrap` for invalid inputs.
+- [x] Validate returned primitives by differentiating them on supported
+  domains and comparing numerical probes for polynomial, exponential,
+  trigonometric and reciprocal examples. The Python contract explicitly checks
+  `integrate(1/x) -> ln(x)`: the derivative matches on `x > 0`, while evaluating
+  the primitive at a negative value fails rather than silently claiming a
+  general real-domain `ln(abs(x))` representation. Targeted validation passed
+  (`3 passed`).
+- [x] Define and test the current definite/numerical integration boundary:
+  there is no symbolic definite-integral API, and numerical quadrature accepts
+  at most one free symbol (the integration variable), finite bounds for
+  finite-interval methods, and only finite results. Simpson/Gauss-Legendre
+  reverse sign for reversed bounds. Interior singularities and convergence are
+  not certified; endpoint substitution alone is not exposed as a definite
+  integral. Adding a separate parameter-binding API or convergence checks is
+  deferred until it has a precise contract.
+- [x] Keep numerical quadrature explicit and separate from symbolic
+  integration. Expose a checked finite-interval Simpson method that rejects
+  zero/odd subdivisions, non-finite bounds, multi-variable expressions and
+  non-finite results before exposing native panic behavior.
+- [x] Expose unweighted finite-interval Gauss-Legendre separately from
+  symbolic integration, with positive-degree, finite-bound, one-variable and
+  finite-result validation.
+- [x] Expose weighted Gauss-Hermite/Gauss-Laguerre with documented weight
+  conventions, exact intervals and Laguerre alpha domain. Both methods validate
+  degree (`1..=4096`), one-dimensional input and finite results; Laguerre also
+  requires finite `alpha > -1`. Hermite integrates `exp(-x^2) * f(x)` over the
+  real line; Laguerre integrates `x^alpha * exp(-x) * f(x)` over `[0, +inf)`.
+  Python contract coverage checks exact polynomial moments and rejected inputs.
 - [x] Expose safe native ExprVector/ExprMatrix construction, shape/indexing,
   transpose, vector dot, matrix-vector product, elementwise differentiation/
   substitution/simplification and evaluation. Reuse `Expr` handles and sorted
@@ -1201,9 +1340,11 @@ release timing checks belong at the end.
 - [x] Limit determinant to verified native capabilities: square matrices of
   sizes 1 through 3. Larger/invalid matrices raise a typed configuration error
   instead of reaching the core panic path.
-- [ ] Add symbolic matrix-matrix and elementwise matrix products only after
-  choosing/documenting their distinct semantics; expose more advanced block,
-  inverse and Kronecker operations only with verified native guarantees.
+- [x] Expose symbolic matrix-matrix and elementwise matrix products as
+  distinct `matmul()` and `hadamard()` methods; validate dimensions before
+  native assertions and preserve empty output shapes. RU/EN guides and contract
+  tests distinguish the semantics. Advanced block, inverse and Kronecker
+  operations remain deferred until their public contracts are reviewed.
 
 ### 15.4 Native 2D/3D trajectory animation
 
@@ -1285,8 +1426,9 @@ release timing checks belong at the end.
   production-wheel validation debt visible while extending these capabilities.
 
 Remaining implementation order: opt-in desktop lifecycle and wheel-delivery
-decision; definite/numerical integration policy and additional symbolic array
-products; installed-wheel validation. The 2026-10-15
+decision; definite/numerical integration policy; review advanced symbolic
+array operations only where native guarantees justify exposing them; and
+installed-wheel validation. The 2026-10-15
 debug validation for scalar expressions, AtomNative/ExprLegacy callables,
 NumPy batch evaluation and opt-in diagnostics passed `93` contract tests with
 `2` skips; adding symbolic integration, vector/matrix bindings and bilingual
@@ -1297,3 +1439,28 @@ compute-only mode and mypy passed. A Windows desktop smoke opened and closed 2D
 then 3D views sequentially through the public facade, proving same-session
 reopen via process isolation. This editable-extension evidence does not replace
 the outstanding full production-wheel suite.
+
+## 16. Additional native APIs
+
+- [ ] Audit `src/numerical/data_processing/` and expose its supported public
+  utilities through an idiomatic Python API. Preserve NumPy shape/dtype and
+  ownership rules, map invalid input to typed Python exceptions, and document
+  which operations are implemented by the Rust core rather than duplicating
+  numerical logic in Python.
+  Progress (2026-10-16): the binding now covers spline resampling,
+  Savitzky-Golay filtering, CPU LOWESS, RMSE/MAE/R-squared, and weighted
+  least-squares B-spline fitting with explicit DenseQR/Banded selection.
+  NumPy ownership, unsafe-input validation, backend parity and example coverage
+  are included. Remaining spline families, array-valued LOWESS results and a
+  final audit of the wider data-processing module still block checking off this
+  item.
+- [x] Add a direct Python binding for `ShootingBVP`, covering the native
+  problem construction, solver options, symbolic frontend/backend routes,
+  solve/result data, continuation or restart where supported, telemetry and
+  typed failures. Publish an explicit capability table and tests so unsupported
+  native combinations are rejected rather than silently defaulted.
+  Completed (2026-10-16): `PyShootingBvpSolver` forwards the supported native
+  symbolic frontend and IVP backend choices, detached trajectory, optional
+  telemetry and typed failures. RU/EN guides and executable examples describe
+  current limitations; no parallel scheduler or unsupported restart contract
+  is invented by the wrapper.

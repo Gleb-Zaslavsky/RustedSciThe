@@ -806,7 +806,7 @@ mod tests {
             bounds: Some(bounds),
             diagnostics: DiagnosticsOptions {
                 collect_history: false,
-                collect_statistics: true,
+                telemetry_mode: crate::numerical::SolverTelemetryMode::Detailed,
                 ..DiagnosticsOptions::default()
             },
             ..SolveOptions::default()

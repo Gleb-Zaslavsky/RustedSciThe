@@ -208,7 +208,7 @@ fn prepare(
     compiler: &str,
 ) -> Result<(BvpSciLambdifyPlan, f64), String> {
     let (equations, states) = equations(dimension);
-    let telemetry = BvpSciTelemetry::timings();
+    let telemetry = BvpSciTelemetry::detailed();
     let started = Instant::now();
     let plan = if route.is_aot() {
         let mut config =
@@ -523,7 +523,7 @@ fn main() {
     assert!(!rows.is_empty(), "matched benchmark selected no rows");
     let table = Table::new(&rows).to_string();
     let report = format!(
-        "# BVP_sci matched AOT/Lambdify full-solve continuation\n\n- dimensions: {dimensions:?}\n- nodes: {nodes:?}\n- continuation counts: {counts:?}\n- repeats per prepared route: {repeats}\n- nonzero manufactured family: `y' = p*(y + 1)`, `y(0)=0`, `y(1)=exp(p)-1`\n- each row prepares one route/layout/count; AOT cache hit/miss columns distinguish reused artifacts\n- `warm_series_ms` includes the initial solve and the continuation solves\n- `amortized_solve_ms = (prepare_ms + warm_series_ms) / continuation_count`; it is a decision aid, not a statistical threshold\n- all timing scopes are diagnostic and non-additive; `full_solve_ms` is the inclusive latest public solve\n\n{table}\n",
+        "# BVP_sci matched AOT/Lambdify full-solve continuation\n\n- dimensions: {dimensions:?}\n- nodes: {nodes:?}\n- continuation counts: {counts:?}\n- repeats per prepared route: {repeats}\n- telemetry: `Detailed` collects counters, timings and detailed traces; measured durations include instrumentation and are diagnostic, not an uninstrumented speed baseline\n- nonzero manufactured family: `y' = p*(y + 1)`, `y(0)=0`, `y(1)=exp(p)-1`\n- each row prepares one route/layout/count; AOT cache hit/miss columns distinguish reused artifacts\n- `warm_series_ms` includes the initial solve and the continuation solves\n- `amortized_solve_ms = (prepare_ms + warm_series_ms) / continuation_count`; it is a decision aid, not a statistical threshold\n- all timing scopes are diagnostic and non-additive; `full_solve_ms` is the inclusive latest public solve\n\n{table}\n",
     );
     let name = std::env::var("BVP_SCI_MATCHED_REPORT")
         .unwrap_or_else(|_| "matched_full_solve_continuation".into());

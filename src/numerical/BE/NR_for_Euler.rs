@@ -1,4 +1,5 @@
 use super::{BeDetailedStatistics, BeFailureKind, BeSymbolicAssemblyBackend, BeTelemetryMode};
+use crate::numerical::logging::{solver_info as info, SolverLogGuard, SolverLogLevel};
 use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpTelemetryMode, IvpTelemetrySnapshot};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
@@ -9,7 +10,6 @@ use crate::symbolic::symbolic_ivp_generated::{
     prepare_generated_symbolic_ivp_problem, DenseIvpGeneratedBackendMode, IvpBackendStatistics,
     SymbolicIvpGeneratedBackendConfig,
 };
-use log::info;
 use nalgebra::{DMatrix, DVector, Matrix};
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -141,6 +141,8 @@ pub struct NreSolverOptions {
     pub generated_backend_config: SymbolicIvpGeneratedBackendConfig,
     /// Symbolic expression frontend used when callbacks are prepared.
     pub symbolic_assembly_backend: BeSymbolicAssemblyBackend,
+    /// Rust-side message threshold; disabled by default.
+    pub logging_level: SolverLogLevel,
 }
 
 impl NreSolverOptions {
@@ -167,7 +169,14 @@ impl NreSolverOptions {
             t_bound,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
             symbolic_assembly_backend: BeSymbolicAssemblyBackend::default(),
+            logging_level: SolverLogLevel::Off,
         }
+    }
+
+    /// Enables Rust-side solver messages up to `level`; does not install a logger.
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        self.logging_level = level;
+        self
     }
 
     pub fn with_step_mode(mut self, step_mode: NreStepMode) -> Self {
@@ -276,6 +285,7 @@ pub struct NRE {
     symbolic_ivp_telemetry: IvpTelemetry,
     symbolic_assembly_backend: BeSymbolicAssemblyBackend,
     detailed_statistics: Arc<Mutex<BeDetailedStatistics>>,
+    logging_level: SolverLogLevel,
 }
 
 impl Display for NRE {
@@ -329,10 +339,11 @@ impl NRE {
             statistics: Arc::new(Mutex::new(IvpBackendStatistics::default())),
             finite_difference_error: Arc::new(Mutex::new(None)),
             uses_finite_difference_jacobian: false,
-            telemetry_mode: BeTelemetryMode::Timings,
+            telemetry_mode: BeTelemetryMode::Detailed,
             symbolic_ivp_telemetry: IvpTelemetry::disabled(),
             symbolic_assembly_backend: BeSymbolicAssemblyBackend::default(),
             detailed_statistics: Arc::new(Mutex::new(BeDetailedStatistics::default())),
+            logging_level: SolverLogLevel::Off,
         }
     }
 
@@ -353,7 +364,18 @@ impl NRE {
         .with_generated_backend_config(options.generated_backend_config);
         solver.set_step_mode(step_mode);
         solver.set_symbolic_assembly_backend(options.symbolic_assembly_backend);
+        solver.set_logging_level(options.logging_level);
         solver
+    }
+
+    /// Sets this Newton solver's local logging threshold.
+    pub fn set_logging_level(&mut self, level: SolverLogLevel) {
+        self.logging_level = level;
+    }
+
+    /// Returns this Newton solver's local logging threshold.
+    pub fn logging_level(&self) -> SolverLogLevel {
+        self.logging_level
     }
 
     pub fn set_generated_backend_config(&mut self, config: SymbolicIvpGeneratedBackendConfig) {
@@ -391,7 +413,7 @@ impl NRE {
     }
 
     pub fn statistics(&self) -> IvpBackendStatistics {
-        if !self.telemetry_mode.collects_counters() {
+        if self.telemetry_mode == BeTelemetryMode::Off {
             return IvpBackendStatistics::default();
         }
         self.statistics
@@ -401,7 +423,7 @@ impl NRE {
     }
 
     pub(crate) fn detailed_statistics(&self) -> BeDetailedStatistics {
-        if !self.telemetry_mode.collects_counters() {
+        if self.telemetry_mode == BeTelemetryMode::Off {
             return BeDetailedStatistics::default();
         }
         self.detailed_statistics
@@ -411,7 +433,7 @@ impl NRE {
     }
 
     fn update_detailed_statistics(&self, update: impl FnOnce(&mut BeDetailedStatistics)) {
-        if self.telemetry_mode.collects_counters() {
+        if self.telemetry_mode.collects_counters() || self.telemetry_mode.collects_timings() {
             update(
                 &mut self
                     .detailed_statistics
@@ -426,7 +448,10 @@ impl NRE {
         elapsed: Option<std::time::Duration>,
         succeeded: bool,
     ) {
-        self.update_detailed_statistics(|stats| stats.record_parameter_bind(elapsed, succeeded));
+        let collect_count = self.telemetry_mode.collects_counters();
+        self.update_detailed_statistics(|stats| {
+            stats.record_parameter_bind(elapsed, succeeded, collect_count)
+        });
     }
 
     pub(crate) fn set_telemetry_mode(&mut self, mode: BeTelemetryMode) {
@@ -446,7 +471,10 @@ impl NRE {
     }
 
     pub(crate) fn record_output_assembly(&self, elapsed: Option<std::time::Duration>) {
-        self.update_detailed_statistics(|stats| stats.record_output_assembly(elapsed));
+        let collect_count = self.telemetry_mode.collects_counters();
+        self.update_detailed_statistics(|stats| {
+            stats.record_output_assembly(elapsed, collect_count)
+        });
     }
 
     pub(crate) fn statistics_handle(&self) -> Arc<Mutex<IvpBackendStatistics>> {
@@ -597,6 +625,12 @@ impl NRE {
                 self.record_parameter_bind_result(Some(start.elapsed()), result.is_ok());
                 result
             }
+            BeTelemetryMode::Detailed => {
+                let start = Instant::now();
+                let result = self.set_parameter_values_inner(values);
+                self.record_parameter_bind_result(Some(start.elapsed()), result.is_ok());
+                result
+            }
         }
     }
 
@@ -656,6 +690,15 @@ impl NRE {
                 stats_for_residual
                     .lock()
                     .expect("IVP statistics lock poisoned")
+                    .residual_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
+                out
+            }),
+            BeTelemetryMode::Detailed => Box::new(move |t, y| {
+                let start = Instant::now();
+                let out = residual(t, y);
+                stats_for_residual
+                    .lock()
+                    .expect("IVP statistics lock poisoned")
                     .record_residual_duration(start.elapsed());
                 out
             }),
@@ -677,6 +720,15 @@ impl NRE {
                 stats_for_jacobian
                     .lock()
                     .expect("IVP statistics lock poisoned")
+                    .jacobian_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
+                out
+            }),
+            BeTelemetryMode::Detailed => Box::new(move |t, y| {
+                let start = Instant::now();
+                let out = jacobian(t, y);
+                stats_for_jacobian
+                    .lock()
+                    .expect("IVP statistics lock poisoned")
                     .record_jacobian_duration(start.elapsed());
                 out
             }),
@@ -688,7 +740,8 @@ impl NRE {
         let telemetry = match self.telemetry_mode {
             BeTelemetryMode::Off => IvpTelemetry::disabled(),
             BeTelemetryMode::Counters => IvpTelemetry::counters(),
-            BeTelemetryMode::Timings => IvpTelemetry::detailed(),
+            BeTelemetryMode::Timings => IvpTelemetry::timings(),
+            BeTelemetryMode::Detailed => IvpTelemetry::detailed(),
         };
         self.symbolic_ivp_telemetry = telemetry.clone();
         telemetry
@@ -707,6 +760,7 @@ impl NRE {
     }
 
     pub fn try_eq_generate(&mut self) -> Result<(), IvpBackendError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         info!("generating equations and jacobian");
         let start = self.telemetry_mode.collects_timings().then(Instant::now);
         let mut options = SymbolicIvpProblemOptions::new();
@@ -739,15 +793,16 @@ impl NRE {
         })?;
         self.generated_backend_config.resolver = prepared.updated_resolver.clone();
         self.install_prepared_backend(prepared.into_problem());
-        if self.telemetry_mode.collects_counters() {
+        if self.telemetry_mode.collects_counters() || self.telemetry_mode.collects_timings() {
             let mut stats = self
                 .statistics
                 .lock()
                 .expect("IVP statistics lock poisoned");
-            if let Some(start) = start {
-                stats.record_backend_prepare_duration(start.elapsed());
-            } else {
+            if self.telemetry_mode.collects_counters() {
                 stats.backend_prepare_calls = stats.backend_prepare_calls.saturating_add(1);
+            }
+            if let Some(start) = start {
+                stats.backend_prepare_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
             }
         }
         assert_eq!(&self.eq_system.len(), &self.n);
@@ -849,6 +904,19 @@ impl NRE {
                     stats
                         .lock()
                         .expect("IVP statistics lock poisoned")
+                        .residual_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
+                    out
+                })
+            }
+            BeTelemetryMode::Detailed => {
+                let stats = self.statistics_handle();
+                let fun_for_eval = Arc::clone(&fun);
+                Box::new(move |t, y| {
+                    let start = Instant::now();
+                    let out = fun_for_eval(t, y);
+                    stats
+                        .lock()
+                        .expect("IVP statistics lock poisoned")
                         .record_residual_duration(start.elapsed());
                     out
                 })
@@ -870,6 +938,18 @@ impl NRE {
                         })
                     }
                     BeTelemetryMode::Timings => {
+                        let stats = self.statistics_handle();
+                        Box::new(move |t, y| {
+                            let start = Instant::now();
+                            let out = jac_fun(t, y);
+                            stats
+                                .lock()
+                                .expect("IVP statistics lock poisoned")
+                                .jacobian_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
+                            out
+                        })
+                    }
+                    BeTelemetryMode::Detailed => {
                         let stats = self.statistics_handle();
                         Box::new(move |t, y| {
                             let start = Instant::now();
@@ -928,6 +1008,31 @@ impl NRE {
                         }
                         BeTelemetryMode::Timings => {
                             let stats = self.statistics_handle();
+                            Box::new(move |t, y| {
+                                let start = Instant::now();
+                                let out = match finite_difference_jacobian(
+                                    fd_fun.as_ref().as_ref(),
+                                    t,
+                                    y,
+                                    || {},
+                                ) {
+                                    Ok(out) => out,
+                                    Err(error) => {
+                                        *fd_error.lock().expect(
+                                            "finite-difference callback error lock poisoned",
+                                        ) = Some(error);
+                                        DMatrix::from_element(y.len(), y.len(), f64::NAN)
+                                    }
+                                };
+                                stats
+                                    .lock()
+                                    .expect("IVP statistics lock poisoned")
+                                    .jacobian_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
+                                out
+                            })
+                        }
+                        BeTelemetryMode::Detailed => {
+                            let stats = self.statistics_handle();
                             let detailed_stats = Arc::clone(&self.detailed_statistics);
                             Box::new(move |t, y| {
                                 let start = Instant::now();
@@ -973,7 +1078,8 @@ impl NRE {
         let result = match self.telemetry_mode {
             BeTelemetryMode::Off => self.try_iteration::<false, false>(self.dt),
             BeTelemetryMode::Counters => self.try_iteration::<true, false>(self.dt),
-            BeTelemetryMode::Timings => self.try_iteration::<true, true>(self.dt),
+            BeTelemetryMode::Timings => self.try_iteration::<false, true>(self.dt),
+            BeTelemetryMode::Detailed => self.try_iteration::<true, true>(self.dt),
         };
         result.expect("Newton iteration should succeed")
     }
@@ -1016,17 +1122,21 @@ impl NRE {
         //equation J*deltay  = -G
         let factorization_start = TIMINGS.then(Instant::now);
         let lu = new_j.lu();
-        if COUNTERS {
+        if COUNTERS || TIMINGS {
             self.update_detailed_statistics(|stats| {
-                stats.record_factorization(factorization_start.map(|start| start.elapsed()));
+                stats.record_factorization(
+                    factorization_start.map(|start| start.elapsed()),
+                    COUNTERS,
+                );
             });
         }
         let neg_f = -1.0 * new_G;
         let linear_solve_start = TIMINGS.then(Instant::now);
         let solve_result = lu.solve(&neg_f);
-        if COUNTERS {
+        if COUNTERS || TIMINGS {
             self.update_detailed_statistics(|stats| {
-                stats.record_linear_solve(linear_solve_start.map(|start| start.elapsed()));
+                stats
+                    .record_linear_solve(linear_solve_start.map(|start| start.elapsed()), COUNTERS);
             });
         }
         let delta_y = solve_result.ok_or(NreError::SingularNewtonMatrix)?;
@@ -1045,10 +1155,12 @@ impl NRE {
     }
 
     pub fn try_solve(&mut self) -> Result<DVector<f64>, NreError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         match self.telemetry_mode {
             BeTelemetryMode::Off => self.try_solve_impl::<false, false>(),
             BeTelemetryMode::Counters => self.try_solve_impl::<true, false>(),
-            BeTelemetryMode::Timings => self.try_solve_impl::<true, true>(),
+            BeTelemetryMode::Timings => self.try_solve_impl::<false, true>(),
+            BeTelemetryMode::Detailed => self.try_solve_impl::<true, true>(),
         }
     }
 

@@ -83,6 +83,16 @@ pub struct DampedSolverOptions {
 }
 
 impl DampedSolverOptions {
+    /// Returns whether this solver should initialize Rust-side logging.
+    ///
+    /// An absent level is the library-safe default and means logging is off.
+    /// Explicit `off`/`none` values are also accepted case-insensitively.
+    pub(crate) fn logging_enabled(loglevel: Option<&str>) -> bool {
+        loglevel.is_some_and(|level| {
+            !level.trim().eq_ignore_ascii_case("off") && !level.trim().eq_ignore_ascii_case("none")
+        })
+    }
+
     /// Creates damped solver options from explicit values.
     #[allow(clippy::too_many_arguments)]
     pub fn new(

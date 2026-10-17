@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_initial_guess(vec![1.8, 1.2, 0.2])
         .with_positive_parameters(["tau"])
         .with_frontend(SymbolicLambdifyFrontend::AtomViewNative)
-        .with_telemetry(true)
+        .with_telemetry(RustedSciThe::numerical::SolverTelemetryMode::Detailed)
         .try_solve()?;
 
     println!("Gavin symbolic fit");

@@ -24,9 +24,13 @@ from .facade import (
     solve_bvp,
     solve_ivp,
     solve_nonlinear,
+    ShootingBvpSolver,
     task,
+    task_dict,
     write_table,
 )
+from .dependencies import check_dependencies
+from ._native import fit_quality, lowess_smooth, savgol_filter, spline_resample
 
 __all__ = [
     name for name in dir(_native) if not name.startswith("_")
@@ -37,4 +41,7 @@ __all__ = [
     "create_nonlinear", "fit", "render_table", "run_task_batch",
     "run_task_batch_report", "solve_bvp",
     "solve_ivp", "solve_nonlinear", "task", "write_table",
+    "ShootingBvpSolver",
+    "task_dict", "check_dependencies",
+    "fit_quality", "lowess_smooth", "savgol_filter", "spline_resample",
 ]

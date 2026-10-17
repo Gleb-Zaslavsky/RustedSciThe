@@ -126,9 +126,10 @@
 //! - Clear error messages for debugging
 
 use crate::numerical::BDF::BDF_solver::{
-    BdfConfigurationError, BdfJacobian, BdfLinearBackend, BdfOperationCounters, BdfStepError, BDF,
+    BDF, BdfConfigurationError, BdfJacobian, BdfLinearBackend, BdfOperationCounters, BdfStepError,
 };
 pub use crate::numerical::BDF::BDF_solver::{BdfJacobianCallbackError, BdfJacobianSource};
+use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::ivp_telemetry::{
     IvpLambdifyExecutionPolicy, IvpTelemetry, IvpTelemetrySnapshot,
@@ -139,13 +140,13 @@ use crate::symbolic::symbolic_ivp::{
     SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    prepare_generated_symbolic_ivp_problem, prepare_generated_symbolic_ivp_residual_problem,
     DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpAotBuildPolicy,
-    SymbolicIvpGeneratedBackendConfig,
+    SymbolicIvpGeneratedBackendConfig, prepare_generated_symbolic_ivp_problem,
+    prepare_generated_symbolic_ivp_residual_problem,
 };
 extern crate nalgebra as na;
-use crate::numerical::BDF::common::NumberOrVec;
 use crate::Utils::plots::plots_ref;
+use crate::numerical::BDF::common::NumberOrVec;
 use na::{DMatrix, DVector};
 
 use csv::Writer;
@@ -180,12 +181,27 @@ pub enum BdfNativeJacobianSource {
 pub enum BdfTelemetryMode {
     #[default]
     Off,
+    /// Collect discrete counters without reading the clock.
     Counters,
+    /// Collect wall-clock timings without discrete counters.
     Timings,
+    /// Collect both discrete counters and wall-clock timings.
+    Detailed,
+}
+
+impl BdfTelemetryMode {
+    const fn collects_counters(self) -> bool {
+        matches!(self, Self::Counters | Self::Detailed)
+    }
+
+    const fn collects_timings(self) -> bool {
+        matches!(self, Self::Timings | Self::Detailed)
+    }
 }
 
 /// Disjoint diagnostic stages inside one BDF backend preparation call.
-/// Timings are populated only when [`BdfTelemetryMode::Timings`] is enabled.
+/// Timings are populated when [`BdfTelemetryMode::Timings`] or
+/// [`BdfTelemetryMode::Detailed`] is enabled.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct BdfPreparationTimings {
     pub configuration_ms: f64,
@@ -363,6 +379,8 @@ pub struct BdfSolverOptions {
     pub telemetry_mode: BdfTelemetryMode,
     /// Maximum number of high-level integration attempts per solve.
     pub max_steps: usize,
+    /// Per-solver Rust log threshold. Off by default; the host owns the log sink.
+    pub logging_level: SolverLogLevel,
 }
 
 impl BdfSolverOptions {
@@ -437,6 +455,7 @@ impl BdfSolverOptions {
             lambdify_execution_policy: IvpLambdifyExecutionPolicy::default(),
             telemetry_mode: BdfTelemetryMode::Off,
             max_steps: 1_000_000,
+            logging_level: SolverLogLevel::Off,
         }
     }
 
@@ -470,6 +489,12 @@ impl BdfSolverOptions {
     /// Sets a bounded number of BDF step attempts for each solve.
     pub fn with_max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = max_steps;
+        self
+    }
+
+    /// Enables solver messages up to `level`; does not install a global logger.
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        self.logging_level = level;
         self
     }
 
@@ -627,6 +652,7 @@ pub struct ODEsolver {
     symbolic_assembly_backend: IvpSymbolicAssemblyBackend,
     lambdify_execution_policy: IvpLambdifyExecutionPolicy,
     telemetry_mode: BdfTelemetryMode,
+    logging_level: SolverLogLevel,
     statistics: Option<Arc<Mutex<IvpBackendStatistics>>>,
     preparation_timings: BdfPreparationTimings,
     preparation_backend_telemetry: Option<IvpTelemetrySnapshot>,
@@ -766,6 +792,7 @@ impl ODEsolver {
             symbolic_assembly_backend: IvpSymbolicAssemblyBackend::ExprLegacy,
             lambdify_execution_policy: IvpLambdifyExecutionPolicy::default(),
             telemetry_mode: BdfTelemetryMode::Off,
+            logging_level: SolverLogLevel::Off,
             statistics: None,
             preparation_timings: BdfPreparationTimings::default(),
             preparation_backend_telemetry: None,
@@ -805,6 +832,7 @@ impl ODEsolver {
         solver.symbolic_assembly_backend = options.symbolic_assembly_backend;
         solver.lambdify_execution_policy = options.lambdify_execution_policy;
         solver.set_telemetry_mode(options.telemetry_mode);
+        solver.set_logging_level(options.logging_level);
         solver
     }
 
@@ -855,14 +883,31 @@ impl ODEsolver {
         self.telemetry_mode
     }
 
+    /// Sets the per-solver Rust log threshold without configuring the global logger.
+    pub fn set_logging_level(&mut self, level: SolverLogLevel) {
+        self.logging_level = level;
+        self.Solver_instance.set_logging_level(level);
+    }
+
+    /// Builder-style per-solver logging configuration.
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        self.set_logging_level(level);
+        self
+    }
+
+    /// Returns the current per-solver log threshold.
+    pub fn logging_level(&self) -> SolverLogLevel {
+        self.logging_level
+    }
+
     /// Returns disjoint backend-preparation timings from the latest generation.
-    /// Values are zero unless telemetry mode is `Timings`.
+    /// Values are zero unless telemetry mode is `Timings` or `Detailed`.
     pub fn preparation_timings(&self) -> BdfPreparationTimings {
         self.preparation_timings
     }
 
-    /// Detailed symbolic-backend cold stages from the latest preparation.
-    /// Available only when BDF timing telemetry was enabled.
+    /// Symbolic-backend stages from the latest preparation. Counters and
+    /// timings follow the selected collection mode; `Off` retains no snapshot.
     pub fn preparation_backend_telemetry(&self) -> Option<&IvpTelemetrySnapshot> {
         self.preparation_backend_telemetry.as_ref()
     }
@@ -887,7 +932,9 @@ impl ODEsolver {
             let Ok(mut stats) = stats.lock() else {
                 return;
             };
-            stats.backend_prepare_calls += 1;
+            if self.telemetry_mode.collects_counters() {
+                stats.backend_prepare_calls += 1;
+            }
             if let Some(start) = start {
                 stats.backend_prepare_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
             }
@@ -903,15 +950,16 @@ impl ODEsolver {
         };
         let mode = self.telemetry_mode;
         Box::new(move |t, y| {
-            let start = (mode == BdfTelemetryMode::Timings).then(Instant::now);
+            let start = mode.collects_timings().then(Instant::now);
             let out = residual(t, y);
             let Ok(mut stats) = stats.lock() else {
                 return out;
             };
-            if let Some(start) = start {
-                stats.record_residual_duration(start.elapsed());
-            } else {
+            if mode.collects_counters() {
                 stats.residual_calls += 1;
+            }
+            if let Some(start) = start {
+                stats.residual_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
             }
             out
         })
@@ -926,15 +974,16 @@ impl ODEsolver {
         };
         let mode = self.telemetry_mode;
         Box::new(move |t, y| {
-            let start = (mode == BdfTelemetryMode::Timings).then(Instant::now);
+            let start = mode.collects_timings().then(Instant::now);
             let out = jacobian(t, y);
             let Ok(mut stats) = stats.lock() else {
                 return out;
             };
-            if let Some(start) = start {
-                stats.record_jacobian_duration(start.elapsed());
-            } else {
+            if mode.collects_counters() {
                 stats.jacobian_calls += 1;
+            }
+            if let Some(start) = start {
+                stats.jacobian_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
             }
             out
         })
@@ -949,15 +998,16 @@ impl ODEsolver {
         };
         let mode = self.telemetry_mode;
         Box::new(move |t, y, out| {
-            let start = (mode == BdfTelemetryMode::Timings).then(Instant::now);
+            let start = mode.collects_timings().then(Instant::now);
             let result = jacobian(t, y, out);
             let Ok(mut stats) = stats.lock() else {
                 return result;
             };
-            if let Some(start) = start {
-                stats.record_jacobian_duration(start.elapsed());
-            } else {
+            if mode.collects_counters() {
                 stats.jacobian_calls += 1;
+            }
+            if let Some(start) = start {
+                stats.jacobian_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
             }
             result
         })
@@ -1321,6 +1371,7 @@ impl ODEsolver {
         values: DVector<f64>,
         t_bound: f64,
     ) -> Result<(), BdfSolveError> {
+        let _logging_scope = crate::numerical::logging::SolverLogGuard::enter(self.logging_level);
         if !self.backend_prepared {
             return Err(BdfSolveError::ContinuationRequiresPreparedBackend);
         }
@@ -1353,6 +1404,7 @@ impl ODEsolver {
         y0: DVector<f64>,
         t_bound: f64,
     ) -> Result<(), BdfSolveError> {
+        let _logging_scope = crate::numerical::logging::SolverLogGuard::enter(self.logging_level);
         if !self.backend_prepared {
             return Err(BdfSolveError::ContinuationRequiresPreparedBackend);
         }
@@ -1397,13 +1449,12 @@ impl ODEsolver {
             .cloned()
             .ok_or(BdfSolveError::ContinuationRequiresPreparedBackend)?;
         let mut solver_instance = BDF::new();
+        solver_instance.set_logging_level(self.logging_level);
         solver_instance
             .try_set_max_order_cap(self.max_bdf_order)
             .map_err(BdfSolveError::Configuration)?;
-        solver_instance
-            .set_operation_counters_enabled(self.telemetry_mode != BdfTelemetryMode::Off);
-        solver_instance
-            .set_operation_timings_enabled(self.telemetry_mode == BdfTelemetryMode::Timings);
+        solver_instance.set_operation_counters_enabled(self.telemetry_mode.collects_counters());
+        solver_instance.set_operation_timings_enabled(self.telemetry_mode.collects_timings());
         let residual_for_runtime = Arc::clone(&residual);
         let wrapped_fun =
             self.instrument_residual(Box::new(move |t, y| residual_for_runtime(t, y)));
@@ -1488,7 +1539,7 @@ impl ODEsolver {
         }
         self.preparation_timings = BdfPreparationTimings::default();
         self.preparation_backend_telemetry = None;
-        let start = (self.telemetry_mode == BdfTelemetryMode::Timings).then(Instant::now);
+        let start = self.telemetry_mode.collects_timings().then(Instant::now);
         let configuration_started = start.map(|_| Instant::now());
         let mut options = SymbolicIvpProblemOptions::new();
         if let Some(parameters) = self.equation_parameters.clone() {
@@ -1502,7 +1553,8 @@ impl ODEsolver {
         let backend_telemetry = match self.telemetry_mode {
             BdfTelemetryMode::Off => None,
             BdfTelemetryMode::Counters => Some(IvpTelemetry::counters()),
-            BdfTelemetryMode::Timings => Some(IvpTelemetry::detailed()),
+            BdfTelemetryMode::Timings => Some(IvpTelemetry::timings()),
+            BdfTelemetryMode::Detailed => Some(IvpTelemetry::detailed()),
         };
         if let Some(telemetry) = &backend_telemetry {
             options = options.with_telemetry(telemetry.clone());
@@ -1587,16 +1639,15 @@ impl ODEsolver {
 
         let runtime_initialization_started = start.map(|_| Instant::now());
         let mut Solver_instance = BDF::new();
+        Solver_instance.set_logging_level(self.logging_level);
         self.reported_bdf_counters = BdfOperationCounters::default();
         Solver_instance
             .try_set_max_order_cap(self.max_bdf_order)
             .map_err(|error| IvpBackendError::InvalidArgumentSchema {
                 message: error.to_string(),
             })?;
-        Solver_instance
-            .set_operation_counters_enabled(self.telemetry_mode != BdfTelemetryMode::Off);
-        Solver_instance
-            .set_operation_timings_enabled(self.telemetry_mode == BdfTelemetryMode::Timings);
+        Solver_instance.set_operation_counters_enabled(self.telemetry_mode.collects_counters());
+        Solver_instance.set_operation_timings_enabled(self.telemetry_mode.collects_timings());
         Solver_instance
             .try_set_initial_with_jacobian_source(
                 wrapped_fun,
@@ -1642,7 +1693,7 @@ impl ODEsolver {
         self.preparation_timings = BdfPreparationTimings::default();
         self.preparation_backend_telemetry = None;
         self.prepared_jacobian_into_factory = None;
-        let start = (self.telemetry_mode == BdfTelemetryMode::Timings).then(Instant::now);
+        let start = self.telemetry_mode.collects_timings().then(Instant::now);
         let callback_wiring_started = start.map(|_| Instant::now());
         let rhs = self
             .native_rhs
@@ -1670,12 +1721,11 @@ impl ODEsolver {
 
         let runtime_initialization_started = start.map(|_| Instant::now());
         let mut solver_instance = BDF::new();
+        solver_instance.set_logging_level(self.logging_level);
         self.reported_bdf_counters = BdfOperationCounters::default();
         solver_instance.try_set_max_order_cap(self.max_bdf_order)?;
-        solver_instance
-            .set_operation_counters_enabled(self.telemetry_mode != BdfTelemetryMode::Off);
-        solver_instance
-            .set_operation_timings_enabled(self.telemetry_mode == BdfTelemetryMode::Timings);
+        solver_instance.set_operation_counters_enabled(self.telemetry_mode.collects_counters());
+        solver_instance.set_operation_timings_enabled(self.telemetry_mode.collects_timings());
         solver_instance.try_set_initial_with_jacobian_source(
             wrapped_fun,
             self.t0,
@@ -1749,16 +1799,15 @@ impl ODEsolver {
 
         let runtime_initialization_started = start.map(|_| Instant::now());
         let mut solver_instance = BDF::new();
+        solver_instance.set_logging_level(self.logging_level);
         self.reported_bdf_counters = BdfOperationCounters::default();
         solver_instance
             .try_set_max_order_cap(self.max_bdf_order)
             .map_err(|error| IvpBackendError::InvalidArgumentSchema {
                 message: error.to_string(),
             })?;
-        solver_instance
-            .set_operation_counters_enabled(self.telemetry_mode != BdfTelemetryMode::Off);
-        solver_instance
-            .set_operation_timings_enabled(self.telemetry_mode == BdfTelemetryMode::Timings);
+        solver_instance.set_operation_counters_enabled(self.telemetry_mode.collects_counters());
+        solver_instance.set_operation_timings_enabled(self.telemetry_mode.collects_timings());
         let Some(factory) = self.bdf_native_jacobian_factory.as_ref() else {
             return Err(IvpBackendError::InvalidArgumentSchema {
                 message: "native Jacobian route has no registered factory".to_string(),
@@ -1820,15 +1869,16 @@ impl ODEsolver {
         };
         let mode = self.telemetry_mode;
         Box::new(move |t: f64, y: &DVector<f64>| -> BdfJacobian {
-            let start = (mode == BdfTelemetryMode::Timings).then(Instant::now);
+            let start = mode.collects_timings().then(Instant::now);
             let out = jacobian(t, y);
             let Ok(mut stats) = stats_for_jac.lock() else {
                 return out;
             };
-            if let Some(start) = start {
-                stats.record_jacobian_duration(start.elapsed());
-            } else {
+            if mode.collects_counters() {
                 stats.jacobian_calls += 1;
+            }
+            if let Some(start) = start {
+                stats.jacobian_ms_total += start.elapsed().as_secs_f64() * 1_000.0;
             }
             out
         })
@@ -1851,6 +1901,7 @@ impl ODEsolver {
     /// - "failed": Step failed (convergence issues, step size too small)
     /// - "running": Integration continues normally
     pub fn step(&mut self) {
+        let _logging_scope = crate::numerical::logging::SolverLogGuard::enter(self.logging_level);
         let _ = self.try_step();
     }
 
@@ -1884,6 +1935,7 @@ impl ODEsolver {
     /// Executes a complete solve and returns a typed failure while preserving
     /// the initial state and every accepted point in `get_result_ref()`.
     pub fn try_solve(&mut self) -> Result<(), BdfSolveError> {
+        let _logging_scope = crate::numerical::logging::SolverLogGuard::enter(self.logging_level);
         if self.max_steps == 0 {
             return Err(BdfSolveError::InvalidMaxSteps);
         }
@@ -1933,7 +1985,7 @@ impl ODEsolver {
             return Ok(());
         }
 
-        let solve_start = (self.telemetry_mode == BdfTelemetryMode::Timings).then(Instant::now);
+        let solve_start = self.telemetry_mode.collects_timings().then(Instant::now);
         let integration_start = solve_start;
         let mut times = Vec::new();
         let mut states = Vec::new();
@@ -1962,7 +2014,7 @@ impl ODEsolver {
             }
 
             step_calls += 1;
-            let step_start = (self.telemetry_mode == BdfTelemetryMode::Timings).then(Instant::now);
+            let step_start = self.telemetry_mode.collects_timings().then(Instant::now);
             let step_result = self.try_step();
             if let Some(start) = step_start {
                 bdf_step_ms += start.elapsed().as_secs_f64() * 1_000.0;
@@ -1972,8 +2024,7 @@ impl ODEsolver {
                 break;
             }
 
-            let collection_start =
-                (self.telemetry_mode == BdfTelemetryMode::Timings).then(Instant::now);
+            let collection_start = self.telemetry_mode.collects_timings().then(Instant::now);
             self.append_current_state(&mut times, &mut states);
             if let Some(start) = collection_start {
                 output_collection_ms += start.elapsed().as_secs_f64() * 1_000.0;
@@ -1986,7 +2037,7 @@ impl ODEsolver {
         }
 
         let integration_ms = integration_start.map(|start| start.elapsed().as_secs_f64() * 1_000.0);
-        let assembly_start = (self.telemetry_mode == BdfTelemetryMode::Timings).then(Instant::now);
+        let assembly_start = self.telemetry_mode.collects_timings().then(Instant::now);
         let cols = self.y0.len();
         let rows = states.len();
         let mut flat = Vec::with_capacity(rows * cols);
@@ -2005,37 +2056,39 @@ impl ODEsolver {
             let Ok(mut stats) = stats.lock() else {
                 return failure.map_or(Ok(()), Err);
             };
-            stats.solve_calls += 1;
-            stats.step_calls += step_calls;
-            stats.accepted_steps_total += current
-                .accepted_steps
-                .saturating_sub(previous.accepted_steps);
-            stats.candidate_step_attempts_total += current
-                .candidate_step_attempts
-                .saturating_sub(previous.candidate_step_attempts);
-            stats.rejected_step_attempts_total += current
-                .rejected_step_attempts
-                .saturating_sub(previous.rejected_step_attempts);
-            stats.bdf_order_changes_total +=
-                current.order_changes.saturating_sub(previous.order_changes);
-            stats.linear_solve_attempts_total += current
-                .linear_solve_attempts
-                .saturating_sub(previous.linear_solve_attempts);
-            stats.nonlinear_solve_calls += current
-                .nonlinear_solves
-                .saturating_sub(previous.nonlinear_solves);
-            stats.nonlinear_iterations_total += current
-                .nonlinear_iterations
-                .saturating_sub(previous.nonlinear_iterations);
-            stats.bdf_nfev_total += current
-                .rhs_evaluations
-                .saturating_sub(previous.rhs_evaluations);
-            stats.bdf_njev_total += current
-                .jacobian_evaluations
-                .saturating_sub(previous.jacobian_evaluations);
-            stats.bdf_nlu_total += current
-                .factorization_attempts
-                .saturating_sub(previous.factorization_attempts);
+            if self.telemetry_mode.collects_counters() {
+                stats.solve_calls += 1;
+                stats.step_calls += step_calls;
+                stats.accepted_steps_total += current
+                    .accepted_steps
+                    .saturating_sub(previous.accepted_steps);
+                stats.candidate_step_attempts_total += current
+                    .candidate_step_attempts
+                    .saturating_sub(previous.candidate_step_attempts);
+                stats.rejected_step_attempts_total += current
+                    .rejected_step_attempts
+                    .saturating_sub(previous.rejected_step_attempts);
+                stats.bdf_order_changes_total +=
+                    current.order_changes.saturating_sub(previous.order_changes);
+                stats.linear_solve_attempts_total += current
+                    .linear_solve_attempts
+                    .saturating_sub(previous.linear_solve_attempts);
+                stats.nonlinear_solve_calls += current
+                    .nonlinear_solves
+                    .saturating_sub(previous.nonlinear_solves);
+                stats.nonlinear_iterations_total += current
+                    .nonlinear_iterations
+                    .saturating_sub(previous.nonlinear_iterations);
+                stats.bdf_nfev_total += current
+                    .rhs_evaluations
+                    .saturating_sub(previous.rhs_evaluations);
+                stats.bdf_njev_total += current
+                    .jacobian_evaluations
+                    .saturating_sub(previous.jacobian_evaluations);
+                stats.bdf_nlu_total += current
+                    .factorization_attempts
+                    .saturating_sub(previous.factorization_attempts);
+            }
             stats.linear_factorization_ms_total += (current.linear_factorization_ms_total
                 - previous.linear_factorization_ms_total)
                 .max(0.0);
@@ -3118,7 +3171,7 @@ mod tests_generated_backend_heavy_dense_aot {
     use crate::symbolic::symbolic_ivp_generated::{
         DenseIvpGeneratedBackendMode, SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
     };
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

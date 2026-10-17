@@ -7,11 +7,11 @@
 //!   into other Rust programs
 
 use crate::command_interpreter::task_parser_bvp::{
-    parse_bvp_task_from_str, run_bvp_task, BvpTaskError, BvpTaskRunResult, BvpTaskSpec,
+    BvpTaskError, BvpTaskRunResult, BvpTaskSpec, parse_bvp_task_from_str, run_bvp_task,
 };
 use crate::command_interpreter::task_parser_ivp::{
-    parse_ivp_task_from_str, run_ivp_task, IvpMethodSpec, IvpTaskError, IvpTaskRunResult,
-    IvpTaskSpec, IvpTelemetryModeSpec, Lsode2TaskExecutionSpec,
+    IvpMethodSpec, IvpTaskError, IvpTaskRunResult, IvpTaskSpec, IvpTelemetryModeSpec,
+    Lsode2TaskExecutionSpec, parse_ivp_task_from_str, run_ivp_task,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -853,6 +853,7 @@ fn ivp_telemetry_label(mode: Option<IvpTelemetryModeSpec>) -> &'static str {
         Some(IvpTelemetryModeSpec::Off) => "off",
         Some(IvpTelemetryModeSpec::Counters) => "counters",
         Some(IvpTelemetryModeSpec::Timings) => "timings",
+        Some(IvpTelemetryModeSpec::Detailed) => "detailed",
         None => "default",
     }
 }

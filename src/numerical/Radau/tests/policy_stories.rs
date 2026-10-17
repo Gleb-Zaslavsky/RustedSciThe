@@ -74,7 +74,7 @@ fn lambdify_policy_full_solve_and_callback_break_even_story() {
                     RadauExecution::Lambdify,
                     RadauMatrixLayout::Dense,
                     policy,
-                    RadauTelemetryMode::Timings,
+                    RadauTelemetryMode::Detailed,
                 );
                 let mut solver = RadauSolver::prepare(problem, config)
                     .unwrap_or_else(|error| panic!("Lambdify prepare failed: {error}"));
@@ -153,7 +153,7 @@ fn aot_policy_full_solve_and_callback_break_even_story() {
                 RadauExecution::Aot,
                 RadauMatrixLayout::Dense,
                 policy,
-                RadauTelemetryMode::Timings,
+                RadauTelemetryMode::Detailed,
             );
             config.aot = Some(super::story_support::rebuild_aot_config(output_dir.path()));
             let mut solver = RadauSolver::prepare(problem, config)

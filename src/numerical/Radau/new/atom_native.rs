@@ -151,7 +151,8 @@ impl AtomNativePlan {
         let options = options.with_telemetry(match telemetry_mode {
             RadauMode::Off => IvpTelemetry::disabled(),
             RadauMode::Counters => IvpTelemetry::counters(),
-            RadauMode::Timings => IvpTelemetry::detailed(),
+            RadauMode::Timings => IvpTelemetry::timings(),
+            RadauMode::Detailed => IvpTelemetry::detailed(),
         });
         let problem = prepare_symbolic_ivp_problem(
             residual,

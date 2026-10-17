@@ -45,7 +45,7 @@ mod tests {
             tolerance: 1e-11,
             max_iterations: 40,
             diagnostics: DiagnosticsOptions {
-                collect_statistics: true,
+                telemetry_mode: crate::numerical::SolverTelemetryMode::Detailed,
                 ..DiagnosticsOptions::default()
             },
             ..SolveOptions::default()

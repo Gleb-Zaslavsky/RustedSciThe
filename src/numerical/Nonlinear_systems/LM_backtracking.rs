@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{
-    eval_residual_with_runtime, measure_linear_system_operation_owned, IterationState,
-    MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome,
+    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
+    StepOutcome, eval_residual_with_runtime, measure_linear_system_operation_owned,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
@@ -142,13 +142,13 @@ impl BacktrackingLevenbergMarquardtMethod {
         }
         let rhs = -(state.jacobian.transpose() * &state.residual);
 
-        runtime.linear_solves += 1;
+        runtime.count_linear_solve();
         let delta = measure_linear_system_operation_owned(
             options.linear_solver,
             regularized,
             &rhs,
             runtime,
-            options.diagnostics.collect_statistics,
+            options.diagnostics.telemetry_mode,
         )?;
         if !delta.iter().all(|value| value.is_finite()) || delta.norm() <= f64::EPSILON {
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
@@ -169,14 +169,14 @@ impl BacktrackingLevenbergMarquardtMethod {
                     problem,
                     &candidate,
                     runtime,
-                    options.diagnostics.collect_statistics,
+                    options.diagnostics.telemetry_mode,
                 )?;
                 if trial_residual.iter().all(|value| value.is_finite())
                     && trial_residual.norm() < current_norm
                 {
                     method_state.lambda =
                         (method_state.lambda * self.lambda_decrease).max(f64::MIN_POSITIVE);
-                    runtime.accepted_steps += 1;
+                    runtime.count_accepted_step();
                     return Ok(StepOutcome::Continue {
                         next_x: candidate.into_owned(),
                         accepted: true,
@@ -184,7 +184,7 @@ impl BacktrackingLevenbergMarquardtMethod {
                 }
             }
 
-            runtime.rejected_steps += 1;
+            runtime.count_rejected_step();
             alpha *= 0.5;
         }
 
@@ -245,6 +245,10 @@ mod tests {
             SolveOptions {
                 tolerance: 1.0e-10,
                 max_iterations: 100,
+                diagnostics: crate::numerical::Nonlinear_systems::engine::DiagnosticsOptions {
+                    telemetry_mode: crate::numerical::SolverTelemetryMode::Detailed,
+                    ..Default::default()
+                },
                 bounds: Some(
                     crate::numerical::Nonlinear_systems::problem::Bounds::new(vec![(0.0, 2.0)])
                         .expect("bounds"),

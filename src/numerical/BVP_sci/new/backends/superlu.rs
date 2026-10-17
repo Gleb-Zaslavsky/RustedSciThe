@@ -178,7 +178,7 @@ mod tests {
     #[test]
     #[ignore = "requires the separately built SuperLU bridge DLL"]
     fn retained_factor_solves_multiple_rhs_without_refactorization() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         let mut backend =
             SuperLuBackend::new(2, telemetry.clone()).expect("load opt-in SuperLU bridge");
         let entries = [(0, 0, 4.0), (0, 1, 1.0), (1, 0, 2.0), (1, 1, 3.0)];

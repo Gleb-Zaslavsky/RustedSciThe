@@ -53,6 +53,7 @@ fn benchmark_telemetry_modes(c: &mut Criterion) {
         ("off", BdfTelemetryMode::Off),
         ("counters", BdfTelemetryMode::Counters),
         ("timings", BdfTelemetryMode::Timings),
+        ("detailed", BdfTelemetryMode::Detailed),
     ];
     let mut group = c.benchmark_group("bdf_telemetry_full_solve");
     group.sample_size(10);

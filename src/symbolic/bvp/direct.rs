@@ -754,6 +754,7 @@ impl DirectBandedProblem {
         let telemetry = match config.telemetry_mode {
             BvpLambdifyTelemetryMode::Off => BvpDirectJacobianTelemetry::disabled(),
             BvpLambdifyTelemetryMode::Counters => BvpDirectJacobianTelemetry::counters(),
+            BvpLambdifyTelemetryMode::Timings => BvpDirectJacobianTelemetry::timings(),
             BvpLambdifyTelemetryMode::Detailed => BvpDirectJacobianTelemetry::new(),
         };
         let telemetry_for_callback = telemetry.clone();

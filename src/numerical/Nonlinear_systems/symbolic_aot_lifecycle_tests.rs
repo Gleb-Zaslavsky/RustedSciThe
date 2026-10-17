@@ -491,7 +491,7 @@ fn parameterized_dense_aot_vs_lambdify_warm_stage_story() {
         max_iterations: 40,
         diagnostics: crate::numerical::Nonlinear_systems::engine::DiagnosticsOptions {
             collect_history: false,
-            collect_statistics: true,
+            telemetry_mode: crate::numerical::SolverTelemetryMode::Detailed,
             ..Default::default()
         },
         ..Default::default()

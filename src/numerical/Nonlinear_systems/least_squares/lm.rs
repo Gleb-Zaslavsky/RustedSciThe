@@ -63,8 +63,9 @@ pub enum TerminationReason {
 ///
 /// The default is [`Self::Off`]: the LM hot path does not read the clock and
 /// does not update counters in that mode. [`Self::Counters`] adds cheap event
-/// counters without timing callback or linear-algebra stages. [`Self::Detailed`]
-/// additionally records monotonic durations in the shared
+/// counters without timing callback or linear-algebra stages. [`Self::Timings`]
+/// records durations without event counters. [`Self::Detailed`] collects both
+/// channels in the shared
 /// [`SolveStatistics`] contract used by the other nonlinear solvers.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum LeastSquaresTelemetryMode {
@@ -73,6 +74,8 @@ pub enum LeastSquaresTelemetryMode {
     Off,
     /// Collect counters but do not read the clock.
     Counters,
+    /// Collect stage durations without event counters.
+    Timings,
     /// Collect counters and stage durations.
     Detailed,
 }
@@ -80,12 +83,12 @@ pub enum LeastSquaresTelemetryMode {
 impl LeastSquaresTelemetryMode {
     #[inline]
     fn collects_counters(self) -> bool {
-        !matches!(self, Self::Off)
+        matches!(self, Self::Counters | Self::Detailed)
     }
 
     #[inline]
     fn collects_timings(self) -> bool {
-        matches!(self, Self::Detailed)
+        matches!(self, Self::Timings | Self::Detailed)
     }
 }
 

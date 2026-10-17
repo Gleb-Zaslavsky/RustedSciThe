@@ -59,7 +59,7 @@ fn be_process_isolated_cold_e2e_matrix_story() {
         .unwrap_or(120_000);
 
     println!(
-        "[BE process-isolated cold E2E] fixture=shared-diffusion-chain-{DIMENSION}; samples_per_route={SAMPLES_PER_ROUTE}; route_order=alternating; artifact_root=target (same volume as lifecycle story); AOT=AtomViewNative/tcc/RebuildAlways; timeout_ms={timeout_ms}; telemetry=Timings"
+        "[BE process-isolated cold E2E] fixture=shared-diffusion-chain-{DIMENSION}; samples_per_route={SAMPLES_PER_ROUTE}; route_order=alternating; artifact_root=target (same volume as lifecycle story); AOT=AtomViewNative/tcc/RebuildAlways; timeout_ms={timeout_ms}; telemetry=Detailed"
     );
     println!(
         "sample | route | child_e2e_ms | process_wall_ms | build_ms | link_ms | build/link_attempts | artifact_key"
@@ -192,7 +192,7 @@ fn be_cold_e2e_process_child() {
         workload.initial_state,
     )
     .with_symbolic_assembly_backend(BeSymbolicAssemblyBackend::AtomViewNative)
-    .with_telemetry_mode(BeTelemetryMode::Timings);
+    .with_telemetry_mode(BeTelemetryMode::Detailed);
     if route == "aot" {
         use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
         use crate::symbolic::symbolic_ivp_generated::{

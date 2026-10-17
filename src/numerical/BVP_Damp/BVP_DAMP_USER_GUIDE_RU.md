@@ -734,12 +734,12 @@ let trace = &solver.get_statistics().telemetry;
 println!("solve_id={} dropped={}", trace.solve_id, trace.log_events_dropped);
 ```
 
-`BvpTelemetryMode::Off` отключает счетчики solver-а, stage timers и timing
-подстадий callback без изменения численного алгоритма. Режим telemetry
-независим от `BvpLoggingMode`: можно оставить ограниченный decision trace,
-не включая подробный сбор счетчиков и времени. `Counters` остается режимом
-по умолчанию для совместимости, а `Detailed` дополнительно собирает timing
-подстадий callback.
+`BvpTelemetryMode::Off` отключает счетчики solver-а и stage timers без
+изменения численного алгоритма. `Counters` собирает дискретные показатели,
+не запуская часы; `Timings` измеряет длительности без увеличения дискретных
+счетчиков; `Detailed` собирает оба вида данных. Режим telemetry независим от
+`BvpLoggingMode`: можно оставить ограниченный decision trace при отключенных
+измерениях.
 
 По умолчанию действует `Off`, и события не сохраняются. `Warnings` оставляет
 восстанавливаемые и неуспешные решения, `Detailed` также сохраняет обычные

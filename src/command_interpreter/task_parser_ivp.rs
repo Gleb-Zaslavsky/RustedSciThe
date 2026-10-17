@@ -15,23 +15,17 @@
 //! the parser stage only validates and normalizes user input, while solver
 //! execution and postprocessing remain explicit follow-up steps.
 
+use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, ParseError, Value};
 use crate::command_interpreter::task_parser_common::{
-    parse_continuation_spec, parse_symbolic_equation_system, ContinuationMode,
-    ContinuationRestartPolicy, ContinuationSpec, SharedEquationParseError,
-};
-use crate::numerical::ODE_api2::{
-    NonStiffMethod, SolverType, UniversalODESolver, UniversalOdeError,
-};
-use crate::numerical::Radau::{
-    RadauAotConfig, RadauConfig, RadauError, RadauExecution, RadauExecutionPolicy, RadauFrontend,
-    RadauMatrixLayout, RadauProblem, RadauSolution, RadauSolver, RadauTelemetryMode,
+    ContinuationMode, ContinuationRestartPolicy, ContinuationSpec, SharedEquationParseError,
+    parse_continuation_spec, parse_symbolic_equation_system,
 };
 use crate::numerical::BDF::BDF_api::{
     BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver as BdfOdeSolver,
 };
 use crate::numerical::BE::{
-    BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode, BE,
+    BE, BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode,
 };
 use crate::numerical::LSODE2::{
     FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend, IvpTelemetry, Lsode2AotProfile,
@@ -41,6 +35,13 @@ use crate::numerical::LSODE2::{
     Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
 use crate::numerical::LSODE2::{Lsode2Error, Lsode2Solver};
+use crate::numerical::ODE_api2::{
+    NonStiffMethod, SolverType, UniversalODESolver, UniversalOdeError,
+};
+use crate::numerical::Radau::{
+    RadauAotConfig, RadauConfig, RadauError, RadauExecution, RadauExecutionPolicy, RadauFrontend,
+    RadauMatrixLayout, RadauProblem, RadauSolution, RadauSolver, RadauTelemetryMode,
+};
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
 use crate::symbolic::symbolic_engine::Expr;
@@ -48,7 +49,6 @@ use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
-use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::fs;
@@ -181,6 +181,7 @@ pub enum IvpTelemetryModeSpec {
     Off,
     Counters,
     Timings,
+    Detailed,
 }
 
 /// LSODE2-specific options parsed from `solver_options`.
@@ -1638,6 +1639,7 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                     IvpTelemetryModeSpec::Off => BdfTelemetryMode::Off,
                     IvpTelemetryModeSpec::Counters => BdfTelemetryMode::Counters,
                     IvpTelemetryModeSpec::Timings => BdfTelemetryMode::Timings,
+                    IvpTelemetryModeSpec::Detailed => BdfTelemetryMode::Detailed,
                 });
             }
             let matrix_layout = spec
@@ -1692,6 +1694,7 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                     IvpTelemetryModeSpec::Off => BeTelemetryMode::Off,
                     IvpTelemetryModeSpec::Counters => BeTelemetryMode::Counters,
                     IvpTelemetryModeSpec::Timings => BeTelemetryMode::Timings,
+                    IvpTelemetryModeSpec::Detailed => BeTelemetryMode::Detailed,
                 });
             }
             let solver = BE::try_new_with_options(options).map_err(|error| {
@@ -1776,6 +1779,7 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                     IvpTelemetryModeSpec::Off => RadauTelemetryMode::Off,
                     IvpTelemetryModeSpec::Counters => RadauTelemetryMode::Counters,
                     IvpTelemetryModeSpec::Timings => RadauTelemetryMode::Timings,
+                    IvpTelemetryModeSpec::Detailed => RadauTelemetryMode::Detailed,
                 };
             }
             if let Some(max_steps) = spec.solver_options.max_iterations {
@@ -1979,6 +1983,7 @@ fn build_lsode2_problem_config_from_spec(
             IvpTelemetryModeSpec::Off => IvpTelemetry::disabled(),
             IvpTelemetryModeSpec::Counters => IvpTelemetry::counters(),
             IvpTelemetryModeSpec::Timings => IvpTelemetry::detailed(),
+            IvpTelemetryModeSpec::Detailed => IvpTelemetry::detailed(),
         });
     }
 
@@ -2653,11 +2658,14 @@ fn parse_common_telemetry(
     match raw.trim().to_ascii_lowercase().as_str() {
         "off" | "disabled" => Ok(Some(IvpTelemetryModeSpec::Off)),
         "counters" | "counter" => Ok(Some(IvpTelemetryModeSpec::Counters)),
-        "timings" | "timing" | "full" => Ok(Some(IvpTelemetryModeSpec::Timings)),
+        "timings" | "timing" => Ok(Some(IvpTelemetryModeSpec::Timings)),
+        "detailed" | "full" => Ok(Some(IvpTelemetryModeSpec::Detailed)),
         other => Err(IvpTaskError::InvalidField {
             section: "solver_options".to_string(),
             field: "telemetry".to_string(),
-            message: format!("unknown telemetry mode `{other}` (use off, counters or timings)"),
+            message: format!(
+                "unknown telemetry mode `{other}` (use off, counters, timings or detailed)"
+            ),
         }),
     }
 }

@@ -444,7 +444,7 @@ mod tests {
             &state_names,
             &parameter_names,
             "x",
-            BvpSciTelemetry::timings(),
+            BvpSciTelemetry::detailed(),
         )
         .expect("ExprLegacy plan should prepare");
         let atom = BvpSciLambdifyPlan::prepare(
@@ -453,7 +453,7 @@ mod tests {
             &state_names,
             &parameter_names,
             "x",
-            BvpSciTelemetry::timings(),
+            BvpSciTelemetry::detailed(),
         )
         .expect("AtomView plan should prepare");
 
@@ -478,7 +478,10 @@ mod tests {
             .expect("AtomView structural Jacobian should evaluate");
         assert_eq!(expr.jacobian_pattern(), atom.jacobian_pattern());
         assert_eq!(expr_values, atom_values);
-        assert_eq!(expr.telemetry_snapshot().mode, BvpSciTelemetryMode::Timings);
+        assert_eq!(
+            expr.telemetry_snapshot().mode,
+            BvpSciTelemetryMode::Detailed
+        );
         assert_eq!(atom.telemetry_snapshot().atom_conversions, 1);
         assert_eq!(atom.telemetry_snapshot().pattern_entries, 1);
         assert!(atom.telemetry_snapshot().expr_to_atom_ms.is_some());

@@ -106,6 +106,7 @@ struct Inner {
 #[derive(Clone)]
 pub struct BvpDirectJacobianTelemetry {
     inner: Option<Arc<Inner>>,
+    counters_enabled: bool,
     timing_enabled: bool,
 }
 
@@ -179,8 +180,8 @@ struct LambdifyInner {
 ///
 /// `Off` is the production default and does not allocate an `Arc`, touch an
 /// atomic counter, or call `Instant::now()` on the callback hot path.
-/// `Counters` adds only relaxed call counters. `Detailed` additionally records
-/// callback wall-clock time with relaxed atomics.
+/// `Counters` adds only relaxed call counters. `Timings` records callback
+/// wall-clock time without counters; `Detailed` enables both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BvpLambdifyTelemetryMode {
     /// No runtime callback measurements.
@@ -188,8 +189,20 @@ pub enum BvpLambdifyTelemetryMode {
     Off,
     /// Count residual and Jacobian callback requests without timing them.
     Counters,
+    /// Measure callback wall-clock time without counting calls.
+    Timings,
     /// Count callback requests and accumulate elapsed wall-clock time.
     Detailed,
+}
+
+impl BvpLambdifyTelemetryMode {
+    const fn collects_counters(self) -> bool {
+        matches!(self, Self::Counters | Self::Detailed)
+    }
+
+    const fn collects_timings(self) -> bool {
+        matches!(self, Self::Timings | Self::Detailed)
+    }
 }
 
 /// Lock-free runtime counters shared by prepared Lambdify callback pairs.
@@ -250,6 +263,11 @@ impl BvpLambdifyTelemetry {
         Self::with_mode(BvpLambdifyTelemetryMode::Detailed)
     }
 
+    /// Creates a callback timing stream without discrete counters.
+    pub fn timings() -> Self {
+        Self::with_mode(BvpLambdifyTelemetryMode::Timings)
+    }
+
     /// Creates a stream for an explicit collection mode.
     pub fn with_mode(mode: BvpLambdifyTelemetryMode) -> Self {
         Self {
@@ -264,10 +282,10 @@ impl BvpLambdifyTelemetry {
         self.mode
     }
 
-    /// Starts timing only in `Detailed` mode.
+    /// Starts timing only in `Timings` or `Detailed` mode.
     #[inline]
     pub fn start_timing(&self) -> Option<Instant> {
-        (self.mode == BvpLambdifyTelemetryMode::Detailed).then(Instant::now)
+        self.mode.collects_timings().then(Instant::now)
     }
 
     #[inline]
@@ -275,12 +293,12 @@ impl BvpLambdifyTelemetry {
         let Some(inner) = &self.inner else {
             return;
         };
-        if residual {
+        if self.mode.collects_counters() && residual {
             inner.residual_calls.fetch_add(1, Ordering::Relaxed);
-        } else {
+        } else if self.mode.collects_counters() {
             inner.jacobian_calls.fetch_add(1, Ordering::Relaxed);
         }
-        if self.mode == BvpLambdifyTelemetryMode::Detailed {
+        if self.mode.collects_timings() {
             let elapsed_ns = started
                 .map(|started| started.elapsed().as_nanos().min(u64::MAX as u128) as u64)
                 .unwrap_or(0);
@@ -314,8 +332,10 @@ impl BvpLambdifyTelemetry {
         let Some(inner) = &self.inner else {
             return;
         };
-        inner.residual_calls.fetch_add(1, Ordering::Relaxed);
-        if self.mode == BvpLambdifyTelemetryMode::Detailed {
+        if self.mode.collects_counters() {
+            inner.residual_calls.fetch_add(1, Ordering::Relaxed);
+        }
+        if self.mode.collects_timings() {
             inner.residual_elapsed_ns.fetch_add(
                 elapsed.as_nanos().min(u64::MAX as u128) as u64,
                 Ordering::Relaxed,
@@ -329,8 +349,10 @@ impl BvpLambdifyTelemetry {
         let Some(inner) = &self.inner else {
             return;
         };
-        inner.jacobian_calls.fetch_add(1, Ordering::Relaxed);
-        if self.mode == BvpLambdifyTelemetryMode::Detailed {
+        if self.mode.collects_counters() {
+            inner.jacobian_calls.fetch_add(1, Ordering::Relaxed);
+        }
+        if self.mode.collects_timings() {
             inner.jacobian_elapsed_ns.fetch_add(
                 elapsed.as_nanos().min(u64::MAX as u128) as u64,
                 Ordering::Relaxed,
@@ -363,10 +385,12 @@ impl BvpLambdifyTelemetry {
         let Some(inner) = &self.inner else {
             return;
         };
-        if parallel {
-            inner.parallel_dispatches.fetch_add(1, Ordering::Relaxed);
-        } else {
-            inner.sequential_dispatches.fetch_add(1, Ordering::Relaxed);
+        if self.mode.collects_counters() {
+            if parallel {
+                inner.parallel_dispatches.fetch_add(1, Ordering::Relaxed);
+            } else {
+                inner.sequential_dispatches.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -514,6 +538,7 @@ impl BvpDirectJacobianTelemetry {
     pub fn new() -> Self {
         Self {
             inner: Some(Arc::new(Inner::default())),
+            counters_enabled: true,
             timing_enabled: true,
         }
     }
@@ -522,7 +547,17 @@ impl BvpDirectJacobianTelemetry {
     pub fn counters() -> Self {
         Self {
             inner: Some(Arc::new(Inner::default())),
+            counters_enabled: true,
             timing_enabled: false,
+        }
+    }
+
+    /// Creates a timing-only stream without incrementing discrete counters.
+    pub fn timings() -> Self {
+        Self {
+            inner: Some(Arc::new(Inner::default())),
+            counters_enabled: false,
+            timing_enabled: true,
         }
     }
 
@@ -530,6 +565,7 @@ impl BvpDirectJacobianTelemetry {
     pub fn disabled() -> Self {
         Self {
             inner: None,
+            counters_enabled: false,
             timing_enabled: false,
         }
     }
@@ -552,10 +588,12 @@ impl BvpDirectJacobianTelemetry {
         let Some(inner) = &self.inner else {
             return;
         };
-        inner.calls.fetch_add(1, Ordering::Relaxed);
-        inner
-            .work_items
-            .fetch_add(work_items as u64, Ordering::Relaxed);
+        if self.counters_enabled {
+            inner.calls.fetch_add(1, Ordering::Relaxed);
+            inner
+                .work_items
+                .fetch_add(work_items as u64, Ordering::Relaxed);
+        }
         if self.timing_enabled {
             inner.elapsed_ns.fetch_add(
                 elapsed.as_nanos().min(u64::MAX as u128) as u64,
@@ -567,8 +605,10 @@ impl BvpDirectJacobianTelemetry {
     /// Records a callback rejected before assembly.
     #[inline]
     pub fn record_error(&self) {
-        if let Some(inner) = &self.inner {
-            inner.errors.fetch_add(1, Ordering::Relaxed);
+        if self.counters_enabled {
+            if let Some(inner) = &self.inner {
+                inner.errors.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -608,12 +648,14 @@ impl BvpDirectJacobianTelemetry {
                 Ordering::Relaxed,
             );
         }
-        inner
-            .evaluator_calls
-            .fetch_add(evaluator_calls as u64, Ordering::Relaxed);
-        inner
-            .storage_writes
-            .fetch_add(storage_writes as u64, Ordering::Relaxed);
+        if self.counters_enabled {
+            inner
+                .evaluator_calls
+                .fetch_add(evaluator_calls as u64, Ordering::Relaxed);
+            inner
+                .storage_writes
+                .fetch_add(storage_writes as u64, Ordering::Relaxed);
+        }
     }
 
     /// Records the selected policy and work decomposition without allocating.
@@ -634,19 +676,21 @@ impl BvpDirectJacobianTelemetry {
         let Some(inner) = &self.inner else {
             return;
         };
-        if parallel {
-            inner.parallel_dispatches.fetch_add(1, Ordering::Relaxed);
-        } else {
-            inner.sequential_dispatches.fetch_add(1, Ordering::Relaxed);
+        if self.counters_enabled {
+            if parallel {
+                inner.parallel_dispatches.fetch_add(1, Ordering::Relaxed);
+            } else {
+                inner.sequential_dispatches.fetch_add(1, Ordering::Relaxed);
+            }
+            if diagonal {
+                inner.diagonal_dispatches.fetch_add(1, Ordering::Relaxed);
+            } else {
+                inner.entry_dispatches.fetch_add(1, Ordering::Relaxed);
+            }
+            inner
+                .effective_task_count
+                .fetch_add(effective_task_count as u64, Ordering::Relaxed);
         }
-        if diagonal {
-            inner.diagonal_dispatches.fetch_add(1, Ordering::Relaxed);
-        } else {
-            inner.entry_dispatches.fetch_add(1, Ordering::Relaxed);
-        }
-        inner
-            .effective_task_count
-            .fetch_add(effective_task_count as u64, Ordering::Relaxed);
     }
 
     /// Records the compile-time Atom IR shape once per prepared callback plan.
@@ -669,6 +713,9 @@ impl BvpDirectJacobianTelemetry {
         let Some(inner) = &self.inner else {
             return;
         };
+        if !self.counters_enabled {
+            return;
+        }
         inner
             .prepared_atom_evaluators
             .fetch_add(evaluators as u64, Ordering::Relaxed);
@@ -701,35 +748,121 @@ impl BvpDirectJacobianTelemetry {
             return BvpDirectJacobianTelemetrySnapshot::default();
         };
         BvpDirectJacobianTelemetrySnapshot {
-            calls: inner.calls.load(Ordering::Relaxed),
-            work_items: inner.work_items.load(Ordering::Relaxed),
-            elapsed: Duration::from_nanos(inner.elapsed_ns.load(Ordering::Relaxed)),
-            errors: inner.errors.load(Ordering::Relaxed),
-            argument_prepare_elapsed: Duration::from_nanos(
-                inner.argument_prepare_ns.load(Ordering::Relaxed),
-            ),
-            evaluator_elapsed: Duration::from_nanos(inner.evaluator_ns.load(Ordering::Relaxed)),
-            storage_write_elapsed: Duration::from_nanos(
-                inner.storage_write_ns.load(Ordering::Relaxed),
-            ),
-            assembly_alloc_elapsed: Duration::from_nanos(
-                inner.assembly_alloc_ns.load(Ordering::Relaxed),
-            ),
-            evaluator_calls: inner.evaluator_calls.load(Ordering::Relaxed),
-            storage_writes: inner.storage_writes.load(Ordering::Relaxed),
-            parallel_dispatches: inner.parallel_dispatches.load(Ordering::Relaxed),
-            sequential_dispatches: inner.sequential_dispatches.load(Ordering::Relaxed),
-            diagonal_dispatches: inner.diagonal_dispatches.load(Ordering::Relaxed),
-            entry_dispatches: inner.entry_dispatches.load(Ordering::Relaxed),
-            effective_task_count: inner.effective_task_count.load(Ordering::Relaxed),
-            prepared_atom_evaluators: inner.prepared_atom_evaluators.load(Ordering::Relaxed),
-            prepared_atom_nodes: inner.prepared_atom_nodes.load(Ordering::Relaxed),
-            prepared_atom_add_nodes: inner.prepared_atom_add_nodes.load(Ordering::Relaxed),
-            prepared_atom_mul_nodes: inner.prepared_atom_mul_nodes.load(Ordering::Relaxed),
-            prepared_atom_powi_nodes: inner.prepared_atom_powi_nodes.load(Ordering::Relaxed),
-            prepared_atom_pow_nodes: inner.prepared_atom_pow_nodes.load(Ordering::Relaxed),
-            prepared_atom_builtin_nodes: inner.prepared_atom_builtin_nodes.load(Ordering::Relaxed),
-            prepared_atom_custom_nodes: inner.prepared_atom_custom_nodes.load(Ordering::Relaxed),
+            calls: if self.counters_enabled {
+                inner.calls.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            work_items: if self.counters_enabled {
+                inner.work_items.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            elapsed: if self.timing_enabled {
+                Duration::from_nanos(inner.elapsed_ns.load(Ordering::Relaxed))
+            } else {
+                Duration::ZERO
+            },
+            errors: if self.counters_enabled {
+                inner.errors.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            argument_prepare_elapsed: if self.timing_enabled {
+                Duration::from_nanos(inner.argument_prepare_ns.load(Ordering::Relaxed))
+            } else {
+                Duration::ZERO
+            },
+            evaluator_elapsed: if self.timing_enabled {
+                Duration::from_nanos(inner.evaluator_ns.load(Ordering::Relaxed))
+            } else {
+                Duration::ZERO
+            },
+            storage_write_elapsed: if self.timing_enabled {
+                Duration::from_nanos(inner.storage_write_ns.load(Ordering::Relaxed))
+            } else {
+                Duration::ZERO
+            },
+            assembly_alloc_elapsed: if self.timing_enabled {
+                Duration::from_nanos(inner.assembly_alloc_ns.load(Ordering::Relaxed))
+            } else {
+                Duration::ZERO
+            },
+            evaluator_calls: if self.counters_enabled {
+                inner.evaluator_calls.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            storage_writes: if self.counters_enabled {
+                inner.storage_writes.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            parallel_dispatches: if self.counters_enabled {
+                inner.parallel_dispatches.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            sequential_dispatches: if self.counters_enabled {
+                inner.sequential_dispatches.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            diagonal_dispatches: if self.counters_enabled {
+                inner.diagonal_dispatches.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            entry_dispatches: if self.counters_enabled {
+                inner.entry_dispatches.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            effective_task_count: if self.counters_enabled {
+                inner.effective_task_count.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            prepared_atom_evaluators: if self.counters_enabled {
+                inner.prepared_atom_evaluators.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            prepared_atom_nodes: if self.counters_enabled {
+                inner.prepared_atom_nodes.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            prepared_atom_add_nodes: if self.counters_enabled {
+                inner.prepared_atom_add_nodes.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            prepared_atom_mul_nodes: if self.counters_enabled {
+                inner.prepared_atom_mul_nodes.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            prepared_atom_powi_nodes: if self.counters_enabled {
+                inner.prepared_atom_powi_nodes.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            prepared_atom_pow_nodes: if self.counters_enabled {
+                inner.prepared_atom_pow_nodes.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            prepared_atom_builtin_nodes: if self.counters_enabled {
+                inner.prepared_atom_builtin_nodes.load(Ordering::Relaxed)
+            } else {
+                0
+            },
+            prepared_atom_custom_nodes: if self.counters_enabled {
+                inner.prepared_atom_custom_nodes.load(Ordering::Relaxed)
+            } else {
+                0
+            },
         }
     }
 }
@@ -810,6 +943,33 @@ mod tests {
             telemetry.snapshot(),
             BvpDirectJacobianTelemetrySnapshot::default()
         );
+    }
+
+    #[test]
+    fn direct_jacobian_timings_mode_suppresses_discrete_counts() {
+        let telemetry = BvpDirectJacobianTelemetry::timings();
+        telemetry.record_call(Duration::from_nanos(19), 4);
+        telemetry.record_error();
+        telemetry.record_dispatch(true, true);
+        telemetry.record_stage_breakdown(
+            Duration::from_nanos(3),
+            Duration::from_nanos(5),
+            Duration::from_nanos(7),
+            Duration::from_nanos(11),
+            4,
+            4,
+        );
+        telemetry.record_prepared_atom_metrics(1, 2, 1, 1, 0, 0, 0, 0);
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.calls, 0);
+        assert_eq!(snapshot.errors, 0);
+        assert_eq!(snapshot.parallel_dispatches, 0);
+        assert_eq!(snapshot.evaluator_calls, 0);
+        assert_eq!(snapshot.prepared_atom_evaluators, 0);
+        assert_eq!(snapshot.elapsed, Duration::from_nanos(19));
+        assert_eq!(snapshot.argument_prepare_elapsed, Duration::from_nanos(3));
+        assert_eq!(snapshot.evaluator_elapsed, Duration::from_nanos(5));
     }
 
     #[test]
@@ -920,6 +1080,21 @@ mod tests {
         let snapshot = telemetry.snapshot();
         assert_eq!(snapshot.residual_calls, 1);
         assert!(snapshot.residual_elapsed > Duration::ZERO);
+    }
+
+    #[test]
+    fn lambdify_timings_mode_measures_without_discrete_counts() {
+        let telemetry = BvpLambdifyTelemetry::timings();
+        assert!(telemetry.start_timing().is_some());
+        telemetry.record_residual(Duration::from_nanos(13));
+        telemetry.record_jacobian(Duration::from_nanos(17));
+        telemetry.record_dispatch_selected(false);
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.residual_calls, 0);
+        assert_eq!(snapshot.jacobian_calls, 0);
+        assert_eq!(snapshot.sequential_dispatches, 0);
+        assert_eq!(snapshot.residual_elapsed, Duration::from_nanos(13));
+        assert_eq!(snapshot.jacobian_elapsed, Duration::from_nanos(17));
     }
 
     #[test]

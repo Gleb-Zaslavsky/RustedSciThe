@@ -619,7 +619,7 @@ fn main() {
 
     let table = Table::new(&rows).to_string();
     let report = format!(
-        "status: {}\n\nconfiguration: n_steps={n_steps_values:?}; continuation={continuation}; routes={routes:?}\ntelemetry: detailed; scopes are diagnostic and not additive\n\n{table}\n",
+        "status: {}\n\nconfiguration: n_steps={n_steps_values:?}; continuation={continuation}; routes={routes:?}\ntelemetry: detailed; solve and continuation wall times include instrumentation; scopes are diagnostic, non-additive and not uninstrumented performance baselines\n\n{table}\n",
         if rows.iter().all(|row| row.status == "ok") {
             "passed"
         } else {

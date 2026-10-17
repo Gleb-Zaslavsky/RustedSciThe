@@ -43,7 +43,7 @@ fn report_stage_breakdown(
         workload,
         dimension,
         assembly,
-        BdfTelemetryMode::Timings,
+        BdfTelemetryMode::Detailed,
     );
     solver.try_generate().unwrap_or_else(|error| {
         panic!(

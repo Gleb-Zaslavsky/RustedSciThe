@@ -270,7 +270,7 @@ fn output_root() -> PathBuf {
 fn run_row(frontend: Frontend, layout: Layout, dimension: usize, policy_name: &str) -> Row {
     let (equations, states) = equations(dimension);
     let parameters = vec!["p".to_owned()];
-    let telemetry = BvpSciTelemetry::timings();
+    let telemetry = BvpSciTelemetry::detailed();
     let prepare_started = Instant::now();
     let plan = if frontend.is_aot() {
         let phase = std::env::var("BVP_SCI_AOT_BENCH_PHASE").unwrap_or_default();
@@ -664,7 +664,7 @@ fn aot_full_solve_row(
             "gcc" => config.with_c_gcc(),
             _ => config.with_c_tcc(),
         };
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         let prepare_started = Instant::now();
         let plan = match BvpSciLambdifyPlan::prepare_aot_with_policy(
             frontend.assembly(),
@@ -1133,7 +1133,7 @@ fn main() {
             repeats,
         );
         let body = format!(
-            "# BVP_sci AOT full-solve execution-policy matrix\n\n- phase: `policy-full-solve`\n- workload: `{workload}` (`independent` or nearest-neighbor `coupled-chain`)\n- workers_requested: {workers}\n- dimensions: {dimensions:?}\n- nodes: {nodes:?}\n- policies: {policies:?}\n- layouts: {:?}\n- rows report medians over {repeats} independent prepared solves\n- break-even uses inclusive `full_solve_ms` only, against Sequential for the same workload/frontend/layout/dimension/nodes\n- `residual_ms` and `jacobian_ms` are evaluator-only telemetry scopes, matched with the Lambdify policy matrix\n- callback/chunk speed is diagnostic and must not be interpreted as full-solve speedup\n- numerical collocation workspace remains single-owner\n- timing scopes are diagnostic and non-additive\n\n{}",
+            "# BVP_sci AOT full-solve execution-policy matrix\n\n- phase: `policy-full-solve`\n- workload: `{workload}` (`independent` or nearest-neighbor `coupled-chain`)\n- workers_requested: {workers}\n- dimensions: {dimensions:?}\n- nodes: {nodes:?}\n- policies: {policies:?}\n- layouts: {:?}\n- rows report medians over {repeats} independent prepared solves\n- telemetry: `Detailed` collects counters, timings and detailed traces; reported solve times include this instrumentation and are diagnostic, not an uninstrumented speed baseline\n- break-even uses inclusive `full_solve_ms` only, against Sequential for the same workload/frontend/layout/dimension/nodes\n- `residual_ms` and `jacobian_ms` are evaluator-only telemetry scopes, matched with the Lambdify policy matrix\n- callback/chunk speed is diagnostic and must not be interpreted as full-solve speedup\n- numerical collocation workspace remains single-owner\n- timing scopes are diagnostic and non-additive\n\n{}",
             layouts
                 .iter()
                 .map(|layout| layout.label())
@@ -1219,7 +1219,7 @@ fn main() {
         format!("\n\n## Failed Rows\n\n- {}\n", failures.join("\n- "))
     };
     let mut body = format!(
-        "# BVP_sci AOT/Lambdify callback matrix\n\n- phase: `{phase}`\n- AOT lifecycle: BuildIfMissing + C/{compiler}\n- `preparation_scope` identifies `lambdify:symbolic+evaluator+plan` versus `aot:BuildIfMissing+compile+link+publish+plan`; `prepare_ms` is not comparable across scope labels or cache policies\n- `residual_ms` and `jacobian_ms` are evaluator-only telemetry scopes; `residual_callback_ms` and `jacobian_callback_ms` include the public callback boundary and caller-owned output work\n- `continuation_ms` is a matched 16-pair residual+Jacobian callback series; `continuation_vs_lambdify` compares only the warm series, not cold preparation\n- AOT uses generated residual/`df/dy` evaluators and a prepared symbolic Lambdify plan for `df/dp`; this hybrid route must be interpreted separately from the older finite-difference fallback evidence\n- in `cold-amortization`, every AOT row receives a unique artifact namespace. Cold build is gated by successful build, link, publication and runtime-ready lifecycle counters; resolver cache hit/miss counters are reported as diagnostics, not as coldness proof\n- `cold_total_16_vs_lambdify` compares preparation plus one 16-pair callback series, while `cold_break_even_callback_pairs` projects the callback-only crossover count; neither is a full-solve break-even claim\n- this callback-only phase is not full BVP solve break-even evidence; use `policy-full-solve` with large matched dimensions/nodes for execution-policy break-even\n- AOT telemetry is shared IVP lifecycle data and is not additive with BVP scopes\n\n{}",
+        "# BVP_sci AOT/Lambdify callback matrix\n\n- phase: `{phase}`\n- AOT lifecycle: BuildIfMissing + C/{compiler}\n- telemetry: `Detailed` collects counters, timings and detailed traces; reported durations include instrumentation and are diagnostic, not an uninstrumented speed baseline\n- `preparation_scope` identifies `lambdify:symbolic+evaluator+plan` versus `aot:BuildIfMissing+compile+link+publish+plan`; `prepare_ms` is not comparable across scope labels or cache policies\n- `residual_ms` and `jacobian_ms` are evaluator-only telemetry scopes; `residual_callback_ms` and `jacobian_callback_ms` include the public callback boundary and caller-owned output work\n- `continuation_ms` is a matched 16-pair residual+Jacobian callback series; `continuation_vs_lambdify` compares only the warm series, not cold preparation\n- AOT uses generated residual/`df/dy` evaluators and a prepared symbolic Lambdify plan for `df/dp`; this hybrid route must be interpreted separately from the older finite-difference fallback evidence\n- in `cold-amortization`, every AOT row receives a unique artifact namespace. Cold build is gated by successful build, link, publication and runtime-ready lifecycle counters; resolver cache hit/miss counters are reported as diagnostics, not as coldness proof\n- `cold_total_16_vs_lambdify` compares preparation plus one 16-pair callback series, while `cold_break_even_callback_pairs` projects the callback-only crossover count; neither is a full-solve break-even claim\n- this callback-only phase is not full BVP solve break-even evidence; use `policy-full-solve` with large matched dimensions/nodes for execution-policy break-even\n- AOT telemetry is shared IVP lifecycle data and is not additive with BVP scopes\n\n{}",
         table
     );
     body.push_str(

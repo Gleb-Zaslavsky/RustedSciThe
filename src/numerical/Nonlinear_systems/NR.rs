@@ -48,10 +48,11 @@ use crate::symbolic::symbolic_functions::Jacobian;
 use crate::numerical::Nonlinear_systems::LM_utils::{
     ConvergenceCriteria, ReductionRatio, ScalingMethod, SubproblemMethod, UpdateMethod,
 };
-use log::{error, info, warn};
+use crate::numerical::logging::{
+    SolverLogGuard, SolverLogLevel, solver_error as error, solver_info as info,
+    solver_warn as warn,
+};
 use nalgebra::{DMatrix, DVector, Matrix};
-use simplelog::LevelFilter;
-use simplelog::*;
 use std::collections::HashMap;
 use std::error::Error;
 use std::time::Instant;
@@ -124,7 +125,7 @@ impl NR {
             y: DVector::zeros(0),
             step: DVector::zeros(0),
             result: None,
-            loglevel: Some("info".to_string()),
+            loglevel: None,
             linear_sys_method: Some("lu".to_string()),
             custom_timer: CustomTimer::new(),
             calc_statistics: HashMap::new(),
@@ -539,7 +540,7 @@ impl NR {
         let undamped_step_k = solve_linear_system(method, J_k, F_k).unwrap();
         for el in undamped_step_k.iter() {
             if el.is_nan() {
-                log::error!("\n \n NaN in damped step deltaY \n \n");
+                error!("\n \n NaN in damped step deltaY \n \n");
                 panic!();
                 //return previous_step;
             }
@@ -682,50 +683,15 @@ impl NR {
     }
     // wrapper around solver function to implement logging
     pub fn solve(&mut self) -> Option<DVector<f64>> {
-        let is_logging_disabled = self
-            .loglevel
-            .as_ref()
-            .map(|level| level == "off" || level == "none")
-            .unwrap_or(false);
-
-        if is_logging_disabled {
-            let res = self.solver();
-            res
-        } else {
-            let loglevel = self.loglevel.clone();
-            let log_option = if let Some(level) = loglevel {
-                match level.as_str() {
-                    "debug" => LevelFilter::Info,
-                    "info" => LevelFilter::Info,
-                    "warn" => LevelFilter::Warn,
-                    "error" => LevelFilter::Error,
-                    _ => panic!("loglevel must be debug, info, warn or error"),
-                }
-            } else {
-                LevelFilter::Info
-            };
-            println!(" \n \n Program started with loglevel: {}", log_option);
-            //  let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
-            //  let name = format!("log_{}.txt", date_and_time);
-            let logger_instance = CombinedLogger::init(vec![TermLogger::new(
-                log_option,
-                Config::default(),
-                TerminalMode::Mixed,
-                ColorChoice::Auto,
-            )]);
-
-            match logger_instance {
-                Ok(()) => {
-                    let res = self.solver();
-                    info!(" \n \n Program ended");
-                    res
-                }
-                Err(_) => {
-                    let res = self.solver();
-                    res
-                } //end Error
-            } // end mat 
-        }
+        let level = match self.loglevel.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            Some("error") => SolverLogLevel::Error,
+            Some("warn") => SolverLogLevel::Warn,
+            Some("info") => SolverLogLevel::Info,
+            Some("debug") => SolverLogLevel::Debug,
+            _ => SolverLogLevel::Off,
+        };
+        let _logging_scope = SolverLogGuard::enter(level);
+        self.solver()
     }
     pub fn get_result(&self) -> Option<DVector<f64>> {
         self.result.clone()
@@ -941,6 +907,22 @@ pub fn bound_step(y: &DVector<f64>, step: &DVector<f64>, bounds: &Vec<(f64, f64)
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    #[test]
+    fn legacy_newton_logging_defaults_to_off_and_does_not_install_a_global_logger() {
+        let mut solver = NR::new();
+        assert_eq!(solver.loglevel, None);
+        solver.set_solver_params(
+            Some("info".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(solver.loglevel.as_deref(), Some("info"));
+    }
+
     #[test]
     fn test_NR_elem_example_simple() {
         let vec_of_expressions = vec!["x^2+y^2-10", "x-y-4"];

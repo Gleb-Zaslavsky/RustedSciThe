@@ -76,7 +76,7 @@ fn aot_continuation_break_even_matches_fresh_reprepare() {
                     RadauExecution::Aot,
                     layout,
                     RadauExecutionPolicy::Sequential,
-                    RadauTelemetryMode::Timings,
+                    RadauTelemetryMode::Detailed,
                 );
                 prepared_config.aot = Some(rebuild_aot_config(artifact_dir.path()));
                 let prepare_start = Instant::now();

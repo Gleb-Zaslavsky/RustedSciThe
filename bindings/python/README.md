@@ -93,11 +93,12 @@ public API from `rustedscithe`; `_native` is an implementation module.
 
 | Problem | Python entry points | Useful distinction |
 | --- | --- | --- |
-| Stiff initial-value problems | `RadauSolver`, `BdfSolver`, `BackwardEulerSolver`, `Lsode2Solver` | Radau and LSODE2 expose structured layouts where supported; standalone BDF and Backward Euler are Dense. LSODE2 separates its solver family from its Adams/BDF/Auto controller. |
-| Boundary-value problems | `BvpSciSolver`, `BvpDampSolver` | BVP_sci uses symbolic boundary residuals and collocation; BVP_Damp uses observed state/boundary data and damped Newton. Their boundary contracts intentionally differ. |
+| Initial-value problems | `UniversalNonStiffSolver`, `RadauSolver`, `BdfSolver`, `BackwardEulerSolver`, `Lsode2Solver` | ODE_api2 exposes RK45/DOPRI/AB4 through its narrow native nonstiff route; stiff solvers retain their dedicated APIs. LSODE2 separates family from its Adams/BDF/Auto controller. |
+| Boundary-value problems | `BvpSciSolver`, `BvpDampSolver`, `BvpDampNaiveSolver`, `BvpDampFrozenSolver` | BVP_sci uses symbolic boundary residuals and collocation; BVP_Damp exposes distinct damped, fixed-mesh Naive and Frozen-Jacobian routes. Their boundary contracts intentionally differ. |
 | Nonlinear systems | `NonlinearSolver` | Prepared square systems with Newton, LM and trust-region method families. |
 | Least squares and fitting | `FittingSolver`, `GavinFittingSolver`, `VarProSolver` | Rectangular symbolic least squares, observation-based fitting and separable-model fitting have distinct contracts. |
-| Text task documents | `TaskDocument`, `task`, `run_task_batch` | Parse and execute reusable IVP/BVP documents through the native task infrastructure. |
+| Signal/data utilities | `spline_resample`, `least_squares_bspline`, `savgol_filter`, `lowess_smooth`, `fit_quality` | Native Rust preprocessing helpers with NumPy float64 inputs/outputs; LSQ B-splines expose explicit DenseQR/Banded routes. See `examples/data_processing_signal.py` and `examples/data_processing_lsq_spline.py`. |
+| Text task documents | `TaskDocument`, `task`, `task_dict`, `run_task_batch` | Parse, inspect as a detached dict, and execute reusable IVP/BVP documents through the native task infrastructure. |
 
 Use `capabilities("solver_name")` to inspect the Python-supported routes.
 Native features that are not exposed by this package are not implied by a
@@ -140,6 +141,7 @@ recommended workflows.
 | LSODE2 | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/LSODE2_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/LSODE2_GUIDE_RU.md) |
 | BVP_sci | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BVP_SCI_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BVP_SCI_GUIDE_RU.md) |
 | BVP_Damp | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BVP_DAMP_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BVP_DAMP_GUIDE_RU.md) |
+| ShootingBVP | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SHOOTING_BVP_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SHOOTING_BVP_GUIDE_RU.md) |
 | Nonlinear systems and fitting | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/NONLINEAR_FITTING_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/NONLINEAR_FITTING_GUIDE_RU.md) |
 
 Runnable, commented Python examples include native symbolic calculus and
@@ -151,10 +153,27 @@ the repository's Rust examples are collected separately in the root
 ## Text Tasks and Executable
 
 Python users can parse and run text task documents with `TaskDocument` or
-`task(...)`, and batch independent documents with `run_task_batch(...)`. The
-batch API preserves typed per-task failures and can write a compact table. The
-Windows console executable is part of the main Rust project, not this Python
-package; see the [task parser documentation](https://github.com/Gleb-Zaslavsky/RustedSciThe/tree/master/src/command_interpreter/).
+`task(...)`, inspect a detached dictionary with `task_dict(...)`, and batch
+independent documents with `run_task_batch(...)`. Parsing, normalization and
+semantic validation are performed by the existing Rust command-interpreter
+parser; Python does not implement a second task DSL. `task_dict(...)` does not
+execute the document. The batch API preserves typed per-task failures and can
+write a compact table. The Windows console executable is part of the main Rust
+project, not this Python package; see the [task parser documentation](https://github.com/Gleb-Zaslavsky/RustedSciThe/tree/master/src/command_interpreter/).
+
+Optional external tools can be checked without console output:
+
+```python
+from rustedscithe import check_dependencies
+
+report = check_dependencies()
+print(report["tools"]["gcc"]["status"])
+print(report["superlu"])  # build feature and configured shared-library loadability
+```
+
+The PATH checks cover Gnuplot, TCC, GCC, Zig and Pandoc. SuperLU is checked
+separately through `SUPERLU_LIBRARY`; a successful dynamic load does not by
+itself validate the bridge ABI or prove a numerical solve will succeed.
 
 ## Diagnostics and Development
 

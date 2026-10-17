@@ -1,5 +1,7 @@
 // Port based on the Gavin implementation in `PY/levenberg_marquardt.py`.
 
+use crate::numerical::SolverTelemetryMode;
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use nalgebra::{DMatrix, DVector};
 use std::error::Error;
 use std::time::{Duration, Instant};
@@ -285,6 +287,8 @@ pub enum GavinLmJacobianSource {
 /// evaluation occurs inside Jacobian construction).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GavinLmTelemetry {
+    /// Requested collection level, needed to interpret zero-valued channels.
+    pub telemetry_mode: SolverTelemetryMode,
     /// Number of outer LM iterations entered.
     pub iterations: usize,
     /// Termination reason for the most recent solve.
@@ -530,8 +534,9 @@ pub struct LevenbergMarquardt<F: ObjectiveFunction> {
     pub max_iterations: usize,
     /// Enables log-facade messages for this solver instance; disabled by default.
     logging_enabled: bool,
-    /// Presence enables counters and timing; `None` keeps the hot path minimal.
+    /// Presence enables the requested collection level; `None` keeps the hot path minimal.
     telemetry: Option<GavinLmTelemetry>,
+    telemetry_mode: SolverTelemetryMode,
     /// Optional exact model-output derivative, shaped (samples, parameters).
     analytic_jacobian: Option<
         Box<dyn Fn(&DVector<f64>, &DVector<f64>) -> Result<DMatrix<f64>, GavinLmCallbackError>>,
@@ -559,6 +564,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
             max_iterations: 1000,
             logging_enabled: false,
             telemetry: None,
+            telemetry_mode: SolverTelemetryMode::Off,
             analytic_jacobian: None,
         }
     }
@@ -569,9 +575,13 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         self
     }
 
-    /// Enables or disables aggregate telemetry collection.
-    pub fn with_telemetry(mut self, enabled: bool) -> Self {
-        self.telemetry = enabled.then(GavinLmTelemetry::default);
+    /// Selects discrete counters, timings, both, or no solve telemetry.
+    pub fn with_telemetry(mut self, mode: SolverTelemetryMode) -> Self {
+        self.telemetry_mode = mode;
+        self.telemetry = mode.is_enabled().then(|| GavinLmTelemetry {
+            telemetry_mode: mode,
+            ..GavinLmTelemetry::default()
+        });
         self
     }
 
@@ -654,11 +664,15 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
                 iteration: self.iteration,
             });
         }
-        let started = self.telemetry.as_ref().map(|_| Instant::now());
+        let started = self.telemetry_mode.collects_timings().then(Instant::now);
         let result = self.objective_fn.evaluate(t, p);
         self.func_calls += 1;
+        if self.telemetry_mode.collects_counters() {
+            if let Some(stats) = self.telemetry.as_mut() {
+                stats.objective_evaluations += 1;
+            }
+        }
         if let (Some(stats), Some(started)) = (self.telemetry.as_mut(), started) {
-            stats.objective_evaluations += 1;
             stats.objective_time += started.elapsed();
         }
         let value = result.map_err(GavinLmError::ObjectiveCallback)?;
@@ -791,7 +805,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         dp: &DVector<f64>,
         cached_output: Option<&DVector<f64>>,
     ) -> Result<(DMatrix<f64>, DVector<f64>, f64, DVector<f64>, DMatrix<f64>), GavinLmError> {
-        let linearization_started = self.telemetry.as_ref().map(|_| Instant::now());
+        let linearization_started = self.telemetry_mode.collects_timings().then(Instant::now);
         let npar = p.len();
         let y_hat = match cached_output {
             Some(output) => output.clone(),
@@ -814,20 +828,28 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
 
         let displacement_sq = (p - p_old).norm_squared();
         let j_new = if let Some(analytic_jacobian) = &self.analytic_jacobian {
-            let started = self.telemetry.as_ref().map(|_| Instant::now());
+            let started = self.telemetry_mode.collects_timings().then(Instant::now);
             let exact_result = analytic_jacobian(t, p);
+            if self.telemetry_mode.collects_counters() {
+                if let Some(stats) = self.telemetry.as_mut() {
+                    stats.analytic_jacobian_evaluations += 1;
+                }
+            }
             if let (Some(stats), Some(started)) = (self.telemetry.as_mut(), started) {
-                stats.analytic_jacobian_evaluations += 1;
                 stats.analytic_jacobian_time += started.elapsed();
             }
             let exact = exact_result.map_err(GavinLmError::AnalyticJacobianCallback)?;
             validate_analytic_jacobian(&exact, y_dat.len(), npar)?;
             exact
         } else if self.objective_fn.has_analytic_jacobian() {
-            let started = self.telemetry.as_ref().map(|_| Instant::now());
+            let started = self.telemetry_mode.collects_timings().then(Instant::now);
             let exact_result = self.objective_fn.analytic_jacobian(t, p);
+            if self.telemetry_mode.collects_counters() {
+                if let Some(stats) = self.telemetry.as_mut() {
+                    stats.analytic_jacobian_evaluations += 1;
+                }
+            }
             if let (Some(stats), Some(started)) = (self.telemetry.as_mut(), started) {
-                stats.analytic_jacobian_evaluations += 1;
                 stats.analytic_jacobian_time += started.elapsed();
             }
             let exact = exact_result
@@ -840,13 +862,17 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
             || displacement_sq == 0.0
             || !displacement_sq.is_finite()
         {
-            if let Some(stats) = &mut self.telemetry {
-                stats.finite_difference_jacobians += 1;
+            if self.telemetry_mode.collects_counters() {
+                if let Some(stats) = &mut self.telemetry {
+                    stats.finite_difference_jacobians += 1;
+                }
             }
             self.lm_fd_j(t, p, &y_hat, dp)?
         } else {
-            if let Some(stats) = &mut self.telemetry {
-                stats.broyden_updates += 1;
+            if self.telemetry_mode.collects_counters() {
+                if let Some(stats) = &mut self.telemetry {
+                    stats.broyden_updates += 1;
+                }
             }
             self.lm_broyden_j(p_old, y_old, j, p, &y_hat)
         };
@@ -1051,12 +1077,19 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         y_dat: &DVector<f64>,
         explicit_weights: Option<&DVector<f64>>,
     ) -> Result<GavinLmResult, GavinLmError> {
+        let log_level = if self.logging_enabled {
+            SolverLogLevel::Info
+        } else {
+            SolverLogLevel::Off
+        };
+        let _logging_scope = SolverLogGuard::enter(log_level);
         // Reset per-run counters while preserving the user's diagnostics policy.
         self.iteration = 0;
         self.func_calls = 0;
         self.last_termination = None;
         if let Some(stats) = &mut self.telemetry {
             *stats = GavinLmTelemetry::default();
+            stats.telemetry_mode = self.telemetry_mode;
             stats.jacobian_source = Some(
                 if self.analytic_jacobian.is_some() || self.objective_fn.has_analytic_jacobian() {
                     GavinLmJacobianSource::Analytic
@@ -1065,7 +1098,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
                 },
             );
         }
-        let solve_started = self.telemetry.as_ref().map(|_| Instant::now());
+        let solve_started = self.telemetry_mode.collects_timings().then(Instant::now);
 
         let expected_outputs = self
             .objective_fn
@@ -1234,13 +1267,17 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         let mut termination = GavinLmTermination::MaxIterations;
         while self.iteration < max_iter {
             self.iteration += 1;
-            if let Some(stats) = &mut self.telemetry {
-                stats.iterations = self.iteration;
+            if self.telemetry_mode.collects_counters() {
+                if let Some(stats) = &mut self.telemetry {
+                    stats.iterations = self.iteration;
+                }
             }
 
-            let linear_solve_started = self.telemetry.as_ref().map(|_| Instant::now());
-            if let Some(stats) = &mut self.telemetry {
-                stats.linear_solves += 1;
+            let linear_solve_started = self.telemetry_mode.collects_timings().then(Instant::now);
+            if self.telemetry_mode.collects_counters() {
+                if let Some(stats) = &mut self.telemetry {
+                    stats.linear_solves += 1;
+                }
             }
             // Solve the damped normal equations for the proposed coefficient
             // correction. Marquardt scales each diagonal by its Hessian entry;
@@ -1286,8 +1323,10 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
             }
 
             if !self.objective_fn.validate_trial(&p_try) {
-                if let Some(stats) = &mut self.telemetry {
-                    stats.rejected_steps += 1;
+                if self.telemetry_mode.collects_counters() {
+                    if let Some(stats) = &mut self.telemetry {
+                        stats.rejected_steps += 1;
+                    }
                 }
                 x2_val = x2_old;
                 lambda = match update_policy {
@@ -1380,8 +1419,10 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
                 }
 
                 if !self.objective_fn.validate_trial(&p_try) {
-                    if let Some(stats) = &mut self.telemetry {
-                        stats.rejected_steps += 1;
+                    if self.telemetry_mode.collects_counters() {
+                        if let Some(stats) = &mut self.telemetry {
+                            stats.rejected_steps += 1;
+                        }
                     }
                     x2_val = x2_old;
                     lambda = (lambda * lambda_up_fac).min(1e7);
@@ -1455,8 +1496,10 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
             }
 
             if rho > eps_chi {
-                if let Some(stats) = &mut self.telemetry {
-                    stats.accepted_steps += 1;
+                if self.telemetry_mode.collects_counters() {
+                    if let Some(stats) = &mut self.telemetry {
+                        stats.accepted_steps += 1;
+                    }
                 }
                 let dx2 = x2_val - x2_old;
                 x2_old = x2_val;
@@ -1493,8 +1536,10 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
                     nu = 2.0;
                 }
             } else {
-                if let Some(stats) = &mut self.telemetry {
-                    stats.rejected_steps += 1;
+                if self.telemetry_mode.collects_counters() {
+                    if let Some(stats) = &mut self.telemetry {
+                        stats.rejected_steps += 1;
+                    }
                 }
                 x2_val = x2_old;
 
@@ -1999,7 +2044,8 @@ mod tests {
         let target = ExponentialSinusoidalModel
             .evaluate(&t, &dvector![2.0, 0.5, 1.0, 2.0])
             .unwrap();
-        let mut solver = LevenbergMarquardt::new(ExponentialSinusoidalModel).with_telemetry(true);
+        let mut solver = LevenbergMarquardt::new(ExponentialSinusoidalModel)
+            .with_telemetry(SolverTelemetryMode::Detailed);
         let result = solver
             .lm_detailed(dvector![1.94, 0.55, 1.0, 1.38], &t, &target)
             .expect("final rejected trial must preserve valid accepted-state statistics");
@@ -2079,7 +2125,7 @@ mod tests {
         assert!(silent.telemetry().is_none());
 
         let mut measured = LevenbergMarquardt::new(PolynomialModel::new(1))
-            .with_telemetry(true)
+            .with_telemetry(SolverTelemetryMode::Detailed)
             .with_logging(false);
         measured
             .lm(dvector![0.8, 1.8], &t, &y)
@@ -2097,13 +2143,40 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_modes_separate_gavin_counts_from_clock_reads() {
+        let t = dvector![0.0, 1.0, 2.0, 3.0];
+        let truth = dvector![1.0, 2.0];
+        let y = PolynomialModel::new(1).evaluate(&t, &truth).unwrap();
+
+        let mut counters = LevenbergMarquardt::new(PolynomialModel::new(1))
+            .with_telemetry(SolverTelemetryMode::Counters);
+        counters.lm(dvector![0.8, 1.8], &t, &y).unwrap();
+        let counters = counters.telemetry().unwrap();
+        assert_eq!(counters.telemetry_mode, SolverTelemetryMode::Counters);
+        assert!(counters.objective_evaluations > 0);
+        assert!(counters.linear_solves > 0);
+        assert_eq!(counters.objective_time, Duration::ZERO);
+        assert_eq!(counters.total_time, Duration::ZERO);
+
+        let mut timings = LevenbergMarquardt::new(PolynomialModel::new(1))
+            .with_telemetry(SolverTelemetryMode::Timings);
+        timings.lm(dvector![0.8, 1.8], &t, &y).unwrap();
+        let timings = timings.telemetry().unwrap();
+        assert_eq!(timings.telemetry_mode, SolverTelemetryMode::Timings);
+        assert_eq!(timings.objective_evaluations, 0);
+        assert_eq!(timings.linear_solves, 0);
+        assert!(timings.objective_time > Duration::ZERO);
+        assert!(timings.total_time > Duration::ZERO);
+    }
+
+    #[test]
     fn analytic_jacobian_path_matches_fd_fit_without_fd_or_broyden_work() {
         let t = dvector![0.0, 1.0, 2.0, 3.0, 4.0];
         let p_true = dvector![1.0, 2.0];
         let y = PolynomialModel::new(1).evaluate(&t, &p_true).unwrap();
         let jacobian_t = t.clone();
         let mut exact = LevenbergMarquardt::new(PolynomialModel::new(1))
-            .with_telemetry(true)
+            .with_telemetry(SolverTelemetryMode::Detailed)
             .with_analytic_jacobian(move |_, _| {
                 DMatrix::from_fn(jacobian_t.len(), 2, |row, col| {
                     if col == 0 { 1.0 } else { jacobian_t[row] }
@@ -2152,7 +2225,8 @@ mod tests {
         let model = SymbolicGavinObjective::new(&bound, &observations)
             .expect("scalar formula with one sample input should adapt");
         let t = dvector![0.0, 1.0, 2.0, 3.0, 4.0];
-        let mut solver = LevenbergMarquardt::new(model).with_telemetry(true);
+        let mut solver =
+            LevenbergMarquardt::new(model).with_telemetry(SolverTelemetryMode::Detailed);
         let (parameters, reduced_chi_square, ..) = solver
             .lm_residuals(dvector![0.8, 1.8], &t)
             .expect("Gavin controller should use the prepared symbolic model");
@@ -2224,7 +2298,8 @@ mod tests {
             .expect("feasible model should bind");
         let observations = [0.0];
         let objective = SymbolicGavinObjective::new(&bound, &observations).unwrap();
-        let mut solver = LevenbergMarquardt::new(objective).with_telemetry(true);
+        let mut solver =
+            LevenbergMarquardt::new(objective).with_telemetry(SolverTelemetryMode::Detailed);
         let error = solver
             .lm_residuals(dvector![-1.0], &dvector![0.0])
             .expect_err("infeasible trial must be rejected before symbolic evaluation");

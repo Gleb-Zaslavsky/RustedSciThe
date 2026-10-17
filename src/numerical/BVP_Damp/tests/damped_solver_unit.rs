@@ -27,6 +27,29 @@ use faer::Col;
 use nalgebra::{DMatrix, DVector};
 use std::sync::Arc;
 
+#[test]
+fn damped_logging_is_disabled_by_default_and_requires_explicit_enablement() {
+    let default_options = DampedSolverOptions::default();
+    assert!(!DampedSolverOptions::logging_enabled(
+        default_options.loglevel.as_deref()
+    ));
+
+    assert!(!DampedSolverOptions::logging_enabled(Some("OFF")));
+    assert!(!DampedSolverOptions::logging_enabled(Some("none")));
+    assert!(DampedSolverOptions::logging_enabled(Some("info")));
+}
+
+#[test]
+fn explicit_damped_off_overrides_structured_event_logging_mode() {
+    let mut solver = sparse_surface_test_solver();
+    solver.loglevel = Some("off".to_string());
+    solver.set_bvp_logging_mode(BvpLoggingMode::Detailed);
+    assert_eq!(
+        solver.effective_logging_level().unwrap(),
+        crate::numerical::logging::SolverLogLevel::Off
+    );
+}
+
 fn sparse_surface_test_solver() -> NRBVP {
     NRBVP::new_with_options(
         vec![Expr::parse_expression("z"), Expr::parse_expression("-y")],

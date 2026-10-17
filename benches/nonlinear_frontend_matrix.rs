@@ -291,7 +291,7 @@ fn solve_options() -> SolveOptions {
         tolerance: 1e-10,
         max_iterations: 80,
         diagnostics: DiagnosticsOptions {
-            collect_statistics: true,
+            telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Detailed,
             ..DiagnosticsOptions::default()
         },
         ..SolveOptions::default()
@@ -468,7 +468,7 @@ fn main() {
         aot_build_policy().1
     )
     .unwrap();
-    writeln!(report, "\nTiming note: preparation stages are diagnostic and may overlap; solve columns exclude preparation; continuation is warm parameter rebinding plus subsequent solves. AOT lifecycle is explicit: cold-rebuild always rebuilds, cold-build-if-missing is the first build, and warm-cache-hit reuses the prepared artifact. Do not compare rows with different lifecycle labels as a cold/warm speedup.\n").unwrap();
+    writeln!(report, "\nTelemetry: `Detailed`; solve and continuation timings include instrumentation and are diagnostic, not uninstrumented speed baselines. Preparation stages are diagnostic and may overlap; solve columns exclude preparation; continuation is warm parameter rebinding plus subsequent solves. AOT lifecycle is explicit: cold-rebuild always rebuilds, cold-build-if-missing is the first build, and warm-cache-hit reuses the prepared artifact. Do not compare rows with different lifecycle labels as a cold/warm speedup.\n").unwrap();
     report.push_str(&Table::new(&rows).to_string());
     writeln!(
         report,

@@ -61,8 +61,10 @@ fallback с конечными разностями доступен тольк�
 непрерывный интерполянт. NumPy-массивы результата — собственные `float64`
 данные, не представления изменяемого Rust-workspace.
 
-Включайте `telemetry="counters"` или `"timings"` в `SolverOptions` и читайте
-`telemetry_counters()`, `telemetry_timings_ms()` и `telemetry_report()`. Ноль и
+В `SolverOptions` можно выбрать `telemetry="counters"`, `"timings"` или
+`"detailed"`: `counters` собирает только дискретные счётчики, `timings` — только
+времена, `detailed` — оба набора. Затем читайте `telemetry_counters()`,
+`telemetry_timings_ms()` и `telemetry_report()`. Ноль и
 неизмеренная стадия — разные вещи. Ошибки конфигурации, подготовки, коллбэка,
 AOT и исчерпания бюджета типизированы; у native-ошибок есть stage/solver/route,
 если эти данные доступны.

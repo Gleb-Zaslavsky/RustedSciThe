@@ -5,6 +5,9 @@ use core::fmt::Display;
 /// This is an implicit Runge-Kutta method with high order accuracy
 /// Newton-Raphson calculation on each step is made using analytic jacobian
 use crate::numerical::Radau::Radau_newton::RadauNewton;
+use crate::numerical::logging::{
+    SolverLogGuard, SolverLogLevel, solver_info as info, solver_warn as warn,
+};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
 use crate::symbolic::symbolic_ivp_generated::{
@@ -12,12 +15,10 @@ use crate::symbolic::symbolic_ivp_generated::{
 };
 use crate::symbolic::symbolic_vectors::ExprVector;
 use crate::{Utils::plots::plots, symbolic::symbolic_vectors::ExprMatrix};
-use log::{info, warn};
+use log::LevelFilter;
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
-use simplelog::*;
 use std::collections::HashMap;
-use std::fs::File;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -400,9 +401,9 @@ impl Radau {
             y_stages: DMatrix::zeros(0, stages),
             values: Vec::new(),
             parallel: false,
-            log_level: Some(LevelFilter::Warn),
+            log_level: Some(LevelFilter::Off),
             log_to_file: None,
-            log_to_console: true,
+            log_to_console: false,
             stop_condition: None,
             tolerance: 1e-6,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
@@ -445,8 +446,7 @@ impl Radau {
         y0: DVector<f64>,
     ) -> () {
         self.tolerance = tolerance;
-        // Initialize logging first
-        self.init_logger();
+        // File logging is initialized lazily when a solve enters its log scope.
         let n_vars = y0.len();
         let n_stages = self.coefficients.stages;
 
@@ -1265,6 +1265,14 @@ impl Radau {
     }
 
     pub fn try_solve(&mut self) -> Result<(), IvpBackendError> {
+        let logging_level = match self.log_level.unwrap_or(LevelFilter::Off) {
+            LevelFilter::Off => SolverLogLevel::Off,
+            LevelFilter::Error => SolverLogLevel::Error,
+            LevelFilter::Warn => SolverLogLevel::Warn,
+            LevelFilter::Info => SolverLogLevel::Info,
+            LevelFilter::Debug | LevelFilter::Trace => SolverLogLevel::Debug,
+        };
+        let _logging_scope = SolverLogGuard::enter(logging_level);
         info!("Initializing Radau solver with {:?} order", self.order);
         if self.native_rhs.is_none() {
             self.newton.try_eq_generate()?;
@@ -1310,48 +1318,18 @@ impl Radau {
     /// Set logging level (Off, Error, Warn, Info, Debug, Trace)
     pub fn set_log_level(&mut self, level: LevelFilter) {
         self.log_level = Some(level);
-        self.init_logger();
     }
 
-    /// Enable logging to file
+    /// Stores a legacy filename hint. The shared process logger currently uses
+    /// its automatic timestamped name under `RST_SOLVER_LOG_DIR` instead.
     pub fn set_log_file(&mut self, filename: String) {
         self.log_to_file = Some(filename);
-        self.init_logger();
     }
 
-    /// Enable/disable console logging
+    /// Stores the legacy console preference; solver messages are persisted to
+    /// the shared file log and are not written to the console.
     pub fn set_console_logging(&mut self, enabled: bool) {
         self.log_to_console = enabled;
-        self.init_logger();
-    }
-
-    /// Initialize the logger based on current settings
-    fn init_logger(&self) {
-        let level = self.log_level.unwrap_or(LevelFilter::Info);
-
-        let mut loggers: Vec<Box<dyn SharedLogger>> = Vec::new();
-
-        // Console logger
-        if self.log_to_console {
-            loggers.push(TermLogger::new(
-                level,
-                Config::default(),
-                TerminalMode::Mixed,
-                ColorChoice::Auto,
-            ));
-        }
-
-        // File logger
-        if let Some(ref filename) = self.log_to_file {
-            if let Ok(file) = File::create(filename) {
-                loggers.push(WriteLogger::new(level, Config::default(), file));
-            }
-        }
-
-        // Initialize combined logger
-        if !loggers.is_empty() {
-            let _ = CombinedLogger::init(loggers);
-        }
     }
 
     /// Enable debug logging

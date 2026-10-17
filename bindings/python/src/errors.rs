@@ -67,17 +67,250 @@ pub(crate) fn annotate_native(
     error
 }
 
-/// Read the enum variant identifier from Rust's derived `Debug` form.
+/// Stable discriminant exposed as Python `native_kind` metadata.
 ///
-/// All current native error enums derive `Debug`; payloads are deliberately
-/// excluded so this value stays useful as a compact discriminator.
-pub(crate) fn native_variant(error: &impl std::fmt::Debug) -> String {
-    format!("{error:?}")
-        .split(['{', '(', ' '])
-        .next()
-        .unwrap_or("Unknown")
-        .to_owned()
+/// Implementations match native enum variants explicitly. Do not derive this
+/// value from `Debug`: changing a diagnostic payload or formatter must not
+/// silently change the Python error contract.
+pub(crate) trait NativeErrorKind {
+    fn native_kind(&self) -> &'static str;
 }
+
+macro_rules! native_error_kinds {
+    ($error:ty { $($pattern:pat => $kind:literal),+ $(,)? }) => {
+        impl NativeErrorKind for $error {
+            fn native_kind(&self) -> &'static str {
+                match self {
+                    $($pattern => $kind,)+
+                }
+            }
+        }
+    };
+}
+
+/// Return a stable native discriminant for an explicitly mapped Rust error.
+///
+/// This helper intentionally accepts only enums implementing
+/// `NativeErrorKind`; there is no `Debug`-string fallback for unmapped errors.
+pub(crate) fn native_variant<E: NativeErrorKind>(error: &E) -> String {
+    error.native_kind().to_owned()
+}
+
+native_error_kinds!(rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError {
+    rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::Backend(_) => "Backend",
+    rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::Configuration(_) => "Configuration",
+    rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::Step(_) => "Step",
+    rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::MaxStepsExceeded { .. } => "MaxStepsExceeded",
+    rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::InvalidMaxSteps => "InvalidMaxSteps",
+    rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::InvalidContinuationBound => "InvalidContinuationBound",
+    rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::ContinuationRequiresPreparedBackend => "ContinuationRequiresPreparedBackend",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::BE::BeError {
+    rustedscithe_core::numerical::BE::BeError::InvalidConfiguration(_) => "InvalidConfiguration",
+    rustedscithe_core::numerical::BE::BeError::Backend(_) => "Backend",
+    rustedscithe_core::numerical::BE::BeError::GeneratedBackend(_) => "GeneratedBackend",
+    rustedscithe_core::numerical::BE::BeError::Newton(_) => "Newton",
+    rustedscithe_core::numerical::BE::BeError::StepUnderflow { .. } => "StepUnderflow",
+    rustedscithe_core::numerical::BE::BeError::StepLimit { .. } => "StepLimit",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::LSODE2::solver::Lsode2Error {
+    rustedscithe_core::numerical::LSODE2::solver::Lsode2Error::UnsupportedBackend(_) => "UnsupportedBackend",
+    rustedscithe_core::numerical::LSODE2::solver::Lsode2Error::InvalidConfig(_) => "InvalidConfig",
+    rustedscithe_core::numerical::LSODE2::solver::Lsode2Error::GeneratedBackend(_) => "GeneratedBackend",
+    rustedscithe_core::numerical::LSODE2::solver::Lsode2Error::NativeStep(_) => "NativeStep",
+});
+
+native_error_kinds!(rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError {
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::MissingParameterValues { .. } => "MissingParameterValues",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::ParameterCountMismatch { .. } => "ParameterCountMismatch",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::ParameterStatePoisoned => "ParameterStatePoisoned",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::InvalidArgumentSchema { .. } => "InvalidArgumentSchema",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::GeneratedBackendFailure { .. } => "GeneratedBackendFailure",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AotArtifactMissing { .. } => "AotArtifactMissing",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AotArtifactNotBuilt { .. } => "AotArtifactNotBuilt",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AotRuntimeUnavailable { .. } => "AotRuntimeUnavailable",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AotLifecycleFailure { .. } => "AotLifecycleFailure",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AotBuildOutputDirMissing => "AotBuildOutputDirMissing",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AtomPreparationFailure { .. } => "AtomPreparationFailure",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AtomDifferentiationFailure { .. } => "AtomDifferentiationFailure",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::InvalidStateShape { .. } => "InvalidStateShape",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::InvalidOutputShape { .. } => "InvalidOutputShape",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::InvalidMatrixShape { .. } => "InvalidMatrixShape",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::InvalidSparsePatternEntry { .. } => "InvalidSparsePatternEntry",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::InvalidJacobianStorage { .. } => "InvalidJacobianStorage",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AtomEvaluationFailure { .. } => "AtomEvaluationFailure",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::InvalidBandedStorage { .. } => "InvalidBandedStorage",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError {
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::InvalidConfiguration(_) => "InvalidConfiguration",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::Callback { .. } => "Callback",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::ShapeMismatch { .. } => "ShapeMismatch",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::NonFinite { .. } => "NonFinite",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::NewtonFailure { .. } => "NewtonFailure",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::SingularJacobian => "SingularJacobian",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::BoundaryToleranceNotMet { .. } => "BoundaryToleranceNotMet",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::MaxNodesExceeded { .. } => "MaxNodesExceeded",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::MeshRefinementLimit { .. } => "MeshRefinementLimit",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::LinearBackend { .. } => "LinearBackend",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::LinearFactorization { .. } => "LinearFactorization",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::LinearSolve { .. } => "LinearSolve",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::UnsupportedRoute(_) => "UnsupportedRoute",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::SymbolicPreparation(_) => "SymbolicPreparation",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::AotPreparation { .. } => "AotPreparation",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::AotHandoff { .. } => "AotHandoff",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::AotRuntime { .. } => "AotRuntime",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::AotCallback { .. } => "AotCallback",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::ContinuationMismatch => "ContinuationMismatch",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::OutputOutOfDomain => "OutputOutOfDomain",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::OutputUnavailable => "OutputUnavailable",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::Nonlinear_systems::error::SolveError {
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::DimensionMismatch { .. } => "DimensionMismatch",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::InvalidConfig(_) => "InvalidConfig",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::InvalidParameterSchema(_) => "InvalidParameterSchema",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::ParameterSchemaMismatch(_) => "ParameterSchemaMismatch",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::InvalidVariableSchema(_) => "InvalidVariableSchema",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::UndeclaredSymbol { .. } => "UndeclaredSymbol",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::NonFiniteParameterValue { .. } => "NonFiniteParameterValue",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::InfeasibleInitialGuess { .. } => "InfeasibleInitialGuess",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::NonFiniteInitialGuess { .. } => "NonFiniteInitialGuess",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::ResidualEvaluation(_) => "ResidualEvaluation",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::JacobianEvaluation(_) => "JacobianEvaluation",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::CompiledAotRuntimeUnavailable(_) => "CompiledAotRuntimeUnavailable",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::CompiledAotArtifactMissing(_) => "CompiledAotArtifactMissing",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::CompiledAotArtifactNotBuilt(_) => "CompiledAotArtifactNotBuilt",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::AotBuildOutputDirMissing => "AotBuildOutputDirMissing",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::AotBuildFailed(_) => "AotBuildFailed",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::LinearSolveFailure(_) => "LinearSolveFailure",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::SingularJacobian => "SingularJacobian",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::NumericalBreakdown(_) => "NumericalBreakdown",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError {
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::InvalidConfiguration { .. } => "InvalidConfiguration",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::InvalidLogLevel(_) => "InvalidLogLevel",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::WrongSolverKind => "WrongSolverKind",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::CallbackFailed { .. } => "CallbackFailed",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::EmptyProblem { .. } => "EmptyProblem",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::InvalidProblemShape { .. } => "InvalidProblemShape",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::DomainViolation => "DomainViolation",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::MaxEvaluationsReached { .. } => "MaxEvaluationsReached",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::MaxIterationsReached { .. } => "MaxIterationsReached",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::DimensionMismatch { .. } => "DimensionMismatch",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::NonFiniteValue { .. } => "NonFiniteValue",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::NumericalBreakdown { .. } => "NumericalBreakdown",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::Problem(_) => "Problem",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError {
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::ModelTargetLengthMismatch { .. } => "ModelTargetLengthMismatch",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::OutputCountOverflow { .. } => "OutputCountOverflow",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::NoParameters => "NoParameters",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::ParameterLengthMismatch { .. } => "ParameterLengthMismatch",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::InsufficientObservations { .. } => "InsufficientObservations",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::EmptyObservations => "EmptyObservations",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::NonFiniteInput { .. } => "NonFiniteInput",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::InvalidOption { .. } => "InvalidOption",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::InvalidFitConfiguration { .. } => "InvalidFitConfiguration",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::ZeroIterationBudget => "ZeroIterationBudget",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::InvalidObservationNorm => "InvalidObservationNorm",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::WeightLengthMismatch { .. } => "WeightLengthMismatch",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::InvalidWeight { .. } => "InvalidWeight",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::AllWeightsZero => "AllWeightsZero",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::SymbolicDataLengthMismatch { .. } => "SymbolicDataLengthMismatch",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::ObjectiveCallback(_) => "ObjectiveCallback",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::SymbolicPreparation(_) => "SymbolicPreparation",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::SymbolicParse { .. } => "SymbolicParse",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::ObjectiveOutputLengthMismatch { .. } => "ObjectiveOutputLengthMismatch",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::NonFiniteObjective { .. } => "NonFiniteObjective",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::AnalyticJacobianCallback(_) => "AnalyticJacobianCallback",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::AnalyticJacobianShapeMismatch { .. } => "AnalyticJacobianShapeMismatch",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::NonFiniteJacobian { .. } => "NonFiniteJacobian",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::MissingModelJacobian => "MissingModelJacobian",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::InfeasibleTrialPoint { .. } => "InfeasibleTrialPoint",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::UnsupportedSymbolicModelDimensions { .. } => "UnsupportedSymbolicModelDimensions",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::SymbolicResidualCountOverflow { .. } => "SymbolicResidualCountOverflow",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::LinearSolveFailure { .. } => "LinearSolveFailure",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::SingularCovariance => "SingularCovariance",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::InvalidCovarianceDiagonal { .. } => "InvalidCovarianceDiagonal",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::NumericalBreakdown { .. } => "NumericalBreakdown",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError {
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::XDataMissing => "XDataMissing",
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::YDataMissing => "YDataMissing",
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::ParameterNamesMissing => "ParameterNamesMissing",
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::InitialParametersMissing => "InitialParametersMissing",
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::BasisFunctionsMissing => "BasisFunctionsMissing",
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::ModelBuild(_) => "ModelBuild",
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::ProblemBuild(_) => "ProblemBuild",
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::SolverFailed { .. } => "SolverFailed",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError {
+    rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::VarPro(_) => "VarPro",
+    rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::SolverConfiguration(_) => "SolverConfiguration",
+    rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::Gavin(_) => "Gavin",
+    rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::UnsupportedOption { .. } => "UnsupportedOption",
+});
+
+native_error_kinds!(rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError {
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::InvalidProblem { .. } => "InvalidProblem",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::InvalidSolverConfiguration { .. } => "InvalidSolverConfiguration",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::PipelinePanicked(_) => "PipelinePanicked",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::InvalidLogLevel { .. } => "InvalidLogLevel",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::LogFileCreationFailed { .. } => "LogFileCreationFailed",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::CompiledAotRequiredButUnavailable { .. } => "CompiledAotRequiredButUnavailable",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AutomaticAotBuildRequested { .. } => "AutomaticAotBuildRequested",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AutomaticAotRebuildRequested { .. } => "AutomaticAotRebuildRequested",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AutomaticAotBuildFailed { .. } => "AutomaticAotBuildFailed",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::CompiledAotRuntimeUnavailable { .. } => "CompiledAotRuntimeUnavailable",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::LinearSolveFailed { .. } => "LinearSolveFailed",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::CallbackShapeMismatch { .. } => "CallbackShapeMismatch",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::CallbackInputLengthMismatch { .. } => "CallbackInputLengthMismatch",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::ParameterCountMismatch { .. } => "ParameterCountMismatch",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::CallbackExecutionFailed { .. } => "CallbackExecutionFailed",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::NonFiniteCallbackValue { .. } => "NonFiniteCallbackValue",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::PreparedRuntimeInvalidated { .. } => "PreparedRuntimeInvalidated",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AtomAotPlanPreparationFailed { .. } => "AtomAotPlanPreparationFailed",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AotLifecycleFailure { .. } => "AotLifecycleFailure",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::Radau::api::RadauErrorKind {
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::Configuration => "Configuration",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::Unsupported => "Unsupported",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::Aot => "Aot",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::Workspace => "Workspace",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::StepBudget => "StepBudget",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::Callback => "Callback",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::NonFiniteCallback => "NonFiniteCallback",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::Shape => "Shape",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::Newton => "Newton",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::StepUnderflow => "StepUnderflow",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::StepControl => "StepControl",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::LinearSolve => "LinearSolve",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::Output => "Output",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError {
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::LoggingSetup(_) => "LoggingSetup",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::MissingProblemField { .. } => "MissingProblemField",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::InvalidProblemDimension { .. } => "InvalidProblemDimension",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::InvalidConfiguration { .. } => "InvalidConfiguration",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::InvalidInterval { .. } => "InvalidInterval",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::InvalidTrajectoryShape { .. } => "InvalidTrajectoryShape",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::MissingIvpResult => "MissingIvpResult",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::NonFiniteValue { .. } => "NonFiniteValue",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::IvpFailure(_) => "IvpFailure",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::SymbolicPreparation(_) => "SymbolicPreparation",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::SymbolicEvaluation(_) => "SymbolicEvaluation",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::SecantBreakdown => "SecantBreakdown",
+    rustedscithe_core::numerical::ShootingBVP::Shooting_simple::ShootingBvpError::IterationExhaustion { .. } => "IterationExhaustion",
+});
 
 /// Guard a public Python/native operation and attach its authoritative context.
 ///
@@ -146,14 +379,18 @@ impl SolverPanicState {
         F: FnOnce() -> PyResult<T>,
     {
         if self.0.load(Ordering::Acquire) {
-            return Err(annotate(
+            let error = annotate(
                 PoisonedSolverError::new_err(format!(
                     "{solver} solver is unusable after a native panic; construct a new solver"
                 )),
                 stage,
                 solver,
                 route,
-            ));
+            );
+            Python::attach(|py| {
+                let _ = error.value(py).setattr("solver_state", "discard");
+            });
+            return Err(error);
         }
 
         let result = catch_panic(stage, solver, route, operation);
@@ -529,6 +766,89 @@ mod tests {
                     .extract::<String>()
                     .unwrap(),
                 "BackendSetup"
+            );
+        });
+    }
+
+    #[test]
+    fn native_kind_uses_explicit_enum_discriminants() {
+        use rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError;
+        use rustedscithe_core::numerical::BE::BeError;
+        use rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError;
+        use rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError;
+        use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
+
+        assert_eq!(
+            native_variant(&BdfSolveError::InvalidMaxSteps),
+            "InvalidMaxSteps"
+        );
+        assert_eq!(
+            native_variant(&BeError::StepLimit { max_steps: 10 }),
+            "StepLimit"
+        );
+        assert_eq!(
+            native_variant(&BvpSciNewError::SingularJacobian),
+            "SingularJacobian"
+        );
+        let varpro_failure = SymbolicVarProError::SolverFailed {
+            termination: "MaxIterationsReached { limit: 1 }".to_owned(),
+            exhausted: true,
+            source: None,
+        };
+        assert_eq!(native_variant(&varpro_failure), "SolverFailed");
+        assert_eq!(
+            native_variant(&UniversalFittingError::VarPro(varpro_failure)),
+            "VarPro"
+        );
+    }
+
+    #[test]
+    fn native_kind_preserves_python_exception_context() {
+        Python::initialize();
+        let native_kind = native_variant(
+            &rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::InvalidMaxSteps,
+        );
+        let error = annotate_native(
+            SolverError::new_err("step failed"),
+            "solve",
+            "bdf",
+            "lambdify",
+            &native_kind,
+        );
+        Python::attach(|py| {
+            let value = error.value(py);
+            assert!(value.is_instance_of::<SolverError>());
+            assert_eq!(
+                value
+                    .getattr("category")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "solver"
+            );
+            assert_eq!(
+                value.getattr("stage").unwrap().extract::<String>().unwrap(),
+                "solve"
+            );
+            assert_eq!(
+                value
+                    .getattr("solver")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "bdf"
+            );
+            assert_eq!(
+                value.getattr("route").unwrap().extract::<String>().unwrap(),
+                "lambdify"
+            );
+            assert_eq!(
+                value
+                    .getattr("native_kind")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "InvalidMaxSteps"
             );
         });
     }

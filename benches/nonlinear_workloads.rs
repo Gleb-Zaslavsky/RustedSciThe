@@ -360,7 +360,7 @@ fn solve_options() -> SolveOptions {
         max_iterations: 30,
         diagnostics: DiagnosticsOptions {
             collect_history: false,
-            collect_statistics: true,
+            telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Detailed,
             ..DiagnosticsOptions::default()
         },
         ..SolveOptions::default()
@@ -575,7 +575,7 @@ fn main() {
     let mut report = String::new();
     writeln!(
         report,
-        "# Nonlinear systems workload dashboard\n\n- dimensions: {:?}\n- routes: {:?}\n- policies: {:?}\n- methods: {:?}\n- continuation_count: {}\n- timing note: preparation stages are exclusive where available; solve durations include numerical solver overhead; continuation row is the aggregate of the remaining parameter binds\n",
+        "# Nonlinear systems workload dashboard\n\n- dimensions: {:?}\n- routes: {:?}\n- policies: {:?}\n- methods: {:?}\n- continuation_count: {}\n- telemetry: `Detailed`; solve and continuation durations include telemetry instrumentation and are diagnostic, not uninstrumented speed baselines\n- timing note: preparation stages are exclusive where available; solve durations include numerical solver overhead; continuation row is the aggregate of the remaining parameter binds\n",
         dimensions,
         routes.iter().map(|route| route.label()).collect::<Vec<_>>(),
         policies.iter().map(|policy| policy.label()).collect::<Vec<_>>(),

@@ -116,7 +116,7 @@ fn median_u64(values: impl IntoIterator<Item = u64>) -> String {
 }
 
 fn build_and_solve(route: Route, nodes: usize) -> Result<Sample, String> {
-    let telemetry = BvpSciTelemetry::timings();
+    let telemetry = BvpSciTelemetry::detailed();
     let equations = [Expr::parse_expression("z"), Expr::parse_expression("0")];
     let state_names = ["y".to_owned(), "z".to_owned()];
 
@@ -151,7 +151,7 @@ fn build_and_solve(route: Route, nodes: usize) -> Result<Sample, String> {
         .with_matrix_layout(BvpSciMatrixLayout::Sparse)
         .with_tolerance(1e-8)
         .with_limits(nodes.saturating_mul(2), 12, 0)
-        .with_telemetry(BvpSciTelemetryMode::Timings);
+        .with_telemetry(BvpSciTelemetryMode::Detailed);
 
     let setup_started = Instant::now();
     let mut solver = BvpSciSolver::new_with_sparse_factorization(
@@ -313,6 +313,7 @@ fn main() {
         "# BVP_sci SuperLU versus StandardFaer full-solve A/B\n\n\
          - Workload: linear two-state BVP (`y'=z`, `z'=0`) with identical mesh and initial state.\n\
          - Only the sparse factorization policy changes; symbolic frontend is ExprLegacy for both.\n\
+         - telemetry: `Detailed` collects counters, timings and detailed traces; solve durations include instrumentation and are diagnostic, not an uninstrumented speed baseline.\n\
          - `prepare`, runtime construction and `solve` are timed separately. Full-solve telemetry is inclusive and not additive with child stages.\n\
          - Each row is the median of {repeats} independent fresh solver instances; execution order alternates.\n\
          - Paired solution max-difference threshold: 1e-8.\n\

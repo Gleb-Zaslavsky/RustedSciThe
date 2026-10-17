@@ -21,7 +21,7 @@ use rustedscithe_core::numerical::Nonlinear_systems::prelude::{
     Bounds, DampedNewtonMethod, DampedNewtonMethodAdvanced, LevenbergMarquardtMethod,
     LevenbergMarquardtMinpack, NielsenLevenbergMarquardtMethod,
     NielsenLevenbergMarquardtMethodAdvanced, NonlinearSolverMethod, PowellDoglegMethod,
-    TrustRegionLMMethod, TrustRegionMethod,
+    ReductionRatio, ScalingMethod, TrustRegionLMMethod, TrustRegionMethod,
 };
 use rustedscithe_core::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, PreparationTelemetryMode, PreparedSymbolicNonlinearProblem,
@@ -68,7 +68,7 @@ fn map_solve_error(error: SolveError) -> PyErr {
     )
 }
 
-fn map_least_squares_error(error: LeastSquaresError) -> PyErr {
+pub(crate) fn map_least_squares_error(error: LeastSquaresError) -> PyErr {
     let native_kind = native_variant(&error);
     annotate_native(
         match error {
@@ -131,11 +131,50 @@ fn parse_execution_policy(value: &str, min_work: usize) -> PyResult<LambdifyExec
     }
 }
 
-fn parse_preparation_telemetry(value: &str) -> PreparationTelemetryMode {
+fn parse_preparation_telemetry(value: &str) -> PyResult<PreparationTelemetryMode> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "detailed" | "timings" | "on" => PreparationTelemetryMode::Collect,
-        _ => PreparationTelemetryMode::Disabled,
+        "off" | "none" => Ok(PreparationTelemetryMode::Disabled),
+        "counters" | "detailed" | "timings" | "on" => Ok(PreparationTelemetryMode::Collect),
+        other => Err(InvalidConfigurationError::new_err(format!(
+            "unsupported nonlinear telemetry '{other}'; expected off, counters or detailed"
+        ))),
     }
+}
+
+fn parse_bounds(
+    bounds: Option<HashMap<String, (Option<f64>, Option<f64>)>>,
+    variables: &[String],
+) -> PyResult<Option<Bounds>> {
+    let Some(bounds) = bounds else {
+        return Ok(None);
+    };
+    if bounds.is_empty() {
+        return Err(InvalidConfigurationError::new_err(
+            "bounds mapping must contain at least one variable",
+        ));
+    }
+    for name in bounds.keys() {
+        if !variables.iter().any(|variable| variable == name) {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "bounds reference unknown variable '{name}'"
+            )));
+        }
+    }
+    let limits = variables
+        .iter()
+        .map(|name| {
+            let (lower, upper) = bounds.get(name).copied().unwrap_or((None, None));
+            let lower = lower.unwrap_or(f64::NEG_INFINITY);
+            let upper = upper.unwrap_or(f64::INFINITY);
+            if lower.is_nan() || upper.is_nan() || lower > upper {
+                return Err(InvalidConfigurationError::new_err(format!(
+                    "invalid bounds for '{name}': lower must not exceed upper and neither may be NaN"
+                )));
+            }
+            Ok((lower, upper))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Bounds::new(limits).map(Some).map_err(map_solve_error)
 }
 
 fn parse_log_level(value: &str) -> PyResult<Option<EngineLogLevel>> {
@@ -169,6 +208,39 @@ fn normalized_method_options(
         boolean.insert(normalize(key), value);
     }
     Ok((numeric, boolean))
+}
+
+fn normalized_method_vectors(
+    values: Option<HashMap<String, Vec<f64>>>,
+) -> PyResult<HashMap<String, Vec<f64>>> {
+    let mut normalized = HashMap::new();
+    for (key, vector) in values.unwrap_or_default() {
+        let key = key.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        if vector.is_empty()
+            || vector
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "method vector '{key}' must be non-empty, finite and strictly positive"
+            )));
+        }
+        normalized.insert(key, vector);
+    }
+    Ok(normalized)
+}
+
+fn normalized_method_choices(values: Option<HashMap<String, String>>) -> HashMap<String, String> {
+    values
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, value)| {
+            (
+                key.trim().to_ascii_lowercase().replace(['-', ' '], "_"),
+                value.trim().to_ascii_lowercase().replace(['-', ' '], "_"),
+            )
+        })
+        .collect()
 }
 
 fn take_numeric(options: &mut HashMap<String, f64>, key: &str, default: f64) -> PyResult<f64> {
@@ -233,8 +305,16 @@ fn reject_remaining_method_options(
     method: &str,
     options: HashMap<String, f64>,
     flags: HashMap<String, bool>,
+    vectors: HashMap<String, Vec<f64>>,
+    choices: HashMap<String, String>,
 ) -> PyResult<()> {
-    if let Some(key) = options.keys().next().or_else(|| flags.keys().next()) {
+    if let Some(key) = options
+        .keys()
+        .next()
+        .or_else(|| flags.keys().next())
+        .or_else(|| vectors.keys().next())
+        .or_else(|| choices.keys().next())
+    {
         return Err(UnsupportedOptionError::new_err(format!(
             "method '{method}' does not support option '{key}'"
         )));
@@ -242,17 +322,48 @@ fn reject_remaining_method_options(
     Ok(())
 }
 
+fn parse_scaling_method(value: Option<&str>, default: ScalingMethod) -> PyResult<ScalingMethod> {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        None => Ok(default),
+        Some(value) => match value.as_str() {
+            "levenberg" => Ok(ScalingMethod::Levenberg),
+            "marquardt" => Ok(ScalingMethod::Marquardt),
+            "more" => Ok(ScalingMethod::More),
+            _ => Err(InvalidConfigurationError::new_err(format!(
+                "unsupported scaling_method '{value}'; expected levenberg, marquardt or more"
+            ))),
+        },
+    }
+}
+
+fn parse_reduction_ratio(value: Option<&str>, default: ReductionRatio) -> PyResult<ReductionRatio> {
+    match value.map(|value| value.trim().to_ascii_lowercase()) {
+        None => Ok(default),
+        Some(value) => match value.as_str() {
+            "nielsen" => Ok(ReductionRatio::Nielsen),
+            "more" => Ok(ReductionRatio::More),
+            _ => Err(InvalidConfigurationError::new_err(format!(
+                "unsupported reduction_ratio_method '{value}'; expected nielsen or more"
+            ))),
+        },
+    }
+}
+
 fn method_from_name(
     value: &str,
     numeric_options: &HashMap<String, f64>,
     flag_options: &HashMap<String, bool>,
+    vector_options: &HashMap<String, Vec<f64>>,
+    choice_options: &HashMap<String, String>,
 ) -> PyResult<NonlinearSolverMethod> {
     let method_name = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
     let mut options = numeric_options.clone();
     let mut flags = flag_options.clone();
+    let mut vectors = vector_options.clone();
+    let mut choices = choice_options.clone();
     match method_name.as_str() {
         "newton" => {
-            reject_remaining_method_options(&method_name, options, flags)?;
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::Newton(
                 rustedscithe_core::numerical::Nonlinear_systems::prelude::NewtonMethod,
             ))
@@ -279,7 +390,7 @@ fn method_from_name(
                     defaults.shrink_factor,
                 )?,
             };
-            reject_remaining_method_options(&method_name, options, flags)?;
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::DampedNewton(method))
         }
         "damped_newton_advanced" => {
@@ -304,7 +415,7 @@ fn method_from_name(
                     defaults.shrink_factor,
                 )?,
             };
-            reject_remaining_method_options(&method_name, options, flags)?;
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::DampedNewtonAdvanced(method))
         }
         "levenberg_marquardt" | "lm" => {
@@ -342,7 +453,7 @@ fn method_from_name(
                     defaults.max_lambda,
                 )?,
             };
-            reject_remaining_method_options(&method_name, options, flags)?;
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::LevenbergMarquardt(method))
         }
         "backtracking_levenberg_marquardt" | "backtracking_lm" => {
@@ -354,7 +465,7 @@ fn method_from_name(
                 alpha_min: take_positive_numeric(&mut options, &method_name, "alpha_min", defaults.alpha_min)?,
                 max_lambda: take_positive_numeric(&mut options, &method_name, "max_lambda", defaults.max_lambda)?,
             };
-            reject_remaining_method_options(&method_name, options, flags)?;
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::BacktrackingLevenbergMarquardt(
                 method,
             ))
@@ -388,7 +499,7 @@ fn method_from_name(
                     defaults.expand_factor,
                 )?,
             };
-            reject_remaining_method_options(&method_name, options, flags)?;
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::TrustRegion(method))
         }
         "powell_dogleg" | "dogleg" => {
@@ -430,7 +541,7 @@ fn method_from_name(
                     defaults.use_column_scaling,
                 ),
             };
-            reject_remaining_method_options(&method_name, options, flags)?;
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::PowellDogleg(method))
         }
         "trust_region_lm" => {
@@ -450,7 +561,7 @@ fn method_from_name(
                     defaults.acceptance_threshold,
                 )?,
             };
-            reject_remaining_method_options(&method_name, options, flags)?;
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::TrustRegionLM(method))
         }
         "levenberg_marquardt_minpack" | "lm_minpack" => {
@@ -460,17 +571,35 @@ fn method_from_name(
                 xtol: take_positive_numeric(&mut options, &method_name, "xtol", defaults.xtol)?,
                 gtol: take_positive_numeric(&mut options, &method_name, "gtol", defaults.gtol)?,
                 maxfev: take_usize(&mut options, &method_name, "maxfev", defaults.maxfev)?,
-                mode: take_usize(&mut options, &method_name, "mode", defaults.mode as usize)?
-                    as i32,
+                mode: {
+                    let mode =
+                        take_usize(&mut options, &method_name, "mode", defaults.mode as usize)?;
+                    if mode != 1 && mode != 2 {
+                        return Err(InvalidConfigurationError::new_err(
+                            "MINPACK mode must be 1 (automatic scaling) or 2 (user diag)",
+                        ));
+                    }
+                    mode as i32
+                },
                 factor: take_positive_numeric(
                     &mut options,
                     &method_name,
                     "factor",
                     defaults.factor,
                 )?,
-                diag: defaults.diag,
+                diag: vectors.remove("diag").map(nalgebra::DVector::from_vec),
             };
-            reject_remaining_method_options(&method_name, options, flags)?;
+            if method.mode == 2 && method.diag.is_none() {
+                return Err(InvalidConfigurationError::new_err(
+                    "MINPACK mode=2 requires method_vectors['diag']",
+                ));
+            }
+            if method.mode == 1 && method.diag.is_some() {
+                return Err(UnsupportedOptionError::new_err(
+                    "MINPACK method_vectors['diag'] requires mode=2",
+                ));
+            }
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::LevenbergMarquardtMinpack(method))
         }
         "nielsen_levenberg_marquardt" | "nielsen_lm" => {
@@ -518,7 +647,7 @@ fn method_from_name(
                     defaults.max_rejections,
                 )?,
             };
-            reject_remaining_method_options(&method_name, options, flags)?;
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::NielsenLevenbergMarquardt(method))
         }
         "nielsen_levenberg_marquardt_advanced" | "nielsen_lm_advanced" => {
@@ -554,8 +683,14 @@ fn method_from_name(
                     "g_tolerance",
                     defaults.g_tolerance,
                 )?,
-                scaling_method: defaults.scaling_method,
-                reduction_ratio_method: defaults.reduction_ratio_method,
+                scaling_method: parse_scaling_method(
+                    choices.remove("scaling_method").as_deref(),
+                    defaults.scaling_method,
+                )?,
+                reduction_ratio_method: parse_reduction_ratio(
+                    choices.remove("reduction_ratio_method").as_deref(),
+                    defaults.reduction_ratio_method,
+                )?,
                 max_rejections: take_usize(
                     &mut options,
                     &method_name,
@@ -563,7 +698,7 @@ fn method_from_name(
                     defaults.max_rejections,
                 )?,
             };
-            reject_remaining_method_options(&method_name, options, flags)?;
+            reject_remaining_method_options(&method_name, options, flags, vectors, choices)?;
             Ok(NonlinearSolverMethod::NielsenLevenbergMarquardtAdvanced(
                 method,
             ))
@@ -574,7 +709,7 @@ fn method_from_name(
     }
 }
 
-fn statistics_counters(statistics: &SolveStatistics) -> HashMap<String, u64> {
+pub(crate) fn statistics_counters(statistics: &SolveStatistics) -> HashMap<String, u64> {
     HashMap::from([
         ("iterations".into(), statistics.iterations as u64),
         (
@@ -599,7 +734,7 @@ fn statistics_counters(statistics: &SolveStatistics) -> HashMap<String, u64> {
     ])
 }
 
-fn statistics_timings(statistics: &SolveStatistics) -> HashMap<String, f64> {
+pub(crate) fn statistics_timings(statistics: &SolveStatistics) -> HashMap<String, f64> {
     let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1e3;
     HashMap::from([
         ("total_ms".into(), ms(statistics.total_duration)),
@@ -706,6 +841,8 @@ pub struct NonlinearSolver {
     method: String,
     method_options: HashMap<String, f64>,
     method_flags: HashMap<String, bool>,
+    method_vectors: HashMap<String, Vec<f64>>,
+    method_choices: HashMap<String, String>,
     tolerance: f64,
     max_iterations: usize,
     parameters: Option<Vec<f64>>,
@@ -725,7 +862,7 @@ impl NonlinearSolver {
     /// preparation diagnostics (`off`, `counters`, or detailed timings where
     /// supported), while `loglevel="off"` keeps solver logging disabled.
     #[new]
-    #[pyo3(signature=(system, *, method="newton", frontend="expr_legacy", execution_policy="sequential", min_work=1, telemetry="off", parameters=None, parameter_values=None, method_options=None, method_flags=None, tolerance=1e-6, max_iterations=100, bounds=None, loglevel="off"))]
+    #[pyo3(signature=(system, *, method="newton", frontend="expr_legacy", execution_policy="sequential", min_work=1, telemetry="off", parameters=None, parameter_values=None, method_options=None, method_flags=None, method_vectors=None, method_choices=None, tolerance=1e-6, max_iterations=100, bounds=None, loglevel="off"))]
     pub fn new(
         system: SymbolicSystem,
         method: &str,
@@ -737,9 +874,11 @@ impl NonlinearSolver {
         parameter_values: Option<Vec<f64>>,
         method_options: Option<HashMap<String, f64>>,
         method_flags: Option<HashMap<String, bool>>,
+        method_vectors: Option<HashMap<String, Vec<f64>>>,
+        method_choices: Option<HashMap<String, String>>,
         tolerance: f64,
         max_iterations: usize,
-        bounds: Option<Vec<(f64, f64)>>,
+        bounds: Option<HashMap<String, (Option<f64>, Option<f64>)>>,
         loglevel: &str,
     ) -> PyResult<Self> {
         if !tolerance.is_finite() || tolerance <= 0.0 || max_iterations == 0 {
@@ -749,13 +888,21 @@ impl NonlinearSolver {
         }
         let frontend = parse_frontend(frontend)?;
         let execution_policy = parse_execution_policy(execution_policy, min_work)?;
-        let preparation_telemetry = parse_preparation_telemetry(telemetry);
+        let preparation_telemetry = parse_preparation_telemetry(telemetry)?;
         let (method_options, method_flags) =
             normalized_method_options(method_options, method_flags)?;
+        let method_vectors = normalized_method_vectors(method_vectors)?;
+        let method_choices = normalized_method_choices(method_choices);
         // Validate the method name and its option schema at construction time;
         // numerical execution must not be the first place an option typo is
         // discovered.
-        let _ = method_from_name(method, &method_options, &method_flags)?;
+        let _ = method_from_name(
+            method,
+            &method_options,
+            &method_flags,
+            &method_vectors,
+            &method_choices,
+        )?;
         let parameter_values = match (parameters.as_ref(), parameter_values) {
             (Some(names), Some(values)) => {
                 if names.len() != values.len() || values.iter().any(|v| !v.is_finite()) {
@@ -773,17 +920,44 @@ impl NonlinearSolver {
             }
             (None, None) => None,
         };
-        let variables = system.variables();
+        let mut variables = system.variables();
+        if let Some(parameter_names) = parameters.as_ref() {
+            let mut unique = std::collections::HashSet::with_capacity(parameter_names.len());
+            for name in parameter_names {
+                if !unique.insert(name.as_str()) {
+                    return Err(InvalidConfigurationError::new_err(format!(
+                        "equation parameter '{name}' is declared more than once"
+                    )));
+                }
+                if !variables.iter().any(|variable| variable == name) {
+                    return Err(InvalidConfigurationError::new_err(format!(
+                        "equation parameter '{name}' is absent from the symbolic system"
+                    )));
+                }
+            }
+            variables.retain(|variable| !unique.contains(variable.as_str()));
+            if variables.is_empty() {
+                return Err(InvalidConfigurationError::new_err(
+                    "a nonlinear system must retain at least one unknown after parameter binding",
+                ));
+            }
+        }
         let equations = system
             .expressions()
             .into_iter()
             .map(|expr| expr.inner)
             .collect();
         let parameter_names = parameters;
-        let bounds = bounds
-            .map(Bounds::new)
-            .transpose()
-            .map_err(map_solve_error)?;
+        if let Some(diag) = method_vectors.get("diag") {
+            if diag.len() != variables.len() {
+                return Err(InvalidConfigurationError::new_err(format!(
+                    "MINPACK diag length {} does not match {} nonlinear unknowns",
+                    diag.len(),
+                    variables.len()
+                )));
+            }
+        }
+        let bounds = parse_bounds(bounds, &variables)?;
         Ok(Self {
             equations,
             variables,
@@ -795,6 +969,8 @@ impl NonlinearSolver {
             method: method.trim().to_owned(),
             method_options,
             method_flags,
+            method_vectors,
+            method_choices,
             tolerance,
             max_iterations,
             parameters: parameter_values,
@@ -902,7 +1078,13 @@ impl NonlinearSolver {
             None => prepared.bind_without_parameters(),
         }
         .map_err(map_solve_error)?;
-        let method = method_from_name(&self.method, &self.method_options, &self.method_flags)?;
+        let method = method_from_name(
+            &self.method,
+            &self.method_options,
+            &self.method_flags,
+            &self.method_vectors,
+            &self.method_choices,
+        )?;
         let mut options = SolveOptions {
             tolerance: self.tolerance,
             max_iterations: self.max_iterations,
@@ -911,7 +1093,11 @@ impl NonlinearSolver {
         };
         options.diagnostics = DiagnosticsOptions {
             collect_history: self.telemetry,
-            collect_statistics: self.telemetry,
+            telemetry_mode: if self.telemetry {
+                rustedscithe_core::numerical::SolverTelemetryMode::Detailed
+            } else {
+                rustedscithe_core::numerical::SolverTelemetryMode::Off
+            },
             enable_logging: self.logging.is_some(),
             log_level: self.logging.unwrap_or(EngineLogLevel::Info),
             enable_memory_diagnostics: false,

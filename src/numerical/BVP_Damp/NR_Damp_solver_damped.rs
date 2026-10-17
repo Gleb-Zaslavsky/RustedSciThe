@@ -42,8 +42,6 @@
 //! - TWOPNT Fortran solver ("The Twopnt Program for Boundary Value Problems" by J. F. Grcar)
 //! - Chemkin Theory Manual p.261
 use crate::symbolic::symbolic_engine::Expr;
-use chrono::Local;
-
 use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
 use crate::Utils::plots::{plots, plots_gnulot, plots_terminal};
 use crate::Utils::postprocessing::{
@@ -79,6 +77,7 @@ use crate::numerical::BVP_Damp::prepared_runtime::{
 use crate::numerical::BVP_Damp::telemetry::{
     BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode, BvpTelemetryRecorder, BvpTelemetrySnapshot,
 };
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use crate::somelinalg::banded::LinearSolverConfig;
 use crate::symbolic::bvp::aot_telemetry::BvpAotTelemetry;
 use crate::symbolic::bvp::telemetry::{
@@ -95,10 +94,7 @@ use crate::symbolic::symbolic_functions_BVP::{
 };
 use core::panic;
 use nalgebra::{DMatrix, DVector};
-use simplelog::LevelFilter;
-use simplelog::*;
 use std::collections::HashMap;
-use std::fs::File;
 use std::sync::Arc;
 use std::time::Instant;
 use tabled::{builder::Builder, settings::Style};

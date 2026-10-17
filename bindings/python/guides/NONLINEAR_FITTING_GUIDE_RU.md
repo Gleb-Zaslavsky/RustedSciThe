@@ -26,6 +26,17 @@ API предоставляет Newton, damped Newton, семейство LM и t
 игнорируются. ExprLegacy/AtomNative выбирают символьную подготовку. AOT не
 заявляется, пока capability metadata не сообщает конкретный compiled-маршрут.
 
+`NonlinearSolver` охватывает все 11 native-методов, оба фронтенда ExprLegacy и
+AtomNative, sequential/parallel/thresholded-auto execution, явный повторно
+безопасный `prepare()`, parameter rebind, логгирование и opt-in counters либо
+detailed timings. Числовые и boolean-настройки передаются через
+`method_options` и `method_flags`. `method_vectors={"diag": [...]}` доступен
+только MINPACK и требует `mode=2`; `method_choices` задаёт advanced Nielsen
+`scaling_method` (`levenberg`, `marquardt`, `more`) и `reduction_ratio_method`
+(`nielsen`, `more`). Именованные частичные box bounds допускают `None` на любой
+границе. Отдельная positive-domain политика, AOT и Python callbacks для этого
+square-system API не поддерживаются и не подменяются скрыто другими режимами.
+
 ## Least-squares fitting
 
 `FittingSolver` минимизирует вектор символьных residual equations. Схема
@@ -38,9 +49,8 @@ from rustedscithe import Expr, FittingSolver
 
 p = Expr.variable("p")
 fit = FittingSolver([p - Expr.constant(3.0)], [0.0], variables=["p"])
-fit.prepare()
 result = fit.solve()
-print(result.solution_array(), result.termination_reason)
+print(result.solution_array(), result.termination)
 ```
 
 ## Gavin и VarPro
@@ -49,9 +59,43 @@ print(result.solution_array(), result.termination_reason)
 выборки, неизвестные параметры и начальное приближение. Это отдельный
 one-shot контракт, не prepared API `FittingSolver`. Положительные ограничения
 параметров выбирает пользователь; они не выводятся автоматически из
-химической модели. `VarProSolver` также имеет собственный one-shot lifecycle
+химической модели. Телеметрия численного solve у Gavin бинарная и по умолчанию
+выключена: передайте `telemetry=True`, чтобы собрать полный native snapshot
+(дискретные счётчики и времена стадий вместе), либо оставьте `False`, чтобы
+не платить за эту инструментализацию. Это отдельно от `preparation_telemetry`,
+измеряющей символьную подготовку. `VarProSolver` также имеет собственный one-shot lifecycle
 и статистики. Не предполагайте у них continuation/rebind семантику canonical
 fitting солвера.
+
+`VarProSolver` предоставляет настройки native LM: tolerances, лимиты итераций
+и вычислений функции, step bound, diagonal scaling и telemetry через
+`with_tolerances`, `with_max_iterations`, `with_max_function_evaluations`,
+`with_step_bound`, `with_scale_diag`, `with_telemetry`. Это ExprLegacy-only,
+последовательный one-shot маршрут без логирования и отдельной стадии подготовки.
+
+`UniversalFitting` — отдельный facade над native Rust method selector, а не
+псевдоним одного из standalone-солверов. Выберите `"lm"`, `"gavin"` или
+`"varpro"`, затем задайте общие данные/неизвестные и equations либо basis
+функции. `build()` потребляет builder и возвращает общий результат с `method`,
+`solution_map()` и `r_squared`; для route-specific telemetry/covariance следует
+использовать standalone-класс. Неподдерживаемые сочетания отклоняются явно:
+VarPro не поддерживает AtomNative и parallel, Gavin не поддерживает
+`f_tolerance` и `scale_diag`. Общий многоуровневый `with_telemetry("counters"|"detailed")`
+предназначен для LM и VarPro; для полного snapshot Gavin используйте
+`with_gavin_telemetry(True)`.
+
+```python
+from rustedscithe import UniversalFitting
+
+fit = UniversalFitting("lm")
+fit.with_data([0.0, 1.0, 2.0], [1.0, 3.0, 5.0])
+fit.with_arg("x")
+fit.with_equation_str("a*x+b")
+fit.with_unknowns(["a", "b"])
+fit.with_initial_guess([0.0, 0.0])
+solution = fit.build()
+print(solution.method, solution.solution_map())
+```
 
 ## Frontend-ы, логирование и результаты
 

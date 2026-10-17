@@ -11,6 +11,7 @@ mod be;
 mod bvp;
 mod bvp_damp;
 mod contract;
+mod data_processing;
 mod errors;
 mod expr;
 mod gavin;
@@ -18,13 +19,16 @@ mod lambdify;
 mod lsode2;
 mod nonlinear;
 mod numpy_support;
+mod ode_api2;
 #[cfg(test)]
 mod parity;
 mod radau;
+mod shooting_bvp;
 mod symbolic_arrays;
 mod system;
 mod task;
 mod telemetry;
+mod universal_fitting;
 mod varpro;
 
 use pyo3::PyTypeInfo;
@@ -33,7 +37,7 @@ use pyo3::prelude::*;
 use crate::bdf::{BdfCallbackSolver, BdfSolution, BdfSolver};
 use crate::be::{BackwardEulerSolution, BackwardEulerSolver};
 use crate::bvp::{BvpSciSolution, BvpSciSolver};
-use crate::bvp_damp::{BvpDampSolution, BvpDampSolver};
+use crate::bvp_damp::{BvpDampFrozenSolver, BvpDampNaiveSolver, BvpDampSolution, BvpDampSolver};
 use crate::contract::{
     ExecutionPolicy, ExecutionRoute, MatrixLayout, SolverCapabilities, SolverOptions,
     SymbolicFrontend, TelemetryMode, capabilities,
@@ -49,10 +53,13 @@ use crate::gavin::{GavinFittingSolution, GavinFittingSolver};
 use crate::lambdify::LambdifiedExpr;
 use crate::lsode2::{Lsode2PythonSolver, Lsode2Solution};
 use crate::nonlinear::{FittingSolution, FittingSolver, NonlinearSolution, NonlinearSolver};
+use crate::ode_api2::{UniversalNonStiffSolution, UniversalNonStiffSolver};
 use crate::radau::{RadauCallbackSolver, RadauSolution, RadauSolver};
+use crate::shooting_bvp::{PyShootingBvpSolution, PyShootingBvpSolver};
 use crate::symbolic_arrays::{PyExprMatrix, PyExprVector};
 use crate::system::{LambdifiedSystem, SymbolicSystem};
 use crate::task::{BvpTaskResult, IvpTaskResult, TaskDocument};
+use crate::universal_fitting::{PyUniversalFitting, PyUniversalFittingSolution};
 use crate::varpro::{VarProSolution, VarProSolver};
 
 /// Initialize the optional Python extension module.
@@ -73,13 +80,19 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<BvpSciSolver>()?;
     module.add_class::<BvpSciSolution>()?;
     module.add_class::<BvpDampSolver>()?;
+    module.add_class::<BvpDampNaiveSolver>()?;
+    module.add_class::<BvpDampFrozenSolver>()?;
     module.add_class::<BvpDampSolution>()?;
     module.add_class::<RadauSolver>()?;
     module.add_class::<RadauCallbackSolver>()?;
     module.add_class::<RadauSolution>()?;
+    module.add_class::<PyShootingBvpSolver>()?;
+    module.add_class::<PyShootingBvpSolution>()?;
     module.add_class::<LambdifiedExpr>()?;
     module.add_class::<Lsode2PythonSolver>()?;
     module.add_class::<Lsode2Solution>()?;
+    module.add_class::<UniversalNonStiffSolver>()?;
+    module.add_class::<UniversalNonStiffSolution>()?;
     module.add_class::<SymbolicSystem>()?;
     module.add_class::<LambdifiedSystem>()?;
     module.add_class::<NonlinearSolver>()?;
@@ -90,6 +103,8 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<GavinFittingSolution>()?;
     module.add_class::<VarProSolver>()?;
     module.add_class::<VarProSolution>()?;
+    module.add_class::<PyUniversalFitting>()?;
+    module.add_class::<PyUniversalFittingSolution>()?;
     module.add_class::<SymbolicFrontend>()?;
     module.add_class::<ExecutionRoute>()?;
     module.add_class::<MatrixLayout>()?;
@@ -108,7 +123,9 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(symbols, module)?)?;
     module.add_function(wrap_pyfunction!(indexed_symbols, module)?)?;
     module.add_function(wrap_pyfunction!(constant, module)?)?;
+    crate::data_processing::register(module)?;
     module.add_function(wrap_pyfunction!(capabilities, module)?)?;
+    module.add_function(wrap_pyfunction!(superlu_feature_enabled, module)?)?;
     module.add_function(wrap_pyfunction!(
         crate::animation::animate_trajectory_2d,
         module
@@ -150,6 +167,12 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("PanicError", PanicError::type_object(py))?;
     module.add("PoisonedSolverError", PoisonedSolverError::type_object(py))?;
     Ok(())
+}
+
+/// Report whether this extension was compiled with the optional SuperLU bridge.
+#[pyfunction]
+fn superlu_feature_enabled() -> bool {
+    cfg!(feature = "superlu")
 }
 
 #[cfg(test)]
@@ -209,6 +232,16 @@ mod tests {
         defaults.validate_for("radau5").unwrap();
         assert_eq!(defaults.frontend(), "expr_legacy");
         assert_eq!(defaults.execution(), "lambdify");
+        assert_eq!(defaults.logging_level(), "off");
+        let mut logged =
+            SolverOptions::new(None, None, None, None, None, None, None, None, None).unwrap();
+        logged.set_logging_level("INFO").unwrap();
+        assert_eq!(logged.logging_level(), "info");
+        assert_eq!(
+            crate::contract::native_logging_level(&logged, "bdf").unwrap(),
+            rustedscithe_core::numerical::logging::SolverLogLevel::Info
+        );
+        assert!(logged.validate_for("radau5").is_err());
 
         let native_unwired = SolverOptions::new(
             Some("atom-view"),
@@ -276,5 +309,10 @@ mod tests {
         .unwrap()
         .validate_for("lsode2")
         .unwrap();
+
+        let shooting = capabilities("shooting_bvp").unwrap();
+        assert_eq!(shooting.frontends(), vec!["expr_legacy", "atom_native"]);
+        assert_eq!(shooting.executions(), vec!["lambdify"]);
+        assert_eq!(shooting.layouts(), vec!["dense"]);
     }
 }

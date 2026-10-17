@@ -111,7 +111,9 @@ fn matched_config(t_bound: f64) -> RadauConfig {
         max_steps: 2_000,
         max_newton_iterations: 6,
         max_retries: 24,
-        telemetry: RadauTelemetryMode::Timings,
+        // This story compares counters and the adaptive-step trace; the
+        // trace belongs to timing diagnostics, so request both collections.
+        telemetry: RadauTelemetryMode::Detailed,
         output: RadauOutputPolicy::Sampled(sample_times),
         ..RadauConfig::default()
     }
@@ -246,7 +248,7 @@ fn extended_config(
     config.first_step = first_step;
     config.max_step = max_step;
     config.rtol = rtol;
-    config.telemetry = RadauTelemetryMode::Timings;
+    config.telemetry = RadauTelemetryMode::Detailed;
     config.output = RadauOutputPolicy::Sampled(
         [0.25, 0.5, 0.75]
             .map(|fraction| t0 + fraction * (t_bound - t0))

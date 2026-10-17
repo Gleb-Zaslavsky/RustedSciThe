@@ -6,7 +6,7 @@
 //! a `HashMap` so stage names cannot allocate during callback execution.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -69,15 +69,26 @@ pub enum IvpTelemetryMode {
     Off,
     /// Record counters but do not call `Instant::now`.
     Counters,
-    /// Record counters and elapsed wall-clock durations.
+    /// Record elapsed wall-clock durations without discrete counters.
+    Timings,
+    /// Record both discrete counters and elapsed wall-clock durations.
     Detailed,
 }
 
 impl IvpTelemetryMode {
+    pub const fn collects_counters(self) -> bool {
+        matches!(self, Self::Counters | Self::Detailed)
+    }
+
+    pub const fn collects_timings(self) -> bool {
+        matches!(self, Self::Timings | Self::Detailed)
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Off => "off",
             Self::Counters => "counters",
+            Self::Timings => "timings",
             Self::Detailed => "detailed",
         }
     }
@@ -448,6 +459,11 @@ impl IvpWarmStage {
 /// One typed stage timing entry.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IvpStageTiming {
+    /// Whether this stage was observed in the selected collection mode.
+    /// This is independent from `calls`: timing-only mode intentionally does
+    /// not collect discrete call counters, but must still distinguish a
+    /// measured zero duration from a stage that never ran.
+    pub recorded: bool,
     pub calls: u64,
     pub elapsed: Duration,
 }
@@ -843,8 +859,10 @@ struct IvpTelemetryInner {
     residual_dimension: AtomicU64,
     parameter_count: AtomicU64,
     cold_calls: [AtomicU64; IvpColdStage::COUNT],
+    cold_recorded: [AtomicBool; IvpColdStage::COUNT],
     cold_nanos: [AtomicU64; IvpColdStage::COUNT],
     warm_calls: [AtomicU64; IvpWarmStage::COUNT],
+    warm_recorded: [AtomicBool; IvpWarmStage::COUNT],
     warm_nanos: [AtomicU64; IvpWarmStage::COUNT],
     residual_requests: AtomicU64,
     residual_evaluations: AtomicU64,
@@ -909,8 +927,10 @@ impl Default for IvpTelemetryInner {
             residual_dimension: AtomicU64::new(0),
             parameter_count: AtomicU64::new(0),
             cold_calls: std::array::from_fn(|_| AtomicU64::new(0)),
+            cold_recorded: std::array::from_fn(|_| AtomicBool::new(false)),
             cold_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
             warm_calls: std::array::from_fn(|_| AtomicU64::new(0)),
+            warm_recorded: std::array::from_fn(|_| AtomicBool::new(false)),
             warm_nanos: std::array::from_fn(|_| AtomicU64::new(0)),
             residual_requests: AtomicU64::new(0),
             residual_evaluations: AtomicU64::new(0),
@@ -1028,6 +1048,10 @@ impl IvpTelemetry {
         Self::with_mode(IvpTelemetryMode::Detailed)
     }
 
+    pub fn timings() -> Self {
+        Self::with_mode(IvpTelemetryMode::Timings)
+    }
+
     pub fn with_mode(mode: IvpTelemetryMode) -> Self {
         Self {
             mode,
@@ -1084,8 +1108,7 @@ impl IvpTelemetry {
 
     pub fn set_lambdify_execution_policy(&self, policy: IvpLambdifyExecutionPolicy) {
         if let Some(inner) = &self.inner {
-            let calibrates_parallel =
-                matches!(policy, IvpLambdifyExecutionPolicy::Auto { .. });
+            let calibrates_parallel = matches!(policy, IvpLambdifyExecutionPolicy::Auto { .. });
             // Rayon may lazily initialize the process-global pool on the
             // first worker-count query. Keep that one-time cost inside the
             // policy setup scope; otherwise Auto can look like unexplained
@@ -1151,12 +1174,12 @@ impl IvpTelemetry {
 
     #[inline]
     pub fn start_cold_stage(&self, _stage: IvpColdStage) -> Option<Instant> {
-        (self.mode == IvpTelemetryMode::Detailed).then(Instant::now)
+        self.mode.collects_timings().then(Instant::now)
     }
 
     #[inline]
     pub fn start_warm_stage(&self, _stage: IvpWarmStage) -> Option<Instant> {
-        (self.mode == IvpTelemetryMode::Detailed).then(Instant::now)
+        self.mode.collects_timings().then(Instant::now)
     }
 
     pub fn scoped_warm_stage(&self, stage: IvpWarmStage) -> IvpTelemetryScope {
@@ -1445,10 +1468,12 @@ impl IvpTelemetry {
         };
 
         let cold = std::array::from_fn(|index| IvpStageTiming {
+            recorded: inner.cold_recorded[index].load(Ordering::Relaxed),
             calls: inner.cold_calls[index].load(Ordering::Relaxed),
             elapsed: Duration::from_nanos(inner.cold_nanos[index].load(Ordering::Relaxed)),
         });
         let warm = std::array::from_fn(|index| IvpStageTiming {
+            recorded: inner.warm_recorded[index].load(Ordering::Relaxed),
             calls: inner.warm_calls[index].load(Ordering::Relaxed),
             elapsed: Duration::from_nanos(inner.warm_nanos[index].load(Ordering::Relaxed)),
         });
@@ -1534,12 +1559,22 @@ impl IvpTelemetry {
         let Some(inner) = &self.inner else {
             return;
         };
+        if started.is_some() {
+            let recorded = if cold {
+                &inner.cold_recorded[index]
+            } else {
+                &inner.warm_recorded[index]
+            };
+            recorded.store(true, Ordering::Relaxed);
+        }
         let calls = if cold {
             &inner.cold_calls[index]
         } else {
             &inner.warm_calls[index]
         };
-        calls.fetch_add(1, Ordering::Relaxed);
+        if self.mode.collects_counters() {
+            calls.fetch_add(1, Ordering::Relaxed);
+        }
         if let Some(started) = started {
             let nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
             let elapsed = if cold {
@@ -1555,13 +1590,21 @@ impl IvpTelemetry {
         let Some(inner) = &self.inner else {
             return;
         };
+        let recorded = if cold {
+            &inner.cold_recorded[index]
+        } else {
+            &inner.warm_recorded[index]
+        };
+        recorded.store(true, Ordering::Relaxed);
         let calls = if cold {
             &inner.cold_calls[index]
         } else {
             &inner.warm_calls[index]
         };
-        calls.fetch_add(1, Ordering::Relaxed);
-        if self.mode == IvpTelemetryMode::Detailed {
+        if self.mode.collects_counters() {
+            calls.fetch_add(1, Ordering::Relaxed);
+        }
+        if self.mode.collects_timings() {
             let nanos = elapsed.as_nanos().min(u64::MAX as u128) as u64;
             let target = if cold {
                 &inner.cold_nanos[index]
@@ -1579,8 +1622,10 @@ impl IvpTelemetry {
 
     #[inline]
     fn add_counter(&self, select: impl FnOnce(&IvpTelemetryInner) -> &AtomicU64, value: u64) {
-        if let Some(inner) = &self.inner {
-            select(inner).fetch_add(value, Ordering::Relaxed);
+        if self.mode.collects_counters() {
+            if let Some(inner) = &self.inner {
+                select(inner).fetch_add(value, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -1894,6 +1939,22 @@ mod tests {
             .cold_stage(IvpColdStage::SolverPreparation);
         assert_eq!(stage.calls, 1);
         assert!(stage.elapsed >= Duration::ZERO);
+    }
+
+    #[test]
+    fn timing_only_stage_tracks_presence_without_collecting_call_counts() {
+        let telemetry = IvpTelemetry::timings();
+        telemetry.record_cold_stage_duration(IvpColdStage::AotBuild, Duration::ZERO);
+
+        let snapshot = telemetry.snapshot();
+        let measured = snapshot.cold_stage(IvpColdStage::AotBuild);
+        let absent = snapshot.cold_stage(IvpColdStage::AotLink);
+        assert!(measured.recorded);
+        assert_eq!(measured.calls, 0);
+        assert_eq!(measured.elapsed, Duration::ZERO);
+        assert!(!absent.recorded);
+        assert_eq!(absent.calls, 0);
+        assert_eq!(absent.elapsed, Duration::ZERO);
     }
 
     #[test]

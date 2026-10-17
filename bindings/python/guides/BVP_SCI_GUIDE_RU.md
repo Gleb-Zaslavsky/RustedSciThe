@@ -76,7 +76,10 @@ singular-term пару `(singular_term_a, singular_term_matrix)` в стиле S
 
 ## Телеметрия и ошибки
 
-Включайте counters/timings через `SolverOptions`; отдельно анализируйте
+Задайте через `SolverOptions` один из режимов: `off`, `counters`, `timings` или
+`detailed`. `counters` собирает дискретную работу без чтения часов; `timings`
+измеряет длительности без дискретных счётчиков; `detailed` объединяет оба вида
+данных и сохраняет диагностику по сетке/Newton. Отдельно анализируйте
 подготовку, collocation, факторизацию, решение системы и refinement. Scopes
 времени могут перекрываться. Результат также сообщает layout и provenance
 frontend/execution и sparse-факторизации. Неверная форма границ, non-finite

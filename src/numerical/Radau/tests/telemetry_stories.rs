@@ -77,7 +77,7 @@ fn lambdify_telemetry_scope_and_applicability_contract_story() {
                 RadauExecution::Lambdify,
                 RadauMatrixLayout::Dense,
                 policy,
-                RadauTelemetryMode::Timings,
+                RadauTelemetryMode::Detailed,
             );
             let mut solver = RadauSolver::prepare(problem, config)
                 .unwrap_or_else(|error| panic!("telemetry prepare failed: {error}"));
@@ -169,7 +169,7 @@ fn aot_lifecycle_scope_relationships_are_consistent_story() {
             RadauExecution::Aot,
             RadauMatrixLayout::Dense,
             RadauExecutionPolicy::Sequential,
-            RadauTelemetryMode::Timings,
+            RadauTelemetryMode::Detailed,
         );
         config.aot = Some(rebuild_aot_config(artifact_dir.path()));
         let mut solver = RadauSolver::prepare(problem, config)

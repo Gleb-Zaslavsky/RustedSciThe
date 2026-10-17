@@ -423,7 +423,7 @@ mod tests_real_odes {
     use approx::assert_relative_eq;
     use nalgebra::DMatrix;
     use nalgebra::DVector;
-    use simplelog::*;
+    use log::LevelFilter;
     #[test]
     fn test_radau_simple_linear_ode() {
         // Test: y' = -y, y(0) = 1
@@ -827,7 +827,7 @@ mod tests_real_odes_parallel {
     use approx::assert_relative_eq;
     use nalgebra::DMatrix;
     use nalgebra::DVector;
-    use simplelog::*;
+    use log::LevelFilter;
     #[test]
     fn test_radau_simple_linear_ode() {
         // Test: y' = -y, y(0) = 1

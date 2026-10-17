@@ -12,6 +12,9 @@ use rustedscithe_core::numerical::BDF::BDF_api::{BdfSolverOptions, BdfTelemetryM
 use rustedscithe_core::numerical::BE::{
     BE, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode,
 };
+use rustedscithe_core::numerical::BVP_sci::new::{
+    BvpSciAssembly, BvpSciMatrixLayout, BvpSciSolver as NativeBvpSciSolver, BvpSciTelemetryMode,
+};
 use rustedscithe_core::numerical::Radau::api::{
     RadauConfig, RadauExecution, RadauFrontend, RadauJacobianSource, RadauMatrixLayout,
     RadauOutputPolicy, RadauProblem, RadauSolver as NativeRadauSolver, RadauTelemetryMode,
@@ -21,6 +24,7 @@ use rustedscithe_core::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 
 use crate::bdf::BdfSolver;
 use crate::be::BackwardEulerSolver;
+use crate::bvp::BvpSciSolver;
 use crate::contract::SolverOptions;
 use crate::expr::PyExpr;
 use crate::radau::RadauSolver;
@@ -275,5 +279,113 @@ fn backward_euler_wrapper_matches_native_dense_expr_legacy_trajectory() {
     assert_eq!(
         wrapper_result.telemetry_counters()["accepted_steps"],
         native.detailed_statistics().accepted_steps as u64
+    );
+}
+
+#[test]
+fn bvp_sci_wrapper_matches_native_dense_expr_legacy_solution_and_counters() {
+    initialize_python();
+
+    // y' = 1, y(0) = 0 has the exact solution y(x) = x. The initially flat
+    // guess forces both adapters through the same Newton/collocation work.
+    let rhs = parse("1");
+    let boundary = parse("ya_y");
+    let mesh = vec![0.0, 0.5, 1.0];
+    let initial_state = vec![0.0, 0.0, 0.0];
+    let mut wrapper = Python::attach(|py| {
+        let options = Py::new(
+            py,
+            SolverOptions::new(
+                None,
+                None,
+                None,
+                None,
+                Some("counters"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("parity options"),
+        )
+        .expect("Python options object");
+        BvpSciSolver::new(
+            vec![rhs.clone()],
+            vec!["y".to_owned()],
+            vec![boundary],
+            mesh.clone(),
+            initial_state.clone(),
+            None,
+            None,
+            "x",
+            Some(options.borrow(py)),
+            1e-3,
+            None,
+            100,
+            8,
+            4,
+            4,
+            "mesh",
+            "symbolic",
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("Python BVP_sci construction")
+    });
+    let wrapper_result = wrapper.solve().expect("Python BVP_sci solve");
+
+    let mut native = NativeBvpSciSolver::builder(vec![rhs.inner.clone()], vec!["y".to_owned()])
+        .with_frontend(BvpSciAssembly::ExprLegacy)
+        .with_mesh_and_initial_state(mesh, initial_state)
+        .with_matrix_layout(BvpSciMatrixLayout::Dense)
+        .with_tolerance(1e-3)
+        .with_limits(100, 8, 4)
+        .with_telemetry(BvpSciTelemetryMode::Counters)
+        .with_boundary_callback(|ya, _yb, _parameters, output| {
+            output[0] = ya[0];
+            Ok(())
+        })
+        .with_boundary_jacobian(|_ya, _yb, _parameters, dya, dyb, _dp| {
+            dya[0] = 1.0;
+            dyb[0] = 0.0;
+            Ok(())
+        })
+        .build()
+        .expect("native BVP_sci construction");
+    let native_result = native.solve().expect("native BVP_sci solve");
+    let native_telemetry = native.plan().telemetry_snapshot();
+
+    assert_eq!(wrapper_result.status_code(), native_result.status.code());
+    assert_eq!(wrapper_result.mesh().len(), native_result.x.len());
+    assert_eq!(wrapper_result.values().len(), native_result.x.len());
+    for (index, (&python_x, &rust_x)) in wrapper_result
+        .mesh()
+        .iter()
+        .zip(native_result.x.iter())
+        .enumerate()
+    {
+        assert_close(python_x, rust_x, 1e-12);
+        assert_close(
+            wrapper_result.values()[index][0],
+            native_result.y[index],
+            1e-11,
+        );
+        assert_close(wrapper_result.values()[index][0], python_x, 1e-10);
+    }
+
+    let counters = wrapper_result.telemetry_counters();
+    assert_eq!(counters["rhs_calls"], native_telemetry.rhs_calls);
+    assert_eq!(counters["boundary_calls"], native_telemetry.boundary_calls);
+    assert_eq!(
+        counters["boundary_jacobian_calls"],
+        native_telemetry.boundary_jacobian_calls
+    );
+    assert_eq!(counters["linear_solves"], native_telemetry.linear_solves);
+    assert_eq!(counters["factorizations"], native_telemetry.factorizations);
+    assert_eq!(
+        counters["newton_iterations"],
+        native_telemetry.newton_iterations
     );
 }

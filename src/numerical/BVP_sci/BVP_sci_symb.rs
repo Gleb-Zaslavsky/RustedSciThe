@@ -78,16 +78,14 @@ use crate::numerical::BVP_sci::BVP_sci_utils::size_of_jacobian;
 use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::symbolic_engine::Expr;
-use chrono::Local;
 use faer::mat::Mat;
-use log::{error, info};
+use crate::numerical::logging::{
+    SolverLogGuard, SolverLogLevel, solver_error as error, solver_info as info,
+};
 use nalgebra::{DMatrix, DVector};
-use simplelog::LevelFilter;
-use simplelog::*;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -156,7 +154,7 @@ impl BvpSciSolverOptions {
             initial_guess,
             use_analytical_jacobian: true,
             bounds: None,
-            loglevel: Some("info".to_string()),
+            loglevel: None,
             generated_backend_config: BvpSciGeneratedBackendConfig::default(),
             linear_solve_policy: BvpSciLinearSolvePolicy::Sparse,
         }
@@ -330,6 +328,7 @@ impl BvpSciSolverOptions {
 pub enum BvpSciBackendError {
     GeneratedBackendNotYetImplemented { mode: BvpSciGeneratedBackendMode },
     GeneratedBackendFailure { message: String },
+    InvalidLogLevel { level: String },
 }
 
 impl Display for BvpSciBackendError {
@@ -343,6 +342,10 @@ impl Display for BvpSciBackendError {
                 )
             }
             Self::GeneratedBackendFailure { message } => write!(f, "{message}"),
+            Self::InvalidLogLevel { level } => write!(
+                f,
+                "unsupported BVP_sci log level {level:?}; expected off, error, warn, info, or debug"
+            ),
         }
     }
 }
@@ -872,7 +875,7 @@ impl BVPwrap {
             result: BVPResult::default(),
             full_result: None,
             use_analytical_jacobian: true,
-            loglevel: Some("info".to_string()), // default log level
+            loglevel: None,
             generated_backend_config: BvpSciGeneratedBackendConfig::default(),
             linear_solve_policy: BvpSciLinearSolvePolicy::Sparse,
             custom_timer: CustomTimer::new(),
@@ -1259,50 +1262,20 @@ impl BVPwrap {
 
     pub fn try_solve(&mut self) -> Result<(), BvpSciBackendError> {
         self.validate_generated_backend_mode()?;
-        let is_logging_disabled = self
-            .loglevel
-            .as_ref()
-            .map(|level| level == "off" || level == "none")
-            .unwrap_or(false);
-
-        if is_logging_disabled {
-            self.try_solver()?;
-        } else {
-            let loglevel = self.loglevel.clone();
-            let log_option = if let Some(level) = loglevel {
-                match level.as_str() {
-                    "debug" => LevelFilter::Info,
-                    "info" => LevelFilter::Info,
-                    "warn" => LevelFilter::Warn,
-                    "error" => LevelFilter::Error,
-                    _ => panic!("loglevel must be debug, info, warn or error"),
-                }
-            } else {
-                LevelFilter::Info
-            };
-            let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
-            let name = format!("log_{}.txt", date_and_time);
-            let logger_instance = CombinedLogger::init(vec![
-                TermLogger::new(
-                    log_option,
-                    Config::default(),
-                    TerminalMode::Mixed,
-                    ColorChoice::Auto,
-                ),
-                WriteLogger::new(log_option, Config::default(), File::create(name).unwrap()),
-            ]);
-
-            match logger_instance {
-                Ok(()) => {
-                    self.try_solver()?;
-                    info!(" \n \n Program ended");
-                }
-                Err(_) => {
-                    self.try_solver()?;
-                } //end Error
-            } // end mat
-        }
-        Ok(())
+        let level = match self.loglevel.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            None | Some("off") | Some("none") => SolverLogLevel::Off,
+            Some("error") => SolverLogLevel::Error,
+            Some("warn") => SolverLogLevel::Warn,
+            Some("info") => SolverLogLevel::Info,
+            Some("debug") => SolverLogLevel::Debug,
+            Some(level) => {
+                return Err(BvpSciBackendError::InvalidLogLevel {
+                    level: level.to_string(),
+                });
+            }
+        };
+        let _logging_scope = SolverLogGuard::enter(level);
+        self.try_solver()
     }
 
     fn try_solver(&mut self) -> Result<(), BvpSciBackendError> {
@@ -1568,6 +1541,26 @@ mod tests_phase1 {
     }
     use std::process::Command;
 
+    #[test]
+    fn bvp_sci_rust_logging_defaults_to_off() {
+        assert_eq!(BvpSciSolverOptions::new(
+            None,
+            Some(0.0),
+            Some(1.0),
+            Some(4),
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            vec![],
+            None,
+            HashMap::new(),
+            "t".to_string(),
+            1e-6,
+            64,
+            DMatrix::from_element(1, 2, 1.0),
+        ).loglevel, None);
+        assert_eq!(linear_problem_options().loglevel.as_deref(), Some("off"));
+    }
+
     fn tcc_is_available() -> bool {
         if let Ok(explicit) = std::env::var("RUSTEDSCITHE_TCC") {
             return std::path::Path::new(&explicit).is_file();
@@ -1803,6 +1796,9 @@ mod tests_phase1 {
             Err(BvpSciBackendError::GeneratedBackendNotYetImplemented { .. }) => {
                 panic!("generated backend path should no longer stop at NotYetImplemented")
             }
+            Err(BvpSciBackendError::InvalidLogLevel { level }) => {
+                panic!("unexpected invalid log level in test: {level}")
+            }
             Ok(_) => panic!("missing prebuilt backend should surface a typed error"),
         }
     }
@@ -1818,6 +1814,9 @@ mod tests_phase1 {
             }
             Err(BvpSciBackendError::GeneratedBackendNotYetImplemented { .. }) => {
                 panic!("generated backend path should no longer stop at NotYetImplemented")
+            }
+            Err(BvpSciBackendError::InvalidLogLevel { level }) => {
+                panic!("unexpected invalid log level in test: {level}")
             }
             Ok(_) => panic!("missing prebuilt backend should surface a typed error"),
         }

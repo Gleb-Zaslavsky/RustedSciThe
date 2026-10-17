@@ -23,6 +23,7 @@ TaskDocument = _native.TaskDocument
 BvpSciSolver = _native.BvpSciSolver
 BvpDampSolver = _native.BvpDampSolver
 Lsode2Solver = _native.Lsode2Solver
+ShootingBvpSolver = _native.ShootingBvpSolver
 
 _ANIMATION_ERROR_PREFIX = "RUSTEDSCITHE_ANIMATION_ERROR:"
 
@@ -205,10 +206,11 @@ def _method_name(method: str) -> str:
         "bdf": "bdf", "radau": "radau5", "radau5": "radau5",
         "be": "backward_euler", "backward_euler": "backward_euler",
         "lsode": "lsode2", "lsode2": "lsode2",
+        "rk45": "rk45", "dopri": "dopri", "ab4": "ab4",
     }
     if normalized not in aliases:
         raise ValueError(
-            "unsupported IVP method; expected bdf, radau5, backward_euler or lsode2"
+            "unsupported IVP method; expected rk45, dopri, ab4, bdf, radau5, backward_euler or lsode2"
         )
     return aliases[normalized]
 
@@ -239,16 +241,18 @@ def create_ivp(
     Parameters
     ----------
     method:
-        Solver family: ``"bdf"``, ``"radau5"``, ``"backward_euler"`` or
-        ``"lsode2"``. ``"radau"``, ``"be"`` and ``"lsode"`` are accepted
-        aliases.
+        Solver family: ``"rk45"``, ``"dopri"``, ``"ab4"``, ``"bdf"``,
+        ``"radau5"``, ``"backward_euler"`` or ``"lsode2"``. ``"radau"``,
+        ``"be"`` and ``"lsode"`` are accepted aliases.
     expressions, state_variables, time_variable:
         Symbolic right-hand sides and their ordered state/time names.
     y0:
         Initial state. NumPy-like arrays are converted to owned native vectors.
         Radau accepts the value here for API symmetry but binds it at ``solve``.
     t0, t_end, max_step:
-        Integration interval and maximum step size, in the model's time units.
+        Integration interval and step control, in the model's time units. For
+        ODE_api2 nonstiff methods this is the native fixed starting step size;
+        other solver families interpret it according to their own contracts.
     parameters, parameter_values:
         Optional ordered parameter schema and current numeric values.
     options:
@@ -274,6 +278,18 @@ def create_ivp(
     """
 
     family = _method_name(method)
+    if family in {"rk45", "dopri", "ab4"}:
+        if controller is not None:
+            raise ValueError("controller is only supported by the LSODE2 route")
+        if parameters is not None or parameter_values is not None:
+            raise _native.UnsupportedOptionError(
+                "ODE_api2 nonstiff does not expose symbolic parameter rebinding"
+            )
+        return _native.UniversalNonStiffSolver(
+            family, expressions, state_variables, time_variable,
+            _owned_sequence(y0), t0, t_end, max_step,
+            options=options, **solver_options,
+        )
     if family == "bdf":
         if controller is not None:
             raise ValueError("controller is only supported by the LSODE2 route")
@@ -611,6 +627,17 @@ def task(source_or_path: str | Path) -> TaskDocument:
         if candidate.exists() and candidate.is_file():
             return TaskDocument.from_file(str(candidate))
     return TaskDocument.parse(raw)
+
+
+def task_dict(source_or_path: str | Path) -> dict[str, Any]:
+    """Parse a native task document and return its detached inspection dict.
+
+    Parsing and semantic normalization remain in the Rust command-interpreter
+    parser. This helper only resolves the path-versus-inline convenience and
+    serializes the already parsed ``TaskDocument``; it never executes a task.
+    """
+
+    return task(source_or_path).to_dict()
 
 
 def capabilities(solver: str) -> Any:

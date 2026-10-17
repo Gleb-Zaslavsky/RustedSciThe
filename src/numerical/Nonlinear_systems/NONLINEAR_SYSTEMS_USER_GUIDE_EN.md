@@ -8,6 +8,7 @@ bindings separate from that preparation:
 ```rust
 use nalgebra::DVector;
 use RustedSciThe::numerical::Nonlinear_systems::prelude::*;
+use RustedSciThe::numerical::SolverTelemetryMode;
 
 let prepared = PreparedSymbolicNonlinearProblem::from_strings(
     vec!["a*x + y - 3".into(), "x - y".into()],
@@ -22,7 +23,7 @@ let options = SolveOptions {
     max_iterations: 64,
     diagnostics: DiagnosticsOptions {
         collect_history: false,
-        collect_statistics: true,
+        telemetry_mode: SolverTelemetryMode::Detailed,
         ..DiagnosticsOptions::default()
     },
     ..SolveOptions::default()
@@ -330,7 +331,7 @@ workload-specific. See Sections 53, 64, and 65.
 ### Telemetry Cost
 
 Solver statistics and preparation telemetry answer different questions.
-`collect_statistics` provides solver-level counts and stage timers;
+`telemetry_mode` selects `Off`, `Counters`, `Timings`, or `Detailed`;
 `collect_history` additionally stores per-iteration snapshots and can cost
 more memory. Detailed preparation telemetry is separately opt-in through
 `PreparationTelemetryMode::Collect`. The release preparation audit measured
@@ -353,9 +354,11 @@ let options = SolveOptions {
 };
 ```
 
-With `collect_statistics: true`, `SolveResult::statistics` reports solver-level
-residual, Jacobian, linear-solve, accepted/rejected-step counters and
-cumulative stage durations. `collect_history` is separate and can add memory
+With `telemetry_mode: SolverTelemetryMode::Detailed`,
+`SolveResult::statistics` reports solver-level residual, Jacobian, linear-solve,
+accepted/rejected-step counters and cumulative stage durations. `Counters`
+does not read the clock; `Timings` does not update discrete counters.
+`collect_history` is separate and can add memory
 and allocation pressure. Disabled diagnostics should be used for hot-path
 timing when history is not part of the question.
 

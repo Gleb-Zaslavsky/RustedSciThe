@@ -88,7 +88,7 @@ fn benchmark_aot_frontends(c: &mut Criterion) {
                     SymbolicIvpAotBuildPolicy::RebuildAlways {
                         profile: AotBuildProfile::Release,
                     },
-                    BdfTelemetryMode::Timings,
+                    BdfTelemetryMode::Detailed,
                 );
                 check.solver.try_generate().unwrap_or_else(|error| {
                     panic!("{} {route} AOT preflight: {error}", workload.label())

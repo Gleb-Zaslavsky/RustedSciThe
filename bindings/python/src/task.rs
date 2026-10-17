@@ -10,6 +10,7 @@ use std::path::Path;
 
 use nalgebra::{DMatrix, DVector};
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 
 use rustedscithe_core::command_interpreter::task_runner::{
     ParsedTaskSpec, TaskDocumentKind, TaskRunResult, TaskRunnerError, parse_task_spec_from_str,
@@ -17,8 +18,11 @@ use rustedscithe_core::command_interpreter::task_runner::{
 };
 
 use rustedscithe_core::command_interpreter::task_parser_bvp::{
-    BvpExecutionSpec, BvpFrontendSpec, BvpLinearBackendSpec, BvpSolverFamilySpec, BvpTaskError,
-    BvpTaskRunResult,
+    BvpExecutionSpec, BvpFrontendSpec, BvpLinearBackendSpec, BvpOutputPolicy, BvpSolverFamilySpec,
+    BvpTaskError, BvpTaskRunResult,
+};
+use rustedscithe_core::command_interpreter::task_parser_common::{
+    ContinuationMode, ContinuationMonotonicity, ContinuationRestartPolicy, ContinuationSpec,
 };
 use rustedscithe_core::command_interpreter::task_parser_ivp::{
     IvpMethodSpec, IvpRunStatus, IvpTaskError, IvpTaskRunResult,
@@ -685,6 +689,160 @@ fn insert_optional_debug<T: std::fmt::Debug>(
     }
 }
 
+fn continuation_mode_name(mode: ContinuationMode) -> &'static str {
+    match mode {
+        ContinuationMode::Fresh => "fresh",
+        ContinuationMode::Warm => "warm",
+        ContinuationMode::Prepared => "prepared",
+    }
+}
+
+fn continuation_restart_name(policy: ContinuationRestartPolicy) -> &'static str {
+    match policy {
+        ContinuationRestartPolicy::Continue => "continue",
+        ContinuationRestartPolicy::RestartEach => "restart_each",
+        ContinuationRestartPolicy::RestartWithState => "restart_with_state",
+    }
+}
+
+fn continuation_monotonicity_name(value: ContinuationMonotonicity) -> &'static str {
+    match value {
+        ContinuationMonotonicity::Allow => "allow",
+        ContinuationMonotonicity::Increasing => "increasing",
+        ContinuationMonotonicity::Decreasing => "decreasing",
+    }
+}
+
+fn continuation_to_dict<'py>(
+    py: Python<'py>,
+    continuation: &ContinuationSpec,
+) -> PyResult<Bound<'py, PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("parameters", &continuation.parameters)?;
+    result.set_item("value_grid", &continuation.value_grid)?;
+    result.set_item("mode", continuation_mode_name(continuation.mode))?;
+    result.set_item("restart_each", continuation.restart_each)?;
+    result.set_item(
+        "restart_policy",
+        continuation_restart_name(continuation.restart_policy),
+    )?;
+    result.set_item(
+        "monotonicity",
+        continuation_monotonicity_name(continuation.monotonicity),
+    )?;
+    result.set_item(
+        "symbolic_equations",
+        continuation
+            .symbolic_rhs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+    )?;
+    if let Some(values) = &continuation.y0_values {
+        result.set_item("y0_values", values)?;
+    }
+    if let Some(values) = &continuation.t0_values {
+        result.set_item("t0_values", values)?;
+    }
+    if let Some(values) = &continuation.t_end_values {
+        result.set_item("t_end_values", values)?;
+    }
+    Ok(result)
+}
+
+fn postprocessing_to_dict<'py>(
+    py: Python<'py>,
+    save_csv: bool,
+    csv_path: Option<&str>,
+    save_txt: bool,
+    txt_path: Option<&str>,
+    write_report: bool,
+    report_path: Option<&str>,
+    plotters_png: bool,
+    plotters_dir: Option<&str>,
+    gnuplot_png: bool,
+    gnuplot_dir: Option<&str>,
+    terminal_plot: bool,
+    plot: bool,
+    output_policy: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("save_csv", save_csv)?;
+    result.set_item("csv_path", csv_path)?;
+    result.set_item("save_txt", save_txt)?;
+    result.set_item("txt_path", txt_path)?;
+    result.set_item("write_report", write_report)?;
+    result.set_item("report_path", report_path)?;
+    result.set_item("plotters_png", plotters_png)?;
+    result.set_item("plotters_dir", plotters_dir)?;
+    result.set_item("gnuplot_png", gnuplot_png)?;
+    result.set_item("gnuplot_dir", gnuplot_dir)?;
+    result.set_item("terminal_plot", terminal_plot)?;
+    result.set_item("plot", plot)?;
+    if let Some(policy) = output_policy {
+        result.set_item("output_policy", policy)?;
+    }
+    Ok(result)
+}
+
+fn set_python_option(target: &Bound<'_, PyDict>, name: &str, value: &str) -> PyResult<()> {
+    match value {
+        "true" => target.set_item(name, true),
+        "false" => target.set_item(name, false),
+        _ => {
+            if let Ok(integer) = value.parse::<u64>() {
+                return target.set_item(name, integer);
+            }
+            if let Ok(number) = value.parse::<f64>()
+                && number.is_finite()
+            {
+                return target.set_item(name, number);
+            }
+            if value.starts_with('[') && value.ends_with(']') {
+                let body = &value[1..value.len() - 1];
+                if body.trim().is_empty() {
+                    return target.set_item(name, Vec::<f64>::new());
+                }
+                if let Ok(numbers) = body
+                    .split(',')
+                    .map(|part| part.trim().parse::<f64>())
+                    .collect::<Result<Vec<_>, _>>()
+                    && numbers.iter().all(|number| number.is_finite())
+                {
+                    return target.set_item(name, numbers);
+                }
+            }
+            target.set_item(name, value)
+        }
+    }
+}
+
+fn string_map_to_dict<'py>(
+    py: Python<'py>,
+    values: HashMap<String, String>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let result = PyDict::new(py);
+    let mut entries = values.into_iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    for (key, value) in entries {
+        result.set_item(key, value)?;
+    }
+    Ok(result)
+}
+
+fn float_map_to_dict<'py>(
+    py: Python<'py>,
+    values: &HashMap<String, f64>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let result = PyDict::new(py);
+    let mut entries = values.iter().collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+    for (key, value) in entries {
+        result.set_item(key, value)?;
+    }
+    Ok(result)
+}
+
 #[pymethods]
 impl TaskDocument {
     /// Parse an IVP/BVP task document without executing a solver.
@@ -974,6 +1132,174 @@ impl TaskDocument {
             }
         }
         options
+    }
+
+    /// Return a detached version-1 dictionary built from the parsed native
+    /// specification. The top-level fields include `kind`, `source`, `solver`,
+    /// `problem`, `continuation` and `postprocessing`, plus native
+    /// `preview`/`check` text. Solver options use Python booleans, integers,
+    /// finite floats and numeric lists where applicable; enum/compiler choices
+    /// are strings. Equations are canonical Rust expression strings, and the
+    /// original source is retained for exact replay. This method never runs
+    /// the task.
+    pub fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let result = PyDict::new(py);
+        result.set_item("dict_schema_version", 1)?;
+        result.set_item("kind", self.kind())?;
+        result.set_item("source", &self.source)?;
+        result.set_item("preview", self.preview())?;
+        result.set_item("check", self.check())?;
+
+        let solver = PyDict::new(py);
+        solver.set_item("selection", string_map_to_dict(py, self.route())?)?;
+        let options = PyDict::new(py);
+        let generated_backend = PyDict::new(py);
+        let mut option_entries = self.options().into_iter().collect::<Vec<_>>();
+        option_entries.sort_by(|left, right| left.0.cmp(&right.0));
+        for (name, value) in option_entries {
+            if let Some(field) = name.strip_prefix("generated_backend.") {
+                set_python_option(&generated_backend, field, &value)?;
+            } else {
+                set_python_option(&options, &name, &value)?;
+            }
+        }
+        if !generated_backend.is_empty() {
+            options.set_item("generated_backend", generated_backend)?;
+        }
+        solver.set_item("options", options)?;
+        result.set_item("solver", solver)?;
+
+        let problem = PyDict::new(py);
+        let postprocessing = match &self.spec {
+            ParsedTaskSpec::Ivp(spec) => {
+                result.set_item("task_schema_version", spec.schema_version)?;
+                problem.set_item("independent_variable", &spec.equations.arg)?;
+                problem.set_item("unknowns", &spec.equations.unknowns)?;
+                problem.set_item(
+                    "equations",
+                    spec.equations
+                        .rhs
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )?;
+                problem.set_item(
+                    "symbolic_equations",
+                    spec.equations
+                        .symbolic_rhs
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )?;
+                problem.set_item("parameters", &spec.equations.parameter_names)?;
+                problem.set_item(
+                    "parameter_values",
+                    float_map_to_dict(py, &spec.equations.parameter_values)?,
+                )?;
+                let initial_conditions = PyDict::new(py);
+                initial_conditions.set_item("t0", spec.initial_conditions.t0)?;
+                initial_conditions.set_item("t_end", spec.initial_conditions.t_end)?;
+                initial_conditions.set_item("y0", &spec.initial_conditions.y0)?;
+                problem.set_item("initial_conditions", initial_conditions)?;
+                postprocessing_to_dict(
+                    py,
+                    spec.postprocessing.save_csv,
+                    spec.postprocessing.csv_path.as_deref(),
+                    spec.postprocessing.save_txt,
+                    spec.postprocessing.txt_path.as_deref(),
+                    spec.postprocessing.write_report,
+                    spec.postprocessing.report_path.as_deref(),
+                    spec.postprocessing.plotters_png,
+                    spec.postprocessing.plotters_dir.as_deref(),
+                    spec.postprocessing.gnuplot_png,
+                    spec.postprocessing.gnuplot_dir.as_deref(),
+                    spec.postprocessing.terminal_plot,
+                    spec.postprocessing.plot,
+                    None,
+                )?
+            }
+            ParsedTaskSpec::Bvp(spec) => {
+                problem.set_item("independent_variable", &spec.equations.arg)?;
+                problem.set_item("unknowns", &spec.equations.unknowns)?;
+                problem.set_item(
+                    "equations",
+                    spec.equations
+                        .rhs
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )?;
+                problem.set_item("parameters", &spec.equations.parameter_names)?;
+                problem.set_item(
+                    "parameter_values",
+                    float_map_to_dict(py, &spec.equations.parameter_values)?,
+                )?;
+
+                let boundary_conditions = PyDict::new(py);
+                let mut names = spec
+                    .boundary_conditions
+                    .conditions
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                names.sort();
+                for name in names {
+                    let mut conditions = spec.boundary_conditions.conditions[&name].clone();
+                    conditions.sort_by_key(|(derivative_order, _)| *derivative_order);
+                    let entries = PyList::empty(py);
+                    for (derivative_order, value) in conditions {
+                        let entry = PyDict::new(py);
+                        entry.set_item("derivative_order", derivative_order)?;
+                        entry.set_item("value", value)?;
+                        entries.append(entry)?;
+                    }
+                    boundary_conditions.set_item(name, entries)?;
+                }
+                problem.set_item("boundary_conditions", boundary_conditions)?;
+
+                let mesh = PyDict::new(py);
+                mesh.set_item("t0", spec.mesh.t0)?;
+                mesh.set_item("t_end", spec.mesh.t_end)?;
+                mesh.set_item("n_steps", spec.mesh.n_steps)?;
+                problem.set_item("mesh", mesh)?;
+                problem.set_item("initial_guess", &spec.initial_guess.values)?;
+
+                let policy = match spec.postprocessing.output_policy {
+                    BvpOutputPolicy::None => "none",
+                    BvpOutputPolicy::Plotters => "plotters",
+                    BvpOutputPolicy::Gnuplot => "gnuplot",
+                    BvpOutputPolicy::Terminal => "terminal",
+                };
+                postprocessing_to_dict(
+                    py,
+                    spec.postprocessing.save_csv,
+                    spec.postprocessing.csv_path.as_deref(),
+                    spec.postprocessing.save_txt,
+                    spec.postprocessing.txt_path.as_deref(),
+                    spec.postprocessing.write_report,
+                    spec.postprocessing.report_path.as_deref(),
+                    spec.postprocessing.plotters_png,
+                    spec.postprocessing.plotters_dir.as_deref(),
+                    spec.postprocessing.gnuplot_png,
+                    spec.postprocessing.gnuplot_dir.as_deref(),
+                    spec.postprocessing.terminal_plot,
+                    spec.postprocessing.plot,
+                    Some(policy),
+                )?
+            }
+        };
+        result.set_item("problem", problem)?;
+        result.set_item("postprocessing", postprocessing)?;
+        let continuation = match &self.spec {
+            ParsedTaskSpec::Ivp(spec) => spec.continuation.as_ref(),
+            ParsedTaskSpec::Bvp(spec) => spec.continuation.as_ref(),
+        };
+        if let Some(continuation) = continuation {
+            result.set_item("continuation", continuation_to_dict(py, continuation)?)?;
+        } else {
+            result.set_item("continuation", py.None())?;
+        }
+        Ok(result.unbind())
     }
 
     /// Execute an IVP document through the shared native task runner.

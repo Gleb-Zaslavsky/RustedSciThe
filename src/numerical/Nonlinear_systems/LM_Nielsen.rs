@@ -3,9 +3,9 @@ use std::borrow::Cow;
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{
-    eval_jacobian_with_runtime, eval_residual_with_runtime, measure_linear_system_operation_owned,
-    scaled_norm, scaling_vector, IterationState, MethodWorkspace, NonlinearMethod,
-    RuntimeDiagnostics, SolveOptions, StepOutcome,
+    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
+    StepOutcome, eval_jacobian_with_runtime, eval_residual_with_runtime,
+    measure_linear_system_operation_owned, scaled_norm, scaling_vector,
 };
 use crate::numerical::Nonlinear_systems::engine::{nonlinear_log_info, nonlinear_log_warn};
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
@@ -526,7 +526,7 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
 
             // SOLVE TRUST REGION SUBPROBLEM with current parameters
             // Create scaled regularization matrix based on method
-            runtime.linear_solves += 1;
+            runtime.count_linear_solve();
             let mut regularized = jtj.clone();
             TrustRegionScaling::add_scaled_regularization_in_place(
                 &mut regularized,
@@ -539,7 +539,7 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
                 regularized,
                 &gradient,
                 runtime,
-                options.diagnostics.collect_statistics,
+                options.diagnostics.telemetry_mode,
             )?;
 
             nonlinear_log_info!("Step vector norm: {:.6e}", step.norm());
@@ -573,7 +573,7 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
                 problem,
                 &trial_x,
                 runtime,
-                options.diagnostics.collect_statistics,
+                options.diagnostics.telemetry_mode,
             )?;
 
             // Compute reduction ratio using selected method
@@ -624,7 +624,7 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
                     method_state.nu
                 );
 
-                runtime.accepted_steps += 1;
+                runtime.count_accepted_step();
                 return Ok(StepOutcome::Continue {
                     next_x: trial_x.into_owned(),
                     accepted: true,
@@ -647,7 +647,7 @@ impl NielsenLevenbergMarquardtMethodAdvanced {
                     method_state.nu
                 );
 
-                runtime.rejected_steps += 1;
+                runtime.count_rejected_step();
 
                 // Continue to next inner iteration with updated mu, nu, delta
                 // The loop will recompute the step with new parameters
@@ -820,7 +820,7 @@ impl NielsenLevenbergMarquardtMethod {
 
         let jtj = state.jacobian.transpose() * &state.jacobian;
         for _ in 0..self.max_rejections {
-            runtime.linear_solves += 1;
+            runtime.count_linear_solve();
             let mut regularized = jtj.clone();
             TrustRegionScaling::add_squared_diagonal_regularization_in_place(
                 &mut regularized,
@@ -832,7 +832,7 @@ impl NielsenLevenbergMarquardtMethod {
                 regularized,
                 &gradient,
                 runtime,
-                options.diagnostics.collect_statistics,
+                options.diagnostics.telemetry_mode,
             )?;
             if scaled_norm(&scaling, &step) < options.tolerance {
                 return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
@@ -855,14 +855,14 @@ impl NielsenLevenbergMarquardtMethod {
                 problem,
                 &trial_x,
                 runtime,
-                options.diagnostics.collect_statistics,
+                options.diagnostics.telemetry_mode,
             )?;
             let actual = state.residual.norm_squared() - trial_residual.norm_squared();
             let trial_jacobian = eval_jacobian_with_runtime(
                 problem,
                 &trial_x,
                 runtime,
-                options.diagnostics.collect_statistics,
+                options.diagnostics.telemetry_mode,
             )?;
             let predicted = 0.5
                 * step.dot(
@@ -884,14 +884,14 @@ impl NielsenLevenbergMarquardtMethod {
                 method_state.mu *= (1.0f64 / 3.0).max(1.0 - (2.0 * rho - 1.0).powi(3));
                 method_state.mu = method_state.mu.max(1e-16);
                 method_state.nu = self.nu_init;
-                runtime.accepted_steps += 1;
+                runtime.count_accepted_step();
                 return Ok(StepOutcome::Continue {
                     next_x: trial_x.into_owned(),
                     accepted: true,
                 });
             }
 
-            runtime.rejected_steps += 1;
+            runtime.count_rejected_step();
             method_state.mu *= method_state.nu;
             method_state.nu *= 2.0;
         }

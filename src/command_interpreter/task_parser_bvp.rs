@@ -548,7 +548,7 @@ impl BvpTaskRuntimeTelemetry {
                 .sparse_factorization
                 .unwrap_or(BvpSciSparseFactorization::StandardFaer)
         });
-        let counters_enabled = mode != BvpSciTelemetryMode::Off;
+        let counters_enabled = mode.collects_counters();
         Self {
             mode,
             requested_sparse_factorization,
@@ -650,7 +650,9 @@ pub struct BvpTaskSegmentResult {
 /// whose shape cannot represent the declared state vector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BvpSolverResultFailure {
-    NoResult { solver: &'static str },
+    NoResult {
+        solver: &'static str,
+    },
     InvalidShape {
         solver: &'static str,
         message: String,
@@ -835,8 +837,9 @@ fn bvp_sci_error_category(error: &BvpSciNewError) -> &'static str {
         BvpSciNewError::NewtonFailure { .. } => "solver_exhaustion",
         BvpSciNewError::SingularJacobian => "solver_singular",
         BvpSciNewError::BoundaryToleranceNotMet { .. } => "solver_tolerance",
-        BvpSciNewError::MaxNodesExceeded { .. }
-        | BvpSciNewError::MeshRefinementLimit { .. } => "solver_exhaustion",
+        BvpSciNewError::MaxNodesExceeded { .. } | BvpSciNewError::MeshRefinementLimit { .. } => {
+            "solver_exhaustion"
+        }
         BvpSciNewError::LinearBackend { .. }
         | BvpSciNewError::LinearFactorization { .. }
         | BvpSciNewError::LinearSolve { .. } => "solver_linear",
@@ -848,12 +851,8 @@ fn bvp_sci_error_category(error: &BvpSciNewError) -> &'static str {
             crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Link => "aot_link",
             crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Timeout => "aot_timeout",
             crate::numerical::BVP_sci::new::BvpSciAotFailureKind::MissingArtifact
-            | crate::numerical::BVP_sci::new::BvpSciAotFailureKind::StaleArtifact => {
-                "aot_artifact"
-            }
-            crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Publication => {
-                "aot_publication"
-            }
+            | crate::numerical::BVP_sci::new::BvpSciAotFailureKind::StaleArtifact => "aot_artifact",
+            crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Publication => "aot_publication",
             crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Runtime => "aot_runtime",
             crate::numerical::BVP_sci::new::BvpSciAotFailureKind::SymbolicPreparation => {
                 "symbolic_preparation"
@@ -1299,11 +1298,9 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
         if segment_spec.postprocessing.plot {
             solver.plot_result();
         }
-        let result = solver
-            .get_result()
-            .ok_or(BvpTaskError::SolverResult(BvpSolverResultFailure::NoResult {
-                solver: "BVP_Damp",
-            }))?;
+        let result = solver.get_result().ok_or(BvpTaskError::SolverResult(
+            BvpSolverResultFailure::NoResult { solver: "BVP_Damp" },
+        ))?;
         let mesh = uniform_bvp_mesh(solver.t0, solver.t_end, solver.n_steps);
         continuation_telemetry.segments += 1;
         continuation_telemetry.fresh_preparations += 1;
@@ -1454,11 +1451,9 @@ fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResul
             telemetry.fresh_preparations += 1;
         }
 
-        let result = solver
-            .get_result()
-            .ok_or(BvpTaskError::SolverResult(BvpSolverResultFailure::NoResult {
-                solver: "BVP_Damp",
-            }))?;
+        let result = solver.get_result().ok_or(BvpTaskError::SolverResult(
+            BvpSolverResultFailure::NoResult { solver: "BVP_Damp" },
+        ))?;
         let mesh = uniform_bvp_mesh(solver.t0, solver.t_end, solver.n_steps);
         telemetry.peak_result_elements = telemetry.peak_result_elements.max(result.len());
         let plan = spec.postprocessing.to_plan("bvp_result.csv");
@@ -2863,11 +2858,14 @@ fn parse_bvp_telemetry(raw: &str) -> Result<BvpSciTelemetryMode, BvpTaskError> {
     match normalize_token(raw).as_str() {
         "off" | "disabled" => Ok(BvpSciTelemetryMode::Off),
         "counters" | "counter" => Ok(BvpSciTelemetryMode::Counters),
-        "timings" | "timing" | "detailed" => Ok(BvpSciTelemetryMode::Timings),
+        "timings" | "timing" => Ok(BvpSciTelemetryMode::Timings),
+        "detailed" | "full" => Ok(BvpSciTelemetryMode::Detailed),
         other => Err(BvpTaskError::InvalidField {
             section: "solver_options".to_string(),
             field: "telemetry".to_string(),
-            message: format!("unknown telemetry mode `{other}`; use off, counters or timings"),
+            message: format!(
+                "unknown telemetry mode `{other}`; use off, counters, timings or detailed"
+            ),
         }),
     }
 }

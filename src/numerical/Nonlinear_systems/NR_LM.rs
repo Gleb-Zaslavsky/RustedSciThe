@@ -1,6 +1,6 @@
 use super::NR::{NR, solve_linear_system};
 use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
-use log::{info, warn};
+use crate::numerical::logging::{solver_info as info, solver_warn as warn};
 use nalgebra::{DMatrix, DVector};
 use std::time::Instant;
 /// CLASSIC LEVENBERG-MARQUARDT ALGORITHM

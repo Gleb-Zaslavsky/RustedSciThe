@@ -68,9 +68,28 @@ has no integration constant.
 
 The current core rule maps `1/x` to `ln(x)`. This is not a globally valid real
 primitive across negative values or the singularity at zero. The caller must
-state and respect the applicable domain. Definite integration and numerical
-quadrature are not currently exposed by this symbolic API; do not infer
-convergence from endpoint substitution alone.
+state and respect the applicable domain. Definite integration is not currently
+exposed by this symbolic API; do not infer convergence from endpoint
+substitution alone.
+
+For an explicitly numerical finite-interval operation, use
+`Expr.integrate_simpson(lower, upper, subdivisions)`. It requires at most one
+free variable, finite bounds and a positive even subdivision count. The result
+must be finite, but this check is not a proof that the integrand has no interior
+singularity or that the quadrature has converged. Reversed finite bounds return
+the signed integral. `Expr.integrate_gauss_legendre(lower, upper, degree)` is
+also available for an unweighted finite-interval integral; it validates a
+degree from 1 through 4096 and the same one-variable/result-finiteness
+conditions. Neither rule detects interior singularities or certifies
+convergence.
+
+The weighted whole-line/half-line rules have explicit names and include their
+weights in the returned integral: `integrate_gauss_hermite(degree)` computes
+`integral(exp(-x**2) * f(x), x=-inf..inf)`, while
+`integrate_gauss_laguerre(degree, alpha=0.5)` computes
+`integral(x**alpha * exp(-x) * f(x), x=0..inf)` for finite `alpha > -1`.
+Their degrees have the same `1..4096` range. These are weighted integrals, not
+automatic transformations for an arbitrary unweighted improper integral.
 
 ## Symbolic vectors and matrices
 
@@ -92,15 +111,20 @@ assert isinstance(A_values, np.ndarray)
 At = A.transpose()
 Av = A.matvec(v)
 det_A = A.determinant()  # native determinant is limited to sizes 1..3
+B = ExprMatrix([[Expr.constant(1.0), y], [x, Expr.constant(2.0)]])
+AB = A.matmul(B)         # conventional row-by-column matrix product
+A_entrywise_B = A.hadamard(B)  # corresponding entries are multiplied
 ```
 
 Vectors support indexing, differentiation, substitution, simplification and
 dot products. Matrices support shape/index access, rows/columns, transpose,
-differentiation, substitution, simplification, matrix-vector products, trace
-and determinants up to 3x3. Invalid indexes, ragged rows, incompatible shapes
-and unsupported determinant sizes are rejected before reaching native
-assertions. Matrix-matrix products and advanced block operations are not part
-of this Python contract yet.
+differentiation, substitution, simplification, matrix-vector products,
+conventional `matmul`, explicit elementwise `hadamard`, trace and determinants
+up to 3x3. The distinct method names avoid overloading `*` with competing
+matrix-product meanings. Invalid indexes, ragged rows and incompatible product
+shapes are rejected before reaching native assertions. Empty result shapes are
+preserved. Advanced block, inverse and Kronecker operations are not part of
+this Python contract yet.
 
 ## Prepared scalar callables
 

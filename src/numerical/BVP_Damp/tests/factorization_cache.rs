@@ -213,6 +213,9 @@ fn damped_banded_solver_reports_factorization_reuse_at_solver_level() {
         |_x, state: &DVector<f64>, _params| DVector::from_vec(vec![state[1], 0.0]),
     );
     solver.dont_save_log(true);
+    solver.set_bvp_telemetry_mode(
+        crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Detailed,
+    );
     solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
     solver
         .try_solve()

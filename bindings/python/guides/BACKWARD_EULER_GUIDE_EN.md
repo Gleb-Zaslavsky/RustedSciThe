@@ -45,9 +45,11 @@ as the global integration error. Use owned NumPy arrays for detached results.
 
 AOT shares the native build/cache lifecycle. A compiler is optional for
 Lambdify and required only when an AOT route is selected. Record the selected
-execution route and artifact provenance. Counter/timing telemetry is opt-in
-through `SolverOptions`; typed preparation and exhaustion errors should be
-handled instead of parsing their message strings.
+execution route and artifact provenance. Select telemetry with
+`SolverOptions(telemetry=...)`: `off`, `counters`, `timings`, or `detailed`.
+`timings` returns durations without discrete counts; `detailed` returns both.
+Typed preparation and exhaustion errors should be handled instead of parsing
+their message strings.
 
 See `examples/backward_euler_basic.py` for step refinement and
 `examples/backward_euler_routes.py` for a matched ExprLegacy/AtomNative route

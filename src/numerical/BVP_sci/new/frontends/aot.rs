@@ -127,7 +127,8 @@ impl BvpSciAotPlan {
         let ivp_telemetry = match telemetry.mode() {
             BvpSciTelemetryMode::Off => IvpTelemetry::disabled(),
             BvpSciTelemetryMode::Counters => IvpTelemetry::counters(),
-            BvpSciTelemetryMode::Timings => IvpTelemetry::detailed(),
+            BvpSciTelemetryMode::Timings => IvpTelemetry::timings(),
+            BvpSciTelemetryMode::Detailed => IvpTelemetry::detailed(),
         };
         let execution_policy = to_ivp_policy(execution_policy);
         let parameter_jacobian = BvpSciParameterJacobianPlan::prepare(

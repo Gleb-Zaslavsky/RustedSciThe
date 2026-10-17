@@ -1,10 +1,48 @@
 use crate::numerical::BDF::BDF_api::{
     BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver,
 };
-use crate::numerical::BDF::BDF_solver::{BdfLinearBackend, BdfLinearFactorization};
+use crate::numerical::BDF::BDF_solver::{BDF, BdfLinearBackend, BdfLinearFactorization};
+use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetryMode};
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
+
+#[test]
+fn low_level_bdf_logging_is_off_by_default_and_configurable_per_instance() {
+    let solver = BDF::new();
+    assert_eq!(solver.logging_level(), SolverLogLevel::Off);
+    assert_eq!(
+        BDF::new()
+            .with_logging_level(SolverLogLevel::Info)
+            .logging_level(),
+        SolverLogLevel::Info
+    );
+}
+
+#[test]
+fn high_level_bdf_logging_option_defaults_off_and_can_be_changed() {
+    let default_solver = native_solver(BdfTelemetryMode::Off);
+    assert_eq!(default_solver.logging_level(), SolverLogLevel::Off);
+
+    let configured_solver = ODEsolver::new_with_options(
+        BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            0.03,
+            0.01,
+            1e-6,
+            1e-8,
+            None,
+            false,
+            Some(0.01),
+        )
+        .with_logging_level(SolverLogLevel::Warn),
+    );
+    assert_eq!(configured_solver.logging_level(), SolverLogLevel::Warn);
+}
 
 fn native_solver(mode: BdfTelemetryMode) -> ODEsolver {
     let options = BdfSolverOptions::new(
@@ -74,7 +112,7 @@ fn changing_telemetry_mode_rebuilds_callbacks_and_resets_statistics() {
     solver.solve();
     assert_eq!(solver.get_statistics().solve_calls, 0);
 
-    solver.set_telemetry_mode(BdfTelemetryMode::Timings);
+    solver.set_telemetry_mode(BdfTelemetryMode::Detailed);
     solver.solve();
 
     let timed_stats = solver.get_statistics();
@@ -133,8 +171,28 @@ fn counters_mode_counts_without_reading_timers() {
 }
 
 #[test]
-fn timings_mode_collects_calls_and_durations() {
+fn timings_mode_collects_durations_without_discrete_counters() {
     let mut solver = native_solver(BdfTelemetryMode::Timings);
+    solver.solve();
+
+    let stats = solver.get_statistics();
+    assert_eq!(stats.backend_prepare_calls, 0);
+    assert_eq!(stats.solve_calls, 0);
+    assert_eq!(stats.step_calls, 0);
+    assert_eq!(stats.residual_calls, 0);
+    assert_eq!(stats.jacobian_calls, 0);
+    assert_eq!(stats.accepted_steps_total, 0);
+    assert_eq!(stats.bdf_nfev_total, 0);
+    assert!(stats.solve_ms_total > 0.0);
+    assert!(stats.residual_ms_total > 0.0);
+    assert!(stats.linear_solve_ms_total > 0.0);
+    assert!(solver.preparation_timings().total_ms > 0.0);
+    assert_eq!(solver.preparation_backend_telemetry(), None);
+}
+
+#[test]
+fn detailed_mode_collects_calls_and_durations() {
+    let mut solver = native_solver(BdfTelemetryMode::Detailed);
     solver.solve();
 
     let stats = solver.get_statistics();
@@ -224,17 +282,47 @@ fn symbolic_preparation_timings_retain_backend_cold_stages() {
         false,
         Some(0.01),
     )
+    .with_telemetry_mode(BdfTelemetryMode::Detailed);
+    let mut solver = ODEsolver::new_with_options(options);
+    solver.solve();
+
+    let backend = solver
+        .preparation_backend_telemetry()
+        .expect("detailed telemetry should expose nested backend stages");
+    assert_eq!(backend.mode, IvpTelemetryMode::Detailed);
+    assert!(backend.cold_stage(IvpColdStage::SymbolicJacobian).calls > 0);
+    assert!(backend.cold_stage(IvpColdStage::SymbolicJacobian).elapsed > std::time::Duration::ZERO);
+    assert!(solver.preparation_timings().symbolic_backend_ms > 0.0);
+}
+
+#[test]
+fn symbolic_timings_mode_retains_durations_without_stage_call_counts() {
+    let options = BdfSolverOptions::new(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".to_string()],
+        "t".to_string(),
+        "BDF".to_string(),
+        0.0,
+        DVector::from_vec(vec![1.0]),
+        0.03,
+        0.01,
+        1e-6,
+        1e-8,
+        None,
+        false,
+        Some(0.01),
+    )
     .with_telemetry_mode(BdfTelemetryMode::Timings);
     let mut solver = ODEsolver::new_with_options(options);
     solver.solve();
 
     let backend = solver
         .preparation_backend_telemetry()
-        .expect("symbolic timings should expose nested backend stages");
-    assert_eq!(backend.mode, IvpTelemetryMode::Detailed);
-    assert!(backend.cold_stage(IvpColdStage::SymbolicJacobian).calls > 0);
-    assert!(backend.cold_stage(IvpColdStage::SymbolicJacobian).elapsed > std::time::Duration::ZERO);
-    assert!(solver.preparation_timings().symbolic_backend_ms > 0.0);
+        .expect("timings mode should retain symbolic stage durations");
+    assert_eq!(backend.mode, IvpTelemetryMode::Timings);
+    let stage = backend.cold_stage(IvpColdStage::SymbolicJacobian);
+    assert_eq!(stage.calls, 0);
+    assert!(stage.elapsed > std::time::Duration::ZERO);
 }
 
 #[test]

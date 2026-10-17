@@ -7,9 +7,11 @@
 
 use super::{
     BvpSciBoundaryCallbacks, BvpSciExecution, BvpSciExecutionPolicy, BvpSciLambdifyPlan,
-    BvpSciMatrixLayout, BvpSciNewError, BvpSciOptions, BvpSciOutputPolicy, BvpSciSingularTerm,
-    BvpSciSolver, BvpSciSparseFactorization, BvpSciTelemetry, BvpSciTelemetryMode,
+    BvpSciMatrixLayout, BvpSciNewError, BvpSciNumericalPlan, BvpSciOptions, BvpSciOutputPolicy,
+    BvpSciSingularTerm, BvpSciSolver, BvpSciSparseFactorization, BvpSciTelemetry,
+    BvpSciTelemetryMode,
 };
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
 
@@ -35,6 +37,7 @@ pub struct BvpSciSolverBuilder {
     options: BvpSciOptions,
     sparse_factorization: BvpSciSparseFactorization,
     aot_config: Option<SymbolicIvpGeneratedBackendConfig>,
+    numerical_plan: Option<BvpSciNumericalPlan>,
 }
 
 impl BvpSciSolverBuilder {
@@ -59,6 +62,7 @@ impl BvpSciSolverBuilder {
             options,
             sparse_factorization: BvpSciSparseFactorization::StandardFaer,
             aot_config: None,
+            numerical_plan: None,
         }
     }
 
@@ -76,6 +80,12 @@ impl BvpSciSolverBuilder {
     /// Select `AtomViewNative` as the symbolic frontend.
     pub fn with_atom_native(self) -> Self {
         self.with_frontend(super::BvpSciAssembly::AtomViewNative)
+    }
+
+    /// Configure Rust-side solver logging; logging is disabled unless enabled.
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        self.options.logging_level = level;
+        self
     }
 
     /// Set the independent variable name used by symbolic expressions.
@@ -225,6 +235,16 @@ impl BvpSciSolverBuilder {
         self
     }
 
+    /// Use the Dense numerical-callback frontend instead of symbolic RHS
+    /// expressions. Its telemetry handle is shared with boundary and solver
+    /// stages; the configured execution policy is applied when building.
+    pub fn with_numerical_plan(mut self, plan: BvpSciNumericalPlan) -> Self {
+        self.numerical_plan = Some(plan);
+        self.options.execution = BvpSciExecution::Numerical;
+        self.options.assembly = Some(super::BvpSciAssembly::Numerical);
+        self
+    }
+
     /// Enable disabled, counter-only or detailed telemetry.
     pub fn with_telemetry(mut self, mode: BvpSciTelemetryMode) -> Self {
         self.options.telemetry = mode;
@@ -245,6 +265,7 @@ impl BvpSciSolverBuilder {
 
     /// Prepare callbacks and construct the numerical solver.
     pub fn build(self) -> Result<BvpSciSolver, BvpSciNewError> {
+        let _logging_scope = SolverLogGuard::enter(self.options.logging_level);
         let Self {
             equations,
             state_names,
@@ -258,6 +279,7 @@ impl BvpSciSolverBuilder {
             mut options,
             sparse_factorization,
             aot_config,
+            numerical_plan,
         } = self;
         let mesh = mesh.ok_or_else(|| {
             BvpSciNewError::InvalidConfiguration("BVP builder requires a mesh".into())
@@ -268,38 +290,82 @@ impl BvpSciSolverBuilder {
         let boundary_callback = boundary_callback.ok_or_else(|| {
             BvpSciNewError::InvalidConfiguration("BVP builder requires boundary callbacks".into())
         })?;
-        if matches!(options.assembly, Some(super::BvpSciAssembly::Numerical)) {
-            return Err(BvpSciNewError::UnsupportedRoute(
-                "the fluent builder currently targets the Lambdify frontend; use prepare_numerical for callbacks".into(),
-            ));
-        }
         let telemetry = match options.telemetry {
             BvpSciTelemetryMode::Off => BvpSciTelemetry::disabled(),
             BvpSciTelemetryMode::Counters => BvpSciTelemetry::counters(),
             BvpSciTelemetryMode::Timings => BvpSciTelemetry::timings(),
+            BvpSciTelemetryMode::Detailed => BvpSciTelemetry::detailed(),
         };
         let assembly = options
             .assembly
             .unwrap_or(super::BvpSciAssembly::ExprLegacy);
         options.assembly = Some(assembly);
-        let plan = match (options.execution, aot_config) {
-            (BvpSciExecution::Aot, Some(config)) => BvpSciLambdifyPlan::prepare_aot_with_policy(
-                assembly,
-                options.matrix_layout,
-                equations.clone(),
-                state_names.clone(),
-                parameter_names.clone(),
-                independent_name.clone(),
-                config,
-                telemetry.clone(),
-                options.execution_policy,
-            )?,
-            (BvpSciExecution::Aot, None) => {
+        let plan = match (options.execution, assembly, numerical_plan, aot_config) {
+            (BvpSciExecution::Numerical, super::BvpSciAssembly::Numerical, Some(plan), None) => {
+                if plan.dimension() != state_names.len()
+                    || plan.parameter_dimension() != parameter_names.len()
+                {
+                    return Err(BvpSciNewError::InvalidConfiguration(
+                        "numerical plan dimensions must match declared state and parameter names"
+                            .into(),
+                    ));
+                }
+                if !matches!(options.matrix_layout, super::BvpSciMatrixLayout::Dense) {
+                    return Err(BvpSciNewError::UnsupportedRoute(
+                        "the numerical callback frontend currently supports Dense layout only"
+                            .into(),
+                    ));
+                }
+                BvpSciLambdifyPlan::prepare_numerical(
+                    plan.with_telemetry(telemetry.clone())
+                        .with_execution_policy(options.execution_policy),
+                )
+            }
+            (BvpSciExecution::Numerical, super::BvpSciAssembly::Numerical, None, _) => {
+                return Err(BvpSciNewError::InvalidConfiguration(
+                    "numerical execution requires a numerical callback plan".into(),
+                ));
+            }
+            (BvpSciExecution::Numerical, _, None, _) => {
+                return Err(BvpSciNewError::InvalidConfiguration(
+                    "numerical execution requires Numerical assembly and a callback plan".into(),
+                ));
+            }
+            (_, _, Some(_), _) => {
+                return Err(BvpSciNewError::InvalidConfiguration(
+                    "numerical callback plan cannot be combined with symbolic or AOT execution"
+                        .into(),
+                ));
+            }
+            (_, super::BvpSciAssembly::Numerical, None, _) => {
+                return Err(BvpSciNewError::InvalidConfiguration(
+                    "Numerical assembly requires a numerical callback plan".into(),
+                ));
+            }
+            (BvpSciExecution::Aot, _, None, Some(config)) => {
+                BvpSciLambdifyPlan::prepare_aot_with_policy(
+                    assembly,
+                    options.matrix_layout,
+                    equations.clone(),
+                    state_names.clone(),
+                    parameter_names.clone(),
+                    independent_name.clone(),
+                    config,
+                    telemetry.clone(),
+                    options.execution_policy,
+                )?
+            }
+            (BvpSciExecution::Aot, _, None, None) => {
                 return Err(BvpSciNewError::InvalidConfiguration(
                     "AOT execution requires a generated backend configuration".into(),
                 ));
             }
-            (_, _) => BvpSciLambdifyPlan::prepare(
+            (_, _, None, Some(_)) => {
+                return Err(BvpSciNewError::InvalidConfiguration(
+                    "generated backend configuration requires AOT execution".into(),
+                ));
+            }
+            (_, _, None, None) => BvpSciLambdifyPlan::prepare(
                 assembly,
                 &equations,
                 &state_names,

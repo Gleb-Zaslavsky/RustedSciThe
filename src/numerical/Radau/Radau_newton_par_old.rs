@@ -248,7 +248,7 @@ mod tests_parallel {
     use crate::symbolic::symbolic_engine::Expr;
     use crate::symbolic::symbolic_functions::Jacobian;
     use approx::assert_relative_eq;
-    use log::info;
+    use crate::numerical::logging::solver_info as info;
     use nalgebra::DVector;
 
     #[test]

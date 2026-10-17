@@ -1,4 +1,5 @@
 use crate::numerical::BDF::BDF_solver::BdfJacobian;
+use crate::numerical::logging::solver_warn;
 use crate::somelinalg::banded::storage::Banded;
 use crate::symbolic::View::evaluate::PreparedEvaluator;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
@@ -750,7 +751,7 @@ fn compile_native_atom_jacobian(
     Ok(Box::new(move |t, y| match callback(t, y) {
         Ok(jacobian) => jacobian,
         Err(error) => {
-            log::warn!(
+            solver_warn!(
                 target: "rusted_scithe::lsode2::native_jacobian",
                 "native AtomView Jacobian compatibility callback failed: {error}"
             );
@@ -913,7 +914,7 @@ pub fn compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry(
     Ok(Box::new(move |t, y| match callback(t, y) {
         Ok(jacobian) => jacobian,
         Err(error) => {
-            log::warn!(
+            solver_warn!(
                 target: "rusted_scithe::lsode2::native_jacobian",
                 "compiled AOT Jacobian compatibility callback failed: {error}"
             );
@@ -1320,7 +1321,7 @@ pub(crate) fn compile_native_sparse_aot_jacobian_from_linked_backend_compat(
     Ok(Box::new(move |t, y| match callback(t, y) {
         Ok(jacobian) => jacobian,
         Err(error) => {
-            log::warn!(
+            solver_warn!(
                 target: "rusted_scithe::lsode2::native_jacobian",
                 "compiled AOT Jacobian compatibility callback failed: {error}"
             );

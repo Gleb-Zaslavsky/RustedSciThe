@@ -308,6 +308,39 @@ impl PyExprMatrix {
         ))
     }
 
+    /// Compute a conventional matrix product; use `hadamard()` for entrywise multiplication.
+    pub fn matmul(&self, other: &PyExprMatrix) -> PyResult<Self> {
+        if self.inner.ncols() != other.inner.nrows() {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "matrix-product dimensions do not match: {:?} and {:?}",
+                self.inner.shape(),
+                other.inner.shape()
+            )));
+        }
+        // The core constructor infers zero columns for a zero-row result, so
+        // preserve the mathematically known output shape at the Python edge.
+        if self.inner.nrows() == 0 {
+            return Ok(Self::from_inner(ExprMatrix::zeros(0, other.inner.ncols())));
+        }
+        Ok(Self::from_inner(self.inner.clone() * other.inner.clone()))
+    }
+
+    /// Multiply corresponding entries of equal-shaped matrices.
+    pub fn hadamard(&self, other: &PyExprMatrix) -> PyResult<Self> {
+        if self.inner.shape() != other.inner.shape() {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "Hadamard-product shapes must match: {:?} and {:?}",
+                self.inner.shape(),
+                other.inner.shape()
+            )));
+        }
+        // Preserve the column count of an empty (0, n) matrix.
+        if self.inner.nrows() == 0 {
+            return Ok(Self::from_inner(ExprMatrix::zeros(0, self.inner.ncols())));
+        }
+        Ok(Self::from_inner(self.inner.hadamard(&other.inner)))
+    }
+
     /// Return the symbolic trace of a square matrix.
     pub fn trace(&self) -> PyResult<PyExpr> {
         if !self.inner.is_square() {

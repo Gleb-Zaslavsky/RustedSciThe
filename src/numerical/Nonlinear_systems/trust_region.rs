@@ -1,7 +1,7 @@
 use crate::numerical::Nonlinear_systems::engine::{
-    eval_residual_with_runtime, measure_linear_operation, measure_linear_system_operation,
-    solve_linear_system, IterationState, LinearSolverKind, NonlinearMethod, RuntimeDiagnostics,
-    SolveOptions, StepOutcome,
+    IterationState, LinearSolverKind, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
+    StepOutcome, eval_residual_with_runtime, measure_linear_operation,
+    measure_linear_system_operation, solve_linear_system,
 };
 use crate::numerical::Nonlinear_systems::engine::{nonlinear_log_debug, nonlinear_log_info};
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
@@ -98,13 +98,13 @@ impl NonlinearMethod for TrustRegionMethod {
         let step = if cauchy_norm >= method_state.delta {
             method_state.delta / cauchy_norm * cauchy_step
         } else {
-            runtime.linear_solves += 1;
+            runtime.count_linear_solve();
             let newton_step = measure_linear_system_operation(
                 options.linear_solver,
                 &state.jacobian,
                 &(-&state.residual),
                 runtime,
-                options.diagnostics.collect_statistics,
+                options.diagnostics.telemetry_mode,
             )?;
             dogleg_step(newton_step, &cauchy_step, method_state.delta)
         };
@@ -123,7 +123,7 @@ impl NonlinearMethod for TrustRegionMethod {
             problem,
             &trial_x,
             runtime,
-            options.diagnostics.collect_statistics,
+            options.diagnostics.telemetry_mode,
         )?;
         let actual = state.residual.norm_squared() - trial_residual.norm_squared();
         let jacobian_step = &state.jacobian * &step;
@@ -140,13 +140,13 @@ impl NonlinearMethod for TrustRegionMethod {
         }
 
         if rho > self.eta {
-            runtime.accepted_steps += 1;
+            runtime.count_accepted_step();
             Ok(StepOutcome::Continue {
                 next_x: trial_x,
                 accepted: true,
             })
         } else {
-            runtime.rejected_steps += 1;
+            runtime.count_rejected_step();
             Ok(StepOutcome::Continue {
                 next_x: state.x.clone(),
                 accepted: false,
@@ -819,40 +819,39 @@ impl NonlinearMethod for PowellDoglegMethod {
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
         }
 
-        let step =
-            measure_linear_operation(runtime, options.diagnostics.collect_statistics, || {
-                method_state
-                    .dogleg_state
-                    .preloop(
-                        &state.jacobian,
-                        &state.residual,
-                        &gradient,
-                        &method_state.scaling,
-                    )
-                    .map_err(|e| {
-                        SolveError::NumericalBreakdown(format!("Dogleg preloop failed: {:?}", e))
-                    })?;
+        let step = measure_linear_operation(runtime, options.diagnostics.telemetry_mode, || {
+            method_state
+                .dogleg_state
+                .preloop(
+                    &state.jacobian,
+                    &state.residual,
+                    &gradient,
+                    &method_state.scaling,
+                )
+                .map_err(|e| {
+                    SolveError::NumericalBreakdown(format!("Dogleg preloop failed: {:?}", e))
+                })?;
 
-                if self.use_double_dogleg {
-                    method_state.dogleg_state.double_step(
-                        &state.jacobian,
-                        &state.residual,
-                        &gradient,
-                        &method_state.scaling,
-                        method_state.delta,
-                    )
-                } else {
-                    method_state.dogleg_state.step(
-                        &state.jacobian,
-                        &state.residual,
-                        &method_state.scaling,
-                        method_state.delta,
-                    )
-                }
-                .map_err(|e| SolveError::NumericalBreakdown(format!("Dogleg step failed: {:?}", e)))
-            })?;
+            if self.use_double_dogleg {
+                method_state.dogleg_state.double_step(
+                    &state.jacobian,
+                    &state.residual,
+                    &gradient,
+                    &method_state.scaling,
+                    method_state.delta,
+                )
+            } else {
+                method_state.dogleg_state.step(
+                    &state.jacobian,
+                    &state.residual,
+                    &method_state.scaling,
+                    method_state.delta,
+                )
+            }
+            .map_err(|e| SolveError::NumericalBreakdown(format!("Dogleg step failed: {:?}", e)))
+        })?;
 
-        runtime.linear_solves += 1;
+        runtime.count_linear_solve();
 
         if step.norm() < options.tolerance {
             if state.residual_norm <= options.tolerance {
@@ -870,7 +869,7 @@ impl NonlinearMethod for PowellDoglegMethod {
             problem,
             &trial_x,
             runtime,
-            options.diagnostics.collect_statistics,
+            options.diagnostics.telemetry_mode,
         )?;
         let actual = state.residual.norm_squared() - trial_residual.norm_squared();
         let predicted = method_state
@@ -902,13 +901,13 @@ impl NonlinearMethod for PowellDoglegMethod {
         }
 
         if rho > self.eta {
-            runtime.accepted_steps += 1;
+            runtime.count_accepted_step();
             Ok(StepOutcome::Continue {
                 next_x: trial_x,
                 accepted: true,
             })
         } else {
-            runtime.rejected_steps += 1;
+            runtime.count_rejected_step();
             Ok(StepOutcome::Continue {
                 next_x: state.x.clone(),
                 accepted: false,

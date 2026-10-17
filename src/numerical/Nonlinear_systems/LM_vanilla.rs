@@ -2,15 +2,15 @@ use std::borrow::Cow;
 
 use nalgebra::{DMatrix, DVector};
 
+use crate::numerical::Nonlinear_systems::LM_utils::TrustRegionScaling;
 use crate::numerical::Nonlinear_systems::engine::{
-    eval_residual_with_runtime, measure_linear_operation, measure_linear_system_operation_owned,
-    scaled_norm, scaling_vector, IterationState, MethodWorkspace, NonlinearMethod,
-    RuntimeDiagnostics, SolveOptions, StepOutcome,
+    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
+    StepOutcome, eval_residual_with_runtime, measure_linear_operation,
+    measure_linear_system_operation_owned, scaled_norm, scaling_vector,
 };
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
 use crate::numerical::Nonlinear_systems::problem::JacobianProvider;
 use crate::numerical::Nonlinear_systems::trust_region_LM::solve_trust_region_subproblem;
-use crate::numerical::Nonlinear_systems::LM_utils::TrustRegionScaling;
 
 /// CLASSIC LEVENBERG-MARQUARDT ALGORITHM
 
@@ -153,14 +153,14 @@ impl LevenbergMarquardtMethod {
                 method_state.lambda,
             );
         }
-        runtime.linear_solves += 1;
+        runtime.count_linear_solve();
         let rhs = -state.jacobian.transpose() * &state.residual;
         let step = measure_linear_system_operation_owned(
             options.linear_solver,
             regularized,
             &rhs,
             runtime,
-            options.diagnostics.collect_statistics,
+            options.diagnostics.telemetry_mode,
         )?;
         if step.norm() < options.tolerance {
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
@@ -183,7 +183,7 @@ impl LevenbergMarquardtMethod {
             problem,
             &trial_x,
             runtime,
-            options.diagnostics.collect_statistics,
+            options.diagnostics.telemetry_mode,
         )?;
         let trial_is_converged =
             trial_residual.norm_squared() < options.tolerance * options.tolerance;
@@ -200,14 +200,14 @@ impl LevenbergMarquardtMethod {
         // that already satisfies the user-requested residual tolerance.
         if trial_is_converged || rho > 0.0 {
             method_state.lambda = (method_state.lambda / self.decrease_factor).max(self.min_lambda);
-            runtime.accepted_steps += 1;
+            runtime.count_accepted_step();
             Ok(StepOutcome::Continue {
                 next_x: trial_x.into_owned(),
                 accepted: true,
             })
         } else {
             method_state.lambda = (method_state.lambda * self.increase_factor).min(self.max_lambda);
-            runtime.rejected_steps += 1;
+            runtime.count_rejected_step();
             if method_state.lambda >= self.max_lambda {
                 return Ok(StepOutcome::Terminated(TerminationReason::Stagnation));
             }
@@ -589,9 +589,9 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
         }
 
         // Determine par and step with the shared MINPACK-style trust-region solver.
-        runtime.linear_solves += 1;
+        runtime.count_linear_solve();
         let subproblem =
-            measure_linear_operation(runtime, options.diagnostics.collect_statistics, || {
+            measure_linear_operation(runtime, options.diagnostics.telemetry_mode, || {
                 solve_trust_region_subproblem(
                     &state.jacobian,
                     &state.residual,
@@ -626,7 +626,7 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
             problem,
             &trial_x,
             runtime,
-            options.diagnostics.collect_statistics,
+            options.diagnostics.telemetry_mode,
         )?;
         method_state.nfev += 1;
         let fnorm1 = trial_residual.norm();
@@ -666,7 +666,7 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
 
         // Decide acceptance
         if accepted {
-            runtime.accepted_steps += 1;
+            runtime.count_accepted_step();
             if function_converged
                 || parameter_converged
                 || method_state.nfev >= self.maxfev
@@ -701,7 +701,7 @@ impl NonlinearMethod for LevenbergMarquardtMinpack {
                 accepted: true,
             });
         } else {
-            runtime.rejected_steps += 1;
+            runtime.count_rejected_step();
         }
 
         // Termination (mapped from MINPACK conditions).  These are deliberately

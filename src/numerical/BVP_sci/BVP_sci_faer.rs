@@ -119,7 +119,7 @@ use faer::col::{Col, ColRef};
 use faer::linalg::solvers::Solve;
 use faer::mat::{Mat, MatRef};
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, Triplet};
-use log::info;
+use crate::numerical::logging::{solver_info as info, solver_warn as warn};
 use nalgebra::{DMatrix, linalg::SVD};
 
 use std::{collections::HashMap, mem::size_of, time::Instant};
@@ -2993,9 +2993,9 @@ pub fn solve_bvp_with_strategy_linear_policy_and_banded_jacobian(
                 iteration,
                 x.nrows()
             ),
-            1 => log::warn!("Number of nodes exceeded after iteration {}.", iteration),
-            2 => log::warn!("Singular Jacobian encountered on iteration {}.", iteration),
-            3 => log::warn!(
+            1 => warn!("Number of nodes exceeded after iteration {}.", iteration),
+            2 => warn!("Singular Jacobian encountered on iteration {}.", iteration),
+            3 => warn!(
                 "Unable to satisfy boundary conditions tolerance on iteration {}.",
                 iteration
             ),

@@ -18,7 +18,7 @@
 //!     .with_initial_guess(vec![1.0, 2.0, 0.1])
 //!     .with_positive_parameters(["tau"])
 //!     .with_atom_native_frontend()
-//!     .with_telemetry(true)
+//!     .with_telemetry(crate::numerical::SolverTelemetryMode::Detailed)
 //!     .try_solve()?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -33,6 +33,7 @@ use crate::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, PreparationTelemetryMode, SymbolicLambdifyFrontend,
     SymbolicPreparationReport, SymbolicProblemOptions,
 };
+use crate::numerical::SolverTelemetryMode;
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::DVector;
 
@@ -57,7 +58,7 @@ pub struct GavinSymbolicFitting {
     tolerances: (f64, f64, f64),
     damping_factors: (f64, f64, f64),
     update_policy: super::lm_gavin::GavinLmUpdatePolicy,
-    telemetry: bool,
+    telemetry_mode: SolverTelemetryMode,
     logging: bool,
     preparation_telemetry: PreparationTelemetryMode,
 }
@@ -69,7 +70,7 @@ pub struct GavinSymbolicFitResult {
     pub fit: GavinLmResult,
     /// Parameter names in the same order as `fit.parameters`.
     pub parameter_names: Vec<String>,
-    /// Optional solve counters/timing; absent when not requested.
+    /// Optional solve telemetry; inspect its mode to see which channels were collected.
     pub telemetry: Option<GavinLmTelemetry>,
     /// Effective symbolic backend selected during preparation.
     pub backend: crate::numerical::Nonlinear_systems::symbolic::SymbolicBackendKind,
@@ -97,7 +98,7 @@ impl GavinSymbolicFitting {
             tolerances: (1e-3, 1e-3, 1e-1),
             damping_factors: (1e-2, 11.0, 9.0),
             update_policy: super::lm_gavin::GavinLmUpdatePolicy::Marquardt,
-            telemetry: false,
+            telemetry_mode: SolverTelemetryMode::Off,
             logging: false,
             preparation_telemetry: PreparationTelemetryMode::Disabled,
         }
@@ -244,9 +245,9 @@ impl GavinSymbolicFitting {
         self
     }
 
-    /// Enables numerical counters and timing for the solve.
-    pub fn with_telemetry(mut self, enabled: bool) -> Self {
-        self.telemetry = enabled;
+    /// Selects solve telemetry channels; preparation telemetry is configured separately.
+    pub fn with_telemetry(mut self, mode: SolverTelemetryMode) -> Self {
+        self.telemetry_mode = mode;
         self
     }
 
@@ -329,7 +330,7 @@ impl GavinSymbolicFitting {
                 self.damping_factors.2,
             )
             .with_update_policy(self.update_policy)
-            .with_telemetry(self.telemetry)
+            .with_telemetry(self.telemetry_mode)
             .with_logging(self.logging);
         let initial = bound.params().clone();
         let sample_locations = DVector::from_vec(self.x_data.clone());
@@ -399,7 +400,7 @@ mod tests {
             .with_sample_parameter("x")
             .with_unknowns(["a", "b"])
             .with_initial_guess(vec![1.2, 0.2])
-            .with_telemetry(true)
+            .with_telemetry(crate::numerical::SolverTelemetryMode::Detailed)
             .with_preparation_telemetry(PreparationTelemetryMode::Collect)
             .try_solve()
             .unwrap();
@@ -515,7 +516,7 @@ mod tests {
             .with_initial_guess(vec![0.1])
             .with_positive_parameters(["a"])
             .with_solver_controls(12, 1e-12, 1e-12, 0.1)
-            .with_telemetry(true)
+            .with_telemetry(crate::numerical::SolverTelemetryMode::Detailed)
             .try_solve()
             .unwrap();
 

@@ -8,7 +8,9 @@
 use nalgebra::DVector;
 use thiserror::Error as ThisError;
 
-use crate::numerical::Nonlinear_systems::least_squares::LevenbergMarquardt;
+use crate::numerical::Nonlinear_systems::least_squares::{
+    LeastSquaresError, LeastSquaresTerminationReason, LevenbergMarquardt,
+};
 use crate::numerical::optimization::varpro::fit::FitResult;
 use crate::numerical::optimization::varpro::model::SeparableModel;
 use crate::numerical::optimization::varpro::model::builder::SeparableModelBuilder;
@@ -62,8 +64,15 @@ pub enum SymbolicVarProError {
     /// The underlying nonlinear solver returned an unsuccessful report.
     #[error("symbolic VarPro solver did not converge: {termination}")]
     SolverFailed {
-        /// Debug representation of the solver termination reason.
+        /// Human-readable solver termination label retained for diagnostics.
         termination: String,
+        /// Whether the native termination was a configured iteration/evaluation
+        /// budget exhaustion. Python adapters use this typed flag rather than
+        /// parsing the human-readable termination label.
+        exhausted: bool,
+        /// Original typed LM failure, retained when the minimizer produced one.
+        #[source]
+        source: Option<LeastSquaresError>,
     },
 }
 
@@ -284,8 +293,18 @@ impl SymbolicVarProBuilder {
 
         LevMarSolver::with_solver(solver)
             .solve(problem)
-            .map_err(|fit| SymbolicVarProError::SolverFailed {
-                termination: format!("{:?}", fit.minimization_report.termination),
+            .map_err(|fit| {
+                let termination = &fit.minimization_report.termination;
+                let exhausted = matches!(
+                    termination,
+                    LeastSquaresTerminationReason::MaxIterationsReached { .. }
+                        | LeastSquaresTerminationReason::LostPatience
+                );
+                SymbolicVarProError::SolverFailed {
+                    termination: format!("{termination:?}"),
+                    exhausted,
+                    source: fit.minimization_report.error,
+                }
             })
     }
 

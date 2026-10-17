@@ -95,7 +95,7 @@ frontends; VarPro currently supports ExprLegacy and sequential evaluation, and
 returns a typed `UnsupportedOption` otherwise. Telemetry and logging are off by
 default. Gavin currently exposes one detailed telemetry snapshot, so either
 enabled least-squares telemetry mode requests that snapshot. Logging uses the
-host application's `log` facade and does not install a logger.
+shared timestamped solver log when enabled; logging remains off by default.
 
 ## Initial Release Baseline (2026-10-11)
 

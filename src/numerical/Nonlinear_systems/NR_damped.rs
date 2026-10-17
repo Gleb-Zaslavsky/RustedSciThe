@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use nalgebra::{DMatrix, DVector};
 
 use crate::numerical::Nonlinear_systems::engine::{
-    eval_residual_norm_with_runtime, measure_linear_system_operation, IterationState,
-    MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions, StepOutcome,
+    IterationState, MethodWorkspace, NonlinearMethod, RuntimeDiagnostics, SolveOptions,
+    StepOutcome, eval_residual_norm_with_runtime, measure_linear_system_operation,
 };
 use crate::numerical::Nonlinear_systems::engine::{nonlinear_log_info, nonlinear_log_warn};
 use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
@@ -152,14 +152,14 @@ impl DampedNewtonMethod {
         runtime: &mut RuntimeDiagnostics,
         mut workspace: Option<&mut MethodWorkspace>,
     ) -> Result<StepOutcome, SolveError> {
-        runtime.linear_solves += 1;
+        runtime.count_linear_solve();
         // Compute Newton step:
         let newton_step = measure_linear_system_operation(
             options.linear_solver,
             &state.jacobian,
             &state.residual,
             runtime,
-            options.diagnostics.collect_statistics,
+            options.diagnostics.telemetry_mode,
         )?;
         if newton_step.norm() < options.tolerance {
             return Ok(StepOutcome::Terminated(TerminationReason::StepTooSmall));
@@ -182,7 +182,7 @@ impl DampedNewtonMethod {
                     problem,
                     trial_point,
                     runtime,
-                    options.diagnostics.collect_statistics,
+                    options.diagnostics.telemetry_mode,
                     residual_output,
                 )?;
                 (Cow::Borrowed(trial_point), trial_norm)
@@ -195,7 +195,7 @@ impl DampedNewtonMethod {
                     problem,
                     &trial_x,
                     runtime,
-                    options.diagnostics.collect_statistics,
+                    options.diagnostics.telemetry_mode,
                     None,
                 )?;
                 (Cow::Owned(trial_x), trial_norm)
@@ -203,14 +203,14 @@ impl DampedNewtonMethod {
             if trial_norm < current_norm * (1.0 - self.sufficient_decrease * alpha)
                 || trial_norm < options.tolerance
             {
-                runtime.accepted_steps += 1;
+                runtime.count_accepted_step();
                 return Ok(StepOutcome::Continue {
                     next_x: trial_x.into_owned(),
                     accepted: true,
                 });
             }
             alpha *= self.shrink_factor;
-            runtime.rejected_steps += 1;
+            runtime.count_rejected_step();
             if alpha < options.tolerance {
                 return Ok(StepOutcome::Terminated(TerminationReason::Stagnation));
             }
@@ -318,14 +318,14 @@ impl DampedNewtonMethodAdvanced {
         runtime: &mut RuntimeDiagnostics,
         mut workspace: Option<&mut MethodWorkspace>,
     ) -> Result<StepOutcome, SolveError> {
-        runtime.linear_solves += 1;
+        runtime.count_linear_solve();
         // Compute Newton step:
         let newton_step = measure_linear_system_operation(
             options.linear_solver,
             &state.jacobian,
             &state.residual,
             runtime,
-            options.diagnostics.collect_statistics,
+            options.diagnostics.telemetry_mode,
         )?;
 
         if newton_step.norm() < options.tolerance {
@@ -365,7 +365,7 @@ impl DampedNewtonMethodAdvanced {
                     problem,
                     trial_point,
                     runtime,
-                    options.diagnostics.collect_statistics,
+                    options.diagnostics.telemetry_mode,
                     residual_output,
                 )?;
                 (Cow::Borrowed(trial_point), trial_norm)
@@ -378,7 +378,7 @@ impl DampedNewtonMethodAdvanced {
                     problem,
                     &trial_x,
                     runtime,
-                    options.diagnostics.collect_statistics,
+                    options.diagnostics.telemetry_mode,
                     None,
                 )?;
                 (Cow::Owned(trial_x), trial_norm)
@@ -399,7 +399,7 @@ impl DampedNewtonMethodAdvanced {
                 || trial_norm < options.tolerance
             {
                 nonlinear_log_info!("Damping coefficient accepted");
-                runtime.accepted_steps += 1;
+                runtime.count_accepted_step();
                 return Ok(StepOutcome::Continue {
                     next_x: trial_x.into_owned(),
                     accepted: true,
@@ -408,7 +408,7 @@ impl DampedNewtonMethodAdvanced {
             // if fail this criterion we must reject it and retries the step with a reduced (often halved) damping parameter trying again until
             // criterion is met  or max damping iterations is reached
             lambda *= self.shrink_factor;
-            runtime.rejected_steps += 1;
+            runtime.count_rejected_step();
         }
 
         nonlinear_log_warn!("Max damping iterations reached");

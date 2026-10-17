@@ -28,6 +28,31 @@ macro_rules! println {
     }
 
 #[test]
+fn frozen_logging_is_disabled_by_default() {
+    let solver = NRBVP::new(
+        Vec::new(),
+        DMatrix::zeros(0, 0),
+        Vec::new(),
+        String::new(),
+        HashMap::new(),
+        0.0,
+        0.0,
+        1,
+        "Naive".to_string(),
+        None,
+        None,
+        "Dense".to_string(),
+        1e-8,
+        1,
+    );
+
+    assert_eq!(
+        solver.telemetry_counters.logging_mode(),
+        BvpLoggingMode::Off
+    );
+}
+
+#[test]
 fn frozen_statistics_keep_legacy_projection_and_typed_snapshot_in_sync() {
     let solver = NRBVP::new(
         Vec::new(),

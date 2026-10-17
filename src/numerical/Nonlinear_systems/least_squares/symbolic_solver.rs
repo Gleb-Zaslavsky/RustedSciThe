@@ -4,6 +4,7 @@
 //! while all numerical iterations go through the canonical least-squares solver
 //! selected by [`crate::numerical::Nonlinear_systems::solver::NonlinearSolver`].
 
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use crate::numerical::Nonlinear_systems::engine::SolveStatistics;
 use crate::numerical::Nonlinear_systems::least_squares::{
     LeastSquaresError, LeastSquaresProblem, LeastSquaresTelemetryMode, LevenbergMarquardt,
@@ -47,7 +48,7 @@ pub struct SymbolicLeastSquaresSolver {
     /// Statistics from the most recent mutable solve.
     pub last_statistics: Option<SolveStatistics>,
     /// Optional log level (debug, info, warn, error, off, none); `None` is silent.
-    /// This library wrapper never installs or changes a process-global logger.
+    /// Enabled messages are persisted to the shared timestamped solver log.
     pub loglevel: Option<String>,
     /// Symbolic variables whose numeric domain is strictly positive.
     ///
@@ -323,11 +324,16 @@ impl SymbolicLeastSquaresSolver {
             .with_lambdify_backend()
             .with_lambdify_frontend(self.lambdify_frontend)
             .with_lambdify_execution_policy(self.lambdify_execution_policy)
-            .with_preparation_telemetry(if self.telemetry_mode == LeastSquaresTelemetryMode::Detailed {
-                PreparationTelemetryMode::Collect
-            } else {
-                PreparationTelemetryMode::Disabled
-            });
+            .with_preparation_telemetry(
+                if matches!(
+                    self.telemetry_mode,
+                    LeastSquaresTelemetryMode::Timings | LeastSquaresTelemetryMode::Detailed
+                ) {
+                    PreparationTelemetryMode::Collect
+                } else {
+                    PreparationTelemetryMode::Disabled
+                },
+            );
         if let Some(parameters) = &self.parameters {
             options = options.with_equation_parameters(parameters.clone());
         }
@@ -363,6 +369,17 @@ impl SymbolicLeastSquaresSolver {
         self.loglevel
             .as_deref()
             .and_then(|value| parse_log_level(value).ok().flatten())
+    }
+
+    fn logging_scope(&self) -> SolverLogGuard {
+        let level = match self.log_level() {
+            Some(Level::Error) => SolverLogLevel::Error,
+            Some(Level::Warn) => SolverLogLevel::Warn,
+            Some(Level::Info) => SolverLogLevel::Info,
+            Some(Level::Debug | Level::Trace) => SolverLogLevel::Debug,
+            None => SolverLogLevel::Off,
+        };
+        SolverLogGuard::enter(level)
     }
 
     /// Declares symbolic variables that must remain strictly positive.
@@ -540,6 +557,7 @@ impl SymbolicLeastSquaresSolver {
         crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
         LeastSquaresError,
     > {
+        let _logging_scope = self.logging_scope();
         self.result = None;
         self.map_of_solutions = None;
         self.last_statistics = None;
@@ -585,6 +603,7 @@ impl SymbolicLeastSquaresSolver {
         crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
         LeastSquaresError,
     > {
+        let _logging_scope = self.logging_scope();
         self.result = None;
         self.map_of_solutions = None;
         self.last_statistics = None;
@@ -617,6 +636,7 @@ impl SymbolicLeastSquaresSolver {
 
     /// Solves the nonlinear system with optional logging.
     pub fn solve(&mut self) {
+        let _logging_scope = self.logging_scope();
         self.ensure_prepared();
         self.solve_internal();
     }
@@ -675,6 +695,7 @@ impl SymbolicLeastSquaresSolver {
         &self,
         params: Vec<f64>,
     ) -> (Option<HashMap<String, f64>>, Option<DVector<f64>>) {
+        let _logging_scope = self.logging_scope();
         let (solution, report) = {
             let prepared = self
                 .prepared

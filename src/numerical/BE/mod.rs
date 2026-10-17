@@ -12,6 +12,7 @@ pub mod prelude {
         BeContinuationStatistics, BeDetailedStatistics, BeError, BeSolverOptions, BeStatus,
         BeSymbolicAssemblyBackend, BeTelemetryMode, BE, DEFAULT_BE_MAX_STEPS,
     };
+    pub use crate::numerical::logging::SolverLogLevel;
     pub use crate::symbolic::symbolic_engine::Expr;
     pub use crate::symbolic::symbolic_ivp_generated::{
         DenseIvpGeneratedBackendMode, SymbolicIvpGeneratedBackendConfig,
@@ -20,6 +21,7 @@ pub mod prelude {
 }
 
 use self::NR_for_Euler::{NreError, NreStepMode, NRE};
+use crate::numerical::logging::{solver_info as info, SolverLogGuard, SolverLogLevel};
 use crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
@@ -28,7 +30,6 @@ use crate::symbolic::symbolic_ivp_generated::{
     prepare_generated_symbolic_ivp_problem, DenseIvpGeneratedBackendMode, IvpBackendStatistics,
     SymbolicIvpGeneratedBackendConfig, SymbolicIvpGeneratedError,
 };
-use log::info;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -68,9 +69,14 @@ pub enum BeTelemetryMode {
     Off,
     /// Collect work counters without reading the clock.
     Counters,
-    /// Collect counters and wall-clock stage timings.
-    #[default]
+    /// Collect elapsed wall-clock stage timings without discrete counters.
     Timings,
+    /// Collect both work counters and wall-clock stage timings.
+    ///
+    /// This remains the default to preserve the solver's former combined
+    /// telemetry behavior while `Timings` now has strict duration-only semantics.
+    #[default]
+    Detailed,
 }
 
 impl BeTelemetryMode {
@@ -80,14 +86,14 @@ impl BeTelemetryMode {
 
     /// Compatibility alias for the former counters-and-timings mode.
     #[allow(non_upper_case_globals)]
-    pub const Enabled: Self = Self::Timings;
+    pub const Enabled: Self = Self::Detailed;
 
     pub(crate) const fn collects_counters(self) -> bool {
-        !matches!(self, Self::Off)
+        matches!(self, Self::Counters | Self::Detailed)
     }
 
     pub(crate) const fn collects_timings(self) -> bool {
-        matches!(self, Self::Timings)
+        matches!(self, Self::Timings | Self::Detailed)
     }
 }
 
@@ -165,12 +171,20 @@ pub struct BeContinuationStatistics {
 }
 
 impl BeContinuationStatistics {
-    fn record(&mut self, elapsed: Option<std::time::Duration>, succeeded: bool) {
-        self.attempts = self.attempts.saturating_add(1);
-        if succeeded {
-            self.completed = self.completed.saturating_add(1);
-        } else {
-            self.failures = self.failures.saturating_add(1);
+    fn record(
+        &mut self,
+        elapsed: Option<std::time::Duration>,
+        succeeded: bool,
+        collect_counts: bool,
+    ) {
+        // Timings-only mode still records elapsed time, but not discrete events.
+        if collect_counts {
+            self.attempts = self.attempts.saturating_add(1);
+            if succeeded {
+                self.completed = self.completed.saturating_add(1);
+            } else {
+                self.failures = self.failures.saturating_add(1);
+            }
         }
         if let Some(elapsed) = elapsed {
             self.elapsed_ms_total += elapsed.as_secs_f64() * 1_000.0;
@@ -221,12 +235,17 @@ impl BeDetailedStatistics {
         &mut self,
         elapsed: Option<std::time::Duration>,
         succeeded: bool,
+        collect_count: bool,
     ) {
-        self.parameter_bind_attempts = self.parameter_bind_attempts.saturating_add(1);
-        if succeeded {
-            self.parameter_bind_successes = self.parameter_bind_successes.saturating_add(1);
-        } else {
-            self.parameter_bind_failures = self.parameter_bind_failures.saturating_add(1);
+        // Keep metric presence independent: `elapsed` controls time, this flag
+        // controls only the discrete counts.
+        if collect_count {
+            self.parameter_bind_attempts = self.parameter_bind_attempts.saturating_add(1);
+            if succeeded {
+                self.parameter_bind_successes = self.parameter_bind_successes.saturating_add(1);
+            } else {
+                self.parameter_bind_failures = self.parameter_bind_failures.saturating_add(1);
+            }
         }
         if let Some(elapsed) = elapsed {
             self.parameter_bind_ms_total += elapsed.as_secs_f64() * 1_000.0;
@@ -249,15 +268,27 @@ impl BeDetailedStatistics {
         self.fd_rhs_evaluations = self.fd_rhs_evaluations.saturating_add(1);
     }
 
-    pub(crate) fn record_factorization(&mut self, elapsed: Option<std::time::Duration>) {
-        self.factorization_calls = self.factorization_calls.saturating_add(1);
+    pub(crate) fn record_factorization(
+        &mut self,
+        elapsed: Option<std::time::Duration>,
+        collect_count: bool,
+    ) {
+        if collect_count {
+            self.factorization_calls = self.factorization_calls.saturating_add(1);
+        }
         if let Some(elapsed) = elapsed {
             self.factorization_ms_total += elapsed.as_secs_f64() * 1_000.0;
         }
     }
 
-    pub(crate) fn record_linear_solve(&mut self, elapsed: Option<std::time::Duration>) {
-        self.linear_solve_calls = self.linear_solve_calls.saturating_add(1);
+    pub(crate) fn record_linear_solve(
+        &mut self,
+        elapsed: Option<std::time::Duration>,
+        collect_count: bool,
+    ) {
+        if collect_count {
+            self.linear_solve_calls = self.linear_solve_calls.saturating_add(1);
+        }
         if let Some(elapsed) = elapsed {
             self.linear_solve_ms_total += elapsed.as_secs_f64() * 1_000.0;
         }
@@ -271,8 +302,14 @@ impl BeDetailedStatistics {
         self.failed_steps = self.failed_steps.saturating_add(1);
     }
 
-    pub(crate) fn record_output_assembly(&mut self, elapsed: Option<std::time::Duration>) {
-        self.output_assembly_calls = self.output_assembly_calls.saturating_add(1);
+    pub(crate) fn record_output_assembly(
+        &mut self,
+        elapsed: Option<std::time::Duration>,
+        collect_count: bool,
+    ) {
+        if collect_count {
+            self.output_assembly_calls = self.output_assembly_calls.saturating_add(1);
+        }
         if let Some(elapsed) = elapsed {
             self.output_assembly_ms_total += elapsed.as_secs_f64() * 1_000.0;
         }
@@ -356,6 +393,8 @@ pub struct BeSolverOptions {
     pub max_steps: usize,
     /// Controls solver and callback instrumentation.
     pub telemetry_mode: BeTelemetryMode,
+    /// Rust-side message threshold; `Off` by default and independent of telemetry.
+    pub logging_level: SolverLogLevel,
 }
 
 impl BeSolverOptions {
@@ -384,8 +423,15 @@ impl BeSolverOptions {
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
             symbolic_assembly_backend: BeSymbolicAssemblyBackend::default(),
             max_steps: DEFAULT_BE_MAX_STEPS,
-            telemetry_mode: BeTelemetryMode::Timings,
+            telemetry_mode: BeTelemetryMode::Detailed,
+            logging_level: SolverLogLevel::Off,
         }
+    }
+
+    /// Enables Rust-side solver messages up to `level`; does not install a logger.
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        self.logging_level = level;
+        self
     }
 
     /// Applies one explicit generated-backend config.
@@ -505,6 +551,7 @@ pub struct BE {
     continuation_statistics: BeContinuationStatistics,
     max_steps: usize,
     telemetry_mode: BeTelemetryMode,
+    logging_level: SolverLogLevel,
     telemetry_locked: bool,
 }
 impl Display for BE {
@@ -552,7 +599,8 @@ impl BE {
             last_error: None,
             continuation_statistics: BeContinuationStatistics::default(),
             max_steps: DEFAULT_BE_MAX_STEPS,
-            telemetry_mode: BeTelemetryMode::Timings,
+            telemetry_mode: BeTelemetryMode::Detailed,
+            logging_level: SolverLogLevel::Off,
             telemetry_locked: false,
         }
     }
@@ -580,8 +628,21 @@ impl BE {
         )?;
         solver.try_set_max_steps(options.max_steps)?;
         solver.try_set_telemetry_mode(options.telemetry_mode)?;
+        solver.set_logging_level(options.logging_level);
         solver.set_symbolic_assembly_backend(symbolic_assembly_backend);
         Ok(solver)
+    }
+
+    /// Sets the per-solver log threshold. Enabled logs go to the shared
+    /// timestamped solver log; the default is [`SolverLogLevel::Off`].
+    pub fn set_logging_level(&mut self, level: SolverLogLevel) {
+        self.logging_level = level;
+        self.newton.set_logging_level(level);
+    }
+
+    /// Returns the configured Rust-side log threshold.
+    pub fn logging_level(&self) -> SolverLogLevel {
+        self.logging_level
     }
 
     /// Installs one high-level generated-backend orchestration config.
@@ -610,7 +671,7 @@ impl BE {
     }
 
     pub fn get_statistics(&self) -> IvpBackendStatistics {
-        if !self.telemetry_mode.collects_counters() {
+        if self.telemetry_mode == BeTelemetryMode::Off {
             return IvpBackendStatistics::default();
         }
         let mut stats = self.statistics.clone();
@@ -633,6 +694,7 @@ impl BE {
                 BeTelemetryMode::Off => "off",
                 BeTelemetryMode::Counters => "counters",
                 BeTelemetryMode::Timings => "timings",
+                BeTelemetryMode::Detailed => "detailed",
             },
             self.continuation_statistics.attempts,
             self.continuation_statistics.completed,
@@ -1017,7 +1079,7 @@ impl BE {
     pub fn set_parameter_values(&mut self, values: DVector<f64>) -> Result<(), BeError> {
         if self.newton.eq_system.is_empty() {
             let start = self.telemetry_mode.collects_timings().then(Instant::now);
-            if self.telemetry_mode.collects_counters() {
+            if self.telemetry_mode.collects_counters() || self.telemetry_mode.collects_timings() {
                 self.newton
                     .record_parameter_bind_result(start.map(|start| start.elapsed()), false);
             }
@@ -1139,7 +1201,8 @@ impl BE {
         self.install_native_callbacks();
         match self.telemetry_mode {
             BeTelemetryMode::Off => self.try_step_inner::<false>(),
-            BeTelemetryMode::Counters | BeTelemetryMode::Timings => self.try_step_inner::<true>(),
+            BeTelemetryMode::Counters | BeTelemetryMode::Detailed => self.try_step_inner::<true>(),
+            BeTelemetryMode::Timings => self.try_step_inner::<false>(),
         }
     }
 
@@ -1201,7 +1264,8 @@ impl BE {
         match self.telemetry_mode {
             BeTelemetryMode::Off => self.main_loop_impl::<false, false>(),
             BeTelemetryMode::Counters => self.main_loop_impl::<true, false>(),
-            BeTelemetryMode::Timings => self.main_loop_impl::<true, true>(),
+            BeTelemetryMode::Timings => self.main_loop_impl::<false, true>(),
+            BeTelemetryMode::Detailed => self.main_loop_impl::<true, true>(),
         }
     }
 
@@ -1301,24 +1365,28 @@ impl BE {
 
         // info("time  {:?}, len {}", &t_res, t_res.len());
         //info("y  {:?}, len {:?}", &y_res, y_res.shape());
-        if COUNTERS {
-            if let Some(start) = start {
-                let duration = start.elapsed();
-                info!("Program took {} milliseconds to run", duration.as_millis());
-                self.statistics.record_solve_duration(duration);
-            } else {
+        if COUNTERS || TIMINGS {
+            let duration = start.map(|start| start.elapsed());
+            if COUNTERS {
                 self.statistics.solve_calls = self.statistics.solve_calls.saturating_add(1);
+            }
+            if let Some(duration) = duration {
+                if TIMINGS {
+                    info!("Program took {} milliseconds to run", duration.as_millis());
+                }
+                self.statistics.solve_ms_total += duration.as_secs_f64() * 1_000.0;
             }
         }
         self.t_result = t_res;
         self.y_result = y_res;
-        if COUNTERS {
+        if COUNTERS || TIMINGS {
             self.newton
                 .record_output_assembly(output_assembly_start.map(|start| start.elapsed()));
         }
     } //
 
     pub fn try_solve(&mut self) -> Result<(), BeError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         self.t = self.t0;
         self.y = self.y0.clone();
         self.t_old = None;
@@ -1345,15 +1413,21 @@ impl BE {
     /// Calling [`Self::try_solve`] afterwards restarts from `(t0, y0)` and uses
     /// the currently configured bound, including this extended bound.
     pub fn try_continue_to(&mut self, new_t_bound: f64) -> Result<(), BeError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         if self.telemetry_mode == BeTelemetryMode::Off {
             return self.try_continue_to_inner(new_t_bound);
         }
         let start = self.telemetry_mode.collects_timings().then(Instant::now);
         let result = self.try_continue_to_inner(new_t_bound);
-        self.continuation_statistics
-            .record(start.map(|start| start.elapsed()), result.is_ok());
-        if let Err(error) = &result {
-            self.newton.record_failure(error.failure_kind());
+        self.continuation_statistics.record(
+            start.map(|start| start.elapsed()),
+            result.is_ok(),
+            self.telemetry_mode.collects_counters(),
+        );
+        if self.telemetry_mode.collects_counters() {
+            if let Err(error) = &result {
+                self.newton.record_failure(error.failure_kind());
+            }
         }
         result
     }
@@ -1369,6 +1443,7 @@ impl BE {
         y0: DVector<f64>,
         t_bound: f64,
     ) -> Result<(), BeError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         let equation_dimension =
             (!self.newton.eq_system.is_empty()).then_some(self.newton.eq_system.len());
         validate_be_configuration(
@@ -1465,6 +1540,7 @@ impl BE {
     }
 
     fn run_current_interval(&mut self) -> Result<(), BeError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
         self.telemetry_locked = true;
         if self.t_bound == self.t {
             self.status = BeStatus::Finished;
@@ -1507,13 +1583,14 @@ impl BE {
             self.generated_backend_config.resolver = prepared.updated_resolver.clone();
             self.newton
                 .install_prepared_backend(prepared.into_problem());
-            if self.telemetry_mode.collects_counters() {
-                if let Some(start) = start {
-                    self.statistics
-                        .record_backend_prepare_duration(start.elapsed());
-                } else {
+            if self.telemetry_mode.collects_counters() || self.telemetry_mode.collects_timings() {
+                if self.telemetry_mode.collects_counters() {
                     self.statistics.backend_prepare_calls =
                         self.statistics.backend_prepare_calls.saturating_add(1);
+                }
+                if let Some(start) = start {
+                    self.statistics.backend_prepare_ms_total +=
+                        start.elapsed().as_secs_f64() * 1_000.0;
                 }
             }
         }

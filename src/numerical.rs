@@ -53,6 +53,48 @@
 ///            ODE_instance.plot_result();
 /// ```
 pub mod BDF;
+/// Shared opt-in logging policy and timestamped file sink for numerical solvers.
+pub mod logging;
+pub use logging::{SolverLogGuard, SolverLogLevel, SolverLoggingError, solver_log_path};
+
+/// Collection level shared by numerical solver telemetry APIs.
+///
+/// The modes separate the cost of integer event accounting from clock reads:
+/// `Timings` measures durations only, while `Detailed` collects both counters
+/// and timings. Solvers may expose only the levels they can implement without
+/// misrepresenting their native instrumentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SolverTelemetryMode {
+    /// Do not collect counters or timings.
+    #[default]
+    Off,
+    /// Collect discrete work counters without reading the clock.
+    Counters,
+    /// Collect elapsed-time measurements without updating discrete counters.
+    Timings,
+    /// Collect both discrete counters and elapsed-time measurements.
+    Detailed,
+}
+
+impl SolverTelemetryMode {
+    /// Whether discrete event counters should be updated.
+    #[inline]
+    pub const fn collects_counters(self) -> bool {
+        matches!(self, Self::Counters | Self::Detailed)
+    }
+
+    /// Whether elapsed-time scopes should read the monotonic clock.
+    #[inline]
+    pub const fn collects_timings(self) -> bool {
+        matches!(self, Self::Timings | Self::Detailed)
+    }
+
+    /// Whether either telemetry channel is active.
+    #[inline]
+    pub const fn is_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
 
 /// Backward Euler method (good for stiff ODEs)
 ///
@@ -291,8 +333,8 @@ pub mod BVP_api;
 /// Typed solver-discovery facade. Prefer this for quick cross-solver
 /// experiments; use the solver-specific modules for detailed configuration.
 pub use BVP_api::{
-    BvpApiError, BvpBoundaryCondition, BvpBoundarySide, BvpMatrixBackend, BvpProblem,
-    BvpSolution, BvpSolver, BvpSolverBuilder, BvpSolverKind, BvpSolverOptions,
+    BvpApiError, BvpBoundaryCondition, BvpBoundarySide, BvpMatrixBackend, BvpProblem, BvpSolution,
+    BvpSolver, BvpSolverBuilder, BvpSolverKind, BvpSolverOptions,
 };
 /// BVP solver with collocation method
 /// rewritten in Rust from Python code from SciPy

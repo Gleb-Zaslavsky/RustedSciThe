@@ -42,7 +42,7 @@
 //! - **Grcar-Smooke**: Best for combustion/reaction systems
 //! - **SciPy**: Excellent when residual information is available
 
-use log::info;
+use crate::numerical::logging::{solver_debug as debug, solver_info as info};
 use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -173,8 +173,8 @@ pub fn refine_all_grid(
     }
     let (new_grid, new_initial_guess, number_of_nonzero_keys) =
         construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark);
-    log::info!("created new grid of length {}", new_grid.len());
-    log::info!(
+    info!("created new grid of length {}", new_grid.len());
+    info!(
         "\n \n new_initial_guess of shape{:?}",
         //   new_initial_guess,
         new_initial_guess.shape()
@@ -194,8 +194,8 @@ pub fn refine_all_grid_par(
     }
     let (new_grid, new_initial_guess, number_of_nonzero_keys) =
         construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark);
-    log::info!("created new grid of length {}", new_grid.len());
-    log::info!("new_initial_guess of shape{:?}", new_initial_guess.shape());
+    info!("created new grid of length {}", new_grid.len());
+    info!("new_initial_guess of shape{:?}", new_initial_guess.shape());
 
     (new_grid, new_initial_guess, number_of_nonzero_keys)
 }
@@ -239,14 +239,14 @@ pub fn easy_grid_refinement(
 
     //  total number of new points to add
     let total_new_points: i32 = mark.sum();
-    log::info!("total new points to add: {}", total_new_points);
+    info!("total new points to add: {}", total_new_points);
 
     let mark: Vec<i32> = mark.iter().copied().collect();
     let (new_grid, new_initial_guess, total_new_points) =
         construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark);
 
-    log::info!("created new grid of length {}", new_grid.len());
-    log::info!(
+    info!("created new grid of length {}", new_grid.len());
+    info!(
         "\n \n new_initial_guess of shape{:?}",
         new_initial_guess.shape()
     );
@@ -296,14 +296,14 @@ pub fn easy_grid_refinement_par(
         }
     }
     let total_new_points: i32 = mark.sum();
-    log::info!("total new points to add: {}", total_new_points);
+    info!("total new points to add: {}", total_new_points);
 
     let mark: Vec<i32> = mark.iter().copied().collect();
     let (new_grid, new_initial_guess, total_new_points) =
         construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark);
 
-    log::info!("created new grid of length {}", new_grid.len());
-    log::info!("new_initial_guess of shape{:?}", new_initial_guess.shape());
+    info!("created new grid of length {}", new_grid.len());
+    info!("new_initial_guess of shape{:?}", new_initial_guess.shape());
     (new_grid, new_initial_guess, total_new_points)
 }
 
@@ -421,7 +421,7 @@ pub fn pearson_grid_refinement(
         let buffer_condition_1 = h[i] / h[i - 1] <= C; // if true at i-1 index point should be added (between x_mesh[i] - x_mesh[i-1];)
         let buffer_condition_2 = h[i] / h[i - 1] >= 1.0 / C; // if true at i index point should be added  (between x_mesh[i+1] - x_mesh[i];
         if !buffer_condition_1 {
-            log::info!(
+            info!(
                 "bufferization at index {} needed, as h[i]/h[i-1] <= C, h[i], h[i-1] = {} , {}",
                 i,
                 h[i],
@@ -435,7 +435,7 @@ pub fn pearson_grid_refinement(
             }
         }
         if !buffer_condition_2 {
-            log::info!(
+            info!(
                 "bufferization at index {} needed, as h[i]/h[i-1] >= 1.0/C, h[i], h[i-1] = {} , {}",
                 i,
                 h[i],
@@ -450,14 +450,14 @@ pub fn pearson_grid_refinement(
     }
     //  total number of new points to add
     let total_new_points: i32 = mark.values().sum();
-    log::info!("total new points to add: {}", total_new_points);
+    info!("total new points to add: {}", total_new_points);
 
     let marks = marks_from_hashmap(&mark, x_mesh.len());
     let (new_grid, new_initial_guess, total_new_points) =
         construct_refined_grid_from_marks(y_DMatrix, x_mesh, &marks);
 
-    log::info!("created new grid of length {}", new_grid.len());
-    log::info!(
+    info!("created new grid of length {}", new_grid.len());
+    info!(
         "\n \n new_initial_guess of shape{:?}",
         new_initial_guess.shape()
     );
@@ -536,7 +536,7 @@ pub fn pearson_grid_refinement_par(
     }
 
     let total_new_points: i32 = mark.iter().sum();
-    log::info!("total new points to add: {}", total_new_points);
+    info!("total new points to add: {}", total_new_points);
 
     construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark)
 }
@@ -576,7 +576,7 @@ pub fn grcar_smooke_grid_refinement(
         y_DMatrix.ncols()
     );
     for (j, y) in y_DMatrix.clone().row_iter().enumerate() {
-        log::debug!("row {} : y= {:}", j, y);
+        debug!("row {} : y= {:}", j, y);
     }
     let mut h: Vec<f64> = Vec::new();
     for i in 0..x_mesh.len() - 1 {
@@ -695,7 +695,7 @@ pub fn grcar_smooke_grid_refinement(
         let buffer_condition_1 = h[i] / h[i - 1] <= C; // if true at i-1 index point should be added (between x_mesh[i] - x_mesh[i-1];)
         let buffer_condition_2 = h[i] / h[i - 1] >= 1.0 / C; // if true at i index point should be added  (between x_mesh[i+1] - x_mesh[i];
         if !buffer_condition_1 {
-            log::info!(
+            info!(
                 "bufferization at index {} needed, as h[i]/h[i-1] <= C, h[i], h[i-1] = {} , {}",
                 i,
                 h[i],
@@ -709,7 +709,7 @@ pub fn grcar_smooke_grid_refinement(
             }
         }
         if !buffer_condition_2 {
-            log::info!(
+            info!(
                 "bufferization at index {} needed, as h[i]/h[i-1] >= 1.0/C, h[i], h[i-1] = {} , {}",
                 i,
                 h[i],
@@ -724,14 +724,14 @@ pub fn grcar_smooke_grid_refinement(
     }
     //  total number of new points to add
     let total_new_points: i32 = mark.values().sum();
-    log::info!("total new points to add: {}", total_new_points);
+    info!("total new points to add: {}", total_new_points);
 
     let marks = marks_from_hashmap(&mark, x_mesh.len());
     let (new_grid, new_initial_guess, total_new_points) =
         construct_refined_grid_from_marks(y_DMatrix, x_mesh, &marks);
 
-    log::info!("created new grid of length {}", new_grid.len());
-    log::info!(
+    info!("created new grid of length {}", new_grid.len());
+    info!(
         "\n \n new_initial_guess of shape{:?}",
         new_initial_guess.shape()
     );
@@ -841,7 +841,7 @@ pub fn grcar_smooke_grid_refinement_par(
         let buffer_condition_1 = h[i] / h[i - 1] <= C;
         let buffer_condition_2 = h[i] / h[i - 1] >= 1.0 / C;
         if !buffer_condition_1 && (i - 1) != 0 {
-            log::info!(
+            info!(
                 "bufferization at index {} needed, as h[i]/h[i-1] <= C, h[i], h[i-1] = {} , {}",
                 i,
                 h[i],
@@ -853,7 +853,7 @@ pub fn grcar_smooke_grid_refinement_par(
             }
         }
         if !buffer_condition_2 {
-            log::info!(
+            info!(
                 "bufferization at index {} needed, as h[i]/h[i-1] >= 1.0/C, h[i], h[i-1] = {} , {}",
                 i,
                 h[i],
@@ -867,12 +867,12 @@ pub fn grcar_smooke_grid_refinement_par(
     }
 
     let total_new_points: i32 = mark.iter().sum();
-    log::info!("total new points to add: {}", total_new_points);
+    info!("total new points to add: {}", total_new_points);
 
     let (new_grid, new_initial_guess, total_new_points) =
         construct_refined_grid_from_marks(y_DMatrix, x_mesh, &mark);
-    log::info!("created new grid of length {}", new_grid.len());
-    log::info!(
+    info!("created new grid of length {}", new_grid.len());
+    info!(
         "\n \n new_initial_guess of shape{:?}",
         new_initial_guess.shape()
     );

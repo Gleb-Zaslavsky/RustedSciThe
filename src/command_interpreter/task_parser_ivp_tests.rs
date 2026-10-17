@@ -1,7 +1,7 @@
 use super::*;
 use crate::command_interpreter::task_parser::ParseErrorKind;
 use crate::command_interpreter::task_runner::{
-    parse_task_spec_from_file, ParsedTaskSpec, TaskRunnerError,
+    ParsedTaskSpec, TaskRunnerError, parse_task_spec_from_file,
 };
 use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetryMode};
 use std::fs;
@@ -112,10 +112,11 @@ t_end_values: 1.0, 1.1, 1.2, 1.3
     );
     let run = run_ivp_continuation(spec).expect("fresh grid continuation should execute");
     assert_eq!(run.segments.len(), 4);
-    assert!(run
-        .segments
-        .iter()
-        .all(|segment| segment.status_code.is_some()));
+    assert!(
+        run.segments
+            .iter()
+            .all(|segment| segment.status_code.is_some())
+    );
 }
 
 #[test]
@@ -258,9 +259,11 @@ fn ivp_adapter_preserves_native_error_category_and_source() {
         },
     ));
 
-    assert!(error
-        .to_string()
-        .contains("generated/AOT backend selection"));
+    assert!(
+        error
+            .to_string()
+            .contains("generated/AOT backend selection")
+    );
     assert!(std::error::Error::source(&error).is_some());
     assert!(matches!(
         error,
@@ -841,6 +844,18 @@ fn ivp_task_parser_rejects_an_option_that_native_bdf_cannot_honor() {
 }
 
 #[test]
+fn ivp_task_parser_exposes_detailed_bdf_telemetry_mode() {
+    let input = "task\nsolver: IVP\nmethod: BDF\n\nsolver_options\ntelemetry: detailed\n";
+    let document = parse_document_for_ivp(input);
+    let settings = parse_ivp_solver_settings_from_document(&document)
+        .expect("detailed telemetry mode should parse");
+    assert_eq!(
+        settings.solver_options.telemetry,
+        Some(IvpTelemetryModeSpec::Detailed)
+    );
+}
+
+#[test]
 fn ivp_task_runner_executes_prepared_bdf_continuation() {
     let input = r#"
 task
@@ -878,18 +893,24 @@ restart_each: false
     assert_eq!(continuation.fresh_preparations, 1);
     assert_eq!(continuation.prepared_reuses, 2);
     assert_eq!(continuation.parameter, "rate");
-    assert!(continuation
-        .segments
-        .iter()
-        .all(|segment| segment.status.as_deref() == Some("finished")));
-    assert!(continuation
-        .segments
-        .iter()
-        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
-    assert!(continuation
-        .segments
-        .iter()
-        .all(|segment| matches!(segment.trajectory, Some(IvpTrajectory::Grid { .. }))));
+    assert!(
+        continuation
+            .segments
+            .iter()
+            .all(|segment| segment.status.as_deref() == Some("finished"))
+    );
+    assert!(
+        continuation
+            .segments
+            .iter()
+            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
+    );
+    assert!(
+        continuation
+            .segments
+            .iter()
+            .all(|segment| matches!(segment.trajectory, Some(IvpTrajectory::Grid { .. })))
+    );
 }
 
 #[test]
@@ -934,10 +955,12 @@ restart_each: false
         .expect("continuation result should be present");
     assert_eq!(first_series.segments.len(), 64);
     assert_eq!(first_series.segments.capacity(), 64);
-    assert!(first_series
-        .segments
-        .iter()
-        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+    assert!(
+        first_series
+            .segments
+            .iter()
+            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
+    );
 
     let second = run_ivp_task_from_str(&input).expect("repeat long series should solve");
     let second_series = second
@@ -1024,10 +1047,12 @@ t_end_values: 0.02, 0.02
         .continuation
         .expect("BE restart should return continuation segments");
     assert_eq!(continuation.segments.len(), 2);
-    assert!(continuation
-        .segments
-        .iter()
-        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+    assert!(
+        continuation
+            .segments
+            .iter()
+            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
+    );
 
     let lsode = input
         .replace("BackwardEuler", "LSODE2")
@@ -1039,10 +1064,12 @@ t_end_values: 0.02, 0.02
         .continuation
         .expect("LSODE2 restart should return continuation segments");
     assert_eq!(continuation.segments.len(), 2);
-    assert!(continuation
-        .segments
-        .iter()
-        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+    assert!(
+        continuation
+            .segments
+            .iter()
+            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
+    );
 }
 
 #[test]
@@ -1080,10 +1107,12 @@ restart_each: false
         .continuation
         .expect("continuation result should be typed");
     assert_eq!(continuation.segments.len(), 3);
-    assert!(continuation
-        .segments
-        .iter()
-        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+    assert!(
+        continuation
+            .segments
+            .iter()
+            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
+    );
 }
 
 #[test]
@@ -1121,14 +1150,18 @@ restart_each: false
         .continuation
         .expect("continuation result should be typed");
     assert_eq!(continuation.segments.len(), 3);
-    assert!(continuation
-        .segments
-        .iter()
-        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
-    assert!(continuation
-        .segments
-        .iter()
-        .all(|segment| matches!(segment.trajectory, Some(IvpTrajectory::Radau(_)))));
+    assert!(
+        continuation
+            .segments
+            .iter()
+            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
+    );
+    assert!(
+        continuation
+            .segments
+            .iter()
+            .all(|segment| matches!(segment.trajectory, Some(IvpTrajectory::Radau(_))))
+    );
 }
 
 #[test]
@@ -1164,10 +1197,12 @@ restart_each: true
         .continuation
         .expect("continuation result should be typed");
     assert_eq!(continuation.segments.len(), 3);
-    assert!(continuation
-        .segments
-        .iter()
-        .all(|segment| segment.status_code == Some(IvpRunStatus::Finished)));
+    assert!(
+        continuation
+            .segments
+            .iter()
+            .all(|segment| segment.status_code == Some(IvpRunStatus::Finished))
+    );
 }
 
 #[test]
@@ -1948,6 +1983,34 @@ solver_options
             );
         }
         _ => panic!("expected Backward Euler solver"),
+    }
+}
+
+#[test]
+fn ivp_task_parser_maps_detailed_telemetry_to_backward_euler_detailed_mode() {
+    let input = "task\nsolver: IVP\nmethod: BackwardEuler\n\nequations\narg: t\nunknowns: y\nrhs: -y\n\ninitial_conditions\nt0: 0.0\nt_end: 0.1\ny0: 1.0\n\nsolver_options\nsymbolic_frontend: ExprLegacy\nsymbolic_execution: Lambdify\nmatrix_layout: dense\ntelemetry: detailed\n";
+    let spec = parse_ivp_task_from_str(input).expect("BE task should parse");
+    let solver = build_ivp_solver_from_spec(&spec).expect("BE solver should build");
+    match solver {
+        IvpTaskSolver::BackwardEuler(solver) => assert_eq!(
+            solver.telemetry_mode(),
+            crate::numerical::BE::BeTelemetryMode::Detailed
+        ),
+        _ => panic!("expected Backward Euler solver"),
+    }
+}
+
+#[test]
+fn ivp_task_parser_maps_detailed_telemetry_to_radau_detailed_mode() {
+    let input = "task\nsolver: IVP\nmethod: Radau5\n\nequations\narg: t\nunknowns: y\nrhs: -y\n\ninitial_conditions\nt0: 0.0\nt_end: 0.1\ny0: 1.0\n\nsolver_options\nsymbolic_frontend: ExprLegacy\nsymbolic_execution: Lambdify\nmatrix_layout: dense\ntelemetry: detailed\n";
+    let spec = parse_ivp_task_from_str(input).expect("Radau task should parse");
+    let solver = build_ivp_solver_from_spec(&spec).expect("Radau solver should build");
+    match solver {
+        IvpTaskSolver::Radau { solver, .. } => assert_eq!(
+            solver.config().telemetry,
+            crate::numerical::Radau::RadauTelemetryMode::Detailed
+        ),
+        _ => panic!("expected Radau solver"),
     }
 }
 

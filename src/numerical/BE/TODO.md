@@ -212,11 +212,12 @@ the default merely because LSODE2 benefits on large sparse diffusion problems.
 
 ## P1: Telemetry, Logging and QoL
 
-- [x] **BE-12: Reuse typed shared IVP telemetry with Off/Counters/Timings modes.**
-  `Off`, `Counters`, and `Timings` now have distinct callback and solver paths:
-  Off installs direct callbacks and no instrumentation; Counters records work
-  counts without reading the clock; Timings records calls and durations. Tests
-  assert zero Off stats and zero duration fields in Counters. Separate BE
+- [x] **BE-12: Use the normative four-level telemetry contract.**
+  `Off` disables collection, `Counters` records discrete work without clock
+  reads, `Timings` records durations without discrete counts, and `Detailed`
+  records both. The former combined `Timings` default is preserved as
+  `Detailed`, including the `Enabled` compatibility alias. Tests assert each
+  mode's independent counter/timing behavior. Separate BE
   detailed statistics report parameter-bind attempts/success/failure and
   timings, typed operation failure counts (configuration/backend/generated
   backend/Newton/underflow/step limit), FD auxiliary RHS calls, Newton
@@ -231,7 +232,8 @@ the default merely because LSODE2 benefits on large sparse diffusion problems.
   BE now passes the shared typed telemetry stream through both symbolic
   preparation entry points, exposes a snapshot and appends it to
   `statistics_report()`. Off creates no shared telemetry allocation; Counters
-  omits clocks; Timings maps to the shared detailed stream. Partial cold-stage
+  omits clocks; Timings maps to the shared timing-only stream and Detailed to
+  the combined stream. Partial cold-stage
   evidence survives preparation errors, and native/backend replacement clears
   stale symbolic snapshots. Focused tests cover these contracts. A release-story
   gate forces an isolated `RebuildAlways` AOT lifecycle and
@@ -459,10 +461,10 @@ failure behavior, continuation and representative full-solve evidence are closed
   rejected after callback preparation/integration starts. Default remains
   enabled for compatibility; select Disabled before solving for zero telemetry
   instrumentation.
-- Refined telemetry into `Off/Counters/Timings`: Off has direct callback paths,
-  Counters records work counts without clocks, and Timings includes durations.
+- Refined telemetry into `Off/Counters/Timings/Detailed`: Timings no longer
+  increments discrete counts; Detailed preserves the former combined behavior.
   Compatibility aliases preserve the former `Disabled/Enabled` spellings.
-  Regression coverage verifies counters-only durations stay zero.
+  Rust, task-parser and Python contract tests cover the separated modes.
 - Added BE-specific detailed statistics without changing the shared
   `IvpBackendStatistics` schema: FD auxiliary RHS evaluations, factorization and
   linear-solve stages, accepted/failed steps, and output assembly. Newton solve

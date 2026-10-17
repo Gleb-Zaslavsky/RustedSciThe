@@ -805,10 +805,10 @@ the measurements identify a real bottleneck.
   the existing diagnostics design where possible, but do not introduce a
   second incompatible solver-counter system. The new detailed preparation
   mode must be disabled by default and must not print logs implicitly.
-- [x] Do not silently change the existing default of
-  `DiagnosticsOptions::collect_statistics` in this task. Solver statistics
-  already have compatibility semantics; detailed preparation instrumentation
-  needs its own explicit opt-in or an explicitly documented extension.
+- [x] Replace the coupled statistics boolean with the crate-wide
+  `SolverTelemetryMode::{Off, Counters, Timings, Detailed}` contract. The
+  nonlinear engine defaults to `Off`; counter-only mode performs no clock
+  reads, and timing-only mode does not update discrete telemetry counters.
 - [x] Define a stable public preparation report containing
   ordered stage records plus equation, variable, parameter, backend, and
   execution-policy metadata. `PreparationTelemetry` is exposed without

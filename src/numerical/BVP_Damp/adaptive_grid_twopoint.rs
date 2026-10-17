@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 
 use crate::numerical::BVP_Damp::BVP_utils::round_to_n_digits;
-use log::{error, info};
+use crate::numerical::logging::{solver_error as error, solver_info as info};
 use nalgebra::{DMatrix, DVector};
 
 pub fn twpnt_refinement(
@@ -349,12 +349,12 @@ impl Grid {
             }
         }
 
-        log::info!(
+        info!(
             "created new grid {:?} of length {}",
             new_grid,
             new_grid.len()
         );
-        log::info!(
+        info!(
             "\n \n new_initial_guess of shape{:?}",
             //  new_initial_guess,
             new_initial_guess.shape()

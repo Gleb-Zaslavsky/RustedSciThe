@@ -957,7 +957,7 @@ mod tests {
             &["y".into()],
             &["p".into()],
             "x",
-            BvpSciTelemetry::timings(),
+            BvpSciTelemetry::detailed(),
         )
         .expect("AtomView preparation should succeed");
         let mut arguments = [0.0; 3];
@@ -974,7 +974,7 @@ mod tests {
         assert!(plan.linear_residual.is_some());
         assert!(plan.linear_jacobian.is_some());
         let telemetry = plan.telemetry_snapshot();
-        assert_eq!(telemetry.mode, BvpSciTelemetryMode::Timings);
+        assert_eq!(telemetry.mode, BvpSciTelemetryMode::Detailed);
         // AtomNative prepares both state and parameter Jacobians once.
         assert_eq!(telemetry.symbolic_jacobian_derivations, 2);
         assert!(telemetry.symbolic_jacobian_ms.is_some());

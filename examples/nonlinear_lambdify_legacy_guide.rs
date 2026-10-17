@@ -60,7 +60,7 @@ fn solve_options() -> SolveOptions {
         max_iterations: 50,
         diagnostics: DiagnosticsOptions {
             collect_history: false,
-            collect_statistics: true,
+            telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Detailed,
             enable_logging: false,
             ..DiagnosticsOptions::default()
         },

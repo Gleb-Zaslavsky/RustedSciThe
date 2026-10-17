@@ -126,7 +126,7 @@ impl Backend {
             Route::Sparse => Self::Sparse(SparseBackend::new_with_telemetry(
                 dimension,
                 dimension * 5,
-                BvpSciTelemetry::timings(),
+                BvpSciTelemetry::detailed(),
             )),
             Route::Banded => Self::Banded(
                 BandedBackend::new_for_collocation(
@@ -136,7 +136,7 @@ impl Backend {
                     1,
                     dimension,
                     0,
-                    BvpSciTelemetry::timings(),
+                    BvpSciTelemetry::detailed(),
                 )
                 .expect("microbench Banded backend should construct"),
             ),
@@ -440,7 +440,7 @@ fn main() {
     measured_dimensions.dedup();
     let table = Table::new(&rows).to_string();
     let body = format!(
-        "# BVP_sci linear backend microbench\n\n- routes: {:?}\n- dimensions: {:?}\n- matrix: stiff tridiagonal core with endpoint border coupling\n- factorization and solve are measured after a separate assembly phase\n- `sparse_symbolic_analysis_ms` is cumulative cold-pattern work; `sparse_numeric_factorization_ms` is the warm median per numeric refresh\n- sparse counters are cumulative over the repeated factorization series\n- timings are local medians/summaries, not release thresholds\n\n{}",
+        "# BVP_sci linear backend microbench\n\n- routes: {:?}\n- dimensions: {:?}\n- matrix: stiff tridiagonal core with endpoint border coupling\n- telemetry: `Detailed` collects counters and stage timings; these microbench timings include instrumentation and are diagnostic, not uninstrumented kernel baselines\n- factorization and solve are measured after a separate assembly phase\n- `sparse_symbolic_analysis_ms` is cumulative cold-pattern work; `sparse_numeric_factorization_ms` is the warm median per numeric refresh\n- sparse counters are cumulative over the repeated factorization series\n- timings are local medians/summaries, not release thresholds\n\n{}",
         routes.iter().map(|route| route.label()).collect::<Vec<_>>(),
         measured_dimensions,
         table

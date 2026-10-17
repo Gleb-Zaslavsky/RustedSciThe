@@ -373,7 +373,9 @@ fn build_solver_with_sparse_factorization(
     execution_policy: BvpSciExecutionPolicy,
     sparse_factorization: BvpSciSparseFactorization,
 ) -> (BvpSciSolver, Arc<AtomicU64>) {
-    let started = BvpSciTelemetry::timings();
+    // Story rows report both lifecycle counts and stage durations; the old
+    // combined Timings behavior is now represented explicitly by Detailed.
+    let started = BvpSciTelemetry::detailed();
     let plan = BvpSciLambdifyPlan::prepare(
         assembly,
         // Exact continuation family: y' = p * (y + 1), y(0) = 0.
@@ -439,7 +441,7 @@ fn build_large_logistic_sparse_solver(
         &["y".into()],
         &["p".into()],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("large logistic frontend should prepare");
     let target = Arc::new(AtomicU64::new(initial_parameter.to_bits()));
@@ -498,7 +500,9 @@ fn build_official_large_parameterized_sparse_solver_with_output(
 ) -> BvpSciSolver {
     let systems = 30usize;
     let dimension = systems * 2;
-    let telemetry = BvpSciTelemetry::timings();
+    // This parity fixture compares both SciPy operation counts and stage
+    // durations, so it must opt into both telemetry dimensions.
+    let telemetry = BvpSciTelemetry::detailed();
     let mut equations = Vec::with_capacity(dimension);
     let mut state_names = Vec::with_capacity(dimension);
     for system in 0..systems {
@@ -587,7 +591,7 @@ fn build_bratu_solver(assembly: BvpSciAssembly, layout: BvpSciMatrixLayout) -> B
         &["y".into(), "z".into()],
         &[],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("Bratu-like frontend should prepare");
     let boundary = BvpSciBoundaryCallbacks::new(
@@ -2232,7 +2236,7 @@ fn lambdify_symbolic_parameter_jacobian_matches_exact_derivative() {
     );
     let mut rows = Vec::new();
     for assembly in [BvpSciAssembly::ExprLegacy, BvpSciAssembly::AtomViewNative] {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         let plan = BvpSciLambdifyPlan::prepare(
             assembly,
             &[
@@ -3101,7 +3105,7 @@ fn lambdify_medium_large_parameter_continuation_matrix_is_compact() {
             &["y".into()],
             &["p".into()],
             "x",
-            BvpSciTelemetry::timings(),
+            BvpSciTelemetry::detailed(),
         )
         .expect("medium continuation frontend should prepare");
         let target = Arc::new(AtomicU64::new(parameter.to_bits()));
@@ -3622,8 +3626,16 @@ fn lambdify_layout_scale_matrix_reports_banded_route_costs() {
             for assembly in [BvpSciAssembly::ExprLegacy, BvpSciAssembly::AtomViewNative] {
                 for layout in selected_layouts() {
                     let started = Instant::now();
-                    let mut solver =
-                        build_damp_exact_solver_with_nodes(workload, assembly, layout, nodes);
+                    // This matrix reports route/fallback counters as well as
+                    // timings, so capture both channels rather than timings
+                    // alone.
+                    let mut solver = build_damp_exact_solver_with_nodes_and_telemetry(
+                        workload,
+                        assembly,
+                        layout,
+                        nodes,
+                        BvpSciTelemetry::detailed(),
+                    );
                     let prepare_ms = started.elapsed().as_secs_f64() * 1e3;
                     let fmt = |value: Option<f64>| {
                         value
@@ -3945,7 +3957,7 @@ fn banded_stiff_coupled_captured_matrix_compares_core_refinement() {
         let state_dimension = DampExactWorkload::StiffCoupled.state_names().len();
 
         for refinement_steps in [0, 2] {
-            let telemetry = BvpSciTelemetry::timings();
+            let telemetry = BvpSciTelemetry::detailed();
             let mut backend = BandedBackend::new_for_collocation_with_refinement_steps(
                 capture.dimension,
                 256,
@@ -4075,7 +4087,7 @@ fn aot_frontend_backend_contract_matrix_is_compact_and_parity_checked() {
     let mut rows = Vec::new();
     for (frontend_name, frontend) in frontends {
         for (layout_name, layout) in layouts {
-            let telemetry = BvpSciTelemetry::timings();
+            let telemetry = BvpSciTelemetry::detailed();
             let mut config = SymbolicIvpGeneratedBackendConfig::build_if_missing_release(
                 output_root.join(frontend_name).join(layout_name),
             );
@@ -4260,7 +4272,7 @@ fn aot_solver_route_continuation_and_policy_matrix_is_compact() {
                     sparse_factorizations.push(("SuperLU", BvpSciSparseFactorization::SuperLu));
                 }
                 for (sparse_factorization_name, sparse_factorization) in &sparse_factorizations {
-                    let telemetry = BvpSciTelemetry::timings();
+                    let telemetry = BvpSciTelemetry::detailed();
                     let mut config = SymbolicIvpGeneratedBackendConfig::build_if_missing_release(
                         output_root
                             .join("solver")
@@ -4455,7 +4467,7 @@ fn aot_full_solve_matches_lambdify_on_medium_parameterized_systems() {
                 .collect::<Vec<_>>();
             for &(layout_name, layout) in &layouts {
                 for &(frontend_name, assembly, is_aot) in &frontends {
-                    let telemetry = BvpSciTelemetry::timings();
+                    let telemetry = BvpSciTelemetry::detailed();
                     let prepare_started = Instant::now();
                     let plan = if is_aot {
                         let mut config =
@@ -4722,7 +4734,7 @@ fn aot_lifecycle_policies_and_typed_failure_matrix_is_compact() {
         parameters.clone(),
         "x",
         producer_config.clone(),
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("BuildIfMissing producer should prepare");
     let producer_snapshot = producer
@@ -4767,7 +4779,7 @@ fn aot_lifecycle_policies_and_typed_failure_matrix_is_compact() {
         parameters.clone(),
         "x",
         consumer_config,
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     );
     // Keep the argument order explicit in the report-producing gate. This
     // match also turns a future API drift into a useful test failure rather
@@ -4815,7 +4827,7 @@ fn aot_lifecycle_policies_and_typed_failure_matrix_is_compact() {
                 profile: AotBuildProfile::Debug,
             })
             .with_c_tcc(),
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("RebuildAlways should prepare");
     let rebuild_snapshot = rebuild
@@ -4930,7 +4942,7 @@ fn aot_continuation_restart_retention_matrix_is_compact() {
                         profile: AotBuildProfile::Debug,
                     })
                     .with_c_tcc(),
-                BvpSciTelemetry::timings(),
+                BvpSciTelemetry::detailed(),
             )
             .expect("continuation AOT plan should prepare");
             let boundary = BvpSciBoundaryCallbacks::new(
@@ -5590,7 +5602,7 @@ fn scipy_118_refined_bratu_matches_dense_output_and_interval_defects() {
         &["y".into(), "z".into()],
         &[],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("refined Bratu parity plan");
     let boundary = BvpSciBoundaryCallbacks::new(
@@ -5706,7 +5718,7 @@ fn scipy_118_boundary_tolerance_exhaustion_maps_to_rust_status_three() {
         &["y".into()],
         &[],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("status-three parity plan");
     let boundary_tolerance = f64::EPSILON / 16.0;
@@ -5809,7 +5821,7 @@ fn scipy_118_official_shock_layer_matches_refined_rust_solution() {
                 / epsilon;
             Ok(())
         },
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("shock-layer numerical plan");
     let plan = BvpSciLambdifyPlan::prepare_numerical(plan);
@@ -6008,7 +6020,7 @@ fn scipy_118_official_large_parameterized_problem_matches_rust() {
         .collect::<Vec<_>>();
     let systems = 30usize;
     let dimension = systems * 2;
-    let telemetry = BvpSciTelemetry::timings();
+    let telemetry = BvpSciTelemetry::detailed();
     let rhs = BvpSciNumericalPlan::new(
         dimension,
         2,
@@ -6386,7 +6398,7 @@ fn scipy_118_exponential_two_point_problem_matches_exact_jacobian_trace() {
         &["y".into(), "z".into()],
         &[],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("exponential SciPy parity plan");
     let boundary = BvpSciBoundaryCallbacks::new(
@@ -6813,7 +6825,7 @@ fn scipy_118_large_independent_system_matches_rust_dense_core() {
         &states,
         &[],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("large independent parity plan");
     let boundary = BvpSciBoundaryCallbacks::new(
@@ -7020,7 +7032,7 @@ fn scipy_118_nonlinear_singular_and_exhaustion_paths_match_or_map_explicitly() {
         &["y".into(), "z".into()],
         &[],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("Bratu parity plan");
     let boundary = BvpSciBoundaryCallbacks::new(
@@ -7092,7 +7104,7 @@ fn scipy_118_nonlinear_singular_and_exhaustion_paths_match_or_map_explicitly() {
         &["y".into()],
         &["p".into()],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("unknown-parameter parity plan");
     let parameter_boundary = BvpSciBoundaryCallbacks::new(
@@ -7169,7 +7181,7 @@ fn scipy_118_nonlinear_singular_and_exhaustion_paths_match_or_map_explicitly() {
         &["y".into(), "z".into()],
         &[],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("singular Lane-Emden plan");
     let singular_boundary = BvpSciBoundaryCallbacks::new(
@@ -7252,7 +7264,7 @@ fn scipy_118_nonlinear_singular_and_exhaustion_paths_match_or_map_explicitly() {
         &["y".into(), "z".into()],
         &[],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("exhaustion plan");
     let exhausted_boundary = BvpSciBoundaryCallbacks::new(
@@ -7262,7 +7274,7 @@ fn scipy_118_nonlinear_singular_and_exhaustion_paths_match_or_map_explicitly() {
             output[1] = yb[0];
             Ok(())
         },
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     );
     let exhausted_mesh: Vec<f64> = (0..6).map(|i| i as f64 / 5.0).collect();
     let mut exhausted_options = BvpSciOptions::default();
@@ -7317,7 +7329,7 @@ fn scipy_118_nonlinear_singular_and_exhaustion_paths_match_or_map_explicitly() {
         &["y".into(), "z".into()],
         &[],
         "x",
-        BvpSciTelemetry::timings(),
+        BvpSciTelemetry::detailed(),
     )
     .expect("tight exponential plan");
     let tight_boundary = BvpSciBoundaryCallbacks::new(

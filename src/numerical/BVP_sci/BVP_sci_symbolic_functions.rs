@@ -29,7 +29,7 @@ use crate::symbolic::symbolic_functions_BVP::{
     bvp_symbolic_variables_for_functions,
 };
 use faer::mat::Mat;
-use log::info;
+use crate::numerical::logging::{solver_info as info, solver_warn as warn};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -231,7 +231,7 @@ impl Jacobian_sci_faer {
                 0 => bounded_value.max(bound_val), // minimum bound
                 1 => bounded_value.min(bound_val), // maximum bound
                 _ => {
-                    log::warn!(
+                    warn!(
                         "Warning: Unknown bound type {} for variable {}",
                         bound_type,
                         var_name

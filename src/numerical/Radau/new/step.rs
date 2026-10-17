@@ -7,7 +7,7 @@
 
 use super::{
     callbacks::{
-        validate_callback_output, DenseJacobianCallback, RadauStepCallbacks, ResidualCallback,
+        DenseJacobianCallback, RadauStepCallbacks, ResidualCallback, validate_callback_output,
     },
     coefficients::RadauIia5,
     config::RadauConfig,
@@ -261,8 +261,10 @@ where
     let mut previous_norm: Option<f64> = None;
     let mut convergence_rate: Option<f64> = None;
     let mut iterations = 0;
-    let newton_started = (workspace.telemetry.mode()
-        == super::telemetry::RadauTelemetryMode::Timings)
+    let newton_started = workspace
+        .telemetry
+        .mode()
+        .collects_timings()
         .then(std::time::Instant::now);
     // The eigentransformed Radau system has one real and one conjugate-pair
     // solve.  The factorization is intentionally outside this loop, matching
@@ -346,8 +348,10 @@ where
     if !converged {
         return Err(RadauError::NewtonFailure { iterations });
     }
-    let output_started = (workspace.telemetry.mode()
-        == super::telemetry::RadauTelemetryMode::Timings)
+    let output_started = workspace
+        .telemetry
+        .mode()
+        .collects_timings()
         .then(std::time::Instant::now);
     // Only a converged attempt may publish its candidate state.  The adaptive
     // controller owns the committed state and decides later whether this
@@ -368,8 +372,10 @@ where
     output_result?;
     workspace.telemetry.count_output_writes(output.len());
     workspace.telemetry.count_error_estimate();
-    let step_control_started = (workspace.telemetry.mode()
-        == super::telemetry::RadauTelemetryMode::Timings)
+    let step_control_started = workspace
+        .telemetry
+        .mode()
+        .collects_timings()
         .then(std::time::Instant::now);
     workspace.prepare_dense_output(&coefficients, t, h, y);
     let error_norm_result = {

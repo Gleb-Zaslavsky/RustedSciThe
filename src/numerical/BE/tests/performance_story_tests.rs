@@ -317,7 +317,7 @@ fn be_aot_build_link_provenance_and_timing_scopes_story() {
             lambdify_workload.initial_state,
         )
         .with_symbolic_assembly_backend(BeSymbolicAssemblyBackend::AtomViewNative)
-        .with_telemetry_mode(BeTelemetryMode::Timings),
+        .with_telemetry_mode(BeTelemetryMode::Detailed),
     )
     .unwrap();
     lambdify
@@ -344,7 +344,7 @@ fn be_aot_build_link_provenance_and_timing_scopes_story() {
         )
         .with_symbolic_assembly_backend(BeSymbolicAssemblyBackend::AtomViewNative)
         .with_generated_backend_config(config)
-        .with_telemetry_mode(BeTelemetryMode::Timings),
+        .with_telemetry_mode(BeTelemetryMode::Detailed),
     )
     .unwrap();
     solver
@@ -407,7 +407,7 @@ fn be_aot_build_link_provenance_and_timing_scopes_story() {
     assert!(!link.elapsed.is_zero());
 
     println!(
-        "[BE cold E2E comparison] fixture=shared-diffusion-chain-{DIMENSION} route_order=lambdify_then_aot telemetry=Timings; includes BE setup+parameter binding+solve; AOT uses RebuildAlways; not a process-cold/benchmark baseline\nroute | wall_ms\nLambdify-AtomViewNative | {lambdify_e2e_ms:.3}\nAOT-AtomViewNative-tcc | {aot_e2e_ms:.3}\nparity max_time_diff={max_time_diff:.3e} max_state_diff={max_state_diff:.3e}"
+        "[BE cold E2E comparison] fixture=shared-diffusion-chain-{DIMENSION} route_order=lambdify_then_aot telemetry=Detailed; includes BE setup+parameter binding+solve; AOT uses RebuildAlways; not a process-cold/benchmark baseline\nroute | wall_ms\nLambdify-AtomViewNative | {lambdify_e2e_ms:.3}\nAOT-AtomViewNative-tcc | {aot_e2e_ms:.3}\nparity max_time_diff={max_time_diff:.3e} max_state_diff={max_state_diff:.3e}"
     );
     println!(
         "[BE AOT lifecycle] execution={} hits={} misses={} build_attempts={} build_successes={} link_attempts={} link_successes={} runtime_ready={} artifact_keys={:?}",
@@ -442,7 +442,7 @@ fn be_native_full_solve_scaling_story() {
         "be_native_full_solve_scaling_story",
     );
     println!(
-        "[BE native full solve story] native diffusion-chain; telemetry=Timings; timings are diagnostic, not thresholds"
+        "[BE native full solve story] native diffusion-chain; telemetry=Detailed; timings are diagnostic, not thresholds"
     );
     println!(
         "dimension | steps | repetitions | wall_ms | solver_ms | residual_calls | jacobian_calls | accepted | status"
@@ -452,7 +452,7 @@ fn be_native_full_solve_scaling_story() {
         let steps = 8;
         let mut solver = make_diffusion_solver(dimension, true, steps as f64 * 0.01);
         solver
-            .try_set_telemetry_mode(BeTelemetryMode::Timings)
+            .try_set_telemetry_mode(BeTelemetryMode::Detailed)
             .unwrap();
         solver.try_solve().unwrap();
         let before = solver.get_statistics();
@@ -508,7 +508,7 @@ fn be_symbolic_parameter_rebind_matches_fresh_solve_story() {
 
     let mut rebound = make_parameterized(1.0);
     rebound
-        .try_set_telemetry_mode(BeTelemetryMode::Timings)
+        .try_set_telemetry_mode(BeTelemetryMode::Detailed)
         .unwrap();
     rebound.try_solve().unwrap();
     let prepared_calls = rebound.get_statistics().backend_prepare_calls;
@@ -523,7 +523,7 @@ fn be_symbolic_parameter_rebind_matches_fresh_solve_story() {
 
     let mut fresh = make_parameterized(2.0);
     fresh
-        .try_set_telemetry_mode(BeTelemetryMode::Timings)
+        .try_set_telemetry_mode(BeTelemetryMode::Detailed)
         .unwrap();
     let fresh_started = Instant::now();
     fresh.try_solve().unwrap();
@@ -545,7 +545,7 @@ fn be_symbolic_parameter_rebind_matches_fresh_solve_story() {
         "parameter updates must reuse symbolic preparation"
     );
 
-    println!("[BE symbolic parameter continuation] correctness parity; diagnostic timings only");
+    println!("[BE symbolic parameter continuation] correctness parity; Detailed counters and diagnostic timings");
     println!(
         "route | wall_ms | solver_ms | residual_calls | jacobian_calls | max_state_diff | preparations"
     );
@@ -596,7 +596,7 @@ fn be_repeated_symbolic_parameter_rebind_matches_fresh_solutions_story() {
     let rates = [0.5, 1.0, 2.0, 4.0, 1.5, 0.5];
     let mut reused = make_parameterized(rates[0]);
     reused
-        .try_set_telemetry_mode(BeTelemetryMode::Timings)
+        .try_set_telemetry_mode(BeTelemetryMode::Detailed)
         .unwrap();
     reused.try_solve().unwrap();
     let preparation_count = reused.get_statistics().backend_prepare_calls;
@@ -663,7 +663,7 @@ fn be_accepted_state_continuation_after_parameter_change_matches_segmented_refer
 
     let mut continued = make_parameterized(1.0, 1.0, 0.0, 0.5);
     continued
-        .try_set_telemetry_mode(BeTelemetryMode::Timings)
+        .try_set_telemetry_mode(BeTelemetryMode::Detailed)
         .unwrap();
     continued.try_solve().unwrap();
     let preparations_before = continued.get_statistics().backend_prepare_calls;

@@ -13,6 +13,8 @@ use crate::numerical::Nonlinear_systems::least_squares::{
 use crate::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
 };
+use crate::numerical::SolverTelemetryMode;
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use crate::numerical::optimization::gavin_fitting::{GavinSymbolicFitResult, GavinSymbolicFitting};
 use crate::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
 use crate::numerical::optimization::sym_fitting::Fitting;
@@ -117,6 +119,7 @@ pub struct UniversalFitting {
     frontend: SymbolicLambdifyFrontend,
     execution_policy: LambdifyExecutionPolicy,
     telemetry_mode: LeastSquaresTelemetryMode,
+    gavin_telemetry_mode: SolverTelemetryMode,
     logging_enabled: bool,
     tolerance: Option<f64>,
     f_tolerance: Option<f64>,
@@ -138,6 +141,7 @@ impl UniversalFitting {
             frontend: SymbolicLambdifyFrontend::ExprLegacy,
             execution_policy: LambdifyExecutionPolicy::Sequential,
             telemetry_mode: LeastSquaresTelemetryMode::Off,
+            gavin_telemetry_mode: SolverTelemetryMode::Off,
             logging_enabled: false,
             tolerance: None,
             f_tolerance: None,
@@ -348,19 +352,16 @@ impl UniversalFitting {
         self
     }
 
-    /// Configures runtime telemetry; all methods are disabled by default.
-    /// Gavin currently has one complete telemetry level, so either enabled
-    /// least-squares level requests its full snapshot.
+    /// Configures classic LM/VarPro telemetry. Gavin's distinct controller
+    /// uses [`SolverTelemetryMode`] via [`with_gavin_telemetry`](Self::with_gavin_telemetry).
+    /// Requesting this least-squares telemetry mode for Gavin is rejected at build.
     pub fn with_telemetry(mut self, mode: LeastSquaresTelemetryMode) -> Self {
         self.telemetry_mode = mode;
         self.lm = self.lm.with_telemetry(mode);
-        self.gavin = self
-            .gavin
-            .with_telemetry(mode != LeastSquaresTelemetryMode::Off);
         self
     }
 
-    /// Enables or disables logging through the application's installed `log` logger.
+    /// Enables or disables logging to the shared timestamped solver log.
     /// Logging is off by default; VarPro emits a completion summary while LM
     /// and Gavin retain their solver-specific details.
     pub fn with_logging(mut self, enabled: bool) -> Self {
@@ -380,13 +381,11 @@ impl UniversalFitting {
         self
     }
 
-    /// Enable Gavin solve telemetry when using [`Method::GAVIN`].
-    pub fn with_gavin_telemetry(self, enabled: bool) -> Self {
-        self.with_telemetry(if enabled {
-            LeastSquaresTelemetryMode::Detailed
-        } else {
-            LeastSquaresTelemetryMode::Off
-        })
+    /// Select Gavin solve telemetry when using [`Method::GAVIN`].
+    pub fn with_gavin_telemetry(mut self, mode: SolverTelemetryMode) -> Self {
+        self.gavin_telemetry_mode = mode;
+        self.gavin = self.gavin.with_telemetry(mode);
+        self
     }
 
     /// Select Gavin's ExprLegacy or AtomView symbolic frontend.
@@ -436,6 +435,12 @@ impl UniversalFitting {
 
     /// Build and solve the selected backend.
     pub fn build(self) -> Result<UniversalFittingResult, UniversalFittingError> {
+        let log_level = if self.logging_enabled {
+            SolverLogLevel::Info
+        } else {
+            SolverLogLevel::Off
+        };
+        let _logging_scope = SolverLogGuard::enter(log_level);
         match self.method {
             Method::LM => {
                 let lm = self
@@ -490,6 +495,12 @@ impl UniversalFitting {
                 Ok(UniversalFittingResult::VARPRO(fit))
             }
             Method::GAVIN => {
+                if self.telemetry_mode != LeastSquaresTelemetryMode::Off {
+                    return Err(UniversalFittingError::UnsupportedOption {
+                        method: Method::GAVIN,
+                        option: "use with_gavin_telemetry(SolverTelemetryMode)",
+                    });
+                }
                 if self.f_tolerance.is_some() {
                     return Err(UniversalFittingError::UnsupportedOption {
                         method: Method::GAVIN,
@@ -513,7 +524,7 @@ impl UniversalFitting {
                         .with_equations(self.equations)
                         .with_frontend(self.frontend)
                         .with_lambdify_execution_policy(self.execution_policy)
-                        .with_telemetry(self.telemetry_mode != LeastSquaresTelemetryMode::Off)
+                        .with_telemetry(self.gavin_telemetry_mode)
                         .with_logging(self.logging_enabled)
                         .with_solver_controls(controls.0, controls.1, controls.2, controls.3)
                         .try_solve()?,
@@ -776,7 +787,7 @@ mod tests {
             .with_arg("x".to_owned())
             .with_unknowns(vec!["a".to_owned(), "tau".to_owned(), "b".to_owned()])
             .with_initial_guess(vec![1.4, 1.6, 0.1])
-            .with_gavin_telemetry(true)
+            .with_gavin_telemetry(SolverTelemetryMode::Detailed)
             .with_logging(true)
             .build()
             .expect("Gavin universal route should fit the nonlinear model");
@@ -824,6 +835,37 @@ mod tests {
         assert!(fit.telemetry.is_none());
         assert_relative_eq!(fit.fit.parameters[0], 1.7, epsilon = 1e-6);
         assert_relative_eq!(fit.fit.parameters[1], 0.4, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn universal_gavin_uses_explicit_telemetry_mode_and_rejects_lm_modes() {
+        let invalid = UniversalFitting::new()
+            .with_gavin()
+            .with_telemetry(LeastSquaresTelemetryMode::Counters)
+            .build();
+        assert!(matches!(
+            invalid,
+            Err(UniversalFittingError::UnsupportedOption {
+                method: Method::GAVIN,
+                option: "use with_gavin_telemetry(SolverTelemetryMode)"
+            })
+        ));
+
+        let x = vec![0.0, 1.0, 2.0, 3.0];
+        let result = UniversalFitting::new()
+            .with_gavin()
+            .with_data(x.clone(), x.iter().map(|value| 2.0 * value + 1.0).collect())
+            .with_equation_str("a*x+b")
+            .with_arg("x")
+            .with_unknowns(["a", "b"])
+            .with_initial_guess(vec![1.5, 0.5])
+            .with_gavin_telemetry(SolverTelemetryMode::Detailed)
+            .build()
+            .unwrap();
+        let UniversalFittingResult::GAVIN(fit) = result else {
+            panic!("expected Gavin result");
+        };
+        assert!(fit.telemetry.is_some());
     }
 
     #[test]

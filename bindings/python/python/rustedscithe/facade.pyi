@@ -20,18 +20,21 @@ from ._native import (
     FittingSolver,
     Lsode2Solution,
     Lsode2Solver,
+    UniversalNonStiffSolution,
+    UniversalNonStiffSolver,
     NonlinearSolution,
     NonlinearSolver,
     RadauSolution,
     RadauSolver,
     SolverCapabilities,
     SolverOptions,
+    ShootingBvpSolver,
     SymbolicSystem,
     TaskDocument,
 )
 
-_IvpSolver: TypeAlias = BdfSolver | RadauSolver | BackwardEulerSolver | Lsode2Solver
-_IvpSolution: TypeAlias = BdfSolution | RadauSolution | BackwardEulerSolution | Lsode2Solution
+_IvpSolver: TypeAlias = BdfSolver | RadauSolver | BackwardEulerSolver | Lsode2Solver | UniversalNonStiffSolver
+_IvpSolution: TypeAlias = BdfSolution | RadauSolution | BackwardEulerSolution | Lsode2Solution | UniversalNonStiffSolution
 _BvpSolver: TypeAlias = BvpSciSolver | BvpDampSolver
 _BvpSolution: TypeAlias = BvpSciSolution | BvpDampSolution
 
@@ -41,6 +44,8 @@ def animate_solution_3d(solution: Any, columns: tuple[int, int, int], axis_names
 def animate_trajectory_2d(points: ArrayLike, times: ArrayLike, axis_names: tuple[str, str] | None = ..., speed: float = ...) -> None: ...
 def animate_trajectory_3d(points: ArrayLike, times: ArrayLike, axis_names: tuple[str, str, str] | None = ..., speed: float = ...) -> None: ...
 
+@overload
+def create_ivp(method: Literal["rk45", "dopri", "ab4"], expressions: list[Expr], state_variables: list[str], time_variable: str, y0: ArrayLike, t0: float, t_end: float, max_step: float, *, parameters: list[str] | None = ..., parameter_values: ArrayLike | None = ..., options: SolverOptions | None = ..., controller: str | None = ..., **solver_options: Any) -> UniversalNonStiffSolver: ...
 @overload
 def create_ivp(method: Literal["bdf"], expressions: list[Expr], state_variables: list[str], time_variable: str, y0: ArrayLike, t0: float, t_end: float, max_step: float, *, parameters: list[str] | None = ..., parameter_values: ArrayLike | None = ..., options: SolverOptions | None = ..., controller: str | None = ..., **solver_options: Any) -> BdfSolver: ...
 @overload
@@ -52,6 +57,8 @@ def create_ivp(method: Literal["lsode", "lsode2"], expressions: list[Expr], stat
 @overload
 def create_ivp(method: str, expressions: list[Expr], state_variables: list[str], time_variable: str, y0: ArrayLike, t0: float, t_end: float, max_step: float, *, parameters: list[str] | None = ..., parameter_values: ArrayLike | None = ..., options: SolverOptions | None = ..., controller: str | None = ..., **solver_options: Any) -> _IvpSolver: ...
 
+@overload
+def solve_ivp(method: Literal["rk45", "dopri", "ab4"], expressions: list[Expr], state_variables: list[str], time_variable: str, y0: ArrayLike, t0: float, t_end: float, max_step: float, *, parameters: list[str] | None = ..., parameter_values: ArrayLike | None = ..., options: SolverOptions | None = ..., controller: str | None = ..., **solver_options: Any) -> UniversalNonStiffSolution: ...
 @overload
 def solve_ivp(method: Literal["bdf"], expressions: list[Expr], state_variables: list[str], time_variable: str, y0: ArrayLike, t0: float, t_end: float, max_step: float, *, parameters: list[str] | None = ..., parameter_values: ArrayLike | None = ..., options: SolverOptions | None = ..., controller: str | None = ..., **solver_options: Any) -> BdfSolution: ...
 @overload
@@ -69,6 +76,7 @@ def solve_nonlinear(system: SymbolicSystem, initial_guess: ArrayLike, *, paramet
 def create_fit(equations: list[Expr], initial_guess: ArrayLike, **solver_options: Any) -> FittingSolver: ...
 def fit(equations: list[Expr], initial_guess: ArrayLike, *, parameters: ArrayLike | None = ..., **solver_options: Any) -> FittingSolution: ...
 def task(source_or_path: str | Path) -> TaskDocument: ...
+def task_dict(source_or_path: str | Path) -> dict[str, Any]: ...
 def run_task_batch(sources: Iterable[str | Path], *, continue_on_error: bool = ...) -> list[dict[str, Any]]: ...
 def run_task_batch_report(sources: Iterable[str | Path], *, path: str | Path | None = ..., continue_on_error: bool = ...) -> str: ...
 def render_table(rows: Iterable[Mapping[str, Any]], columns: Iterable[str] | None = ...) -> str: ...

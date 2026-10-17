@@ -52,7 +52,8 @@ impl AotWorkspace {
         let shared_telemetry = match mode {
             RadauTelemetryMode::Off => IvpTelemetry::disabled(),
             RadauTelemetryMode::Counters => IvpTelemetry::counters(),
-            RadauTelemetryMode::Timings => IvpTelemetry::detailed(),
+            RadauTelemetryMode::Timings => IvpTelemetry::timings(),
+            RadauTelemetryMode::Detailed => IvpTelemetry::detailed(),
         };
         shared_telemetry.set_lambdify_execution_policy(policy);
         Self {
@@ -161,7 +162,8 @@ impl AotPlan {
         .with_telemetry(match telemetry.mode() {
             RadauTelemetryMode::Off => IvpTelemetry::disabled(),
             RadauTelemetryMode::Counters => IvpTelemetry::counters(),
-            RadauTelemetryMode::Timings => IvpTelemetry::detailed(),
+            RadauTelemetryMode::Timings => IvpTelemetry::timings(),
+            RadauTelemetryMode::Detailed => IvpTelemetry::detailed(),
         });
 
         configure_chunking(&mut config, layout, dimension, execution_policy);

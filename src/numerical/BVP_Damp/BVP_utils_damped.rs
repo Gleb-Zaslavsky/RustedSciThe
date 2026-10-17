@@ -3,6 +3,7 @@ use crate::numerical::BVP_Damp::BVP_traits::{MatrixType, VectorType};
 use nalgebra::DMatrix;
 
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::SolverParams;
+use crate::numerical::logging::solver_info as info;
 use std::collections::HashMap;
 ////////////////////////////////////BOUND STEP  CONDITIONS////////////////////////////////////
 /// Inspired by the Cantera MultiNewton bound-step guard.
@@ -195,7 +196,7 @@ pub fn jac_recalc(
 
     // when jac is None it means this is first iteration
     if old_jac.is_none() || m > m_from_task {
-        log::info!(
+        info!(
             "\n number of iterations with old jac {} is higher then threshold {}",
             m,
             m_from_task

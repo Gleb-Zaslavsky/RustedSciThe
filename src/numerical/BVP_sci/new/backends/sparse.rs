@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn continuation_reuses_symbolic_lu_analysis() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         let mut backend = SparseBackend::new_with_telemetry(3, 5, telemetry.clone());
         let first = [
             (0, 0, 4.0),

@@ -13,11 +13,30 @@ use crate::symbolic::bvp::telemetry::BvpLambdifyExecutionPolicy;
 use crate::symbolic::ivp_telemetry::IvpTelemetryContractError;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Selects independent telemetry dimensions for BVP_sci.
+///
+/// `Timings` measures durations without collecting discrete counts. The more
+/// expensive Newton trace and per-mesh snapshots are exclusive to `Detailed`.
 pub enum BvpSciTelemetryMode {
     #[default]
     Off,
     Counters,
     Timings,
+    Detailed,
+}
+
+impl BvpSciTelemetryMode {
+    pub const fn collects_counters(self) -> bool {
+        matches!(self, Self::Counters | Self::Detailed)
+    }
+
+    pub const fn collects_timings(self) -> bool {
+        matches!(self, Self::Timings | Self::Detailed)
+    }
+
+    const fn collects_detailed_traces(self) -> bool {
+        matches!(self, Self::Detailed)
+    }
 }
 
 /// Stable identity for an aggregate timing scope.
@@ -105,7 +124,7 @@ pub struct BvpSciTelemetryScope {
 /// This is intentionally a compact summary rather than a callback-level event
 /// stream. It is enough to distinguish a bad linear correction from a stale
 /// Jacobian or exhausted backtracking without putting a lock or allocation in
-/// the residual/Jacobian hot path.
+/// the residual/Jacobian hot path. It is retained only in `Detailed` mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BvpSciNewtonTraceEntry {
     /// Zero-based outer solve pass. A pass may revisit the same mesh when
@@ -136,7 +155,7 @@ pub struct BvpSciNewtonTraceEntry {
 
 /// Work and inclusive stage times attributed to one outer mesh solve pass.
 ///
-/// This compact record is only collected in `Timings` mode. Its timings are
+/// This compact record is only collected in `Detailed` mode. Its timings are
 /// per-pass deltas of the global counters/scopes, not allocator measurements.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BvpSciMeshPassSnapshot {
@@ -246,7 +265,7 @@ pub struct BvpSciSuperLuTelemetrySnapshot {
 
 /// Point-in-time report for one prepared model and its numerical lifecycle.
 ///
-/// Counter fields are meaningful in both `Counters` and `Timings` modes.
+/// Counter and timing fields are populated only by their corresponding modes.
 /// Timing fields are `None` unless clock collection was explicitly enabled;
 /// this makes disabled and inapplicable measurements distinguishable from a
 /// measured zero.
@@ -271,7 +290,7 @@ pub struct BvpSciTelemetrySnapshot {
     pub newton_rejected_steps: u64,
     /// Detailed-only modified-Newton trace; empty in Off/Counters modes.
     pub newton_residual_history: Vec<BvpSciNewtonTraceEntry>,
-    /// Per-outer-pass work and timings, available only in `Timings` mode.
+    /// Per-outer-pass work and timings, available in `Timings` and `Detailed` modes.
     pub mesh_passes: Vec<BvpSciMeshPassSnapshot>,
     pub collocation_evaluations: u64,
     pub mesh_defect_probes: u64,
@@ -560,7 +579,7 @@ impl BvpSciTelemetrySnapshot {
         ]
         .into_iter()
         .any(|value| value.is_some());
-        if self.mode != BvpSciTelemetryMode::Timings {
+        if !self.mode.collects_timings() {
             if !self.timing_scopes.is_empty() || !self.mesh_passes.is_empty() || has_timing_fields {
                 return Err(BvpSciTelemetryContractError::TimingDataWithoutTimingMode);
             }
@@ -752,9 +771,12 @@ struct TelemetryInner {
 impl TelemetryInner {
     fn new(mode: BvpSciTelemetryMode) -> Self {
         Self {
-            newton_residual_history: (mode == BvpSciTelemetryMode::Timings)
+            newton_residual_history: mode
+                .collects_detailed_traces()
                 .then(|| Mutex::new(Vec::new())),
-            mesh_passes: (mode == BvpSciTelemetryMode::Timings).then(|| Mutex::new(Vec::new())),
+            mesh_passes: mode
+                .collects_detailed_traces()
+                .then(|| Mutex::new(Vec::new())),
             banded_core_factor_residual_relative_bits: AtomicU64::new(u64::MAX),
             banded_min_abs_pivot_bits: AtomicU64::new(u64::MAX),
             banded_max_multiplier_norm_bits: AtomicU64::new(u64::MAX),
@@ -815,7 +837,12 @@ impl Drop for BvpSciTelemetryTimer {
         let Some(inner) = &self.telemetry.inner else {
             return;
         };
-        let elapsed = self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let elapsed = self
+            .started
+            .elapsed()
+            .as_nanos()
+            .max(1)
+            .min(u64::MAX as u128) as u64;
         match self.kind {
             BvpSciTelemetryTimerKind::FullSolve => {
                 inner.full_solve_ns.fetch_add(elapsed, Ordering::Relaxed);
@@ -1087,9 +1114,14 @@ impl BvpSciTelemetry {
         Self::with_mode(BvpSciTelemetryMode::Counters)
     }
 
-    /// Construct a handle collecting counters and inclusive stage timings.
+    /// Construct a handle collecting inclusive stage timings without discrete counters.
     pub fn timings() -> Self {
         Self::with_mode(BvpSciTelemetryMode::Timings)
+    }
+
+    /// Creates a stream with counters, timings, Newton traces and mesh-pass detail.
+    pub fn detailed() -> Self {
+        Self::with_mode(BvpSciTelemetryMode::Detailed)
     }
 
     /// Construct a handle for an explicit telemetry mode.
@@ -1103,6 +1135,16 @@ impl BvpSciTelemetry {
     /// Return the collection mode of this handle.
     pub fn mode(&self) -> BvpSciTelemetryMode {
         self.mode
+    }
+
+    #[inline]
+    fn counters_enabled(&self) -> bool {
+        self.mode.collects_counters()
+    }
+
+    #[inline]
+    fn timings_enabled(&self) -> bool {
+        self.mode.collects_timings()
     }
 
     /// Opt in to capturing the first assembled Newton system at or above the
@@ -1172,14 +1214,16 @@ impl BvpSciTelemetry {
 
     #[inline]
     pub fn start_timing(&self) -> Option<Instant> {
-        (self.mode == BvpSciTelemetryMode::Timings).then(Instant::now)
+        self.timings_enabled().then(Instant::now)
     }
 
     /// Start an inclusive timer covering one public solve call.
     #[inline]
     pub fn start_full_solve(&self) -> Option<BvpSciTelemetryTimer> {
-        if let Some(inner) = &self.inner {
-            inner.full_solve_calls.fetch_add(1, Ordering::Relaxed);
+        if self.counters_enabled() {
+            if let Some(inner) = &self.inner {
+                inner.full_solve_calls.fetch_add(1, Ordering::Relaxed);
+            }
         }
         let started = self.start_timing()?;
         Some(BvpSciTelemetryTimer {
@@ -1194,25 +1238,31 @@ impl BvpSciTelemetry {
     /// callback scopes retain their specialized low-overhead record methods.
     #[inline]
     pub fn start_stage(&self, stage: BvpSciTelemetryStage) -> Option<BvpSciTelemetryTimer> {
-        let started = self.start_timing()?;
-        if let Some(inner) = &self.inner {
-            match stage {
-                BvpSciTelemetryStage::Newton => {
-                    inner.newton_scope_calls.fetch_add(1, Ordering::Relaxed);
+        // Counter collection must not depend on timing being enabled. In
+        // Counters mode this records the phase call and then returns without
+        // constructing a timer; Detailed records both channels.
+        let started = self.start_timing();
+        if self.counters_enabled() {
+            if let Some(inner) = &self.inner {
+                match stage {
+                    BvpSciTelemetryStage::Newton => {
+                        inner.newton_scope_calls.fetch_add(1, Ordering::Relaxed);
+                    }
+                    BvpSciTelemetryStage::MeshDefectEstimation => {
+                        inner
+                            .mesh_defect_estimation_calls
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    BvpSciTelemetryStage::OutputConstruction => {
+                        inner
+                            .output_construction_calls
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {}
                 }
-                BvpSciTelemetryStage::MeshDefectEstimation => {
-                    inner
-                        .mesh_defect_estimation_calls
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                BvpSciTelemetryStage::OutputConstruction => {
-                    inner
-                        .output_construction_calls
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-                _ => {}
             }
         }
+        let started = started?;
         Some(BvpSciTelemetryTimer {
             telemetry: self.clone(),
             started,
@@ -1221,7 +1271,7 @@ impl BvpSciTelemetry {
     }
 
     /// Start a per-mesh diagnostic scope. It is intentionally unavailable in
-    /// `Off` and `Counters` modes and is created once per outer controller
+    /// All modes except `Detailed` and is created once per outer controller
     /// pass, never once per callback or Newton iteration.
     pub fn start_mesh_pass(
         &self,
@@ -1229,7 +1279,7 @@ impl BvpSciTelemetry {
         mesh_nodes: usize,
         linear_system_dimension: usize,
     ) -> Option<BvpSciMeshPassTimer> {
-        if self.mode != BvpSciTelemetryMode::Timings {
+        if !self.timings_enabled() || !self.mode.collects_detailed_traces() {
             return None;
         }
         Some(BvpSciMeshPassTimer {
@@ -1252,10 +1302,19 @@ impl BvpSciTelemetry {
     #[inline]
     fn add_duration_value(slot: &AtomicU64, elapsed: Option<Duration>) {
         if let Some(elapsed) = elapsed {
+            // A one-nanosecond sentinel preserves "measured zero" separately
+            // from an unobserved scope without requiring a discrete call counter.
             slot.fetch_add(
-                elapsed.as_nanos().min(u64::MAX as u128) as u64,
+                elapsed.as_nanos().max(1).min(u64::MAX as u128) as u64,
                 Ordering::Relaxed,
             );
+        }
+    }
+
+    #[inline]
+    fn add_counter(&self, slot: &AtomicU64, amount: u64) {
+        if self.counters_enabled() {
+            slot.fetch_add(amount, Ordering::Relaxed);
         }
     }
 
@@ -1266,8 +1325,10 @@ impl BvpSciTelemetry {
         started: Option<Instant>,
         mode: BvpSciTelemetryMode,
     ) {
-        counter.fetch_add(1, Ordering::Relaxed);
-        if mode == BvpSciTelemetryMode::Timings {
+        if mode.collects_counters() {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        if mode.collects_timings() {
             Self::add_duration(timer, started);
         }
     }
@@ -1282,7 +1343,9 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_argument_binding(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner.argument_bindings.fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner.argument_bindings.fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.binding_ns, started);
         }
     }
@@ -1290,7 +1353,9 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_residual_evaluation(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner.residual_evaluations.fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner.residual_evaluations.fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.residual_evaluation_ns, started);
         }
     }
@@ -1298,7 +1363,9 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_jacobian_evaluation(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner.jacobian_evaluations.fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner.jacobian_evaluations.fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.jacobian_evaluation_ns, started);
         }
     }
@@ -1306,9 +1373,11 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_jacobian_output_assembly(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner
-                .jacobian_output_assemblies
-                .fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner
+                    .jacobian_output_assemblies
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.jacobian_output_assembly_ns, started);
         }
     }
@@ -1316,16 +1385,20 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_copy(&self) {
         if let Some(inner) = &self.inner {
-            inner.copies.fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner.copies.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
     #[inline]
     pub fn record_output_writes(&self, count: usize) {
         if let Some(inner) = &self.inner {
-            inner
-                .output_writes
-                .fetch_add(count as u64, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner
+                    .output_writes
+                    .fetch_add(count as u64, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1379,56 +1452,53 @@ impl BvpSciTelemetry {
 
     pub fn record_finite_difference_probe(&self) {
         if let Some(inner) = &self.inner {
-            inner
-                .finite_difference_probes
-                .fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.finite_difference_probes, 1);
         }
     }
 
     #[inline]
     pub fn record_newton_iteration(&self) {
         if let Some(inner) = &self.inner {
-            inner.newton_iterations.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.newton_iterations, 1);
         }
     }
 
     #[inline]
     pub fn record_newton_jacobian_refresh(&self) {
         if let Some(inner) = &self.inner {
-            inner
-                .newton_jacobian_refreshes
-                .fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.newton_jacobian_refreshes, 1);
         }
     }
 
     #[inline]
     pub fn record_newton_backtracking_trial(&self) {
         if let Some(inner) = &self.inner {
-            inner
-                .newton_backtracking_trials
-                .fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.newton_backtracking_trials, 1);
         }
     }
 
     #[inline]
     pub fn record_newton_accepted_step(&self) {
         if let Some(inner) = &self.inner {
-            inner.newton_accepted_steps.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.newton_accepted_steps, 1);
         }
     }
 
     #[inline]
     pub fn record_newton_rejected_step(&self) {
         if let Some(inner) = &self.inner {
-            inner.newton_rejected_steps.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.newton_rejected_steps, 1);
         }
     }
 
-    /// Store one detailed Newton observation. This is disabled unless timing
+    /// Store one detailed Newton observation. This is disabled unless detailed
     /// telemetry was explicitly requested, so production callbacks remain
     /// allocation-free and lock-free.
     pub fn record_newton_trace(&self, entry: BvpSciNewtonTraceEntry) {
         let Some(inner) = &self.inner else { return };
+        if !self.mode.collects_detailed_traces() {
+            return;
+        }
         let Some(history) = &inner.newton_residual_history else {
             return;
         };
@@ -1440,14 +1510,16 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_mesh_defect_probe(&self) {
         if let Some(inner) = &self.inner {
-            inner.mesh_defect_probes.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.mesh_defect_probes, 1);
         }
     }
 
     #[inline]
     pub fn record_linear_assembly(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner.linear_assemblies.fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner.linear_assemblies.fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.linear_assembly_ns, started);
         }
     }
@@ -1455,7 +1527,9 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_factorization(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner.factorizations.fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner.factorizations.fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.factorization_ns, started);
         }
     }
@@ -1464,8 +1538,10 @@ impl BvpSciTelemetry {
     /// and therefore selected the established StandardFaer backend.
     #[inline]
     pub fn record_superlu_fallback(&self) {
-        if let Some(inner) = &self.inner {
-            inner.superlu_fallbacks.fetch_add(1, Ordering::Relaxed);
+        if self.counters_enabled() {
+            if let Some(inner) = &self.inner {
+                inner.superlu_fallbacks.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1477,9 +1553,11 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_sparse_symbolic_analysis(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner
-                .sparse_symbolic_analyses
-                .fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner
+                    .sparse_symbolic_analyses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.sparse_symbolic_analysis_ns, started);
         }
     }
@@ -1488,9 +1566,11 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_sparse_numeric_factorization(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner
-                .sparse_numeric_factorizations
-                .fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner
+                    .sparse_numeric_factorizations
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.sparse_numeric_factorization_ns, started);
         }
     }
@@ -1498,7 +1578,9 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_sparse_symbolic_reuse(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner.sparse_symbolic_reuses.fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner.sparse_symbolic_reuses.fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.sparse_symbolic_reuse_ns, started);
         }
     }
@@ -1506,9 +1588,11 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_sparse_triplet_materialization(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner
-                .sparse_triplet_materializations
-                .fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner
+                    .sparse_triplet_materializations
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.sparse_triplet_materialization_ns, started);
         }
     }
@@ -1516,7 +1600,9 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_sparse_csc_assembly(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner.sparse_csc_assemblies.fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner.sparse_csc_assemblies.fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.sparse_csc_assembly_ns, started);
         }
     }
@@ -1525,9 +1611,11 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_superlu_abi_conversion(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner
-                .superlu_abi_conversions
-                .fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner
+                    .superlu_abi_conversions
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.superlu_abi_conversion_ns, started);
         }
     }
@@ -1541,31 +1629,35 @@ impl BvpSciTelemetry {
         factor_storage: Option<(usize, usize, usize, usize)>,
     ) {
         let Some(inner) = &self.inner else { return };
-        inner
-            .superlu_factor_ffi_calls
-            .fetch_add(1, Ordering::Relaxed);
-        if native_elapsed.is_some() {
+        if self.counters_enabled() {
             inner
-                .superlu_native_factorization_calls
+                .superlu_factor_ffi_calls
                 .fetch_add(1, Ordering::Relaxed);
+            if native_elapsed.is_some() {
+                inner
+                    .superlu_native_factorization_calls
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
-        if self.mode == BvpSciTelemetryMode::Timings {
+        if self.timings_enabled() {
             Self::add_duration_value(&inner.superlu_factor_ffi_ns, ffi_elapsed);
             Self::add_duration_value(&inner.superlu_native_factorization_ns, native_elapsed);
         }
-        if let Some((l_storage, u_storage, l_csc, u_csc)) = factor_storage {
-            inner
-                .superlu_factor_l_storage_entries
-                .store(l_storage as u64, Ordering::Relaxed);
-            inner
-                .superlu_factor_u_storage_entries
-                .store(u_storage as u64, Ordering::Relaxed);
-            inner
-                .superlu_factor_l_csc_nnz
-                .store(l_csc as u64, Ordering::Relaxed);
-            inner
-                .superlu_factor_u_csc_nnz
-                .store(u_csc as u64, Ordering::Relaxed);
+        if self.counters_enabled() {
+            if let Some((l_storage, u_storage, l_csc, u_csc)) = factor_storage {
+                inner
+                    .superlu_factor_l_storage_entries
+                    .store(l_storage as u64, Ordering::Relaxed);
+                inner
+                    .superlu_factor_u_storage_entries
+                    .store(u_storage as u64, Ordering::Relaxed);
+                inner
+                    .superlu_factor_l_csc_nnz
+                    .store(l_csc as u64, Ordering::Relaxed);
+                inner
+                    .superlu_factor_u_csc_nnz
+                    .store(u_csc as u64, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1577,15 +1669,17 @@ impl BvpSciTelemetry {
         native_elapsed: Option<Duration>,
     ) {
         let Some(inner) = &self.inner else { return };
-        inner
-            .superlu_solve_ffi_calls
-            .fetch_add(1, Ordering::Relaxed);
-        if native_elapsed.is_some() {
+        if self.counters_enabled() {
             inner
-                .superlu_native_solve_calls
+                .superlu_solve_ffi_calls
                 .fetch_add(1, Ordering::Relaxed);
+            if native_elapsed.is_some() {
+                inner
+                    .superlu_native_solve_calls
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
-        if self.mode == BvpSciTelemetryMode::Timings {
+        if self.timings_enabled() {
             Self::add_duration_value(&inner.superlu_solve_ffi_ns, ffi_elapsed);
             Self::add_duration_value(&inner.superlu_native_solve_ns, native_elapsed);
         }
@@ -1617,14 +1711,20 @@ impl BvpSciTelemetry {
                 &inner.banded_border_factorization_ns,
             ),
         };
-        counter.fetch_add(calls as u64, Ordering::Relaxed);
-        Self::add_duration_value(timer, Some(elapsed));
+        if self.counters_enabled() {
+            counter.fetch_add(calls as u64, Ordering::Relaxed);
+        }
+        if self.timings_enabled() {
+            Self::add_duration_value(timer, Some(elapsed));
+        }
     }
 
     #[inline]
     pub fn record_linear_solve(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner.linear_solves.fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner.linear_solves.fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.solve_ns, started);
         }
     }
@@ -1633,24 +1733,36 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_banded_factorization(&self, route: BvpSciBandedRoute, started: Option<Instant>) {
         let Some(inner) = &self.inner else { return };
-        match route {
-            BvpSciBandedRoute::Structured => {
-                inner
-                    .banded_structured_factorizations
-                    .fetch_add(1, Ordering::Relaxed);
-                Self::add_duration(&inner.banded_structured_factorization_ns, started);
+        if self.counters_enabled() {
+            match route {
+                BvpSciBandedRoute::Structured => {
+                    inner
+                        .banded_structured_factorizations
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                BvpSciBandedRoute::ScalarFallback => {
+                    inner
+                        .banded_scalar_fallback_factorizations
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                BvpSciBandedRoute::SparseFallback => {
+                    inner
+                        .banded_sparse_fallback_factorizations
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
-            BvpSciBandedRoute::ScalarFallback => {
-                inner
-                    .banded_scalar_fallback_factorizations
-                    .fetch_add(1, Ordering::Relaxed);
-                Self::add_duration(&inner.banded_scalar_fallback_factorization_ns, started);
-            }
-            BvpSciBandedRoute::SparseFallback => {
-                inner
-                    .banded_sparse_fallback_factorizations
-                    .fetch_add(1, Ordering::Relaxed);
-                Self::add_duration(&inner.banded_sparse_fallback_factorization_ns, started);
+        }
+        if self.timings_enabled() {
+            match route {
+                BvpSciBandedRoute::Structured => {
+                    Self::add_duration(&inner.banded_structured_factorization_ns, started)
+                }
+                BvpSciBandedRoute::ScalarFallback => {
+                    Self::add_duration(&inner.banded_scalar_fallback_factorization_ns, started)
+                }
+                BvpSciBandedRoute::SparseFallback => {
+                    Self::add_duration(&inner.banded_sparse_fallback_factorization_ns, started)
+                }
             }
         }
     }
@@ -1663,9 +1775,11 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_banded_scalar_fallback_assembly(&self, started: Option<Instant>) {
         let Some(inner) = &self.inner else { return };
-        inner
-            .banded_scalar_fallback_assemblies
-            .fetch_add(1, Ordering::Relaxed);
+        if self.counters_enabled() {
+            inner
+                .banded_scalar_fallback_assemblies
+                .fetch_add(1, Ordering::Relaxed);
+        }
         Self::add_duration(&inner.banded_scalar_fallback_assembly_ns, started);
     }
 
@@ -1676,9 +1790,11 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_banded_sparse_fallback_assembly(&self, started: Option<Instant>) {
         let Some(inner) = &self.inner else { return };
-        inner
-            .banded_sparse_fallback_assemblies
-            .fetch_add(1, Ordering::Relaxed);
+        if self.counters_enabled() {
+            inner
+                .banded_sparse_fallback_assemblies
+                .fetch_add(1, Ordering::Relaxed);
+        }
         Self::add_duration(&inner.banded_sparse_fallback_assembly_ns, started);
     }
 
@@ -1686,24 +1802,36 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_banded_solve(&self, route: BvpSciBandedRoute, started: Option<Instant>) {
         let Some(inner) = &self.inner else { return };
-        match route {
-            BvpSciBandedRoute::Structured => {
-                inner
-                    .banded_structured_solves
-                    .fetch_add(1, Ordering::Relaxed);
-                Self::add_duration(&inner.banded_structured_solve_ns, started);
+        if self.counters_enabled() {
+            match route {
+                BvpSciBandedRoute::Structured => {
+                    inner
+                        .banded_structured_solves
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                BvpSciBandedRoute::ScalarFallback => {
+                    inner
+                        .banded_scalar_fallback_solves
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                BvpSciBandedRoute::SparseFallback => {
+                    inner
+                        .banded_sparse_fallback_solves
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
-            BvpSciBandedRoute::ScalarFallback => {
-                inner
-                    .banded_scalar_fallback_solves
-                    .fetch_add(1, Ordering::Relaxed);
-                Self::add_duration(&inner.banded_scalar_fallback_solve_ns, started);
-            }
-            BvpSciBandedRoute::SparseFallback => {
-                inner
-                    .banded_sparse_fallback_solves
-                    .fetch_add(1, Ordering::Relaxed);
-                Self::add_duration(&inner.banded_sparse_fallback_solve_ns, started);
+        }
+        if self.timings_enabled() {
+            match route {
+                BvpSciBandedRoute::Structured => {
+                    Self::add_duration(&inner.banded_structured_solve_ns, started)
+                }
+                BvpSciBandedRoute::ScalarFallback => {
+                    Self::add_duration(&inner.banded_scalar_fallback_solve_ns, started)
+                }
+                BvpSciBandedRoute::SparseFallback => {
+                    Self::add_duration(&inner.banded_sparse_fallback_solve_ns, started)
+                }
             }
         }
     }
@@ -1712,17 +1840,21 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_banded_residual_guard(&self, started: Option<Instant>) {
         let Some(inner) = &self.inner else { return };
-        inner.banded_residual_checks.fetch_add(1, Ordering::Relaxed);
+        if self.counters_enabled() {
+            inner.banded_residual_checks.fetch_add(1, Ordering::Relaxed);
+        }
         Self::add_duration(&inner.banded_residual_guard_ns, started);
     }
 
     /// Record a switch from the structured Banded route to its safety route.
     #[inline]
     pub fn record_banded_fallback_switch(&self) {
-        if let Some(inner) = &self.inner {
-            inner
-                .banded_fallback_switches
-                .fetch_add(1, Ordering::Relaxed);
+        if self.counters_enabled() {
+            if let Some(inner) = &self.inner {
+                inner
+                    .banded_fallback_switches
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1734,6 +1866,9 @@ impl BvpSciTelemetry {
         min_abs_pivot: f64,
         max_multiplier_norm: f64,
     ) {
+        if !self.counters_enabled() {
+            return;
+        }
         let Some(inner) = &self.inner else { return };
         inner
             .banded_core_factor_residual_relative_bits
@@ -1752,6 +1887,9 @@ impl BvpSciTelemetry {
         min_abs_pivot: f64,
         max_multiplier_norm: f64,
     ) {
+        if !self.counters_enabled() {
+            return;
+        }
         let Some(inner) = &self.inner else { return };
         inner
             .banded_border_min_abs_pivot_bits
@@ -1765,6 +1903,9 @@ impl BvpSciTelemetry {
     /// dense global matrix. A finite but enormous solution is evidence for a
     /// Schur/conditioning problem even when core pivots look healthy.
     pub fn record_banded_solve_diagnostics(&self, residual_inf: f64, solution_inf: f64) {
+        if !self.counters_enabled() {
+            return;
+        }
         let Some(inner) = &self.inner else { return };
         inner
             .banded_last_residual_inf_bits
@@ -1778,21 +1919,25 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_banded_rhs_permutation(&self, entries: usize, started: Option<Instant>) {
         let Some(inner) = &self.inner else { return };
-        inner
-            .banded_rhs_permutations
-            .fetch_add(1, Ordering::Relaxed);
-        inner
-            .banded_rhs_permutation_entries
-            .fetch_add(entries as u64, Ordering::Relaxed);
+        if self.counters_enabled() {
+            inner
+                .banded_rhs_permutations
+                .fetch_add(1, Ordering::Relaxed);
+            inner
+                .banded_rhs_permutation_entries
+                .fetch_add(entries as u64, Ordering::Relaxed);
+        }
         Self::add_duration(&inner.banded_rhs_permutation_ns, started);
     }
 
     #[inline]
     pub fn record_collocation(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner
-                .collocation_evaluations
-                .fetch_add(1, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner
+                    .collocation_evaluations
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.collocation_ns, started);
         }
     }
@@ -1801,10 +1946,12 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_mesh_refinement(&self, started: Option<Instant>, points_added: usize) {
         if let Some(inner) = &self.inner {
-            inner.mesh_refinements.fetch_add(1, Ordering::Relaxed);
-            inner
-                .mesh_points_added
-                .fetch_add(points_added as u64, Ordering::Relaxed);
+            if self.counters_enabled() {
+                inner.mesh_refinements.fetch_add(1, Ordering::Relaxed);
+                inner
+                    .mesh_points_added
+                    .fetch_add(points_added as u64, Ordering::Relaxed);
+            }
             Self::add_duration(&inner.mesh_refinement_ns, started);
         }
     }
@@ -1812,19 +1959,19 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_workspace_resize(&self) {
         if let Some(inner) = &self.inner {
-            inner.workspace_resizes.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.workspace_resizes, 1);
         }
     }
 
     pub fn record_parameter_rebind(&self) {
         if let Some(inner) = &self.inner {
-            inner.parameter_rebinds.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.parameter_rebinds, 1);
         }
     }
 
     pub fn record_continuation_solve(&self) {
         if let Some(inner) = &self.inner {
-            inner.continuation_solves.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.continuation_solves, 1);
         }
     }
 
@@ -1832,19 +1979,19 @@ impl BvpSciTelemetry {
     /// This intentionally does not claim to be a global allocator counter.
     pub fn record_allocation(&self) {
         if let Some(inner) = &self.inner {
-            inner.allocations.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.allocations, 1);
         }
     }
 
     pub fn record_restart(&self) {
         if let Some(inner) = &self.inner {
-            inner.restarts.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.restarts, 1);
         }
     }
 
     pub fn record_preparation(&self, started: Option<Instant>) {
         if let Some(inner) = &self.inner {
-            inner.preparation_calls.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.preparation_calls, 1);
             Self::add_duration(&inner.preparation_ns, started);
         }
     }
@@ -1852,23 +1999,21 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_atom_conversion(&self, started: Option<Instant>, entries: u64) {
         let Some(inner) = &self.inner else { return };
-        inner.atom_conversions.fetch_add(entries, Ordering::Relaxed);
+        self.add_counter(&inner.atom_conversions, entries);
         Self::add_duration(&inner.expr_to_atom_ns, started);
     }
 
     #[inline]
     pub fn record_symbolic_jacobian(&self, started: Option<Instant>, derivatives: u64) {
         let Some(inner) = &self.inner else { return };
-        inner
-            .symbolic_jacobian_derivations
-            .fetch_add(derivatives, Ordering::Relaxed);
+        self.add_counter(&inner.symbolic_jacobian_derivations, derivatives);
         Self::add_duration(&inner.symbolic_jacobian_ns, started);
     }
 
     #[inline]
     pub fn record_pattern(&self, started: Option<Instant>, entries: u64) {
         let Some(inner) = &self.inner else { return };
-        inner.pattern_entries.fetch_add(entries, Ordering::Relaxed);
+        self.add_counter(&inner.pattern_entries, entries);
         Self::add_duration(&inner.pattern_ns, started);
     }
 
@@ -1882,7 +2027,7 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_pattern_elapsed(&self, elapsed: Option<Duration>, entries: u64) {
         let Some(inner) = &self.inner else { return };
-        inner.pattern_entries.fetch_add(entries, Ordering::Relaxed);
+        self.add_counter(&inner.pattern_entries, entries);
         Self::add_duration_value(&inner.pattern_ns, elapsed);
     }
 
@@ -1893,16 +2038,14 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_lowering(&self, started: Option<Instant>) {
         let Some(inner) = &self.inner else { return };
-        inner.lowering_calls.fetch_add(1, Ordering::Relaxed);
+        self.add_counter(&inner.lowering_calls, 1);
         Self::add_duration(&inner.lowering_ns, started);
     }
 
     #[inline]
     pub fn record_evaluator_compilation(&self, started: Option<Instant>, evaluators: u64) {
         let Some(inner) = &self.inner else { return };
-        inner
-            .evaluator_compilations
-            .fetch_add(evaluators, Ordering::Relaxed);
+        self.add_counter(&inner.evaluator_compilations, evaluators);
         Self::add_duration(&inner.evaluator_compilation_ns, started);
     }
 
@@ -1912,12 +2055,8 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_residual_evaluator_compilation(&self, started: Option<Instant>, evaluators: u64) {
         let Some(inner) = &self.inner else { return };
-        inner
-            .evaluator_compilations
-            .fetch_add(evaluators, Ordering::Relaxed);
-        inner
-            .residual_evaluator_compilations
-            .fetch_add(evaluators, Ordering::Relaxed);
+        self.add_counter(&inner.evaluator_compilations, evaluators);
+        self.add_counter(&inner.residual_evaluator_compilations, evaluators);
         Self::add_duration(&inner.evaluator_compilation_ns, started);
         Self::add_duration(&inner.residual_evaluator_compilation_ns, started);
     }
@@ -1928,12 +2067,8 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_jacobian_evaluator_compilation(&self, started: Option<Instant>, evaluators: u64) {
         let Some(inner) = &self.inner else { return };
-        inner
-            .evaluator_compilations
-            .fetch_add(evaluators, Ordering::Relaxed);
-        inner
-            .jacobian_evaluator_compilations
-            .fetch_add(evaluators, Ordering::Relaxed);
+        self.add_counter(&inner.evaluator_compilations, evaluators);
+        self.add_counter(&inner.jacobian_evaluator_compilations, evaluators);
         Self::add_duration(&inner.evaluator_compilation_ns, started);
         Self::add_duration(&inner.jacobian_evaluator_compilation_ns, started);
     }
@@ -1941,18 +2076,14 @@ impl BvpSciTelemetry {
     #[inline]
     pub fn record_singular_term_application(&self) {
         if let Some(inner) = &self.inner {
-            inner
-                .singular_term_applications
-                .fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.singular_term_applications, 1);
         }
     }
 
     #[inline]
     pub fn record_dense_output_construction(&self) {
         if let Some(inner) = &self.inner {
-            inner
-                .dense_output_constructions
-                .fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.dense_output_constructions, 1);
         }
     }
 
@@ -1969,12 +2100,14 @@ impl BvpSciTelemetry {
         let Some(inner) = &self.inner else { return };
         let parallel = work > 1 && policy.should_parallel_with_tasks(work, work);
         if parallel {
-            inner.parallel_dispatches.fetch_add(1, Ordering::Relaxed);
-            inner
-                .max_worker_threads
-                .fetch_max(rayon::current_num_threads() as u64, Ordering::Relaxed);
+            self.add_counter(&inner.parallel_dispatches, 1);
+            if self.counters_enabled() {
+                inner
+                    .max_worker_threads
+                    .fetch_max(rayon::current_num_threads() as u64, Ordering::Relaxed);
+            }
         } else {
-            inner.sequential_dispatches.fetch_add(1, Ordering::Relaxed);
+            self.add_counter(&inner.sequential_dispatches, 1);
         }
     }
 
@@ -1985,9 +2118,8 @@ impl BvpSciTelemetry {
                 ..BvpSciTelemetrySnapshot::default()
             };
         };
-        let timed = |ns: u64, calls: u64| {
-            (self.mode == BvpSciTelemetryMode::Timings && calls > 0)
-                .then(|| ns as f64 / 1_000_000.0)
+        let timed = |ns: u64, _calls: u64| {
+            (self.mode.collects_timings() && ns > 0).then(|| ns as f64 / 1_000_000.0)
         };
         let mut snapshot = BvpSciTelemetrySnapshot {
             mode: self.mode,
@@ -2174,8 +2306,8 @@ impl BvpSciTelemetry {
             parallel_dispatches: inner.parallel_dispatches.load(Ordering::Relaxed),
             sequential_dispatches: inner.sequential_dispatches.load(Ordering::Relaxed),
             max_worker_threads: inner.max_worker_threads.load(Ordering::Relaxed),
-            preparation_ms: (self.mode == BvpSciTelemetryMode::Timings
-                && inner.preparation_calls.load(Ordering::Relaxed) > 0)
+            preparation_ms: (self.mode.collects_timings()
+                && inner.preparation_ns.load(Ordering::Relaxed) > 0)
                 .then(|| inner.preparation_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0),
             expr_to_atom_ms: timed(
                 inner.expr_to_atom_ns.load(Ordering::Relaxed),
@@ -2409,7 +2541,7 @@ impl BvpSciTelemetry {
             ),
             timing_scopes: Vec::new(),
         };
-        if self.mode == BvpSciTelemetryMode::Timings {
+        if self.mode.collects_timings() {
             let scope = |stage, parent, elapsed_ms| {
                 let calls = match stage {
                     BvpSciTelemetryStage::Preparation => snapshot.preparation_calls,
@@ -2484,7 +2616,11 @@ impl BvpSciTelemetry {
                     stage,
                     kind: BvpSciTelemetryScopeKind::Inclusive,
                     parent,
-                    calls,
+                    calls: if self.mode.collects_counters() {
+                        calls
+                    } else {
+                        0
+                    },
                     elapsed_ms,
                 }
             };
@@ -2676,6 +2812,74 @@ mod tests {
     use super::*;
 
     #[test]
+    fn telemetry_modes_separate_counts_timings_and_detailed_traces() {
+        let counters = BvpSciTelemetry::counters();
+        assert!(counters.start_timing().is_none());
+        counters.record_rhs(None);
+        counters.record_newton_iteration();
+        assert!(counters
+            .start_stage(BvpSciTelemetryStage::Newton)
+            .is_none());
+        let counter_snapshot = counters.snapshot();
+        assert_eq!(counter_snapshot.rhs_calls, 1);
+        assert_eq!(counter_snapshot.newton_iterations, 1);
+        assert_eq!(counter_snapshot.newton_scope_calls, 1);
+        assert!(counter_snapshot.rhs_callback_ms.is_none());
+
+        let timings = BvpSciTelemetry::timings();
+        let rhs_started = timings.start_timing();
+        timings.record_rhs(rhs_started);
+        timings.record_newton_iteration();
+        {
+            let _solve = timings.start_full_solve();
+            let _newton = timings.start_stage(BvpSciTelemetryStage::Newton);
+        }
+        let timing_snapshot = timings.snapshot();
+        assert_eq!(timing_snapshot.rhs_calls, 0);
+        assert_eq!(timing_snapshot.newton_iterations, 0);
+        assert!(timing_snapshot.rhs_callback_ms.is_some());
+        assert!(timing_snapshot.full_solve_ms.is_some());
+        assert!(
+            timing_snapshot
+                .timing_scopes
+                .iter()
+                .all(|scope| scope.calls == 0)
+        );
+        assert!(timing_snapshot.newton_residual_history.is_empty());
+        assert!(timing_snapshot.mesh_passes.is_empty());
+
+        let detailed = BvpSciTelemetry::detailed();
+        detailed.record_rhs(detailed.start_timing());
+        detailed.record_newton_iteration();
+        detailed.record_newton_trace(BvpSciNewtonTraceEntry {
+            mesh_pass: 0,
+            mesh_nodes: 3,
+            linear_system_dimension: 8,
+            iteration: 0,
+            residual_before: 1.0,
+            residual_after: Some(0.5),
+            step_inf_norm: 0.1,
+            affine_cost_before: 1.0,
+            affine_cost_after: Some(0.25),
+            armijo_alpha: 1.0,
+            backtracking_trials: 0,
+            jacobian_refreshed: true,
+            accepted: true,
+            max_normalized_collocation_residual: 0.5,
+            normalized_boundary_residual: 0.25,
+        });
+        {
+            let _pass = detailed.start_mesh_pass(0, 3, 8);
+        }
+        let detailed_snapshot = detailed.snapshot();
+        assert_eq!(detailed_snapshot.rhs_calls, 1);
+        assert_eq!(detailed_snapshot.newton_iterations, 1);
+        assert_eq!(detailed_snapshot.newton_residual_history.len(), 1);
+        assert_eq!(detailed_snapshot.mesh_passes.len(), 1);
+        assert!(detailed_snapshot.rhs_callback_ms.is_some());
+    }
+
+    #[test]
     fn linear_system_capture_is_opt_in_and_keeps_only_first_qualifying_system() {
         let telemetry = BvpSciTelemetry::timings();
         assert!(telemetry.linear_system_capture().is_none());
@@ -2723,7 +2927,7 @@ mod tests {
 
     #[test]
     fn superlu_snapshot_separates_bridge_and_native_scopes() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         telemetry.record_superlu_abi_conversion(Some(Instant::now()));
         telemetry.record_superlu_factorization(
             Some(Duration::from_micros(90)),
@@ -2799,7 +3003,7 @@ mod tests {
 
     #[test]
     fn timing_snapshot_describes_nested_and_banded_routes() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         assert!(telemetry.snapshot().full_solve_ms.is_none());
         telemetry.record_rhs(telemetry.start_timing());
         telemetry.record_boundary(telemetry.start_timing());
@@ -2870,10 +3074,12 @@ mod tests {
             structured_factorization.kind,
             BvpSciTelemetryScopeKind::Inclusive
         );
-        assert!(snapshot
-            .timing_scopes
-            .iter()
-            .any(|scope| scope.stage == BvpSciTelemetryStage::FullSolve));
+        assert!(
+            snapshot
+                .timing_scopes
+                .iter()
+                .any(|scope| scope.stage == BvpSciTelemetryStage::FullSolve)
+        );
         let newton = snapshot
             .timing_scopes
             .iter()
@@ -2885,7 +3091,7 @@ mod tests {
 
     #[test]
     fn mesh_pass_scope_captures_counter_and_stage_deltas() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         {
             let _pass = telemetry.start_mesh_pass(0, 5, 302);
             let _newton = telemetry.start_stage(BvpSciTelemetryStage::Newton);
@@ -2920,7 +3126,7 @@ mod tests {
 
     #[test]
     fn evaluator_compilation_scopes_remain_distinct() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         telemetry.record_residual_evaluator_compilation(telemetry.start_timing(), 3);
         telemetry.record_jacobian_evaluator_compilation(telemetry.start_timing(), 5);
         let snapshot = telemetry.snapshot();
@@ -2945,7 +3151,7 @@ mod tests {
 
     #[test]
     fn pattern_elapsed_preserves_entries_without_nested_derivative_time() {
-        let telemetry = BvpSciTelemetry::timings();
+        let telemetry = BvpSciTelemetry::detailed();
         telemetry.record_pattern_elapsed(Some(Duration::from_millis(1)), 9);
         let snapshot = telemetry.snapshot();
 

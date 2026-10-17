@@ -79,7 +79,7 @@ fn measure(
             .with_initial_guess(vec![1.9, 0.55, 0.9, 1.9])
             .with_gavin_frontend(frontend)
             .with_gavin_update_policy(update_policy)
-            .with_gavin_telemetry(true)
+            .with_gavin_telemetry(RustedSciThe::numerical::SolverTelemetryMode::Detailed)
             .build()
             .expect("Gavin benchmark fit should complete");
         full.push(started.elapsed().as_secs_f64() * 1e3);
@@ -152,7 +152,7 @@ fn main() {
     }
     let table = Table::new(&rows).to_string();
     let report = format!(
-        "# Gavin symbolic fitting performance matrix\n\n- repeats_per_row: {REPEATS}\n- controller policies: Marquardt, Quadratic, Nielsen\n- model: `a*exp(-x/tau)+c*sin(x/omega)`\n- lifecycle: fresh symbolic preparation and solve per sample\n- prepare_median_ms is symbolic preparation; solve_median_ms is solver-internal; full_median_ms is external end-to-end time including parsing/adapter overhead. Do not require these medians to sum exactly\n- inner solver timing scopes overlap (objective and Jacobian evaluations occur during linearization)\n\n{table}\n"
+        "# Gavin symbolic fitting instrumented performance matrix\n\n- repeats_per_row: {REPEATS}\n- controller policies: Marquardt, Quadratic, Nielsen\n- model: `a*exp(-x/tau)+c*sin(x/omega)`\n- lifecycle: fresh symbolic preparation and solve per sample\n- telemetry: `Detailed`; solver and end-to-end solve medians include telemetry instrumentation and are diagnostic, not an uninstrumented speed baseline\n- prepare_median_ms is symbolic preparation; solve_median_ms is solver-internal; full_median_ms is external end-to-end time including parsing/adapter overhead. Do not require these medians to sum exactly\n- inner solver timing scopes overlap (objective and Jacobian evaluations occur during linearization)\n\n{table}\n"
     );
     println!("{report}");
     let path = write_test_report(

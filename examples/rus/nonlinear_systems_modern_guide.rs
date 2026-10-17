@@ -23,7 +23,7 @@ fn solve_options(bounds: Option<Bounds>) -> SolveOptions {
         bounds,
         diagnostics: DiagnosticsOptions {
             collect_history: false,
-            collect_statistics: true,
+            telemetry_mode: RustedSciThe::numerical::SolverTelemetryMode::Detailed,
             enable_logging: false,
             ..DiagnosticsOptions::default()
         },

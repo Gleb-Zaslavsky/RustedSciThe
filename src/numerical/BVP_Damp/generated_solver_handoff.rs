@@ -46,7 +46,7 @@ use crate::symbolic::symbolic_functions_BVP::{
     BvpLegacySolverBundle, BvpSparseExecutionPlan, BvpSparseSolverBundle,
     BvpSymbolicAssemblyBackend, Jacobian,
 };
-use log::{error, info};
+use crate::numerical::logging::{solver_error as error, solver_info as info};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
