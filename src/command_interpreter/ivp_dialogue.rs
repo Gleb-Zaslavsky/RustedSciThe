@@ -441,7 +441,11 @@ pub fn run_ivp_template_dialogue(output_path: Option<PathBuf>) -> std::io::Resul
                 options: if method == 5 {
                     &["1e-3 (standard)", "1e-2", "1e-1"]
                 } else {
-                    &["max=1e-3, first=1e-6", "max=1e-2, first=1e-5", "unbounded adaptive"]
+                    &[
+                        "max=1e-3, first=1e-6",
+                        "max=1e-2, first=1e-5",
+                        "unbounded adaptive",
+                    ]
                 },
                 default: 0,
             });
@@ -733,7 +737,10 @@ pub fn run_ivp_template_dialogue(output_path: Option<PathBuf>) -> std::io::Resul
 /// terminal dialogue. Interactive customization belongs to `wizard`.
 pub fn write_ivp_task_template(path: Option<PathBuf>) -> std::io::Result<PathBuf> {
     let path = path.unwrap_or_else(|| PathBuf::from("ivp_task_template.txt"));
-    std::fs::write(&path, build_ivp_task_template(&IvpTemplateConfig::default()))?;
+    std::fs::write(
+        &path,
+        build_ivp_task_template(&IvpTemplateConfig::default()),
+    )?;
     Ok(path)
 }
 
@@ -741,7 +748,7 @@ pub fn write_ivp_task_template(path: Option<PathBuf>) -> std::io::Result<PathBuf
 mod tests {
     use super::*;
     use crate::command_interpreter::task_parser_ivp::{
-        parse_ivp_task_from_str, IvpMethodSpec, Lsode2TaskExecutionSpec,
+        IvpMethodSpec, Lsode2TaskExecutionSpec, parse_ivp_task_from_str,
     };
     use crate::command_interpreter::task_runner::{parse_task_spec_from_str, render_task_check};
     use crate::numerical::LSODE2::{
@@ -914,8 +921,9 @@ mod tests {
             assert!(template.contains("max_iterations: 100"));
             assert!(template.contains("max_step: 0.001"));
             assert_template_passes_cli_preflight(&template);
-            parse_ivp_task_from_str(&template)
-                .unwrap_or_else(|error| panic!("{} template must parse: {error}", method.task_value()));
+            parse_ivp_task_from_str(&template).unwrap_or_else(|error| {
+                panic!("{} template must parse: {error}", method.task_value())
+            });
         }
 
         let config = IvpTemplateConfig {

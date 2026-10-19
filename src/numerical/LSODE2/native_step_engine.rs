@@ -195,7 +195,6 @@ fn should_force_refresh_on_first_correction(
 
 #[allow(private_interfaces)]
 pub enum Lsode2NativeStepEngine {
-    
     Dense(Box<Lsode2NativeStepEngineImpl<DenseLuBdfLinearBackend>>),
     Sparse(Box<Lsode2NativeStepEngineImpl<FaerSparseBdfLinearBackend>>),
     Banded(Box<Lsode2NativeStepEngineImpl<FaithfulBandedBdfLinearBackend>>),

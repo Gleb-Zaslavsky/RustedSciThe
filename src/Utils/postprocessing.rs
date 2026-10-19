@@ -429,11 +429,13 @@ mod tests {
             assert!(dir.join("y.png").exists());
         } else {
             assert_eq!(entry.status, PostprocessStatus::Skipped);
-            assert!(entry
-                .message
-                .as_deref()
-                .unwrap_or_default()
-                .contains("gnuplot executable"));
+            assert!(
+                entry
+                    .message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("gnuplot executable")
+            );
         }
 
         let _ = fs::remove_dir_all(dir);

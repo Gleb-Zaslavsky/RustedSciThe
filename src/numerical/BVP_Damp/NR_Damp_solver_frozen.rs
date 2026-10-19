@@ -47,9 +47,7 @@ use crate::symbolic::symbolic_functions_BVP::{
     BvpBackendIntegrationError, BvpMatrixBackend, BvpSymbolicAssemblyBackend,
 };
 
-use crate::numerical::logging::{
-    SolverLogGuard, SolverLogLevel, solver_info as info,
-};
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel, solver_info as info};
 
 include!("frozen_solver/statistics.rs");
 include!("frozen_solver/options.rs");

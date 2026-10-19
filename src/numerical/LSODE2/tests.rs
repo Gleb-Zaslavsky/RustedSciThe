@@ -53,11 +53,17 @@ fn exponential_decay_config() -> Lsode2ProblemConfig {
 
 #[test]
 fn lsode2_rust_logging_defaults_to_off_and_is_per_solver() {
-    let mut solver = Lsode2Solver::new(exponential_decay_config())
-        .expect("LSODE2 config should build");
-    assert_eq!(solver.logging_level(), crate::numerical::logging::SolverLogLevel::Off);
+    let mut solver =
+        Lsode2Solver::new(exponential_decay_config()).expect("LSODE2 config should build");
+    assert_eq!(
+        solver.logging_level(),
+        crate::numerical::logging::SolverLogLevel::Off
+    );
     solver.set_logging_level(crate::numerical::logging::SolverLogLevel::Warn);
-    assert_eq!(solver.logging_level(), crate::numerical::logging::SolverLogLevel::Warn);
+    assert_eq!(
+        solver.logging_level(),
+        crate::numerical::logging::SolverLogLevel::Warn
+    );
 }
 
 #[test]

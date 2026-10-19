@@ -1,5 +1,6 @@
 use crate::numerical::BVP_Damp::BVP_traits::{Fun, Jac};
 use crate::numerical::BVP_Damp::telemetry::{BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode};
+use crate::numerical::logging::{solver_error as error, solver_info as info};
 use crate::somelinalg::banded::LinearSolverConfig;
 use crate::symbolic::bvp::aot_telemetry::{BvpAotColdStage, BvpAotLifecycleEvent};
 use crate::symbolic::bvp::aot_telemetry::{BvpAotTelemetry, BvpAotTelemetryMode};
@@ -46,7 +47,6 @@ use crate::symbolic::symbolic_functions_BVP::{
     BvpLegacySolverBundle, BvpSparseExecutionPlan, BvpSparseSolverBundle,
     BvpSymbolicAssemblyBackend, Jacobian,
 };
-use crate::numerical::logging::{solver_error as error, solver_info as info};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};

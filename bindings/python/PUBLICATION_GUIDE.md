@@ -210,15 +210,11 @@ cargo test --manifest-path bindings/python/Cargo.toml --lib --no-default-feature
 
 ## Linux
 
-**Release gate:** the published `0.1.3` release is Windows-only. Package
-metadata in the working tree is set to the unreleased `0.1.4` candidate, but
-do not build or upload release artifacts until the non-cosmetic debts in
-`TODO.md` are closed. The agreed cross-platform target is `0.1.4`: build its
-Windows and Linux wheels plus one sdist from the same release source, validate
-the complete artifact set on TestPyPI, and publish the set together. Do not
-attempt to append Linux to
-`0.1.3`. The older `0.1.3` instructions below are retained only as release
-history and diagnostic guidance.
+**Release gate:** the published `0.1.3` release is Windows-only. The Linux
+`0.1.4` wheel was built and published after the Windows `0.1.4` TestPyPI
+artifact, using the corrected current checkout. Do not attempt to append Linux
+to `0.1.3`; published files are immutable. The older `0.1.3` instructions
+below are retained only as release history and diagnostic guidance.
 
 ### Codex handoff for a Linux VS Code session
 
@@ -306,6 +302,86 @@ Rust/Cargo, Python, PyO3 and Maturin versions. Do not add SuperLU as a build
 dependency for the default wheel; it is an optional runtime backend.
 
 ### Build and audit
+
+### Linux 0.1.4 clean-build incident and procedure
+
+During the first Linux build, the wheel was approximately 341 MB. The native
+extension and bundled shared libraries were not the main cause: inspection of
+the wheel showed a packaged `rustedscithe.pdb` debug-symbol file of about
+291 MB, plus Python `__pycache__` files. These were stale artifacts inherited
+from the shared `bindings/python/target` tree, including Windows/debug build
+outputs. Always build from a clean staging copy and a separate Cargo target
+directory; do not reuse a mixed host `target` directory for publication.
+
+The following procedure was used for the Linux `0.1.4` wheel. It does not
+modify Rust source files or delete the user's existing build tree:
+
+```bash
+set -euo pipefail
+VERSION=0.1.4
+stage="$(mktemp -d /tmp/rustedscithe-publication-source.XXXXXX)"
+out="$(pwd)/bindings/python/target/publication-linux-clean-$VERSION"
+mkdir -p "$out/wheels"
+rsync -a \
+  --exclude '.git' \
+  --exclude 'target' \
+  --exclude '__pycache__' \
+  --exclude '*.pdb' \
+  ./ "$stage/"
+test "$(find "$stage" -type f -name '*.pdb' | wc -l)" -eq 0
+test "$(find "$stage" -type d -name '__pycache__' | wc -l)" -eq 0
+```
+
+Install the host tools and the official Maturin manylinux image:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io python3 python3-venv python3-pip rsync
+python3 -m venv .venv-publication-linux
+.venv-publication-linux/bin/python -m pip install --upgrade pip
+.venv-publication-linux/bin/python -m pip install maturin twine auditwheel numpy pytest
+sg docker -c 'docker pull ghcr.io/pyo3/maturin:latest'
+docker image inspect ghcr.io/pyo3/maturin:latest \
+  --format '{{index .RepoDigests 0}}'
+```
+
+If the shell does not yet have the Docker group, prefix Docker commands with
+`sg docker -c '...'`. The image used for this release resolved to
+`sha256:1c897d72a79c083cdea8829662f7b28e7657cf5b0d7f44fb4231e55998cf52ed`.
+The command is `docker pull IMAGE`, not `docker pull maturin manylinux2014`;
+the latter passes two arguments and fails.
+
+Build with an isolated target directory. The development headers below are
+needed by the graphical/native dependency tree inside the manylinux image;
+they are not copied into the wheel as build directories:
+
+```bash
+sg docker -c "docker run --rm \
+  -v '$stage:/io/src' \
+  -v '$(pwd)/$out:/io/out' \
+  -e CARGO_TARGET_DIR=/io/out/cargo-target \
+  ghcr.io/pyo3/maturin@sha256:1c897d72a79c083cdea8829662f7b28e7657cf5b0d7f44fb4231e55998cf52ed \
+  bash -lc 'yum install -y pkgconfig wayland-devel libX11-devel libXcursor-devel libXrandr-devel libXi-devel libXinerama-devel libxkbcommon-devel alsa-lib-devel libudev-devel fontconfig-devel freetype-devel >/dev/null && maturin build --release --manifest-path /io/src/bindings/python/Cargo.toml --manylinux 2014 --out /io/out/wheels'"
+```
+
+Audit the result before uploading. The absence checks are important: a small
+wheel alone does not prove that the wrong files were excluded.
+
+```bash
+wheel="$(find "$out/wheels" -maxdepth 1 -name '*.whl' -print -quit)"
+ls -lh "$wheel"
+unzip -l "$wheel" | rg '\.(pdb|pyc)$|__pycache__' && exit 1 || true
+.venv-publication-linux/bin/python -m twine check "$wheel"
+.venv-publication-linux/bin/python -m auditwheel show "$wheel"
+sha256sum "$wheel"
+```
+
+For the published Linux `0.1.4` artifact these checks produced a
+`cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64` wheel of
+`49,457,989` bytes, with no PDB or `__pycache__` members. Its SHA-256 is
+`11427c60444a7dcbb3c61db4495df4e583fb945be04be3637e8bcff0a1ae3bfb`.
+The wheel installed successfully in a new virtual environment with NumPy,
+and `Expr.parse('x^2 + 1')` returned `x ^ 2 + 1`.
 
 For the coordinated `0.1.4` release, create and audit one corrected sdist
 from the immutable release tag, then use that exact archive for the Linux
@@ -466,13 +542,13 @@ release-file policy](https://blog.pypi.org/posts/2026-07-22-releases-now-reject-
 
 ### Linux status
 
-- [ ] Build the x86_64 manylinux2014 wheel from the exact release sdist and
-  record the resolved container image digest.
-- [ ] Run `twine check`/`auditwheel show`, clean-install, full contract,
-  continuation, telemetry and typed-error gates on Linux.
-- [ ] Upload the Linux wheel to TestPyPI and confirm pip selects that wheel
-  rather than falling back to the sdist.
-- [ ] Upload the same validated Linux wheel to production PyPI and record its
+- [x] Build the x86_64 manylinux2014 wheel in a clean staging copy with a
+  separate target directory and record the resolved container image digest.
+- [x] Run `twine check`/`auditwheel show`, clean-install, and the basic NumPy /
+  `Expr.parse` smoke test on Linux.
+- [x] Upload the Linux wheel to TestPyPI and confirm that it is present as a
+  manylinux wheel rather than relying on the sdist.
+- [x] Upload the same validated Linux wheel to production PyPI and record its
   SHA-256 and clean-install evidence.
 - [ ] Decide whether Linux aarch64 is in the supported platform matrix; do not
   imply support until it has its own built and installed-wheel evidence.

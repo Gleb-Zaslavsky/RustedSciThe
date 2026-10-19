@@ -1,4 +1,4 @@
-use dialoguer::{theme::ColorfulTheme, Select};
+use dialoguer::{Select, theme::ColorfulTheme};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
@@ -19,7 +19,10 @@ where
     let configuration_level = choose(
         &theme,
         "Configuration level",
-        &["Basic (recommended defaults)", "Advanced (all solver controls)"],
+        &[
+            "Basic (recommended defaults)",
+            "Advanced (all solver controls)",
+        ],
         0,
     )?;
     let advanced = configuration_level == 1;
@@ -133,12 +136,7 @@ fn previous_step(cursor: usize) -> Option<usize> {
 
 fn section_for_key(key: &str) -> &'static str {
     match key {
-        "method"
-        | "family"
-        | "strategy"
-        | "scheme"
-        | "tolerance_profile"
-        | "iteration_budget"
+        "method" | "family" | "strategy" | "scheme" | "tolerance_profile" | "iteration_budget"
         | "step_profile" => "Solver",
         "assembly" | "symbolic" | "frontend" | "execution" | "route" | "profile" => "Symbolic",
         "structure"

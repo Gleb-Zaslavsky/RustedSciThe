@@ -1,8 +1,6 @@
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel, solver_info as info};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
-use crate::numerical::logging::{
-    solver_info as info, SolverLogGuard, SolverLogLevel,
-};
 use nalgebra::{DMatrix, DVector, Matrix};
 // solve algebraic nonlinear system with free parameter t
 pub struct NRODE {

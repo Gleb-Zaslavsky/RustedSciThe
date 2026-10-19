@@ -190,7 +190,7 @@ impl GeneralBandedSolver {
 ///   ab[(kl + ku + i - j) + j * ldab] = A[i, j]
 ///
 /// where ldab = 2*kl + ku + 1.
- #[allow(dead_code)]
+#[allow(dead_code)]
 fn compact_to_lapack_gb(a: &Banded<f64>) -> BandedLu {
     let n = a.n();
     let kl = a.kl();

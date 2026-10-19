@@ -5,7 +5,7 @@
 //! already-tested step/session layers.
 
 use super::callbacks::{
-    validate_callback_output, DenseJacobianCallback, ResidualCallback, SymbolicCallbackSession,
+    DenseJacobianCallback, ResidualCallback, SymbolicCallbackSession, validate_callback_output,
 };
 use super::config::{RadauConfig, RadauMatrixLayout};
 use super::controller::{
@@ -18,7 +18,7 @@ use super::output::{RadauOutput, RadauOutputCollector};
 use super::session::RadauSession;
 use super::state::RadauSolverState;
 use super::step::{
-    try_radau5_step_with_rejection, try_radau5_symbolic_step_with_backend, RadauStepResult,
+    RadauStepResult, try_radau5_step_with_rejection, try_radau5_symbolic_step_with_backend,
 };
 use super::telemetry::{RadauAdaptiveStepTrace, RadauCallbackStage};
 use super::workspace::RadauWorkspace;

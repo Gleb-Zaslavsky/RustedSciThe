@@ -29,6 +29,70 @@ the real Jacobian fixtures. Its test name is
 The View corpus remains the owner of operation-level diagnostics; LSODE2 only
 supplies the larger workload and solver-facing parity boundary.
 
+## Small finite f64 coefficient fidelity
+
+- Date: 2026-10-19
+- Scope: debug-only Expr-to-AtomView numerical fidelity; no nonlinear solver,
+  release benchmark, or performance conclusion.
+- Tests:
+  `symbolic::View::atomview_diagnostics::tests::diagnostic_reports_small_constant_conversion_without_solver_involvement`,
+  `symbolic::View::atomview_diagnostics::tests::diagnostic_reports_small_coefficient_inside_power_expression`,
+  `symbolic::View::atomview_diagnostics::tests::diagnostic_sweep_covers_both_signs_near_observed_boundary`,
+  `symbolic::View::atomview_diagnostics::tests::diagnostic_preserves_small_f64_during_packed_numeric_arithmetic`,
+  `symbolic::View::atomview_diagnostics::tests::diagnostic_does_not_panic_or_erase_overflowed_float_power`,
+  `symbolic::View::atomview_diagnostics::tests::diagnostic_preserves_subnormal_and_minimum_normal_constants`,
+  `symbolic::View::atomview_diagnostics::tests::diagnostic_preserves_maximum_finite_and_mixed_magnitudes`,
+  `symbolic::View::atomview_diagnostics::tests::diagnostic_preserves_cancellation_and_small_terms_in_compositions`,
+  `symbolic::View::atomview_diagnostics::tests::diagnostic_covers_signed_integer_fractional_and_reciprocal_powers`,
+  `symbolic::View::atomview_diagnostics::tests::diagnostic_covers_function_boundaries_and_nonfinite_classification`.
+- Command:
+
+```powershell
+cargo test --lib --no-default-features --locked symbolic::View::atomview_diagnostics -- --nocapture --test-threads=1
+```
+
+- Initial diagnosis: the old finite-f64 fallback attempted a compact rational
+  with a fixed scale of `1e6`. Values below that scale could become a zero
+  numerator after the rational candidates were rejected, before AtomView
+  evaluation began.
+- Repair: finite values that do not fit the compact rational representation
+  are stored in an internal packed f64 numeric leaf and are handled by the
+  AtomView evaluator, printer, conversion and code-generation paths. Numeric
+  powers use f64 folding when finite; exact or float overflow remains a
+  symbolic power instead of panicking or becoming zero.
+- Result: `10 passed; 0 failed`; the coefficient `+-5.09024475e-16`, the
+  composed `c*T^4` case at `T=2500`, and both-sign sweeps remain nonzero and
+  agree with the original f64 value within the diagnostic tolerance. The
+  extended matrix also covers subnormal and maximum finite values, mixed
+  magnitudes, cancellation, signed/fractional/reciprocal powers, function
+  boundaries, and matching `NaN`/infinity classification.
+- Remaining boundary: direct textual View parsing still has a separate exact
+  rational grammar. Its audit is now covered by the parser tests below: exact
+  scientific literals stay rational when possible, finite long literals use
+  packed f64, and nonfinite/incomplete literals fail explicitly.
+
+## Text parser scientific-notation fidelity
+
+- Date: 2026-10-19
+- Scope: debug parser correctness; no solver or performance measurement.
+- Tests:
+  `symbolic::View::parser::test::parses_scientific_notation_exactly`,
+  `symbolic::View::parser::test::parses_uppercase_scientific_notation`,
+  `symbolic::View::parser::test::preserves_finite_scientific_literal_beyond_exact_rational_range`,
+  `symbolic::View::parser::test::preserves_long_scientific_literal_inside_composed_expression`,
+  `symbolic::View::parser::test::rejects_nonfinite_scientific_literal_instead_of_encoding_it`.
+- Command:
+
+```powershell
+cargo test --lib --no-default-features --locked symbolic::View::parser::test -- --nocapture --test-threads=1
+```
+
+- Result: `13 passed; 0 failed`.
+- Contract: `e/E` notation is accepted; compact exact rationals remain exact;
+  finite literals outside the `i64/i64` rational range are retained as f64;
+  malformed and nonfinite literals are rejected with a parser error rather
+  than being converted to zero.
+
 ## Scalar Jacobian Lowering Corpus
 
 - Test: `symbolic::View::scalar_jacobian_story_tests::scalar_jacobian_lowering_story_preserves_values_and_reports_stages`

@@ -421,9 +421,9 @@ mod tests_real_odes {
 
     use crate::numerical::Radau::Radau_main::{Radau, RadauOrder};
     use approx::assert_relative_eq;
+    use log::LevelFilter;
     use nalgebra::DMatrix;
     use nalgebra::DVector;
-    use log::LevelFilter;
     #[test]
     fn test_radau_simple_linear_ode() {
         // Test: y' = -y, y(0) = 1
@@ -825,9 +825,9 @@ mod tests_real_odes_parallel {
 
     use crate::numerical::Radau::Radau_main::{Radau, RadauOrder};
     use approx::assert_relative_eq;
+    use log::LevelFilter;
     use nalgebra::DMatrix;
     use nalgebra::DVector;
-    use log::LevelFilter;
     #[test]
     fn test_radau_simple_linear_ode() {
         // Test: y' = -y, y(0) = 1

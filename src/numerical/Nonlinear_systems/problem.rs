@@ -104,11 +104,7 @@ impl Bounds {
                 scale = scale.min((lower - value) / delta);
             }
         }
-        if scale.is_finite() {
-            scale
-        } else {
-            1.0
-        }
+        if scale.is_finite() { scale } else { 1.0 }
     }
 }
 

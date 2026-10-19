@@ -271,14 +271,29 @@ impl From<(i32, i32)> for Coefficient {
 // ── CoefficientView ───────────────────────────────────────────────────────────
 
 /// A borrowed view of a coefficient stored in the packed byte stream.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone)]
 /// Borrowed view of a coefficient stored inside packed atom bytes.
 pub enum CoefficientView<'a> {
     /// Inline fixed-size rational `(numerator, denominator)`.
     Natural(i64, i64),
+    /// Finite IEEE-754 value retained when a compact rational would be lossy.
+    Float(f64),
     /// Serialized large rational payload retained only for wire-format compatibility.
     Large(SerializedRational<'a>),
 }
+
+impl PartialEq for CoefficientView<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (CoefficientView::Natural(a, b), CoefficientView::Natural(c, d)) => a == c && b == d,
+            (CoefficientView::Float(a), CoefficientView::Float(b)) => a.to_bits() == b.to_bits(),
+            (CoefficientView::Large(a), CoefficientView::Large(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CoefficientView<'_> {}
 
 /// A large rational stored as raw digit bytes (sign + limbs).
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -296,6 +311,9 @@ impl<'a> CoefficientView<'a> {
     pub fn to_owned(&self) -> Coefficient {
         match self {
             CoefficientView::Natural(n, d) => Coefficient::reduce(*n, *d),
+            CoefficientView::Float(_) => {
+                panic!("floating coefficients cannot be converted to exact rationals")
+            }
             CoefficientView::Large(_) => {
                 panic!("Large coefficients not supported in simplified build")
             }
@@ -309,17 +327,26 @@ impl<'a> CoefficientView<'a> {
     pub fn is_integer(&self) -> bool {
         match self {
             CoefficientView::Natural(_, d) => *d == 1,
+            CoefficientView::Float(value) => value.is_finite() && value.fract() == 0.0,
             CoefficientView::Large(_) => false,
         }
     }
 
     /// Raise `self` to the power `exp`, returning `(new_base, new_exp)`.
     pub fn pow(&self, exp: &CoefficientView<'_>) -> (Coefficient, Coefficient) {
+        self.try_pow(exp)
+            .unwrap_or_else(|| panic!("power cannot be represented exactly"))
+    }
+
+    /// Try to fold an exact rational power without overflowing the compact
+    /// coefficient representation. `None` means the caller should retain the
+    /// symbolic power instead of panicking or changing its value.
+    pub fn try_pow(&self, exp: &CoefficientView<'_>) -> Option<(Coefficient, Coefficient)> {
         match (self, exp) {
             (&CoefficientView::Natural(mut n1, mut d1), &CoefficientView::Natural(mut n2, d2)) => {
                 if n2 < 0 {
                     if n1 == 0 {
-                        panic!("Division by 0");
+                        return None;
                     }
                     n2 = n2.saturating_abs();
                     std::mem::swap(&mut n1, &mut d1);
@@ -328,13 +355,13 @@ impl<'a> CoefficientView<'a> {
                     if let (Some(pn), Some(pd)) =
                         (n1.checked_pow(n2 as u32), d1.checked_pow(n2 as u32))
                     {
-                        return (Coefficient::reduce(pn, pd), Coefficient::reduce(1, d2));
+                        return Some((Coefficient::reduce(pn, pd), Coefficient::reduce(1, d2)));
                     }
-                    panic!("Power overflow");
+                    return None;
                 }
-                panic!("Power too large: {}", n2);
+                None
             }
-            _ => panic!("pow not supported for Large coefficients"),
+            _ => None,
         }
     }
 }
@@ -353,6 +380,13 @@ impl Ord for CoefficientView<'_> {
                 let rhs = *n2 as i128 * *d1 as i128;
                 lhs.cmp(&rhs)
             }
+            (CoefficientView::Float(n1), CoefficientView::Float(n2)) => n1.total_cmp(n2),
+            (CoefficientView::Float(n1), CoefficientView::Natural(n2, d2)) => {
+                n1.total_cmp(&(*n2 as f64 / *d2 as f64))
+            }
+            (CoefficientView::Natural(n1, d1), CoefficientView::Float(n2)) => {
+                (*n1 as f64 / *d1 as f64).total_cmp(n2)
+            }
             _ => Ordering::Equal,
         }
     }
@@ -365,6 +399,9 @@ impl Add<CoefficientView<'_>> for CoefficientView<'_> {
             (CoefficientView::Natural(n1, d1), CoefficientView::Natural(n2, d2)) => {
                 Coefficient::reduce(n1, d1) + Coefficient::reduce(n2, d2)
             }
+            (CoefficientView::Float(_), _) | (_, CoefficientView::Float(_)) => {
+                panic!("floating coefficient addition requires the packed numeric path")
+            }
             _ => panic!("Add not supported for Large coefficients"),
         }
     }
@@ -375,6 +412,9 @@ impl Add<i64> for CoefficientView<'_> {
     fn add(self, other: i64) -> Coefficient {
         match self {
             CoefficientView::Natural(n, d) => Coefficient::reduce(n, d) + Coefficient::from(other),
+            CoefficientView::Float(_) => {
+                panic!("floating coefficient addition requires the packed numeric path")
+            }
             _ => panic!("Add not supported for Large coefficients"),
         }
     }
@@ -387,6 +427,9 @@ impl Mul for CoefficientView<'_> {
             (CoefficientView::Natural(n1, d1), CoefficientView::Natural(n2, d2)) => {
                 Coefficient::reduce(n1, d1) * Coefficient::reduce(n2, d2)
             }
+            (CoefficientView::Float(_), _) | (_, CoefficientView::Float(_)) => {
+                panic!("floating coefficient multiplication requires the packed numeric path")
+            }
             _ => panic!("Mul not supported for Large coefficients"),
         }
     }
@@ -396,6 +439,7 @@ impl PartialEq<Coefficient> for CoefficientView<'_> {
     fn eq(&self, other: &Coefficient) -> bool {
         match self {
             CoefficientView::Natural(n, d) => *n == other.num && *d == other.den,
+            CoefficientView::Float(_) => false,
             _ => false,
         }
     }

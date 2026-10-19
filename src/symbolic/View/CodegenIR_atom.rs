@@ -669,6 +669,7 @@ fn coeff_to_f64(view: AtomView<'_>) -> f64 {
     if let AtomView::Num(n) = view {
         match n.get_coeff_view() {
             CoefficientView::Natural(num, den) => num as f64 / den as f64,
+            CoefficientView::Float(value) => value,
             CoefficientView::Large(_) => f64::NAN,
         }
     } else {
@@ -682,7 +683,7 @@ fn coeff_to_f64(view: AtomView<'_>) -> f64 {
 mod tests {
     use super::*;
     use crate::symbolic::View::atom::Atom;
-    use crate::{ parse, symbol};
+    use crate::{parse, symbol};
     fn eval(ir: &LinearExpr, inputs: &[f64]) -> f64 {
         let mut regs = vec![0f64; ir.num_temps];
         for instr in &ir.instructions {

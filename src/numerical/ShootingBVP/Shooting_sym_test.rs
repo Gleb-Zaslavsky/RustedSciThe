@@ -6,11 +6,10 @@ mod tests {
 
     use approx::assert_abs_diff_eq;
     use approx::assert_relative_eq;
-    use std::collections::HashMap;
     use nalgebra::DVector;
+    use std::collections::HashMap;
     #[test]
     fn test_bc_create_dirichlet_dirichlet() {
-
         let eq_vec = vec![Expr::parse_expression("y1"), Expr::parse_expression("y0")];
         let values = vec!["y0".to_string(), "y1".to_string()];
         let arg = "x".to_string();
@@ -29,7 +28,6 @@ mod tests {
 
     #[test]
     fn test_bc_create_dirichlet_neumann() {
-
         let eq_vec = vec![Expr::parse_expression("y1"), Expr::parse_expression("y0")];
         let values = vec!["y0".to_string(), "y1".to_string()];
         let arg = "x".to_string();
@@ -49,7 +47,6 @@ mod tests {
 
     #[test]
     fn test_simple_linear_bvp() {
-
         // y'' = 0, y(0) = 0, y(1) = 1 (solution: y = x)
         let eq_vec = vec![Expr::parse_expression("y1"), Expr::parse_expression("0")];
         let values = vec!["y0".to_string(), "y1".to_string()];
@@ -75,7 +72,6 @@ mod tests {
     }
     #[test]
     fn test_simple_linear_bvp2() {
-
         // y'' = 0, y(0) = 0, y'(1) = 1 (solution: y = x)
         let eq_vec = vec![Expr::parse_expression("y1"), Expr::parse_expression("0")];
         let values = vec!["y0".to_string(), "y1".to_string()];
@@ -101,7 +97,6 @@ mod tests {
     }
     #[test]
     fn test_exponential_bvp() {
-
         // y'' - y = 0, y(0) = 0, y(1) = sinh(1)
         let eq_vec = vec![Expr::parse_expression("y1"), Expr::parse_expression("y0")];
         let values = vec!["y0".to_string(), "y1".to_string()];
@@ -121,7 +116,6 @@ mod tests {
 
     #[test]
     fn test_mixed_bc_bvp() {
-
         // y'' = 0, y(0) = 1, y'(1) = 2 (solution: y = 2x + 1)
         let eq_vec = vec![Expr::parse_expression("y1"), Expr::parse_expression("0")];
         let values = vec!["y0".to_string(), "y1".to_string()];
@@ -149,7 +143,6 @@ mod tests {
 
     #[test]
     fn test_harmonic_oscillator() {
-
         // y'' + y = 0, y(0) = 1, y(π/2) = 0 (solution: y = cos(x))
         let eq_vec = vec![Expr::parse_expression("y1"), Expr::parse_expression("-y0")];
         let values = vec!["y0".to_string(), "y1".to_string()];

@@ -21,6 +21,7 @@
 
 pub mod CodegenIR_atom;
 pub mod atom;
+pub mod atomview_diagnostics;
 pub mod bvp;
 pub mod bvp_codegen;
 
@@ -46,6 +47,7 @@ pub mod state;
 pub mod transform;
 
 pub use atom::{Atom, AtomCore, AtomView};
+pub use atomview_diagnostics::{AtomViewFidelityReport, compare_expr_and_atom};
 pub use coefficient::Coefficient;
 pub use derivative::{DerivativeError, try_derivative};
 pub use diagnostics::{

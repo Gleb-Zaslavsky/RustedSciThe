@@ -942,8 +942,8 @@ impl LinkedAotRuntimeRegistrySnapshot {
 /// This function is deliberately separate from callback resolution and is not
 /// used by production hot paths. Each backend-kind map is locked separately,
 /// so concurrent registration can make the combined view non-atomic.
-pub fn try_linked_aot_runtime_registry_snapshot(
-) -> Result<LinkedAotRuntimeRegistrySnapshot, LinkedAotRegistryError> {
+pub fn try_linked_aot_runtime_registry_snapshot()
+-> Result<LinkedAotRuntimeRegistrySnapshot, LinkedAotRegistryError> {
     let sparse_problem_keys = linked_sparse_registry()
         .lock()
         .map_err(|_| LinkedAotRegistryError::LockPoisoned { registry: "sparse" })?
@@ -1617,9 +1617,11 @@ mod tests {
             .expect("fallible registry removal should succeed")
             .expect("registered backend should be removable");
         assert_eq!(removed.problem_key, key);
-        assert!(try_resolve_linked_dense_backend(key)
-            .expect("fallible registry lookup should succeed")
-            .is_none());
+        assert!(
+            try_resolve_linked_dense_backend(key)
+                .expect("fallible registry lookup should succeed")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1991,9 +1993,11 @@ mod tests {
             .try_jacobian_values_eval(&[1.0], &mut values)
             .expect("compact callback should accept complete slot storage");
         assert_eq!(values[8], 8.0);
-        assert!(backend
-            .try_jacobian_values_eval(&[1.0], &mut vec![0.0; 8])
-            .is_err());
+        assert!(
+            backend
+                .try_jacobian_values_eval(&[1.0], &mut vec![0.0; 8])
+                .is_err()
+        );
     }
 
     #[test]

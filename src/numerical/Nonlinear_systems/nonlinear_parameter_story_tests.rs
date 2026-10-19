@@ -7,7 +7,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Instant;
 
     use approx::assert_relative_eq;

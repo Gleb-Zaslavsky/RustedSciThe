@@ -64,7 +64,7 @@ mod story_tests_experimental;
 pub use solver::BvpSciSolver;
 pub use telemetry::{
     BvpSciBandedFactorPhase, BvpSciBandedRoute, BvpSciLinearSystemCapture, BvpSciMeshPassSnapshot,
-    BvpSciNewtonTraceEntry, BvpSciSuperLuTelemetrySnapshot, BvpSciTelemetry,
-    BvpSciTelemetryMode, BvpSciTelemetryScope, BvpSciTelemetryScopeKind,
-    BvpSciTelemetrySnapshot, BvpSciTelemetryStage, BvpSciTelemetryTimer,
+    BvpSciNewtonTraceEntry, BvpSciSuperLuTelemetrySnapshot, BvpSciTelemetry, BvpSciTelemetryMode,
+    BvpSciTelemetryScope, BvpSciTelemetryScopeKind, BvpSciTelemetrySnapshot, BvpSciTelemetryStage,
+    BvpSciTelemetryTimer,
 };

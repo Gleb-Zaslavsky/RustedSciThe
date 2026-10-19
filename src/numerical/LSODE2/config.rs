@@ -1,9 +1,9 @@
 use super::algorithm::Lsode2ControllerConfig;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_runtime_api::{
+    DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
     recommended_dense_jacobian_chunking_for_parallelism,
     recommended_residual_chunking_for_parallelism, recommended_row_chunking_for_parallelism,
-    DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
 };
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;

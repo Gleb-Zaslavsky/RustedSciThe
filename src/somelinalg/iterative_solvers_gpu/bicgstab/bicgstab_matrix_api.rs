@@ -58,7 +58,7 @@
 //! - **Triplet Iteration**: Uses efficient triplet iteration for sparse matrix traversal
 
 use crate::somelinalg::iterative_solvers_gpu::bicgstab::bicgstab_with_preconditioneer::{
-    solve_banded_bicgstab_flexible_f32, PreconditionerType,
+    PreconditionerType, solve_banded_bicgstab_flexible_f32,
 };
 use af::{Array, Dim4};
 use arrayfire as af;

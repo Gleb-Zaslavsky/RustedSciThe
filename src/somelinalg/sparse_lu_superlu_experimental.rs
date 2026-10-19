@@ -110,7 +110,10 @@ impl SuperLuCsc32 {
         for column in 0..n {
             let start = col_ptr[column];
             let end = col_ptr[column + 1];
-            if row_idx[start..end].windows(2).any(|pair| pair[0] >= pair[1]) {
+            if row_idx[start..end]
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            {
                 return Err(SuperLuExperimentError::InvalidCsc(
                     "row indices must be strictly increasing in each CSC column",
                 ));

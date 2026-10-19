@@ -14,7 +14,7 @@ use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
 use crate::symbolic::symbolic_engine::Expr;
 
 /// Borrowed ExprLegacy AOT payload.
- #[allow(dead_code)]
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ExprLegacyAotAdapter<'a> {
     /// Residual expressions owned by the compatibility bridge.
@@ -46,7 +46,7 @@ impl<'a> AtomViewAotAdapter<'a> {
 }
 
 /// Typed route selected by a prepared BVP AOT bridge.
- #[allow(dead_code)]
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum BvpAotAdapter<'a> {
     /// Retained Expr-based compatibility path.

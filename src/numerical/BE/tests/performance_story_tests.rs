@@ -545,7 +545,9 @@ fn be_symbolic_parameter_rebind_matches_fresh_solve_story() {
         "parameter updates must reuse symbolic preparation"
     );
 
-    println!("[BE symbolic parameter continuation] correctness parity; Detailed counters and diagnostic timings");
+    println!(
+        "[BE symbolic parameter continuation] correctness parity; Detailed counters and diagnostic timings"
+    );
     println!(
         "route | wall_ms | solver_ms | residual_calls | jacobian_calls | max_state_diff | preparations"
     );

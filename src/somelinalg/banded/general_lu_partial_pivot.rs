@@ -234,12 +234,12 @@ impl GeneralBandedLuPartialPivot {
 //========================================================================================
 #[cfg(test)]
 mod tests {
-    use rand::{rngs::StdRng, Rng, RngExt, SeedableRng};
+    use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 
     use crate::somelinalg::banded::error::BandedError;
     use crate::somelinalg::banded::{
-        banded_matvec, banded_to_dense, dense_diff_linf, general_lu::GeneralBandedLuNoPivot,
-        residual_linf, storage::Banded, GeneralBandedLuPartialPivot,
+        GeneralBandedLuPartialPivot, banded_matvec, banded_to_dense, dense_diff_linf,
+        general_lu::GeneralBandedLuNoPivot, residual_linf, storage::Banded,
     };
 
     fn random_diag_dominant_banded(n: usize, kl: usize, ku: usize, seed: u64) -> Banded<f64> {

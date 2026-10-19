@@ -112,6 +112,7 @@ use crate::numerical::BVP_sci::BVP_sci_bordered_solver::{
     assemble_bordered_banded_blocks_from_pointwise, extract_bordered_banded_blocks,
     factor_bordered_banded_structured,
 };
+use crate::numerical::logging::{solver_info as info, solver_warn as warn};
 use crate::numerical::optimization::PPoly::{Extrapolate, PPoly};
 use crate::somelinalg::banded::LapackStyleBandedLuFaithful;
 use crate::somelinalg::banded::banded_assembly::BandedAssembly;
@@ -119,7 +120,6 @@ use faer::col::{Col, ColRef};
 use faer::linalg::solvers::Solve;
 use faer::mat::{Mat, MatRef};
 use faer::sparse::{SparseColMat, SymbolicSparseColMat, Triplet};
-use crate::numerical::logging::{solver_info as info, solver_warn as warn};
 use nalgebra::{DMatrix, linalg::SVD};
 
 use std::{collections::HashMap, mem::size_of, time::Instant};

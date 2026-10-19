@@ -19,8 +19,8 @@ use crate::numerical::Nonlinear_systems::symbolic::{
 };
 use crate::numerical::Nonlinear_systems::symbolic_aot::materialize_symbolic_nonlinear_aot_build_with_compile_config;
 use crate::numerical::Nonlinear_systems::symbolic_backend::{
-    select_symbolic_nonlinear_backend, SelectedSymbolicNonlinearBackendKind,
-    SymbolicBackendSelectionPolicy,
+    SelectedSymbolicNonlinearBackendKind, SymbolicBackendSelectionPolicy,
+    select_symbolic_nonlinear_backend,
 };
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::register_generated_dense_cdylib_backend;
@@ -691,9 +691,7 @@ fn perform_requested_build(
                 match build.execute() {
                     Ok(executed) if executed.succeeded() => {
                         built_now = true;
-                        if let Err(_) = write_nonlinear_aot_ready_marker(&build, &lifecycle_key)
-                        {
-                        }
+                        if let Err(_) = write_nonlinear_aot_ready_marker(&build, &lifecycle_key) {}
                         Ok(build)
                     }
                     Ok(executed) => Err(format!(
@@ -1479,11 +1477,15 @@ mod tests {
             !nonlinear_aot_ready_marker_matches(&build, &problem_key),
             "mutated output must not remain trusted by the old marker"
         );
-        assert!(invalidate_nonlinear_aot_ready_marker(&build)
-            .expect("marker invalidation should succeed"));
+        assert!(
+            invalidate_nonlinear_aot_ready_marker(&build)
+                .expect("marker invalidation should succeed")
+        );
         assert!(!nonlinear_aot_ready_marker_path(&build).exists());
-        assert!(!invalidate_nonlinear_aot_ready_marker(&build)
-            .expect("missing marker invalidation should be harmless"));
+        assert!(
+            !invalidate_nonlinear_aot_ready_marker(&build)
+                .expect("missing marker invalidation should be harmless")
+        );
     }
 
     #[test]
@@ -1839,9 +1841,11 @@ mod tests {
             .expect("both concurrent AOT builds should succeed");
 
         assert_eq!(results.len(), 2);
-        assert!(results
-            .iter()
-            .all(|(backend, _)| { *backend == SelectedSymbolicNonlinearBackendKind::AotCompiled }));
+        assert!(
+            results.iter().all(|(backend, _)| {
+                *backend == SelectedSymbolicNonlinearBackendKind::AotCompiled
+            })
+        );
         assert_eq!(results[0].1, results[1].1);
         assert!(unregister_linked_dense_backend(&results[0].1).is_some());
     }

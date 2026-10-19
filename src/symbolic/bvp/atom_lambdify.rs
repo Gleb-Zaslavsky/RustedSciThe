@@ -1,4 +1,4 @@
- #![allow(dead_code)]
+#![allow(dead_code)]
 //! AtomView-native Lambdify callback builders for BVP systems.
 //!
 //! This module intentionally does not belong to `legacy_lambdify`: the
@@ -614,7 +614,7 @@ mod tests {
     #[test]
     fn atomview_callback_reuses_compiled_functions_after_numeric_rebind() {
         let binding = BvpParameterBindingHandle::new(Some(vec![1.0]));
-        let  callback = dense_residual_with_binding(
+        let callback = dense_residual_with_binding(
             vec![parser::parse("p + x").expect("test Atom expression must parse")],
             vec!["p".to_string(), "x".to_string()],
             binding.clone(),

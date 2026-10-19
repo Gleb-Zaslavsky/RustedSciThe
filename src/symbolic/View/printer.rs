@@ -75,6 +75,7 @@ fn print_view_prec(view: &AtomView<'_>, options: &PrintOptions, out: &mut String
                     out.push_str(&format!("{}/{}", num, den));
                 }
             }
+            CoefficientView::Float(value) => out.push_str(&value.to_string()),
             CoefficientView::Large(_) => out.push_str("<large>"),
         },
         AtomView::Var(v) => out.push_str(&format_symbol(v.get_symbol(), options)),

@@ -75,13 +75,13 @@ use crate::numerical::BVP_sci::BVP_sci_faer::{
 };
 use crate::numerical::BVP_sci::BVP_sci_symbolic_functions::Jacobian_sci_faer;
 use crate::numerical::BVP_sci::BVP_sci_utils::size_of_jacobian;
+use crate::numerical::logging::{
+    SolverLogGuard, SolverLogLevel, solver_error as error, solver_info as info,
+};
 use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::symbolic_engine::Expr;
 use faer::mat::Mat;
-use crate::numerical::logging::{
-    SolverLogGuard, SolverLogLevel, solver_error as error, solver_info as info,
-};
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::error::Error;
@@ -1262,7 +1262,12 @@ impl BVPwrap {
 
     pub fn try_solve(&mut self) -> Result<(), BvpSciBackendError> {
         self.validate_generated_backend_mode()?;
-        let level = match self.loglevel.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        let level = match self
+            .loglevel
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
             None | Some("off") | Some("none") => SolverLogLevel::Off,
             Some("error") => SolverLogLevel::Error,
             Some("warn") => SolverLogLevel::Warn,
@@ -1543,21 +1548,25 @@ mod tests_phase1 {
 
     #[test]
     fn bvp_sci_rust_logging_defaults_to_off() {
-        assert_eq!(BvpSciSolverOptions::new(
-            None,
-            Some(0.0),
-            Some(1.0),
-            Some(4),
-            vec![Expr::parse_expression("-y")],
-            vec!["y".to_string()],
-            vec![],
-            None,
-            HashMap::new(),
-            "t".to_string(),
-            1e-6,
-            64,
-            DMatrix::from_element(1, 2, 1.0),
-        ).loglevel, None);
+        assert_eq!(
+            BvpSciSolverOptions::new(
+                None,
+                Some(0.0),
+                Some(1.0),
+                Some(4),
+                vec![Expr::parse_expression("-y")],
+                vec!["y".to_string()],
+                vec![],
+                None,
+                HashMap::new(),
+                "t".to_string(),
+                1e-6,
+                64,
+                DMatrix::from_element(1, 2, 1.0),
+            )
+            .loglevel,
+            None
+        );
         assert_eq!(linear_problem_options().loglevel.as_deref(), Some("off"));
     }
 

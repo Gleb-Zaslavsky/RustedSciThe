@@ -23,13 +23,13 @@ use crate::numerical::BVP_Damp::BVP_utils::elapsed_time;
 use crate::numerical::BVP_sci::BVP_sci_faer::{
     ODEFunction, ODEJacobian, faer_col, faer_dense_mat, faer_mat,
 };
+use crate::numerical::logging::{solver_info as info, solver_warn as warn};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::{
     bvp_symbolic_bandwidth, bvp_symbolic_jacobian_smart, bvp_symbolic_parse_variables,
     bvp_symbolic_variables_for_functions,
 };
 use faer::mat::Mat;
-use crate::numerical::logging::{solver_info as info, solver_warn as warn};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -233,8 +233,7 @@ impl Jacobian_sci_faer {
                 _ => {
                     warn!(
                         "Warning: Unknown bound type {} for variable {}",
-                        bound_type,
-                        var_name
+                        bound_type, var_name
                     );
                     bounded_value
                 }

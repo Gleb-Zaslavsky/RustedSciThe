@@ -401,6 +401,19 @@ impl Atom {
         }
     }
 
+    /// Construct a numeric Atom retaining a finite f64 without rationalizing
+    /// it through a lossy fixed decimal scale.
+    pub fn new_f64(value: f64) -> Atom {
+        if value == 0.0 {
+            Atom::Zero
+        } else {
+            let mut buffer = Vec::with_capacity(9);
+            buffer.push(1); // packed Atom tag for Num
+            coefficient::write_f64_packed(value, &mut buffer);
+            Atom::Num(unsafe { Num::from_raw(buffer) })
+        }
+    }
+
     /// Build `exp(self)`.
     pub fn exp(&self) -> Atom {
         FunctionBuilder::new(Atom::EXP)

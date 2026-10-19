@@ -18,8 +18,8 @@ use once_cell::sync::Lazy;
 
 use super::{
     atom::{
-        representation::{BorrowedRawAtom, KeyLookup},
         Atom, AtomView,
+        representation::{BorrowedRawAtom, KeyLookup},
     },
     coefficient::{Coefficient, CoefficientView},
     state::Symbol,
@@ -975,6 +975,7 @@ impl<'a> PreparedCompiler<'a> {
         let node = match view {
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(num, den) => PreparedNode::Const(num as f64 / den as f64),
+                CoefficientView::Float(value) => PreparedNode::Const(value),
                 CoefficientView::Large(_) => {
                     return Err(
                         "Large coefficients are not supported in the prepared evaluator".into(),
@@ -1217,6 +1218,9 @@ impl<'a> AtomView<'a> {
         match self {
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(num, den) => Ok(Coefficient::reduce(num, den)),
+                CoefficientView::Float(_) => {
+                    Err("Floating coefficients are not supported in exact evaluation".into())
+                }
                 CoefficientView::Large(_) => {
                     Err("Large coefficients are not supported in exact evaluation".into())
                 }
@@ -1239,6 +1243,9 @@ impl<'a> AtomView<'a> {
                         }
                         CoefficientView::Natural(_, _) => {
                             Err("Exact evaluation only supports integer exponents".into())
+                        }
+                        CoefficientView::Float(_) => {
+                            Err("Exact evaluation only supports rational exponents".into())
                         }
                         CoefficientView::Large(_) => {
                             Err("Large exponents are not supported in exact evaluation".into())
@@ -1272,6 +1279,9 @@ impl<'a> AtomView<'a> {
         match self {
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(num, den) => Ok(Coefficient::reduce(num, den)),
+                CoefficientView::Float(_) => {
+                    Err("Floating coefficients are not supported in exact evaluation".into())
+                }
                 CoefficientView::Large(_) => {
                     Err("Large coefficients are not supported in exact evaluation".into())
                 }
@@ -1296,6 +1306,9 @@ impl<'a> AtomView<'a> {
                         }
                         CoefficientView::Natural(_, _) => {
                             Err("Exact evaluation only supports integer exponents".into())
+                        }
+                        CoefficientView::Float(_) => {
+                            Err("Exact evaluation only supports rational exponents".into())
                         }
                         CoefficientView::Large(_) => {
                             Err("Large exponents are not supported in exact evaluation".into())
@@ -1335,6 +1348,7 @@ impl<'a> AtomView<'a> {
         match self {
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(num, den) => Ok(num as f64 / den as f64),
+                CoefficientView::Float(value) => Ok(value),
                 CoefficientView::Large(_) => {
                     Err("Large coefficients are not supported in the simplified evaluator".into())
                 }
@@ -1452,6 +1466,7 @@ impl<'a> AtomView<'a> {
         match self {
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(num, den) => Ok(num as f64 / den as f64),
+                CoefficientView::Float(value) => Ok(value),
                 CoefficientView::Large(_) => {
                     Err("Large coefficients are not supported in the simplified evaluator".into())
                 }
@@ -1650,10 +1665,10 @@ mod test {
     use ahash::HashMap;
 
     use super::{
-        evaluate_exact, evaluate_exact_with_symbols, prepare_evaluator, ExactSymbolMap, FunctionMap,
+        ExactSymbolMap, FunctionMap, evaluate_exact, evaluate_exact_with_symbols, prepare_evaluator,
     };
     use crate::symbolic::View::{atom::Atom, coefficient::Coefficient};
-    use crate::{ parse, symbol};
+    use crate::{parse, symbol};
 
     #[test]
     fn evaluate_like_original_example() {

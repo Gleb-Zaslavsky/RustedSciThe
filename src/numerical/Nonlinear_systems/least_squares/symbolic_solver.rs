@@ -4,7 +4,6 @@
 //! while all numerical iterations go through the canonical least-squares solver
 //! selected by [`crate::numerical::Nonlinear_systems::solver::NonlinearSolver`].
 
-use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use crate::numerical::Nonlinear_systems::engine::SolveStatistics;
 use crate::numerical::Nonlinear_systems::least_squares::{
     LeastSquaresError, LeastSquaresProblem, LeastSquaresTelemetryMode, LevenbergMarquardt,
@@ -15,8 +14,9 @@ use crate::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, PreparationTelemetryMode, SymbolicLambdifyFrontend,
     SymbolicProblemOptions,
 };
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use crate::symbolic::symbolic_engine::Expr;
-use log::{log, Level};
+use log::{Level, log};
 use nalgebra::DVector;
 use std::collections::HashMap;
 

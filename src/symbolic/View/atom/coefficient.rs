@@ -14,6 +14,7 @@ const U8_NUM: u8 = 0b00000001;
 const U16_NUM: u8 = 0b00000010;
 const U32_NUM: u8 = 0b00000011;
 const U64_NUM: u8 = 0b00000100;
+const F64_NUM: u8 = 0b00000101;
 const ARB_NUM: u8 = 0b00000111;
 const U8_DEN: u8 = 0b00010000;
 const U16_DEN: u8 = 0b00100000;
@@ -59,6 +60,13 @@ pub trait PackedRationalNumberWriter {
     fn write_packed(&self, dest: &mut Vec<u8>);
     fn write_packed_fixed(&self, dest: &mut [u8]);
     fn get_packed_size(&self) -> u64;
+}
+
+/// Write a finite f64 payload using the otherwise-unused numeric tag. Keeping
+/// it inside the existing numeric record preserves all parent AtomView nodes.
+pub(crate) fn write_f64_packed(value: f64, dest: &mut Vec<u8>) {
+    dest.put_u8(F64_NUM);
+    dest.put_u64_le(value.to_bits());
 }
 
 impl PackedRationalNumberWriter for Coefficient {
@@ -203,6 +211,14 @@ impl PackedRationalNumberReader for [u8] {
     #[inline(always)]
     fn get_coeff_view(&self) -> (CoefficientView<'_>, &[u8]) {
         let disc = self[0] & NUM_MASK;
+        if disc == F64_NUM {
+            let mut source = self;
+            source.get_u8();
+            return (
+                CoefficientView::Float(f64::from_bits(source.get_u64_le())),
+                source,
+            );
+        }
         if disc == ARB_NUM {
             // Large rational stored as raw digit bytes
             let mut source = self;
@@ -361,6 +377,10 @@ impl PackedRationalNumberReader for [u8] {
     fn skip_rational(&self) -> &[u8] {
         let mut dest = self;
         let disc = dest.get_u8();
+        if disc & NUM_MASK == F64_NUM {
+            dest.advance(8);
+            return dest;
+        }
         match disc & (NUM_MASK | DEN_MASK) {
             U8_NUM => {
                 dest.advance(1);
@@ -412,11 +432,17 @@ impl PackedRationalNumberReader for [u8] {
 
     #[inline(always)]
     fn is_zero_rat(&self) -> bool {
+        if self[0] & NUM_MASK == F64_NUM {
+            return f64::from_bits(u64::from_le_bytes(self[1..9].try_into().unwrap())) == 0.0;
+        }
         self[1] == 1 && self[2] == 0
     }
 
     #[inline(always)]
     fn is_one_rat(&self) -> bool {
+        if self[0] & NUM_MASK == F64_NUM {
+            return f64::from_bits(u64::from_le_bytes(self[1..9].try_into().unwrap())) == 1.0;
+        }
         self[1] == 1 && self[2] == 1
     }
 }

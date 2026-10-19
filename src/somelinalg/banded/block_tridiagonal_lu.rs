@@ -1,9 +1,8 @@
 use super::{
     block_tridiagonal::BlockTridiagonal,
     dense_block_kernels::{
-        block_copy,  dense_lu_pivot_in_place,
-        dense_lu_pivot_right_solve_block_in_place, dense_lu_pivot_solve_in_place,
-      dense_matmul_sub_assign, idx,
+        block_copy, dense_lu_pivot_in_place, dense_lu_pivot_right_solve_block_in_place,
+        dense_lu_pivot_solve_in_place, dense_matmul_sub_assign, idx,
     },
     error::BandedError,
 };

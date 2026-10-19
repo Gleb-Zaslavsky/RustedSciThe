@@ -1,5 +1,23 @@
 # TODO: Coordinated ExprLegacy to Prepared AtomView Migration
 
+## AtomView small-constant fidelity regression (2026-10-19)
+
+- [x] Keep the debug-only `View::atomview_diagnostics` probes for the minimal
+  `Expr::Const(f64)` and `c*T^4` cases, including positive/negative sweeps
+  around `5e-16`. The probes must compare direct `Expr` and AtomView
+  Lambdify values without involving a nonlinear solver.
+- [x] Remove the lossy `Expr -> Atom` fallback that can round a finite small
+  `f64` coefficient to zero after compact rational conversion. Preserve the
+  coefficient through AtomView preparation and evaluation, or return a typed
+  conversion error; silent zero is not acceptable.
+- [x] Verify the repair at the packed numeric leaf, prepared evaluator and
+  composed-expression levels. Add a focused debug story report before any
+  release or performance conclusion.
+- [x] Audit direct textual View parsing separately: exact scientific notation
+  remains rational when it fits the compact representation, while longer
+  finite literals use packed f64 and invalid/nonfinite literals return an
+  explicit parser error.
+
 Priority update, 2026-09-23: pause further LSODE2/BVP evaluator migration while
 investigating [View/Lambdify execution cost](View/TODO.md). Atom-derived
 Jacobian expressions can evaluate more slowly despite fast preparation.

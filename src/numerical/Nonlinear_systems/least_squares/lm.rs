@@ -1,6 +1,6 @@
 use super::errors::{LeastSquaresError, LeastSquaresStage};
 use super::problem::LeastSquaresProblem;
-use super::trust_region::{determine_lambda_and_parameter_update_with_count, LMParameter};
+use super::trust_region::{LMParameter, determine_lambda_and_parameter_update_with_count};
 use super::utils::{enorm, epsmch};
 use crate::numerical::Nonlinear_systems::engine::{SolveStatistics, StatisticsAvailability};
 use crate::somelinalg::least_squares_qr::{LinearLeastSquaresDiagonalProblem, PivotedQR};

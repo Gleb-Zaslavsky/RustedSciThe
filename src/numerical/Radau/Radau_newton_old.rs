@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use crate::numerical::Radau::Radau_main::RadauStatistics;
+use crate::numerical::logging::solver_info as info;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions::Jacobian;
 use crate::symbolic::symbolic_ivp::{
@@ -10,7 +11,6 @@ use crate::symbolic::symbolic_ivp_generated::{
     DenseIvpGeneratedBackendMode, SymbolicIvpGeneratedBackendConfig,
     prepare_generated_symbolic_ivp_problem,
 };
-use crate::numerical::logging::solver_info as info;
 use nalgebra::{DMatrix, DVector, Matrix};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

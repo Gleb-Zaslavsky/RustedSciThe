@@ -1032,8 +1032,7 @@ impl<'a> BvpSparseSolverProvider<'a> {
                         ),
                         None => linked.try_residual_eval(flat_args, callback_out),
                     };
-                    callback_result
-                        .map_err(|error| map_linked_callback_error("residual", error))
+                    callback_result.map_err(|error| map_linked_callback_error("residual", error))
                 };
                 if let Some(plan) = selected.prepared_problem.atom_aot_plan() {
                     plan.record_worker_batch(
@@ -1045,10 +1044,7 @@ impl<'a> BvpSparseSolverProvider<'a> {
                         chunks,
                     );
                     plan.try_execute_residual_callback_with_chunks(
-                        &flat_args,
-                        out,
-                        chunks,
-                        callback,
+                        &flat_args, out, chunks, callback,
                     )
                 } else if selected.prepared_problem.symbolic_assembly_backend
                     == BvpSymbolicAssemblyBackend::ExprLegacy
@@ -1172,8 +1168,7 @@ impl<'a> BvpSparseSolverProvider<'a> {
                         ),
                         None => linked.try_jacobian_values_eval(flat_args, callback_out),
                     };
-                    callback_result
-                        .map_err(|error| map_linked_callback_error("Jacobian", error))
+                    callback_result.map_err(|error| map_linked_callback_error("Jacobian", error))
                 };
                 if let Some(plan) = selected.prepared_problem.atom_aot_plan() {
                     plan.record_worker_batch(
@@ -1185,10 +1180,7 @@ impl<'a> BvpSparseSolverProvider<'a> {
                         chunks,
                     );
                     plan.try_execute_jacobian_callback_with_chunks(
-                        &flat_args,
-                        values_out,
-                        chunks,
-                        callback,
+                        &flat_args, values_out, chunks, callback,
                     )
                 } else if selected.prepared_problem.symbolic_assembly_backend
                     == BvpSymbolicAssemblyBackend::ExprLegacy
@@ -2549,8 +2541,7 @@ impl BvpPreparedSparseAotProblem {
                 && !matches!(
                     codegen.matrix_layout(),
                     AtomAotMatrixLayout::BandedCompact { .. }
-                )
-            {
+                ) {
                 let (kl, ku) = self
                     .bandwidth
                     .unwrap_or_else(|| infer_atom_bandwidth(&codegen));
@@ -2562,11 +2553,13 @@ impl BvpPreparedSparseAotProblem {
             } else {
                 codegen
             };
-            return codegen.prepared_aot_manifest(matrix_backend).map_err(|error| {
-                BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
-                    message: error.to_string(),
-                }
-            });
+            return codegen
+                .prepared_aot_manifest(matrix_backend)
+                .map_err(
+                    |error| BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
+                        message: error.to_string(),
+                    },
+                );
         }
         let prepared = self.as_prepared_problem_for_matrix_backend(matrix_backend);
         Ok(PreparedProblemManifest::from(&prepared))
@@ -2626,7 +2619,9 @@ impl BvpPreparedSparseAotProblem {
                 return Ok(());
             }
             return Err(BvpBackendIntegrationError::AtomAotPlanPreparationFailed {
-                message: "AtomView route has neither a prepared codegen payload nor a discretized system".to_string(),
+                message:
+                    "AtomView route has neither a prepared codegen payload nor a discretized system"
+                        .to_string(),
             });
         };
         if matrix_backend == MatrixBackend::Banded {
@@ -5353,8 +5348,14 @@ impl Jacobian {
         self.variable_string = variable_string.clone();
         self.vector_of_variables =
             Expr::parse_vector_expression(variable_string.iter().map(|s| s.as_str()).collect());
-        debug!("BVP symbolic functions initialized: {:?}", self.vector_of_functions);
-        debug!("BVP symbolic variables initialized: {:?}", self.vector_of_variables);
+        debug!(
+            "BVP symbolic functions initialized: {:?}",
+            self.vector_of_functions
+        );
+        debug!(
+            "BVP symbolic variables initialized: {:?}",
+            self.vector_of_variables
+        );
     }
 
     /// Sets symbolic parameter names used during residual/Jacobian evaluation.

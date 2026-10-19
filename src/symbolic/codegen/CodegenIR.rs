@@ -37,12 +37,12 @@
 //! - CSE and other IR passes,
 //! - residual/Jacobian-specific batch code generation.
 
+use crate::symbolic::View::CodegenIR_atom::{AtomCsePolicy, Lowerer as AtomLowerer};
+use crate::symbolic::View::atom::AtomView;
+use crate::symbolic::View::state::Symbol;
 use crate::symbolic::codegen::codegen_tasks::{CodegenOutputLayout, CodegenTaskPlan};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_metadata::SignatureCache;
-use crate::symbolic::View::atom::AtomView;
-use crate::symbolic::View::state::Symbol;
-use crate::symbolic::View::CodegenIR_atom::{AtomCsePolicy, Lowerer as AtomLowerer};
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -3146,7 +3146,9 @@ mod tests {
         let source = block.emit();
 
         assert_eq!(block.fn_name, "eval_sparse_values_chunk_1");
-        assert!(source.contains("pub fn eval_sparse_values_chunk_1(args: &[f64], out: &mut [f64])"));
+        assert!(
+            source.contains("pub fn eval_sparse_values_chunk_1(args: &[f64], out: &mut [f64])")
+        );
         assert!(
             source.contains("// Sparse Jacobian values block: 3 rows x 4 cols, 1 non-zero values")
         );

@@ -2297,3 +2297,270 @@ The Windows Rust unit-test link gate is already closed for the current
 candidate (`24 passed`); see section 20.1 and `PUBLICATION_GUIDE.md`. Re-run it
 after source freeze only if the Rust/PyO3 binding code changes before the final
 tag.
+
+## 21. Additional native APIs from the core crate (2026-10-18)
+
+This workstream expands the Python package beyond the solver families already
+wrapped. The selection rule is strict: expose only stable, documented and
+tested Rust APIs. Experimental, abandoned, legacy and solver-internal modules
+remain outside the public Python surface until they have their own Rust API
+review and production-readiness decision.
+
+The Python layer remains a thin adapter. Numerical algorithms, factorization,
+symbolic preparation and native telemetry stay in Rust. Python owns argument
+validation at the boundary, NumPy conversion, Python-friendly result objects
+and exception translation. Do not reimplement numerical kernels in Python.
+
+### 21.1 Public API selection and review
+
+- [ ] Build a capability inventory for `src/somelinalg/` and `src/symbolic/`:
+  classify each candidate as `stable`, `experimental`, `legacy`,
+  `solver-internal` or `not suitable for Python exposure`.
+- [ ] For every proposed stable candidate, record its ownership model, input
+  layout, allocation behavior, mutation rules, error type, logging behavior,
+  telemetry availability and thread-safety contract.
+- [ ] Reject APIs that silently allocate dense `n x n` representations for a
+  structured problem or expose implementation details without a stable
+  semantic contract.
+- [ ] Add matching entries to the Python facade, `.pyi` stubs, Rust/Python
+  contract tests, RU/EN guides and Python examples in one change set.
+- [ ] Keep experimental SuperLU, reusable sparse BVP kernels and abandoned
+  banded alternatives outside the default public import surface. Revisit them
+  only after a separate opt-in and platform-support review.
+
+### 21.2 Faithful banded linear algebra API
+
+The first native linear-algebra candidate is the faithful LAPACK-style banded
+LU implementation in `somelinalg::banded`. Its Python representation must
+preserve band storage and must never make a dense matrix the normal input or
+working representation.
+
+- [ ] Expose a compact `BandedMatrix` value with `n`, `kl`, `ku` and packed
+  values using the documented layout
+  `ab[ku + i - j, j] = A[i, j]`.
+- [ ] Accept NumPy arrays shaped `(kl + ku + 1, n)` and validate dtype,
+  dimensionality, finiteness, band widths and shape before entering Rust.
+- [ ] Provide explicit constructors from compact values and from separate
+  lower/diagonal/upper bands where applicable; document which constructor
+  copies input data and which views are unsupported.
+- [ ] Expose `LapackStyleBandedLuFaithful` as a reusable factorization object:
+  factor once, solve one RHS repeatedly, solve multiple RHS in compact
+  column-major form, and expose `is_factorized`, `ipiv`, `kl`, `ku`, `ldab`
+  and dimension metadata.
+- [ ] Keep RHS results as NumPy arrays with shape `(n,)` or `(n, nrhs)` and
+  provide an in-place native route where the Python contract can guarantee
+  safe ownership. Never convert a banded matrix to a dense matrix on the
+  ordinary solve path.
+- [ ] Expose iterative refinement only as an explicit option and return a
+  typed refinement report with residual information. Do not run dense
+  reconstruction helpers during normal solving or telemetry collection.
+- [ ] Decide and document the factorization ownership contract: factorization
+  owns copied numeric storage, and later mutation of the source NumPy array
+  cannot change an existing factorization.
+- [ ] Map `BandedError` variants to stable Python exceptions while preserving
+  stage and operation context: invalid dimensions, invalid bands, out of
+  bounds access, singular pivot, not-factorized state and RHS mismatch.
+- [ ] Add correctness tests against the Rust reference tests for diagonal,
+  tridiagonal, asymmetric, wide-band, singular and multiple-RHS systems.
+- [ ] Add memory-layout tests proving that the normal path allocates O(n *
+  (kl + ku)) storage and does not materialize an O(n^2) NumPy or Rust matrix.
+- [ ] Add factor-reuse tests and verify that repeated solves use the retained
+  factorization without refactoring.
+- [ ] Add compact Tabled benches for assembly, factorization, warm solve,
+  multiple RHS and refinement across small, medium and large `n` and several
+  fixed bandwidths. Report storage bytes and do not mix dense conversion time
+  into the banded solve row.
+- [ ] Add a dedicated RU/EN guide and Python examples explaining compact
+  indexing, `kl`/`ku`, RHS shapes, factor reuse, singular failures and the
+  memory tradeoff.
+
+### 21.3 Additional `somelinalg` candidates
+
+- [ ] Audit the pure tridiagonal and pivoted tridiagonal implementations;
+  expose them only if their error semantics, numerical stability and input
+  ownership are documented. Use three one-dimensional NumPy bands rather than
+  a dense matrix.
+- [ ] Audit block-tridiagonal and bordered block-tridiagonal implementations;
+  select one canonical stable implementation, define block-major NumPy
+  layouts and verify that block storage remains structured throughout solve.
+- [ ] Review `least_squares_qr` as a possible standalone numerical API after
+  its public result/error contract is separated from fitting internals.
+- [ ] Keep `linear_sys_diagnostics` out of the first exposure until its
+  unconditional printing, boolean-only result contract and dense ownership
+  are revised or explicitly accepted as a diagnostic-only API.
+- [ ] Keep the SuperLU facade as a separate optional API. Before exposing it,
+  define Windows/Linux bridge discovery, missing-library errors, CSC ownership,
+  factor lifecycle, ABI provenance and fallback behavior in the Python
+  contract.
+- [ ] Do not expose `bvp_sparse_lu`, sparse reference fixtures, benchmark-only
+  helpers or modules marked experimental merely because they are `pub` inside
+  the Rust crate.
+
+### 21.4 Symbolic API expansion
+
+The current Python symbolic surface already covers scalar expressions,
+substitution, differentiation, integration, symbolic vectors/matrices,
+Lambdify and prepared systems. New work must fill measured gaps and preserve
+the native representation selected by the caller.
+
+- [ ] Audit scalar `Expr` methods against the stable Rust symbolic API and
+  classify missing operations: normalization/simplification controls,
+  pretty-print options, argument extraction, recursive `where` substitution,
+  symbolic integration and domain-sensitive functions.
+- [ ] Add typed Python errors for unsupported symbolic operations, invalid
+  variable names, cyclic substitutions, unknown targets and invalid numerical
+  evaluation inputs.
+- [ ] Add a prepared symbolic-system route that prepares residuals and
+  Jacobians once and evaluates them repeatedly without reparsing or rebuilding
+  the derivative graph.
+- [ ] Ensure the AtomNative route differentiates and evaluates in the native
+  packed representation where the Rust API supports it; do not label an
+  Expr-derived Jacobian as AtomNative merely because the final callable uses
+  Atom lowering.
+- [ ] Add sparse/structured Jacobian preparation using the stable
+  `PreparedSparseAtomSystem` contract where its ownership and error semantics
+  are suitable for public use. Preserve variable order, candidate columns and
+  bandwidth metadata.
+- [ ] Define batch evaluation methods accepting NumPy arrays with explicit
+  shape and variable-axis conventions. Keep scalar evaluation and batch
+  evaluation semantically identical, including domain and non-finite checks.
+- [ ] Review symbolic vector and matrix methods for missing operations useful
+  to solver preparation: flattening, row/column extraction, substitution,
+  differentiation, evaluation, matrix-vector products and structured output.
+- [ ] Review `symexpr_graphs` for a separate named-definition API exposing
+  dependency analysis, evaluation order and controlled recursive expansion.
+  Cycles and unknown targets must become typed Python exceptions.
+- [ ] Preserve `ExprLegacy` and `AtomNative` as explicit frontend choices;
+  record preparation scope, frontend and diagnostics in the returned object.
+- [ ] Add parity tests for values, derivatives, substitutions, recursive
+  definitions, simplification and batch evaluation across both frontends.
+- [ ] Add long reuse tests confirming no repeated symbolic preparation and no
+  unbounded growth of native workspaces during repeated evaluation.
+- [ ] Add wrapper-overhead benches that separate Python/NumPy conversion,
+  preparation, native callback execution and result materialization. These
+  benches must not be presented as Rust-core performance benchmarks.
+- [ ] Add a dedicated RU/EN symbolic guide and a larger Python example set
+  covering expression construction, exact Jacobians, recursive substitution,
+  symbolic systems, structured Jacobians and numerical evaluation.
+
+### 21.5 Cross-cutting contracts and release gates
+
+- [ ] Add every new class/function to `__init__.py`, `_native.pyi`, capability
+  descriptors and the public API inventory; verify signatures and defaults
+  with installed-wheel contract tests.
+- [ ] Verify NumPy dtype, shape, order, ownership and mutation behavior on
+  CPython 3.10 and the newest supported CPython on Windows and Linux.
+- [ ] Verify `Off / Counters / Timings / Detailed` telemetry where native
+  telemetry exists, and preserve the solver's native logging enable/disable
+  contract. Do not invent telemetry for kernels that intentionally have none.
+- [ ] Add failure matrices for dimension mismatch, non-finite input, singular
+  factorization, invalid lifecycle calls, unsupported frontend/layout and
+  missing optional native libraries.
+- [ ] Keep all normal reports in Tabled form, with technical compiler output
+  stored separately. Add release scripts that continue after one matrix row
+  fails and return a typed aggregate summary.
+- [ ] Update the production readiness section only after correctness,
+  structured-memory, frontend parity, error, telemetry, documentation and
+  installed-wheel gates pass on the supported platforms.
+
+### 21.6 Recommended execution order
+
+1. [ ] Complete the stable/experimental audit and freeze the public scope.
+2. [ ] Implement and test compact faithful banded storage and reusable LU.
+3. [ ] Add banded documentation, examples and Tabled correctness/performance
+   evidence.
+4. [ ] Close prepared SymbolicSystem and structured-Jacobian gaps.
+5. [ ] Add symbolic parity, reuse, failure and Python-boundary tests.
+6. [ ] Audit tridiagonal, block-tridiagonal, QR and optional SuperLU candidates
+   one at a time; expose only candidates that pass the same gates.
+7. [ ] Run the complete Windows/Linux installed-wheel matrix and update the
+   release documentation after all selected APIs are stable.
+
+## 22. Version 0.1.5 active plan (2026-10-18)
+
+Version `0.1.4` is the publication baseline. The older release sections above
+remain as historical evidence and must not be treated as a second active
+release checklist. Before adding new public APIs, copy only genuinely open
+items from the `0.1.4` audit into the three workstreams below and close them
+with code, tests, documentation and installed-wheel evidence.
+
+### 22.1 Carry-over technical debt from the 0.1.4 audit
+
+- [ ] Reconcile the solver-by-solver capability inventory with the native Rust
+  API: frontend/backend choices, defaults, lifecycle methods, continuation,
+  logging, telemetry, typed failures, NumPy shapes and `.pyi` signatures.
+- [ ] Finish semantic forwarding/defaults review for the existing Python
+  facades. Every unsupported combination must be rejected explicitly or
+  documented as intentionally unavailable; no setting may be silently
+  ignored or replaced by a native default.
+- [ ] Complete the remaining installed-wheel contract matrix on Windows and
+  Linux, including CPython 3.10, current supported CPython, long continuation
+  series, restart/prepared lifecycle and workspace/memory-retention checks.
+- [ ] Close the remaining Python-boundary evidence gaps: separate Python and
+  NumPy conversion overhead from native preparation, callbacks, result
+  materialization and solver execution. These are wrapper measurements, not
+  replacement Rust-core performance claims.
+- [ ] Finish typed-error and telemetry audits for existing routes. Preserve
+  native stage, solver, route and native-kind context, distinguish unavailable
+  measurements from measured zero, and keep `Off / Counters / Timings /
+  Detailed` semantics aligned with the Rust contract.
+- [ ] Complete the documentation and example audit: every non-obvious option,
+  frontend/backend choice, lifecycle mode and failure policy must be explained
+  in RU/EN guides and demonstrated by maintained Python examples.
+- [ ] Review the remaining QoL and optional-dependency contracts, including
+  task-document parsing, dependency preflight, animation failure handling and
+  optional SuperLU reporting, without making experimental native routes look
+  production-ready.
+
+### 22.2 `somelinalg`: first priority is faithful banded
+
+- [ ] Freeze the public `somelinalg` scope after classifying implementations as
+  stable, experimental, legacy or solver-internal. Do not expose reference,
+  benchmark-only or unfinished SuperLU/reusable-sparse helpers by accident.
+- [ ] Implement the compact NumPy-facing faithful banded API described in
+  section 21.2. Preserve `(kl + ku + 1, n)` storage, avoid dense conversion,
+  define ownership and mutation behavior, and expose reusable factorization,
+  one/multiple-RHS solves and explicit refinement diagnostics.
+- [ ] Add typed Python errors and contract tests for invalid bands, shape and
+  dtype mismatch, non-finite input, singular pivots, missing factorization and
+  RHS mismatch. Verify numerical results against the Rust faithful reference.
+- [ ] Add structured-memory, factor-reuse and medium/large Tabled benchmarks.
+  Report storage and factor/solve stages separately; do not claim a speedup
+  until the compact path is compared against the appropriate reference.
+- [ ] Add a dedicated RU/EN guide and commented Python examples. Only after
+  the banded API is stable, audit tridiagonal, block-tridiagonal, QR and
+  optional SuperLU candidates one at a time.
+
+### 22.3 Symbolic API expansion
+
+- [ ] Extend the stable Python symbolic facade with the audited high-value
+  operations: simplification/normalization, pretty printing, argument
+  extraction, substitution and recursive `where` definitions, symbolic
+  integration, domain-sensitive functions and structured vector/matrix
+  operations.
+- [ ] Preserve explicit `ExprLegacy` and `AtomNative` frontend identity and
+  preparation provenance. Do not expose an AtomNative label for an Expr-built
+  graph or hide a fallback route behind a successful result.
+- [ ] Complete prepared symbolic-system and structured-Jacobian routes so
+  residuals and derivatives are built once and reused without reparsing or
+  rebuilding graphs. Keep NumPy scalar/batch shape, dtype and non-finite
+  semantics explicit.
+- [ ] Map unknown symbols, cyclic recursive substitutions, unsupported
+  operations and invalid numerical inputs to stable typed Python exceptions.
+  Add parity, reuse, failure and long-series workspace tests for both
+  supported frontends.
+- [ ] Add a standalone RU/EN symbolic guide and a representative Python
+  example suite covering construction, exact Jacobians, substitutions,
+  recursive definitions, integration, structured systems and evaluation.
+
+### 22.4 0.1.5 completion gates
+
+- [ ] Keep the public surface limited to APIs that pass correctness, ownership,
+  error, telemetry, documentation and installed-wheel checks on Windows and
+  Linux.
+- [ ] Build the Windows and Linux wheels and sdist from one immutable source
+  candidate. Run `twine check`, clean-install smoke tests and the complete
+  selected contract matrix on CPython 3.10 and the current supported CPython.
+- [ ] Publish only after the `somelinalg` faithful banded route and selected
+  Symbolic additions have matching `.pyi`, RU/EN documentation, examples,
+  Tabled reports and no unresolved release-blocking failures.

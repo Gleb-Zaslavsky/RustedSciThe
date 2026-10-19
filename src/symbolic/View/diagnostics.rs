@@ -261,6 +261,7 @@ fn visit_atom(
                     CoefficientView::Natural(numerator, denominator) => {
                         classify_power(numerator as f64 / denominator as f64)
                     }
+                    CoefficientView::Float(value) => classify_power(value),
                     CoefficientView::Large(_) => PowerClass::NonNumeric,
                 },
                 _ => PowerClass::NonNumeric,

@@ -198,8 +198,7 @@ pub fn jac_recalc(
     if old_jac.is_none() || m > m_from_task {
         info!(
             "\n number of iterations with old jac {} is higher then threshold {}",
-            m,
-            m_from_task
+            m, m_from_task
         );
         true
     } else {

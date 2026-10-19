@@ -626,13 +626,34 @@ impl<'a> AtomView<'a> {
                             out.set_from_view(&base_handle.as_view());
                             break 'pow_simplify;
                         } else if let AtomView::Num(n) = base_handle.as_view() {
-                            let (new_base_num, new_exp_num) = n.get_coeff_view().pow(&exp_num);
-                            if new_exp_num == 1.into() {
-                                out.to_num(new_base_num);
+                            let base_num = n.get_coeff_view();
+                            if let CoefficientView::Float(base_value) = base_num {
+                                if let Some(exp_value) = coefficient_to_f64(exp_num) {
+                                    let folded_value = base_value.powf(exp_value);
+                                    if folded_value.is_finite() {
+                                        let folded = Atom::new_f64(folded_value);
+                                        out.set_from_view(&folded.as_view());
+                                        break 'pow_simplify;
+                                    }
+                                }
+                                // Keep overflowed/non-finite float powers symbolic.
+                                out.to_pow(base_handle.as_view(), exp_handle.as_view());
                                 break 'pow_simplify;
                             }
-                            base_handle.to_num(new_base_num);
-                            exp_handle.to_num(new_exp_num);
+
+                            if let Some((new_base_num, new_exp_num)) = base_num.try_pow(&exp_num) {
+                                if new_exp_num == 1.into() {
+                                    out.to_num(new_base_num);
+                                    break 'pow_simplify;
+                                }
+                                base_handle.to_num(new_base_num);
+                                exp_handle.to_num(new_exp_num);
+                            } else {
+                                // Exact power overflow must not erase or panic;
+                                // retain the normalized symbolic power.
+                                out.to_pow(base_handle.as_view(), exp_handle.as_view());
+                                break 'pow_simplify;
+                            }
                         } else if let AtomView::Var(v) = base_handle.as_view() {
                             if v.get_symbol() == Atom::I {
                                 if let CoefficientView::Natural(n, d) = exp_num {
@@ -845,6 +866,14 @@ impl<'a> AtomView<'a> {
         }
 
         false
+    }
+}
+
+fn coefficient_to_f64(value: CoefficientView<'_>) -> Option<f64> {
+    match value {
+        CoefficientView::Natural(num, den) => Some(num as f64 / den as f64),
+        CoefficientView::Float(value) => Some(value),
+        CoefficientView::Large(_) => None,
     }
 }
 

@@ -16,11 +16,11 @@
 //! cargo test --release --lib --no-default-features numerical::BDF::scipy_parity::bdf_python_vs_rust_numerical_core_release_benchmark -- --ignored --nocapture --test-threads=1
 //! ```
 
-use crate::numerical::BDF::common::NumberOrVec;
 use crate::numerical::BDF::BDF_api::{
     BdfNativeJacobianSource, BdfSolverOptions, BdfTelemetryMode, ODEsolver,
 };
-use crate::numerical::BDF::BDF_solver::{BdfJacobian, BdfJacobianSource, BDF};
+use crate::numerical::BDF::BDF_solver::{BDF, BdfJacobian, BdfJacobianSource};
+use crate::numerical::BDF::common::NumberOrVec;
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::collections::BTreeMap;

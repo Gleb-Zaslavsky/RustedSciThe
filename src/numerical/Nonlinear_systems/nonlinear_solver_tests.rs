@@ -1,6 +1,15 @@
 #[cfg(test)]
 mod tests {
 
+    use crate::numerical::Nonlinear_systems::LM_Nielsen::{
+        NielsenLevenbergMarquardtMethod, NielsenLevenbergMarquardtMethodAdvanced,
+    };
+    use crate::numerical::Nonlinear_systems::LM_vanilla::{
+        LevenbergMarquardtMethod, LevenbergMarquardtMinpack,
+    };
+    use crate::numerical::Nonlinear_systems::NR_damped::{
+        DampedNewtonMethod, DampedNewtonMethodAdvanced,
+    };
     use crate::numerical::Nonlinear_systems::engine::{
         DiagnosticsOptions, NewtonMethod, SolveOptions, SolverEngine,
     };
@@ -12,15 +21,6 @@ mod tests {
     use crate::numerical::Nonlinear_systems::trust_region::PowellDoglegMethod;
     use crate::numerical::Nonlinear_systems::trust_region::TrustRegionMethod;
     use crate::numerical::Nonlinear_systems::trust_region_LM::TrustRegionLMMethod;
-    use crate::numerical::Nonlinear_systems::LM_Nielsen::{
-        NielsenLevenbergMarquardtMethod, NielsenLevenbergMarquardtMethodAdvanced,
-    };
-    use crate::numerical::Nonlinear_systems::LM_vanilla::{
-        LevenbergMarquardtMethod, LevenbergMarquardtMinpack,
-    };
-    use crate::numerical::Nonlinear_systems::NR_damped::{
-        DampedNewtonMethod, DampedNewtonMethodAdvanced,
-    };
     use nalgebra::{DMatrix, DVector};
 
     use crate::numerical::Nonlinear_systems::problem::{JacobianProvider, NonlinearProblem};

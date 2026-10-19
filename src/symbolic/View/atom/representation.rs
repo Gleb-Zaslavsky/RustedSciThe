@@ -289,20 +289,46 @@ impl Num {
         let nv = self.to_num_view();
         let a = nv.get_coeff_view();
         let b = other.get_coeff_view();
-        let n = a + b;
-
-        self.data.truncate(1);
-        n.write_packed(&mut self.data);
+        match (a, b) {
+            (CoefficientView::Float(lhs), CoefficientView::Float(rhs)) => self.set_f64(lhs + rhs),
+            (CoefficientView::Float(lhs), CoefficientView::Natural(rhs, den)) => {
+                self.set_f64(lhs + rhs as f64 / den as f64)
+            }
+            (CoefficientView::Natural(lhs, den), CoefficientView::Float(rhs)) => {
+                self.set_f64(lhs as f64 / den as f64 + rhs)
+            }
+            _ => {
+                let n = a + b;
+                self.data.truncate(1);
+                n.write_packed(&mut self.data);
+            }
+        }
     }
 
     pub fn mul(&mut self, other: &NumView<'_>) {
         let nv = self.to_num_view();
         let a = nv.get_coeff_view();
         let b = other.get_coeff_view();
-        let n = a * b;
+        match (a, b) {
+            (CoefficientView::Float(lhs), CoefficientView::Float(rhs)) => self.set_f64(lhs * rhs),
+            (CoefficientView::Float(lhs), CoefficientView::Natural(rhs, den)) => {
+                self.set_f64(lhs * (rhs as f64 / den as f64))
+            }
+            (CoefficientView::Natural(lhs, den), CoefficientView::Float(rhs)) => {
+                self.set_f64((lhs as f64 / den as f64) * rhs)
+            }
+            _ => {
+                let n = a * b;
+                self.data.truncate(1);
+                n.write_packed(&mut self.data);
+            }
+        }
+    }
 
-        self.data.truncate(1);
-        n.write_packed(&mut self.data);
+    fn set_f64(&mut self, value: f64) {
+        self.data.clear();
+        self.data.put_u8(NUM_ID);
+        super::coefficient::write_f64_packed(value, &mut self.data);
     }
 
     #[inline]

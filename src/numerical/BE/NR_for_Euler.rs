@@ -1,5 +1,5 @@
 use super::{BeDetailedStatistics, BeFailureKind, BeSymbolicAssemblyBackend, BeTelemetryMode};
-use crate::numerical::logging::{solver_info as info, SolverLogGuard, SolverLogLevel};
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel, solver_info as info};
 use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpTelemetryMode, IvpTelemetrySnapshot};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
@@ -7,8 +7,8 @@ use crate::symbolic::symbolic_ivp::{
     SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    prepare_generated_symbolic_ivp_problem, DenseIvpGeneratedBackendMode, IvpBackendStatistics,
-    SymbolicIvpGeneratedBackendConfig,
+    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_problem,
 };
 use nalgebra::{DMatrix, DVector, Matrix};
 use std::fmt::Display;
@@ -1444,9 +1444,11 @@ mod tests {
         assert_eq!(uncapped, 1.0);
         assert_eq!(solver.statistics().residual_calls, 2);
         assert_eq!(solver.statistics().jacobian_calls, 2);
-        assert!(solver
-            .suggest_step_size(0.0, &DVector::from_vec(vec![1.0]), 0.0)
-            .is_err());
+        assert!(
+            solver
+                .suggest_step_size(0.0, &DVector::from_vec(vec![1.0]), 0.0)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1470,9 +1472,11 @@ mod tests {
                 .as_slice(),
             &[2.0]
         );
-        assert!(solver
-            .set_parameter_values(DVector::from_vec(vec![f64::INFINITY]))
-            .is_err());
+        assert!(
+            solver
+                .set_parameter_values(DVector::from_vec(vec![f64::INFINITY]))
+                .is_err()
+        );
     }
 
     #[test]

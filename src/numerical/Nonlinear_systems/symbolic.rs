@@ -28,13 +28,13 @@ use crate::numerical::Nonlinear_systems::error::SolveError;
 use crate::numerical::Nonlinear_systems::problem::{JacobianProvider, NonlinearProblem};
 use crate::numerical::Nonlinear_systems::symbolic_atom::AtomNativeSymbolicBackend;
 use crate::numerical::Nonlinear_systems::symbolic_backend::{
-    select_symbolic_nonlinear_backend, SelectedSymbolicNonlinearBackendKind,
-    SymbolicBackendSelectionPolicy,
+    SelectedSymbolicNonlinearBackendKind, SymbolicBackendSelectionPolicy,
+    select_symbolic_nonlinear_backend,
 };
 use crate::numerical::Nonlinear_systems::symbolic_legacy::LegacyLambdifySymbolicBackend;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    resolve_linked_dense_backend, LinkedDenseAotBackend,
+    LinkedDenseAotBackend, resolve_linked_dense_backend,
 };
 use crate::symbolic::codegen::codegen_manifest::{
     GeneratedChunkManifest, GeneratedFunctionsManifest, PreparedJacobianLayout,
@@ -2764,12 +2764,12 @@ impl<'a> JacobianProvider for BoundSymbolicNonlinearProblem<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numerical::Nonlinear_systems::engine::{NewtonMethod, SolveOptions, SolverEngine};
-    use crate::numerical::Nonlinear_systems::problem::Bounds;
-    use crate::numerical::Nonlinear_systems::trust_region::*;
     use crate::numerical::Nonlinear_systems::LM_Nielsen::NielsenLevenbergMarquardtMethod;
     use crate::numerical::Nonlinear_systems::LM_vanilla::LevenbergMarquardtMethod;
     use crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod;
+    use crate::numerical::Nonlinear_systems::engine::{NewtonMethod, SolveOptions, SolverEngine};
+    use crate::numerical::Nonlinear_systems::problem::Bounds;
+    use crate::numerical::Nonlinear_systems::trust_region::*;
     use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
     use approx::assert_relative_eq;
     use std::collections::HashMap;

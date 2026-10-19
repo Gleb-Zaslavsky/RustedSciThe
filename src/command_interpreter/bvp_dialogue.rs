@@ -385,7 +385,10 @@ pub fn run_bvp_damp_template_dialogue(output_path: Option<PathBuf>) -> std::io::
 /// terminal dialogue. Interactive customization belongs to `wizard`.
 pub fn write_bvp_task_template(path: Option<PathBuf>) -> std::io::Result<PathBuf> {
     let path = path.unwrap_or_else(|| PathBuf::from("bvp_task_template.txt"));
-    std::fs::write(&path, build_bvp_task_template(&BvpTemplateConfig::default()))?;
+    std::fs::write(
+        &path,
+        build_bvp_task_template(&BvpTemplateConfig::default()),
+    )?;
     Ok(path)
 }
 
@@ -644,7 +647,7 @@ pub fn run_bvp_sci_template_dialogue(output_path: Option<PathBuf>) -> std::io::R
 mod tests {
     use super::*;
     use crate::command_interpreter::task_parser_bvp::{
-        parse_bvp_task_from_str, BvpLinearBackendSpec, BvpSolverFamilySpec, BvpStrategySpec,
+        BvpLinearBackendSpec, BvpSolverFamilySpec, BvpStrategySpec, parse_bvp_task_from_str,
     };
     use crate::command_interpreter::task_runner::{parse_task_spec_from_str, render_task_check};
 

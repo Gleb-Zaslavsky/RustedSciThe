@@ -9,7 +9,8 @@
 //! Compared with the first standalone parser, this version carries line/column diagnostics
 //! and accepts scientific notation in numeric literals. Decimal and scientific-notation
 //! inputs are still converted into exact rational coefficients whenever they fit in the
-//! fixed-size numeric model.
+//! fixed-size numeric model; finite literals outside that exact range use the
+//! packed-f64 numeric representation instead of being rounded or erased.
 
 use super::{
     atom::{Atom, AtomView, DefaultNamespace},
@@ -198,7 +199,7 @@ impl<'a> Parser<'a> {
                 }
                 Ok(expr)
             }
-            Some(c) if c.is_ascii_digit() || c == '.' => self.parse_number().map(Atom::new_num),
+            Some(c) if c.is_ascii_digit() || c == '.' => self.parse_number(),
             Some(c) if is_ident_start(c) => self.parse_identifier_or_call(),
             Some(c) => {
                 Err(self.error_here(format!("unexpected '{}' while parsing an expression", c)))
@@ -256,8 +257,12 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    /// Parse an integer, decimal, or scientific-notation literal into an exact rational coefficient.
-    fn parse_number(&mut self) -> Result<Coefficient, ParseError> {
+    /// Parse an integer, decimal, or scientific-notation literal.
+    ///
+    /// Values that fit the compact exact rational representation retain that
+    /// representation. Longer but finite literals use packed f64 so the text
+    /// parser has the same no-silent-zero guarantee as Expr-to-Atom lowering.
+    fn parse_number(&mut self) -> Result<Atom, ParseError> {
         self.skip_ws();
         let start = self.pos;
         let mut text = String::new();
@@ -298,7 +303,12 @@ impl<'a> Parser<'a> {
             return Err(self.error_here("expected valid number literal"));
         }
 
-        parse_exact_number(&text).ok_or_else(|| {
+        if let Some(coefficient) = parse_exact_number(&text) {
+            return Ok(Atom::new_num(coefficient));
+        }
+
+        let value = text.parse::<f64>().ok().filter(|value| value.is_finite());
+        value.map(Atom::new_f64).ok_or_else(|| {
             self.error_here(format!("invalid or out-of-range number literal '{}'", text))
         })
     }
@@ -446,6 +456,31 @@ mod test {
     fn parses_uppercase_scientific_notation() {
         assert_eq!(parse!("3E2").unwrap(), parse!("300").unwrap());
         assert_eq!(parse!("4.2E-1").unwrap(), parse!("21/50").unwrap());
+    }
+
+    #[test]
+    fn preserves_finite_scientific_literal_beyond_exact_rational_range() {
+        let coefficient = -0.000000000000000509024475_f64;
+        let atom = parse("-0.000000000000000509024475").unwrap();
+        let value = atom.lambdify_borrowed_thread_safe(&[])(&[]);
+
+        assert_eq!(value, coefficient);
+    }
+
+    #[test]
+    fn preserves_long_scientific_literal_inside_composed_expression() {
+        let coefficient = -0.000000000000000509024475_f64;
+        let atom = parse("-0.000000000000000509024475 * T ^ 4").unwrap();
+        let value = atom.lambdify_borrowed_thread_safe(&["T"])(&[2500.0]);
+        let expected = coefficient * 2500.0_f64.powi(4);
+
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn rejects_nonfinite_scientific_literal_instead_of_encoding_it() {
+        let err = parse("1e999").unwrap_err();
+        assert!(err.contains("invalid or out-of-range"), "error: {err}");
     }
 
     #[test]

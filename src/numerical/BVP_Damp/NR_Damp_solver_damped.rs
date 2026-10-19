@@ -41,7 +41,6 @@
 //! - Cantera MultiNewton solver (MultiNewton.cpp)
 //! - TWOPNT Fortran solver ("The Twopnt Program for Boundary Value Problems" by J. F. Grcar)
 //! - Chemkin Theory Manual p.261
-use crate::symbolic::symbolic_engine::Expr;
 use crate::Utils::logger::{save_matrix_to_csv, save_matrix_to_file};
 use crate::Utils::plots::{plots, plots_gnulot, plots_terminal};
 use crate::Utils::postprocessing::{
@@ -89,6 +88,7 @@ use crate::symbolic::codegen::codegen_backend_selection::{
     BackendSelectionPolicy, SelectedBackendKind,
 };
 use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
+use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::{
     BvpBackendIntegrationError, BvpMatrixBackend, BvpSymbolicAssemblyBackend,
 };

@@ -18,7 +18,10 @@ pub(crate) fn approximate_f64_atom(value: f64) -> Atom {
     const MAX_COMPACT_ERROR: f64 = 1.0e-12;
     if let Some((num, den)) = bounded_f64_to_ratio(value, MAX_COMPACT_DENOMINATOR) {
         let error = (num as f64 / den as f64 - value).abs();
-        if num != 0 && error <= MAX_COMPACT_ERROR * value.abs().max(1.0) {
+        if num != 0
+            && error <= MAX_COMPACT_ERROR * value.abs().max(1.0)
+            && error <= value.abs().max(f64::MIN_POSITIVE) * 8.0 * f64::EPSILON
+        {
             return Atom::new_num(Coefficient::reduce(num, den));
         }
     }
@@ -27,12 +30,15 @@ pub(crate) fn approximate_f64_atom(value: f64) -> Atom {
     // the compact-denominator cap. Preserve their decimal magnitude rather
     // than allowing a compact approximation to collapse them to zero.
     if let Some((num, den)) = decimal_f64_to_ratio(value) {
-        return Atom::new_num(Coefficient::reduce(num, den));
+        let error = (num as f64 / den as f64 - value).abs();
+        if error <= value.abs().max(f64::MIN_POSITIVE) * 8.0 * f64::EPSILON {
+            return Atom::new_num(Coefficient::reduce(num, den));
+        }
     }
 
-    let scale = 1_000_000i64;
-    let num = (value * scale as f64).round() as i64;
-    Atom::new_num(Coefficient::reduce(num, scale))
+    // Never round a finite nonzero f64 through a fixed 1e6 scale: for
+    // coefficients around 1e-16 that fallback silently creates Atom::Zero.
+    Atom::new_f64(value)
 }
 
 /// Recovers a compact rational close to `value` without encoding the full
@@ -176,6 +182,7 @@ fn view_to_expr(view: AtomView<'_>) -> Expr {
                     )
                 }
             }
+            CoefficientView::Float(value) => Expr::Const(value),
             CoefficientView::Large(_) => panic!("Large coefficients not supported"),
         },
         AtomView::Var(v) => {

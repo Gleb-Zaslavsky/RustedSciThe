@@ -517,7 +517,10 @@ impl<'a> SymbolicCallbackSession<'a> {
             self.telemetry.record_finite_difference_probe();
             let eps = f64::EPSILON.sqrt();
             for column in 0..dimension {
-                let scale = state[column].abs().max(self.finite_difference_atol).max(1.0);
+                let scale = state[column]
+                    .abs()
+                    .max(self.finite_difference_atol)
+                    .max(1.0);
                 let mut h = eps * scale;
                 if h == 0.0 || !h.is_finite() {
                     h = eps;

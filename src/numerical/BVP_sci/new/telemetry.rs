@@ -2817,9 +2817,7 @@ mod tests {
         assert!(counters.start_timing().is_none());
         counters.record_rhs(None);
         counters.record_newton_iteration();
-        assert!(counters
-            .start_stage(BvpSciTelemetryStage::Newton)
-            .is_none());
+        assert!(counters.start_stage(BvpSciTelemetryStage::Newton).is_none());
         let counter_snapshot = counters.snapshot();
         assert_eq!(counter_snapshot.rhs_calls, 1);
         assert_eq!(counter_snapshot.newton_iterations, 1);

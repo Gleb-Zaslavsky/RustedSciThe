@@ -811,7 +811,10 @@ fn try_assemble_atom_bvp_problem(
     };
     // Keep library calls quiet by default.  Applications that install a
     // logger can opt into this compact preparation table at info level.
-    info!("Atom/View BVP discretization timing:\n{}", system.render_timer_table());
+    info!(
+        "Atom/View BVP discretization timing:\n{}",
+        system.render_timer_table()
+    );
     Ok(system)
 }
 

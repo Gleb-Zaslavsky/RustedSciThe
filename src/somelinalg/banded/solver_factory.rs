@@ -123,9 +123,7 @@ pub fn factor_block_tridiagonal(
                             return Ok(LinearSolver::FaerSparse(solver));
                         }
 
-                        {
-                            Err(native_err)
-                        }
+                        { Err(native_err) }
                     }
                 },
             }
@@ -140,7 +138,7 @@ mod tests {
     use crate::somelinalg::banded::{
         banded_assembly::BandedAssembly,
         block_tridiagonal::BlockTridiagonal,
-        linear_solver::{build_solver_for_system, LinearSolver, LinearSystemRef},
+        linear_solver::{LinearSolver, LinearSystemRef, build_solver_for_system},
         ops::banded_to_dense,
         solver_policy::{FallbackPolicy, LinearSolveError, LinearSolverConfig, LinearSolverPolicy},
         solver_traits::DirectLinearSolver,

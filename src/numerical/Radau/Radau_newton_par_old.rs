@@ -245,10 +245,10 @@ impl RadauNewton {
 #[cfg(test)]
 mod tests_parallel {
 
+    use crate::numerical::logging::solver_info as info;
     use crate::symbolic::symbolic_engine::Expr;
     use crate::symbolic::symbolic_functions::Jacobian;
     use approx::assert_relative_eq;
-    use crate::numerical::logging::solver_info as info;
     use nalgebra::DVector;
 
     #[test]

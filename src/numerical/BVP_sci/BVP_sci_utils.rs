@@ -1,6 +1,6 @@
 use crate::numerical::BVP_sci::BVP_sci_faer::faer_mat;
-use faer::sparse::SparseColMat;
 use crate::numerical::logging::{solver_info as info, solver_warn as warn};
+use faer::sparse::SparseColMat;
 use sysinfo::System;
 
 fn matrix_stats(mat: &SparseColMat<usize, f64>) -> (usize, usize, usize, f64, f64) {

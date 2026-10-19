@@ -7,10 +7,10 @@ pub mod NR_for_Euler;
 
 /// Common Backward Euler types for applications using the direct solver API.
 pub mod prelude {
-    pub use super::NR_for_Euler::{NreError, NreSolverOptions, NreStepMode, NRE};
+    pub use super::NR_for_Euler::{NRE, NreError, NreSolverOptions, NreStepMode};
     pub use super::{
-        BeContinuationStatistics, BeDetailedStatistics, BeError, BeSolverOptions, BeStatus,
-        BeSymbolicAssemblyBackend, BeTelemetryMode, BE, DEFAULT_BE_MAX_STEPS,
+        BE, BeContinuationStatistics, BeDetailedStatistics, BeError, BeSolverOptions, BeStatus,
+        BeSymbolicAssemblyBackend, BeTelemetryMode, DEFAULT_BE_MAX_STEPS,
     };
     pub use crate::numerical::logging::SolverLogLevel;
     pub use crate::symbolic::symbolic_engine::Expr;
@@ -20,15 +20,15 @@ pub mod prelude {
     pub use nalgebra::{DMatrix, DVector};
 }
 
-use self::NR_for_Euler::{NreError, NreStepMode, NRE};
-use crate::numerical::logging::{solver_info as info, SolverLogGuard, SolverLogLevel};
+use self::NR_for_Euler::{NRE, NreError, NreStepMode};
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel, solver_info as info};
 use crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
 use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 use crate::symbolic::symbolic_ivp_generated::{
-    prepare_generated_symbolic_ivp_problem, DenseIvpGeneratedBackendMode, IvpBackendStatistics,
-    SymbolicIvpGeneratedBackendConfig, SymbolicIvpGeneratedError,
+    DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpGeneratedBackendConfig,
+    SymbolicIvpGeneratedError, prepare_generated_symbolic_ivp_problem,
 };
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
