@@ -15,9 +15,10 @@ use std::time::Instant;
 mod shared_bench_support;
 
 pub fn run_diffusion_chain() -> Result<ScenarioOutput, RunnerError> {
-    const DIMENSION: usize = 64;
+    const DIMENSION: usize = 128;
+    const STEP_COUNT: usize = 512;
     const STEP: f64 = 0.001;
-    const FINAL_TIME: f64 = 0.016;
+    const FINAL_TIME: f64 = STEP_COUNT as f64 * STEP;
 
     let full_started = Instant::now();
     let setup_started = Instant::now();
@@ -44,7 +45,7 @@ pub fn run_diffusion_chain() -> Result<ScenarioOutput, RunnerError> {
         )));
     }
     let (times, states) = solver.trajectory();
-    if times.len() != BE_STEPS + 1
+    if times.len() != STEP_COUNT + 1
         || states.nrows() != times.len()
         || states.ncols() != DIMENSION
         || times.iter().any(|time| !time.is_finite())
@@ -92,10 +93,11 @@ const FRONTEND_EXPR: u8 = 0;
 const FRONTEND_ATOM: u8 = 1;
 const ROUTE_LAMBDIFY: u8 = 0;
 const ROUTE_AOT: u8 = 1;
-const BE_DIMENSION: usize = 64;
-const BE_STEPS: usize = 16;
+const BE_DIMENSION: usize = 128;
+const BE_STEPS: usize = 64;
 const BE_H: f64 = 0.001;
 const BE_T_END: f64 = BE_STEPS as f64 * BE_H;
+const BE_MAX_NEWTON_ITERATIONS: usize = 16;
 
 #[derive(Clone, Copy)]
 enum Frontend {
@@ -509,7 +511,7 @@ fn run_once(
         workload.variables,
         workload.time_variable,
         1.0e-10,
-        16,
+        BE_MAX_NEWTON_ITERATIONS,
         Some(BE_H),
         0.0,
         BE_T_END,
@@ -582,18 +584,18 @@ fn run_once(
 macro_rules! be_scenario {
     ($frontend_id:ident, $frontend:literal, $frontend_key:literal, $route_id:ident, $execution:literal, $suffix:literal) => {
         crate::registry::Scenario {
-            id: concat!("be_diff64_", $frontend_key, "_", $suffix),
+            id: concat!("be_diff128_", $frontend_key, "_", $suffix),
             solver: "be",
             groups: &["ivp", "stiff", "be-matrix"],
-            workload: "parameterized diffusion chain, dimension=64, 16 fixed steps, t=[0,0.016]",
+            workload: "parameterized diffusion chain, dimension=128, 64 fixed steps, t=[0,0.064]",
             frontend: $frontend,
             execution: $execution,
             linear_algebra: "Dense (fixed implementation)",
             parallel_policy: "Sequential (fixed; no parallel dispatch API)",
             telemetry: "off wall gate + Detailed stage diagnostic",
-            version: 2,
+            version: 3,
             gate_metrics: &["scenario_wall_ms"],
-            description: "Matched BE canonical diffusion-chain route; dense layout and sequential dispatch are fixed",
+            description: "Matched BE canonical diffusion-chain workload; dense layout and sequential dispatch are fixed",
             run: run_symbolic_cell::<{ $frontend_id }, { $route_id }>,
             diagnose: Some(diagnose::<{ $frontend_id }, { $route_id }>),
         }
