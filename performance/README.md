@@ -157,10 +157,13 @@ error. `compare` never writes a baseline; missing, incompatible or unstable
 measurements cannot become PASS.
 Baseline recording and live comparison reject Debug binaries. Debug builds
 remain appropriate for runner unit tests and correctness-only smoke checks.
-`record` also refuses a dirty or unversioned source tree by default. Commit the
-reviewed runner, scenario definitions and generated machine alias profile
-before collecting the shared initial baselines. `--allow-dirty-source` is an
-explicit diagnostic escape hatch; the
+`record` also refuses a dirty or unversioned source tree by default. Generated
+files under `performance/baselines/` are excluded from this source-dirty check:
+they are measurement outputs, so a multi-solver baseline session does not
+require a commit after each solver. Changes to runner code, scenario
+definitions, machine profiles, or other source inputs still require a clean
+tree. Commit reviewed baselines when they are ready to share.
+`--allow-dirty-source` is an explicit diagnostic escape hatch; the
 baseline records the revision, dirty flag and lockfile fingerprint, so that
 such a reference is visibly non-clean rather than silently misrepresented.
 

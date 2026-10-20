@@ -132,7 +132,7 @@ pub fn fingerprint() -> EnvironmentFingerprint {
         features.push("openblas-system");
     }
     let compiled_features = features.join(",");
-    let (source_revision, source_dirty) = source_state();
+    let (source_revision, source_dirty) = source_state(Path::new(env!("CARGO_MANIFEST_DIR")));
     let lockfile_fingerprint = lockfile_fingerprint();
     // Stable FNV-1a over hard compatibility fields. Compiler version remains
     // visible provenance, but changing it does not hide the old baseline.
@@ -159,8 +159,7 @@ pub fn fingerprint() -> EnvironmentFingerprint {
     }
 }
 
-fn source_state() -> (String, bool) {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+fn source_state(root: &Path) -> (String, bool) {
     let revision = Command::new("git")
         .args(["-C"])
         .arg(root)
@@ -171,16 +170,31 @@ fn source_state() -> (String, bool) {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         .filter(|revision| !revision.is_empty())
         .unwrap_or_else(|| "git-unavailable".into());
-    let dirty = Command::new("git")
+    let dirty = source_is_dirty(root);
+    (revision, dirty)
+}
+
+fn source_is_dirty(root: &Path) -> bool {
+    // Baselines are generated measurement artifacts, not source inputs. Ignore
+    // them so a multi-solver recording session does not require a commit after
+    // every solver. Changes to runner code, scenarios, profiles, and all other
+    // repository files remain part of the dirty-source check.
+    Command::new("git")
         .args(["-C"])
         .arg(root)
-        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+            "--",
+            ".",
+            ":(exclude)performance/baselines/**",
+        ])
         .output()
         .ok()
         .filter(|output| output.status.success())
         .map(|output| !output.stdout.is_empty())
-        .unwrap_or(true);
-    (revision, dirty)
+        .unwrap_or(true)
 }
 
 fn lockfile_fingerprint() -> String {
@@ -382,7 +396,19 @@ fn slug(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::compatibility_id;
+    use super::{compatibility_id, source_is_dirty};
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
 
     #[test]
     fn compatibility_id_is_stable_for_equal_hard_environment_fields() {
@@ -416,5 +442,31 @@ mod tests {
                 "superlu",
             )
         );
+    }
+
+    #[test]
+    fn generated_baselines_do_not_make_source_dirty_but_code_changes_do() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init", "--quiet"]);
+        git(
+            root,
+            &["config", "user.email", "perf-gates@example.invalid"],
+        );
+        git(root, &["config", "user.name", "perf-gates test"]);
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname='fixture'\n").unwrap();
+        git(root, &["add", "Cargo.toml"]);
+        git(root, &["commit", "--quiet", "-m", "fixture"]);
+
+        assert!(!source_is_dirty(root));
+        let baseline = root.join("performance/baselines/windows/scenario.toml");
+        std::fs::create_dir_all(baseline.parent().unwrap()).unwrap();
+        std::fs::write(&baseline, "samples = [1.0, 2.0, 3.0]\n").unwrap();
+        assert!(!source_is_dirty(root));
+        git(root, &["add", "performance/baselines"]);
+        assert!(!source_is_dirty(root));
+
+        std::fs::write(root.join("new-source.rs"), "fn changed() {}\n").unwrap();
+        assert!(source_is_dirty(root));
     }
 }

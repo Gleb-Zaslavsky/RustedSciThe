@@ -31,12 +31,15 @@ Release run.
   passed all 56 registered AOT scenarios with TCC 0.9.27, one warmup and three
   samples each; this does not validate Release timing stability.
 - Still blocks a clean shared baseline: the source tree must be reviewed and
-  committed; the target machine must be registered and its alias profile
+  committed; generated files under `performance/baselines/` are excluded from
+  dirty-source detection so multiple solver baselines can be recorded in one
+  session. The target machine must be registered and its alias profile
   reviewed; then a Release calibration must establish that selected gate
   metrics are measurable and stable. AOT prerequisites/routes were checked on
   the current Windows/TCC target and must be rechecked if the target changes.
-- The checkout is dirty at this audit. Do not use `--allow-dirty-source` for
-  the shared baseline; freeze and commit the intended source candidate first.
+- Historical audit note: the checkout was dirty then. Do not use
+  `--allow-dirty-source` for shared baselines; freeze and commit the intended
+  source candidate first. Generated baseline outputs themselves are excluded.
 - Still blocks calling the system a validated regression gate: automated tests
   for machine/profile lifecycle, child failure/timeout behavior, comparison
   confirmation/noise boundaries, path safety, and cross-platform file/process
