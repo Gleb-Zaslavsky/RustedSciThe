@@ -15,7 +15,7 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
 
-const DIMENSION: usize = 32;
+const DIMENSION: usize = 128;
 const T_BOUND: f64 = 0.01;
 
 /// Keep the original small Robertson case as a stable, inexpensive sanity gate.

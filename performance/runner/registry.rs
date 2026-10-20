@@ -93,13 +93,13 @@ macro_rules! lsode2_route {
             id: $id,
             solver: "lsode2",
             groups: &["ivp", "stiff", "lsode2-matrix"],
-            workload: "diffusion-chain, dimension=32, t=[0,0.01], fixed BDF-only faithful route",
+            workload: "diffusion-chain, dimension=128, t=[0,0.01], fixed BDF-only faithful route",
             frontend: $frontend,
             execution: $execution,
             linear_algebra: $layout,
             parallel_policy: $policy,
             telemetry: "off wall gate + Detailed stage diagnostic",
-            version: 1,
+            version: 2,
             gate_metrics: &["scenario_wall_ms"],
             description: "Matched LSODE2 diffusion route; AOT uses a runner-owned warm cache and TCC",
             run: $run,
@@ -214,7 +214,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         diagnose: None,
     },
     lsode2_route!(
-        "lsode2_diff32_expr_dense_lambdify_seq",
+        "lsode2_diff128_expr_dense_lambdify_seq",
         "ExprLegacy",
         "Lambdify",
         "Dense",
@@ -222,7 +222,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_dense_lambdify_seq
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_dense_lambdify_seq",
+        "lsode2_diff128_atom_dense_lambdify_seq",
         "AtomView",
         "Lambdify",
         "Dense",
@@ -230,7 +230,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_dense_lambdify_seq
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_sparse_lambdify_seq",
+        "lsode2_diff128_expr_sparse_lambdify_seq",
         "ExprLegacy",
         "Lambdify",
         "Sparse",
@@ -238,7 +238,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_sparse_lambdify_seq
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_sparse_lambdify_seq",
+        "lsode2_diff128_atom_sparse_lambdify_seq",
         "AtomView",
         "Lambdify",
         "Sparse",
@@ -246,7 +246,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_sparse_lambdify_seq
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_banded_lambdify_seq",
+        "lsode2_diff128_expr_banded_lambdify_seq",
         "ExprLegacy",
         "Lambdify",
         "Banded(1,1)",
@@ -254,7 +254,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_banded_lambdify_seq
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_banded_lambdify_seq",
+        "lsode2_diff128_atom_banded_lambdify_seq",
         "AtomView",
         "Lambdify",
         "Banded(1,1)",
@@ -262,7 +262,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_banded_lambdify_seq
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_dense_lambdify_parallel",
+        "lsode2_diff128_expr_dense_lambdify_parallel",
         "ExprLegacy",
         "Lambdify",
         "Dense",
@@ -270,7 +270,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_dense_lambdify_parallel
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_dense_lambdify_parallel",
+        "lsode2_diff128_atom_dense_lambdify_parallel",
         "AtomView",
         "Lambdify",
         "Dense",
@@ -278,7 +278,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_dense_lambdify_parallel
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_sparse_lambdify_parallel",
+        "lsode2_diff128_expr_sparse_lambdify_parallel",
         "ExprLegacy",
         "Lambdify",
         "Sparse",
@@ -286,7 +286,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_sparse_lambdify_parallel
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_sparse_lambdify_parallel",
+        "lsode2_diff128_atom_sparse_lambdify_parallel",
         "AtomView",
         "Lambdify",
         "Sparse",
@@ -294,7 +294,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_sparse_lambdify_parallel
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_banded_lambdify_parallel",
+        "lsode2_diff128_expr_banded_lambdify_parallel",
         "ExprLegacy",
         "Lambdify",
         "Banded(1,1)",
@@ -302,7 +302,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_banded_lambdify_parallel
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_banded_lambdify_parallel",
+        "lsode2_diff128_atom_banded_lambdify_parallel",
         "AtomView",
         "Lambdify",
         "Banded(1,1)",
@@ -310,7 +310,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_banded_lambdify_parallel
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_dense_lambdify_auto",
+        "lsode2_diff128_expr_dense_lambdify_auto",
         "ExprLegacy",
         "Lambdify",
         "Dense",
@@ -318,7 +318,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_dense_lambdify_auto
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_dense_lambdify_auto",
+        "lsode2_diff128_atom_dense_lambdify_auto",
         "AtomView",
         "Lambdify",
         "Dense",
@@ -326,7 +326,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_dense_lambdify_auto
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_sparse_lambdify_auto",
+        "lsode2_diff128_expr_sparse_lambdify_auto",
         "ExprLegacy",
         "Lambdify",
         "Sparse",
@@ -334,7 +334,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_sparse_lambdify_auto
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_sparse_lambdify_auto",
+        "lsode2_diff128_atom_sparse_lambdify_auto",
         "AtomView",
         "Lambdify",
         "Sparse",
@@ -342,7 +342,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_sparse_lambdify_auto
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_banded_lambdify_auto",
+        "lsode2_diff128_expr_banded_lambdify_auto",
         "ExprLegacy",
         "Lambdify",
         "Banded(1,1)",
@@ -350,7 +350,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_banded_lambdify_auto
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_banded_lambdify_auto",
+        "lsode2_diff128_atom_banded_lambdify_auto",
         "AtomView",
         "Lambdify",
         "Banded(1,1)",
@@ -358,7 +358,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_banded_lambdify_auto
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_dense_aot_whole",
+        "lsode2_diff128_expr_dense_aot_whole",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Dense",
@@ -366,7 +366,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_dense_aot_whole
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_dense_aot_whole",
+        "lsode2_diff128_atom_dense_aot_whole",
         "AtomView",
         "AOT(warm-cache)",
         "Dense",
@@ -374,7 +374,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_dense_aot_whole
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_sparse_aot_whole",
+        "lsode2_diff128_expr_sparse_aot_whole",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Sparse",
@@ -382,7 +382,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_sparse_aot_whole
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_sparse_aot_whole",
+        "lsode2_diff128_atom_sparse_aot_whole",
         "AtomView",
         "AOT(warm-cache)",
         "Sparse",
@@ -390,7 +390,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_sparse_aot_whole
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_banded_aot_whole",
+        "lsode2_diff128_expr_banded_aot_whole",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Banded(1,1)",
@@ -398,7 +398,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_banded_aot_whole
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_banded_aot_whole",
+        "lsode2_diff128_atom_banded_aot_whole",
         "AtomView",
         "AOT(warm-cache)",
         "Banded(1,1)",
@@ -406,7 +406,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_banded_aot_whole
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_dense_aot_parallel2",
+        "lsode2_diff128_expr_dense_aot_parallel2",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Dense",
@@ -414,7 +414,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_dense_aot_parallel2
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_dense_aot_parallel2",
+        "lsode2_diff128_atom_dense_aot_parallel2",
         "AtomView",
         "AOT(warm-cache)",
         "Dense",
@@ -422,7 +422,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_dense_aot_parallel2
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_sparse_aot_parallel2",
+        "lsode2_diff128_expr_sparse_aot_parallel2",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Sparse",
@@ -430,7 +430,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_sparse_aot_parallel2
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_sparse_aot_parallel2",
+        "lsode2_diff128_atom_sparse_aot_parallel2",
         "AtomView",
         "AOT(warm-cache)",
         "Sparse",
@@ -438,7 +438,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_sparse_aot_parallel2
     ),
     lsode2_route!(
-        "lsode2_diff32_expr_banded_aot_parallel2",
+        "lsode2_diff128_expr_banded_aot_parallel2",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Banded(1,1)",
@@ -446,7 +446,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_expr_banded_aot_parallel2
     ),
     lsode2_route!(
-        "lsode2_diff32_atom_banded_aot_parallel2",
+        "lsode2_diff128_atom_banded_aot_parallel2",
         "AtomView",
         "AOT(warm-cache)",
         "Banded(1,1)",
@@ -924,7 +924,7 @@ mod tests {
         assert_eq!(lsode2.len(), 30);
         assert!(lsode2.iter().all(|scenario| {
             scenario.workload
-                == "diffusion-chain, dimension=32, t=[0,0.01], fixed BDF-only faithful route"
+                == "diffusion-chain, dimension=128, t=[0,0.01], fixed BDF-only faithful route"
         }));
 
         for frontend in ["ExprLegacy", "AtomView"] {
