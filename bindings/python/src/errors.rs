@@ -106,6 +106,33 @@ native_error_kinds!(rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError {
     rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::ContinuationRequiresPreparedBackend => "ContinuationRequiresPreparedBackend",
 });
 
+native_error_kinds!(rustedscithe_core::somelinalg::banded::BandedError {
+    rustedscithe_core::somelinalg::banded::BandedError::DimensionMismatch => "DimensionMismatch",
+    rustedscithe_core::somelinalg::banded::BandedError::InvalidBand { .. } => "InvalidBand",
+    rustedscithe_core::somelinalg::banded::BandedError::OutOfBounds { .. } => "OutOfBounds",
+    rustedscithe_core::somelinalg::banded::BandedError::Singular { .. } => "Singular",
+    rustedscithe_core::somelinalg::banded::BandedError::ZeroPivot { .. } => "ZeroPivot",
+    rustedscithe_core::somelinalg::banded::BandedError::NonFiniteCallbackValue { .. } => "NonFiniteCallbackValue",
+    rustedscithe_core::somelinalg::banded::BandedError::NonFiniteInput { .. } => "NonFiniteInput",
+    rustedscithe_core::somelinalg::banded::BandedError::NonFiniteFactor { .. } => "NonFiniteFactor",
+    rustedscithe_core::somelinalg::banded::BandedError::NonFiniteSolution { .. } => "NonFiniteSolution",
+    rustedscithe_core::somelinalg::banded::BandedError::NotFactorized => "NotFactorized",
+    rustedscithe_core::somelinalg::banded::BandedError::InvalidRhsLayout { .. } => "InvalidRhsLayout",
+    rustedscithe_core::somelinalg::banded::BandedError::BackendUnavailable => "BackendUnavailable",
+    rustedscithe_core::somelinalg::banded::BandedError::LapackArgument { .. } => "LapackArgument",
+});
+
+native_error_kinds!(rustedscithe_core::somelinalg::banded::TridiagonalPpError {
+    rustedscithe_core::somelinalg::banded::TridiagonalPpError::DimensionMismatch { .. } => "DimensionMismatch",
+    rustedscithe_core::somelinalg::banded::TridiagonalPpError::NonFiniteInput { .. } => "NonFiniteInput",
+    rustedscithe_core::somelinalg::banded::TridiagonalPpError::InvalidPivotTolerance { .. } => "InvalidPivotTolerance",
+    rustedscithe_core::somelinalg::banded::TridiagonalPpError::ZeroPivot { .. } => "ZeroPivot",
+    rustedscithe_core::somelinalg::banded::TridiagonalPpError::NonFiniteFactor { .. } => "NonFiniteFactor",
+    rustedscithe_core::somelinalg::banded::TridiagonalPpError::RhsDimensionMismatch { .. } => "RhsDimensionMismatch",
+    rustedscithe_core::somelinalg::banded::TridiagonalPpError::InvalidRhsLayout { .. } => "InvalidRhsLayout",
+    rustedscithe_core::somelinalg::banded::TridiagonalPpError::NonFiniteSolution { .. } => "NonFiniteSolution",
+});
+
 native_error_kinds!(rustedscithe_core::numerical::BE::BeError {
     rustedscithe_core::numerical::BE::BeError::InvalidConfiguration(_) => "InvalidConfiguration",
     rustedscithe_core::numerical::BE::BeError::Backend(_) => "Backend",

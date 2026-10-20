@@ -7,7 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 __all__ = [
-    "Expr", "ExprVector", "ExprMatrix", "BdfSolver", "BdfCallbackSolver", "BdfSolution",
+    "Expr", "ExprVector", "ExprMatrix", "BandedMatrix", "LapackStyleBandedLuFaithful", "BandedRefinementResult", "PivotedTridiagonalLu", "BlockTridiagonalLuConsistent", "BlockTridiagonalRefinementResult", "BdfSolver", "BdfCallbackSolver", "BdfSolution",
     "BackwardEulerSolver", "BackwardEulerSolution", "UniversalNonStiffSolver", "UniversalNonStiffSolution", "BvpSciSolver",
     "BvpSciSolution", "BvpDampSolver", "BvpDampNaiveSolver", "BvpDampFrozenSolver", "BvpDampSolution", "RadauSolver",
     "RadauCallbackSolver", "RadauSolution", "LambdifiedExpr", "Lsode2Solver",
@@ -336,6 +336,138 @@ class BdfSolution:
     def telemetry_aot_counters(self) -> dict[str, int]: ...
     def telemetry_aot_timings_ms(self) -> dict[str, float]: ...
     def write_telemetry_report(self, path: str) -> None: ...
+
+
+class BandedMatrix:
+    """Owned compact banded matrix.
+
+    ``values`` uses LAPACK-style storage with shape ``(kl + ku + 1, n)``;
+    construction copies the input and never creates a global dense matrix.
+    """
+    n: int
+    kl: int
+    ku: int
+    shape: tuple[int, int]
+    storage_bytes: int
+    def __init__(self, n: int, kl: int, ku: int, values: NDArray[np.float64]) -> None: ...
+    @staticmethod
+    def from_bands(
+        diagonal: NDArray[np.float64],
+        lower: NDArray[np.float64] | None = ...,
+        upper: NDArray[np.float64] | None = ...,
+    ) -> BandedMatrix: ...
+    def values(self) -> NDArray[np.float64]: ...
+    def get(self, row: int, column: int) -> float: ...
+    def set(self, row: int, column: int, value: float) -> None: ...
+
+
+class LapackStyleBandedLuFaithful:
+    """Reusable faithful LAPACK-style banded LU factorization.
+
+    Call :meth:`factor` once, then reuse the native workspace for one or more
+    RHS vectors. The standalone kernel has telemetry mode ``"off"``.
+    """
+    n: int
+    kl: int
+    ku: int
+    kv: int
+    ldab: int
+    pivot_epsilon: float
+    is_factorized: bool
+    ipiv: list[int]
+    def __init__(self, n: int, kl: int, ku: int, pivot_epsilon: float = ...) -> None: ...
+    def set_pivot_epsilon(self, value: float) -> None: ...
+    def factor(self, matrix: BandedMatrix) -> None: ...
+    def factor_compact(self, values: NDArray[np.float64]) -> None: ...
+    def factor_residual_relative(self, matrix: BandedMatrix) -> float: ...
+    def solve(self, rhs: NDArray[np.float64]) -> NDArray[np.float64]: ...
+    def solve_in_place(self, rhs: NDArray[np.float64]) -> None: ...
+    def solve_multiple(self, rhs: NDArray[np.float64]) -> NDArray[np.float64]: ...
+    def solve_with_refinement(
+        self,
+        matrix: BandedMatrix,
+        rhs: NDArray[np.float64],
+        max_iters: int = ...,
+        tolerance: float = ...,
+    ) -> BandedRefinementResult: ...
+
+
+class BandedRefinementResult:
+    """Detached solution and residual report from explicit refinement."""
+    iterations: int
+    residual_inf: float
+    relative_residual_inf: float
+    tolerance: float
+    converged: bool
+    def solution_array(self) -> NDArray[np.float64]: ...
+
+
+class PivotedTridiagonalLu:
+    """Reusable pivoted LU in three compact one-dimensional bands.
+
+    The constructor copies ``lower``, ``diagonal`` and ``upper`` and performs
+    factorization immediately. The padded in-place API preserves each RHS
+    block's unused tail.
+    """
+    n: int
+    pivot_epsilon: float
+    ipiv: list[int]
+    storage_bytes: int
+    def __init__(
+        self,
+        lower: NDArray[np.float64],
+        diagonal: NDArray[np.float64],
+        upper: NDArray[np.float64],
+        pivot_epsilon: float = ...,
+    ) -> None: ...
+    def solve(self, rhs: NDArray[np.float64]) -> NDArray[np.float64]: ...
+    def solve_in_place(self, rhs: NDArray[np.float64]) -> None: ...
+    def solve_multiple(self, rhs: NDArray[np.float64]) -> NDArray[np.float64]: ...
+    def solve_multiple_in_place(
+        self, rhs: NDArray[np.float64], nrhs: int, stride: int
+    ) -> None: ...
+
+
+class BlockTridiagonalLuConsistent:
+    """Reusable compact LU for structured block-tridiagonal systems.
+
+    Inputs have shapes ``(n_blocks - 1, bs, bs)``, ``(n_blocks, bs, bs)`` and
+    ``(n_blocks - 1, bs, bs)``. The global coefficient matrix is never
+    materialized as a dense NumPy array.
+    """
+    n_blocks: int
+    block_size: int
+    n: int
+    is_factorized: bool
+    storage_bytes: int
+    factor_residual_relative: float
+    def __init__(
+        self,
+        lower: NDArray[np.float64],
+        diagonal: NDArray[np.float64],
+        upper: NDArray[np.float64],
+    ) -> None: ...
+    def condition_diagnostics(self) -> tuple[float, float]: ...
+    def pivot_diagnostics(self) -> list[tuple[int, int, int]]: ...
+    def solve(self, rhs: NDArray[np.float64]) -> NDArray[np.float64]: ...
+    def solve_in_place(self, rhs: NDArray[np.float64]) -> None: ...
+    def solve_multiple(self, rhs: NDArray[np.float64]) -> NDArray[np.float64]: ...
+    def solve_multiple_in_place(
+        self, rhs: NDArray[np.float64], nrhs: int, stride: int
+    ) -> None: ...
+    def solve_with_refinement(
+        self, rhs: NDArray[np.float64], refinement_steps: int
+    ) -> BlockTridiagonalRefinementResult: ...
+
+
+class BlockTridiagonalRefinementResult:
+    """Detached solution and residual report from block refinement."""
+    requested_steps: int
+    accepted_steps: int
+    refinement_attempted: bool
+    direct_relative_residual: float
+    final_relative_residual: float
+    def solution_array(self) -> NDArray[np.float64]: ...
 
 
 class BdfSolver:

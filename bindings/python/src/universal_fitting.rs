@@ -7,20 +7,20 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 
-use rustedscithe_core::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
-use rustedscithe_core::numerical::optimization::universal_fitting::{
-    Method, UniversalFitting, UniversalFittingError, UniversalFittingResult,
-};
-use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
 use rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresTelemetryMode;
 use rustedscithe_core::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
 };
 use rustedscithe_core::numerical::SolverTelemetryMode;
+use rustedscithe_core::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
+use rustedscithe_core::numerical::optimization::universal_fitting::{
+    Method, UniversalFitting, UniversalFittingError, UniversalFittingResult,
+};
+use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
 
 use crate::errors::{
-    annotate_native, native_variant, ExhaustionError, InvalidConfigurationError,
-    InvalidExpressionError, SolverError, SolverPanicState, UnsupportedOptionError,
+    ExhaustionError, InvalidConfigurationError, InvalidExpressionError, SolverError,
+    SolverPanicState, UnsupportedOptionError, annotate_native, native_variant,
 };
 use crate::expr::PyExpr;
 
@@ -159,7 +159,9 @@ impl PyUniversalFittingSolution {
                 crate::nonlinear::statistics_counters(&fit.minimization_report.statistics),
                 crate::nonlinear::statistics_timings(&fit.minimization_report.statistics),
                 crate::nonlinear::statistics_attempt_counters(&fit.minimization_report.statistics),
-                crate::nonlinear::statistics_attempt_timings_ms(&fit.minimization_report.statistics),
+                crate::nonlinear::statistics_attempt_timings_ms(
+                    &fit.minimization_report.statistics,
+                ),
             ),
             UniversalFittingResult::GAVIN(fit) => fit.telemetry.as_ref().map_or_else(
                 || (HashMap::new(), HashMap::new(), Vec::new(), Vec::new()),

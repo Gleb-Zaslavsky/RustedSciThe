@@ -6,8 +6,10 @@
 
 mod animation;
 mod aot;
+mod banded;
 mod bdf;
 mod be;
+mod block_tridiagonal;
 pub(crate) mod bvp;
 mod bvp_damp;
 mod contract;
@@ -28,19 +30,22 @@ mod symbolic_arrays;
 mod system;
 mod task;
 mod telemetry;
+mod tridiagonal;
 mod universal_fitting;
 mod varpro;
 
-use pyo3::prelude::*;
 use pyo3::PyTypeInfo;
+use pyo3::prelude::*;
 
+use crate::banded::{BandedMatrix, BandedRefinementResult, LapackStyleBandedLuFaithful};
 use crate::bdf::{BdfCallbackSolver, BdfSolution, BdfSolver};
 use crate::be::{BackwardEulerSolution, BackwardEulerSolver};
+use crate::block_tridiagonal::{BlockTridiagonalLuConsistent, BlockTridiagonalRefinementResult};
 use crate::bvp::{BvpSciSolution, BvpSciSolver};
 use crate::bvp_damp::{BvpDampFrozenSolver, BvpDampNaiveSolver, BvpDampSolution, BvpDampSolver};
 use crate::contract::{
-    capabilities, ExecutionPolicy, ExecutionRoute, MatrixLayout, SolverCapabilities, SolverOptions,
-    SymbolicFrontend, TelemetryMode,
+    ExecutionPolicy, ExecutionRoute, MatrixLayout, SolverCapabilities, SolverOptions,
+    SymbolicFrontend, TelemetryMode, capabilities,
 };
 use crate::errors::{
     AotArtifactError, AotCompilerError, AotLifecycleError, AotLinkError, AotTimeoutError, BvpError,
@@ -48,7 +53,7 @@ use crate::errors::{
     PoisonedSolverError, PreparationError, RustedSciTheError, SolverError, TaskDocumentError,
     TelemetryError, UnsupportedOptionError, UnsupportedSymbolicOperationError,
 };
-use crate::expr::{constant, indexed_symbols, parse_expr, symbol, symbols, PyExpr};
+use crate::expr::{PyExpr, constant, indexed_symbols, parse_expr, symbol, symbols};
 use crate::gavin::{GavinFittingSolution, GavinFittingSolver};
 use crate::lambdify::LambdifiedExpr;
 use crate::lsode2::{Lsode2PythonSolver, Lsode2Solution};
@@ -59,6 +64,7 @@ use crate::shooting_bvp::{PyShootingBvpSolution, PyShootingBvpSolver};
 use crate::symbolic_arrays::{PyExprMatrix, PyExprVector};
 use crate::system::{LambdifiedSystem, SymbolicSystem};
 use crate::task::{BvpTaskResult, IvpTaskResult, TaskDocument};
+use crate::tridiagonal::PivotedTridiagonalLu;
 use crate::universal_fitting::{PyUniversalFitting, PyUniversalFittingSolution};
 use crate::varpro::{VarProSolution, VarProSolver};
 
@@ -75,6 +81,12 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<BdfSolver>()?;
     module.add_class::<BdfCallbackSolver>()?;
     module.add_class::<BdfSolution>()?;
+    module.add_class::<BandedMatrix>()?;
+    module.add_class::<LapackStyleBandedLuFaithful>()?;
+    module.add_class::<BandedRefinementResult>()?;
+    module.add_class::<BlockTridiagonalLuConsistent>()?;
+    module.add_class::<BlockTridiagonalRefinementResult>()?;
+    module.add_class::<PivotedTridiagonalLu>()?;
     module.add_class::<BackwardEulerSolver>()?;
     module.add_class::<BackwardEulerSolution>()?;
     module.add_class::<BvpSciSolver>()?;
@@ -215,10 +227,12 @@ mod tests {
         assert!(PyExpr::variable("").is_err());
         assert!(PyExpr::constant(f64::NAN).is_err());
         assert!(PyExpr::parse("x").unwrap().evaluate(vec![]).is_err());
-        assert!(PyExpr::parse("x")
-            .unwrap()
-            .evaluate(vec![f64::INFINITY])
-            .is_err());
+        assert!(
+            PyExpr::parse("x")
+                .unwrap()
+                .evaluate(vec![f64::INFINITY])
+                .is_err()
+        );
     }
 
     #[test]
@@ -265,20 +279,22 @@ mod tests {
             bdf.telemetry_modes(),
             vec!["off", "counters", "timings", "detailed"]
         );
-        assert!(SolverOptions::new(
-            None,
-            None,
-            Some("sparse"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None
-        )
-        .unwrap()
-        .validate_for("be")
-        .is_err());
+        assert!(
+            SolverOptions::new(
+                None,
+                None,
+                Some("sparse"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )
+            .unwrap()
+            .validate_for("be")
+            .is_err()
+        );
 
         let be = capabilities("backward_euler").unwrap();
         assert_eq!(be.solver(), "backward_euler");

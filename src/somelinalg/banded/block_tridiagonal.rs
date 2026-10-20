@@ -27,6 +27,9 @@ impl BlockTridiagonal {
         let block_len = block_size
             .checked_mul(block_size)
             .ok_or(BandedError::DimensionMismatch)?;
+        n_blocks
+            .checked_mul(block_size)
+            .ok_or(BandedError::DimensionMismatch)?;
 
         let mut diag = Vec::with_capacity(n_blocks);
         for _ in 0..n_blocks {
@@ -51,6 +54,49 @@ impl BlockTridiagonal {
         })
     }
 
+    /// Construct a block-tridiagonal matrix from contiguous row-major blocks.
+    ///
+    /// `diagonal` contains `n_blocks` blocks, while `lower` and `upper`
+    /// contain `n_blocks - 1` blocks. Each block has `block_size *
+    /// block_size` entries. The input is copied and all entries are checked
+    /// for finiteness before the matrix becomes visible to the caller.
+    pub fn from_row_major_blocks(
+        n_blocks: usize,
+        block_size: usize,
+        lower: &[f64],
+        diagonal: &[f64],
+        upper: &[f64],
+    ) -> Result<Self, BandedError> {
+        let matrix = Self::zeros(n_blocks, block_size)?;
+        let block_len = matrix.block_len();
+        let expected_diag = n_blocks
+            .checked_mul(block_len)
+            .ok_or(BandedError::DimensionMismatch)?;
+        let expected_off = n_blocks
+            .saturating_sub(1)
+            .checked_mul(block_len)
+            .ok_or(BandedError::DimensionMismatch)?;
+        if diagonal.len() != expected_diag
+            || lower.len() != expected_off
+            || upper.len() != expected_off
+        {
+            return Err(BandedError::DimensionMismatch);
+        }
+
+        let mut matrix = matrix;
+        for block in 0..n_blocks {
+            let start = block * block_len;
+            matrix.diag[block].copy_from_slice(&diagonal[start..start + block_len]);
+        }
+        for block in 0..n_blocks.saturating_sub(1) {
+            let start = block * block_len;
+            matrix.lower[block].copy_from_slice(&lower[start..start + block_len]);
+            matrix.upper[block].copy_from_slice(&upper[start..start + block_len]);
+        }
+        matrix.validate_finite()?;
+        Ok(matrix)
+    }
+
     #[inline]
     pub fn n_blocks(&self) -> usize {
         self.n_blocks
@@ -63,12 +109,55 @@ impl BlockTridiagonal {
 
     #[inline]
     pub fn n(&self) -> usize {
-        self.n_blocks * self.block_size
+        self.n_blocks.saturating_mul(self.block_size)
     }
 
     #[inline]
     pub fn block_len(&self) -> usize {
         self.block_size * self.block_size
+    }
+
+    /// Approximate bytes occupied by the structured numeric blocks.
+    pub fn storage_bytes(&self) -> usize {
+        let block_values = self
+            .n_blocks
+            .saturating_mul(3)
+            .saturating_sub(2)
+            .saturating_mul(self.block_len());
+        block_values.saturating_mul(std::mem::size_of::<f64>())
+    }
+
+    /// Reject NaN/Inf entries before a factorization can mutate its workspace.
+    pub fn validate_finite(&self) -> Result<(), BandedError> {
+        let bs = self.block_size;
+        for (block, values) in self.diag.iter().enumerate() {
+            validate_block_finite(
+                "block_tridiagonal.diagonal",
+                block * bs,
+                block * bs,
+                values,
+                bs,
+            )?;
+        }
+        for (block, values) in self.lower.iter().enumerate() {
+            validate_block_finite(
+                "block_tridiagonal.lower",
+                (block + 1) * bs,
+                block * bs,
+                values,
+                bs,
+            )?;
+        }
+        for (block, values) in self.upper.iter().enumerate() {
+            validate_block_finite(
+                "block_tridiagonal.upper",
+                block * bs,
+                (block + 1) * bs,
+                values,
+                bs,
+            )?;
+        }
+        Ok(())
     }
 
     #[inline]
@@ -148,6 +237,14 @@ impl BlockTridiagonal {
         j: usize,
         value: f64,
     ) -> Result<(), BandedError> {
+        if !value.is_finite() {
+            return Err(BandedError::NonFiniteInput {
+                stage: "block_tridiagonal.diagonal",
+                row: k * self.block_size + i,
+                col: k * self.block_size + j,
+                value,
+            });
+        }
         let idx = self
             .block_index(i, j)
             .ok_or(BandedError::OutOfBounds { i, j })?;
@@ -163,6 +260,14 @@ impl BlockTridiagonal {
         j: usize,
         value: f64,
     ) -> Result<(), BandedError> {
+        if !value.is_finite() {
+            return Err(BandedError::NonFiniteInput {
+                stage: "block_tridiagonal.lower",
+                row: (k + 1) * self.block_size + i,
+                col: k * self.block_size + j,
+                value,
+            });
+        }
         let idx = self
             .block_index(i, j)
             .ok_or(BandedError::OutOfBounds { i, j })?;
@@ -181,6 +286,14 @@ impl BlockTridiagonal {
         j: usize,
         value: f64,
     ) -> Result<(), BandedError> {
+        if !value.is_finite() {
+            return Err(BandedError::NonFiniteInput {
+                stage: "block_tridiagonal.upper",
+                row: k * self.block_size + i,
+                col: (k + 1) * self.block_size + j,
+                value,
+            });
+        }
         let idx = self
             .block_index(i, j)
             .ok_or(BandedError::OutOfBounds { i, j })?;
@@ -263,6 +376,26 @@ impl BlockTridiagonal {
     }
 }
 
+fn validate_block_finite(
+    stage: &'static str,
+    row0: usize,
+    col0: usize,
+    values: &[f64],
+    block_size: usize,
+) -> Result<(), BandedError> {
+    for (index, value) in values.iter().copied().enumerate() {
+        if !value.is_finite() {
+            return Err(BandedError::NonFiniteInput {
+                stage,
+                row: row0 + index / block_size,
+                col: col0 + index % block_size,
+                value,
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::BlockTridiagonal;
@@ -335,5 +468,64 @@ mod tests {
         ];
 
         assert_eq!(d, expected);
+    }
+
+    #[test]
+    fn contiguous_constructor_preserves_block_layout_and_storage_contract() {
+        let matrix = BlockTridiagonal::from_row_major_blocks(
+            2,
+            2,
+            &[9.0, 10.0, 11.0, 12.0],
+            &[1.0, 2.0, 3.0, 4.0, 13.0, 14.0, 15.0, 16.0],
+            &[5.0, 6.0, 7.0, 8.0],
+        )
+        .unwrap();
+
+        assert_eq!(
+            matrix.to_dense(),
+            vec![
+                vec![1.0, 2.0, 5.0, 6.0],
+                vec![3.0, 4.0, 7.0, 8.0],
+                vec![9.0, 10.0, 13.0, 14.0],
+                vec![11.0, 12.0, 15.0, 16.0],
+            ]
+        );
+        assert_eq!(matrix.storage_bytes(), 16 * std::mem::size_of::<f64>());
+    }
+
+    #[test]
+    fn contiguous_constructor_rejects_bad_shape_and_nonfinite_values() {
+        let shape_error =
+            BlockTridiagonal::from_row_major_blocks(2, 2, &[0.0, 0.0], &[1.0; 8], &[0.0; 4])
+                .unwrap_err();
+        assert!(matches!(shape_error, super::BandedError::DimensionMismatch));
+
+        let nonfinite =
+            BlockTridiagonal::from_row_major_blocks(1, 2, &[], &[1.0, f64::NAN, 0.0, 1.0], &[])
+                .unwrap_err();
+        assert!(matches!(
+            nonfinite,
+            super::BandedError::NonFiniteInput {
+                stage: "block_tridiagonal.diagonal",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn mutating_setters_reject_nonfinite_values() {
+        let mut matrix = BlockTridiagonal::zeros(2, 2).unwrap();
+
+        let error = matrix.set_diag(0, 1, 0, f64::INFINITY).unwrap_err();
+        assert!(matches!(
+            error,
+            super::BandedError::NonFiniteInput {
+                stage: "block_tridiagonal.diagonal",
+                row: 1,
+                col: 0,
+                ..
+            }
+        ));
+        assert_eq!(matrix.get_diag(0, 1, 0).unwrap(), 0.0);
     }
 }

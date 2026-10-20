@@ -1523,6 +1523,18 @@ mod tests {
         a
     }
 
+    fn make_tridiag_4() -> Banded<f64> {
+        let mut a = Banded::<f64>::zeros(4, 1, 1).unwrap();
+        for i in 0..4 {
+            a[(i, i)] = 4.0;
+        }
+        for i in 0..3 {
+            a[(i, i + 1)] = 1.0;
+            a[(i + 1, i)] = 2.0;
+        }
+        a
+    }
+
     fn make_pivot_required_small() -> Banded<f64> {
         let mut a = Banded::<f64>::zeros(3, 1, 1).unwrap();
         a[(0, 0)] = 0.0;
@@ -1594,6 +1606,24 @@ mod tests {
         let mut rhs = dense_matvec(&dense, &x_true);
 
         let mut lu = LapackStyleBandedLuFaithful::new(5, 1, 1).unwrap();
+        lu.factor_from(&a).unwrap();
+        lu.solve_in_place(&mut rhs).unwrap();
+
+        for i in 0..x_true.len() {
+            assert!((rhs[i] - x_true[i]).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn solve_four_by_four_tridiagonal_recovers_known_solution() {
+        let a = make_tridiag_4();
+        let mut lu0 = LapackStyleBandedLuFaithful::new(4, 1, 1).unwrap();
+        lu0.load_from_banded(&a).unwrap();
+        let dense = lu0.reconstruct_original_band_dense();
+        let x_true = vec![1.0, 2.0, 3.0, 4.0];
+        let mut rhs = dense_matvec(&dense, &x_true);
+
+        let mut lu = LapackStyleBandedLuFaithful::new(4, 1, 1).unwrap();
         lu.factor_from(&a).unwrap();
         lu.solve_in_place(&mut rhs).unwrap();
 

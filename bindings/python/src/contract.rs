@@ -769,6 +769,63 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
     let solver = solver.trim().to_ascii_lowercase().replace(['-', ' '], "_");
     let common_frontends = vec!["expr_legacy".to_owned(), "atom_native".to_owned()];
     match solver.as_str() {
+        "lapack_banded" | "somelinalg_banded" => Ok(SolverCapabilities {
+            solver: "lapack_banded".to_owned(),
+            // This is a numerical linear-algebra kernel, not a symbolic
+            // solver. Its public API accepts compact NumPy bands directly.
+            frontends: Vec::new(),
+            executions: vec![
+                "factor".to_owned(),
+                "solve".to_owned(),
+                "solve_multiple".to_owned(),
+                "refinement".to_owned(),
+            ],
+            methods: Vec::new(),
+            layouts: vec!["banded".to_owned()],
+            policies: vec!["sequential".to_owned()],
+            telemetry_modes: vec!["off".to_owned()],
+            supports_continuation: false,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "pivoted_tridiagonal" | "tridiagonal_lu_pp" => Ok(SolverCapabilities {
+            solver: "pivoted_tridiagonal".to_owned(),
+            // This is a numerical kernel. It consumes compact one-dimensional
+            // bands directly and intentionally has no symbolic frontend axis.
+            frontends: Vec::new(),
+            executions: vec![
+                "factor".to_owned(),
+                "solve".to_owned(),
+                "solve_multiple".to_owned(),
+            ],
+            methods: Vec::new(),
+            layouts: vec!["tridiagonal".to_owned()],
+            policies: vec!["sequential".to_owned()],
+            telemetry_modes: vec!["off".to_owned()],
+            supports_continuation: false,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
+        "block_tridiagonal" | "block_tridiagonal_lu_consistent" => Ok(SolverCapabilities {
+            solver: "block_tridiagonal".to_owned(),
+            // This is a structured numerical kernel.  The Python route owns
+            // compact block arrays and deliberately has no symbolic or
+            // telemetry axis.
+            frontends: Vec::new(),
+            executions: vec![
+                "factor".to_owned(),
+                "solve".to_owned(),
+                "solve_multiple".to_owned(),
+                "refinement".to_owned(),
+            ],
+            methods: Vec::new(),
+            layouts: vec!["block_tridiagonal".to_owned()],
+            policies: vec!["sequential".to_owned()],
+            telemetry_modes: vec!["off".to_owned()],
+            supports_continuation: false,
+            supports_analytical_callbacks: false,
+            analytical_callback_layouts: Vec::new(),
+        }),
         "radau" | "radau5" => Ok(SolverCapabilities {
             solver: "radau5".to_owned(),
             frontends: common_frontends,
@@ -1022,7 +1079,7 @@ fn capabilities_for(solver: &str) -> PyResult<SolverCapabilities> {
             analytical_callback_layouts: Vec::new(),
         }),
         _ => Err(InvalidConfigurationError::new_err(format!(
-            "unknown solver '{solver}'; capabilities are defined for radau5, bdf, backward_euler, lsode2, ode_api2_nonstiff, bvp_damp, bvp_sci, shooting_bvp, nonlinear_system, fitting, gavin_fitting, varpro and method-specific UniversalFitting routes"
+            "unknown solver '{solver}'; capabilities are defined for lapack_banded, pivoted_tridiagonal, block_tridiagonal, radau5, bdf, backward_euler, lsode2, ode_api2_nonstiff, bvp_damp, bvp_sci, shooting_bvp, nonlinear_system, fitting, gavin_fitting, varpro and method-specific UniversalFitting routes"
         ))),
     }
 }

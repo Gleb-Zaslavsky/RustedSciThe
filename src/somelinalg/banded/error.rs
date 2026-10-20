@@ -25,6 +25,22 @@ pub enum BandedError {
         value: f64,
     },
 
+    #[error("non-finite {stage} input value at row={row}, col={col}, value={value}")]
+    NonFiniteInput {
+        stage: &'static str,
+        row: usize,
+        col: usize,
+        value: f64,
+    },
+
+    #[error("non-finite {stage} factor value at block={block}, index={index}, value={value}")]
+    NonFiniteFactor {
+        stage: &'static str,
+        block: usize,
+        index: usize,
+        value: f64,
+    },
+
     #[error("non-finite {stage} solution value at index={index}, value={value}")]
     NonFiniteSolution {
         stage: &'static str,

@@ -160,6 +160,8 @@ Binding design and review criteria are defined in the
 | BVP_Damp | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BVP_DAMP_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/BVP_DAMP_GUIDE_RU.md) |
 | ShootingBVP | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SHOOTING_BVP_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SHOOTING_BVP_GUIDE_RU.md) |
 | Nonlinear systems and fitting | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/NONLINEAR_FITTING_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/NONLINEAR_FITTING_GUIDE_RU.md) |
+| Faithful banded linear algebra | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SOMELINALG_BANDED_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SOMELINALG_BANDED_GUIDE_RU.md) |
+| Pivoted tridiagonal LU | [Guide](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SOMELINALG_TRIDIAGONAL_GUIDE_EN.md) | [Руководство](https://github.com/Gleb-Zaslavsky/RustedSciThe/blob/master/bindings/python/guides/SOMELINALG_TRIDIAGONAL_GUIDE_RU.md) |
 
 Runnable, commented Python examples include native symbolic calculus and
 arrays, Robertson kinetics, Lorenz and three-body systems, frontend/layout

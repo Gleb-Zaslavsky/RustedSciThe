@@ -57,6 +57,21 @@ release baselines for performance claims; this script is diagnostic evidence.
 `python_boundary_bvp.py` remains a smaller one-problem diagnostic that compares
 symbolic Lambdify against a Python callback route.
 
+## Compact Faithful Banded Boundary
+
+`python_banded.py` measures `somelinalg`'s compact faithful banded API without
+constructing a dense coefficient matrix. It reports packed assembly,
+factorization, warm single-RHS solve, multiple-RHS solve and explicit
+iterative-refinement stages separately, together with retained storage bytes.
+The result is Python/NumPy boundary evidence, not a replacement for a Rust
+core benchmark.
+
+```powershell
+& $wheelPython .\bindings\python\benchmarks\python_banded.py `
+  --dimensions 32,128,512 --bandwidths 1,2 --repeats 5 `
+  --output $env:TEMP\python_banded.md
+```
+
 ## IVP Boundary and Continuation
 
 `python_boundary_ivp.py` compares ExprLegacy and AtomNative on the same dense

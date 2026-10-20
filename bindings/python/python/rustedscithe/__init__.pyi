@@ -34,7 +34,7 @@ from ._native import savgol_filter as savgol_filter
 from ._native import spline_resample as spline_resample
 
 __all__ = [
-    "Expr", "ExprVector", "ExprMatrix", "BdfSolver", "BdfCallbackSolver", "BdfSolution",
+    "Expr", "ExprVector", "ExprMatrix", "BandedMatrix", "LapackStyleBandedLuFaithful", "BandedRefinementResult", "PivotedTridiagonalLu", "BlockTridiagonalLuConsistent", "BlockTridiagonalRefinementResult", "BdfSolver", "BdfCallbackSolver", "BdfSolution",
     "BackwardEulerSolver", "BackwardEulerSolution", "UniversalNonStiffSolver", "UniversalNonStiffSolution", "BvpSciSolver",
     "BvpSciSolution", "BvpDampSolver", "BvpDampNaiveSolver", "BvpDampFrozenSolver", "BvpDampSolution", "RadauSolver",
     "RadauCallbackSolver", "RadauSolution", "LambdifiedExpr", "Lsode2Solver",

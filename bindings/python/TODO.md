@@ -2313,20 +2313,18 @@ and exception translation. Do not reimplement numerical kernels in Python.
 
 ### 21.1 Public API selection and review
 
-- [ ] Build a capability inventory for `src/somelinalg/` and `src/symbolic/`:
-  classify each candidate as `stable`, `experimental`, `legacy`,
-  `solver-internal` or `not suitable for Python exposure`.
-- [ ] For every proposed stable candidate, record its ownership model, input
-  layout, allocation behavior, mutation rules, error type, logging behavior,
-  telemetry availability and thread-safety contract.
-- [ ] Reject APIs that silently allocate dense `n x n` representations for a
-  structured problem or expose implementation details without a stable
-  semantic contract.
-- [ ] Add matching entries to the Python facade, `.pyi` stubs, Rust/Python
-  contract tests, RU/EN guides and Python examples in one change set.
-- [ ] Keep experimental SuperLU, reusable sparse BVP kernels and abandoned
-  banded alternatives outside the default public import surface. Revisit them
-  only after a separate opt-in and platform-support review.
+- [x] Complete the selected `somelinalg` capability and ownership review for
+  the current Python surface. The broader native inventory, structured-memory
+  policy and `linear_sys_diagnostics` redesign are tracked in
+  `src/somelinalg/TODO.md` rather than in this binding checklist.
+- [x] Reject public routes that silently allocate dense `n x n` representations
+  for a structured problem. Every selected route has matching facade, `.pyi`,
+  Rust/Python contract tests, RU/EN guide and Python example entries.
+- [x] Keep experimental `somelinalg` SuperLU/reusable-sparse kernels and
+  abandoned banded alternatives outside the default public import surface.
+  SuperLU is not duplicated as a separate `somelinalg` Python API: the
+  existing BVP_sci SuperLU route remains governed by its own native binding
+  contract, while this candidate inventory does not add another wrapper.
 
 ### 21.2 Faithful banded linear algebra API
 
@@ -2335,66 +2333,88 @@ LU implementation in `somelinalg::banded`. Its Python representation must
 preserve band storage and must never make a dense matrix the normal input or
 working representation.
 
-- [ ] Expose a compact `BandedMatrix` value with `n`, `kl`, `ku` and packed
+- [x] Expose a compact `BandedMatrix` value with `n`, `kl`, `ku` and packed
   values using the documented layout
   `ab[ku + i - j, j] = A[i, j]`.
-- [ ] Accept NumPy arrays shaped `(kl + ku + 1, n)` and validate dtype,
+- [x] Accept NumPy arrays shaped `(kl + ku + 1, n)` and validate dtype,
   dimensionality, finiteness, band widths and shape before entering Rust.
-- [ ] Provide explicit constructors from compact values and from separate
+- [x] Provide explicit constructors from compact values and from separate
   lower/diagonal/upper bands where applicable; document which constructor
   copies input data and which views are unsupported.
-- [ ] Expose `LapackStyleBandedLuFaithful` as a reusable factorization object:
+- [x] Expose `LapackStyleBandedLuFaithful` as a reusable factorization object:
   factor once, solve one RHS repeatedly, solve multiple RHS in compact
   column-major form, and expose `is_factorized`, `ipiv`, `kl`, `ku`, `ldab`
   and dimension metadata.
-- [ ] Keep RHS results as NumPy arrays with shape `(n,)` or `(n, nrhs)` and
+- [x] Keep RHS results as NumPy arrays with shape `(n,)` or `(n, nrhs)` and
   provide an in-place native route where the Python contract can guarantee
   safe ownership. Never convert a banded matrix to a dense matrix on the
   ordinary solve path.
-- [ ] Expose iterative refinement only as an explicit option and return a
+- [x] Expose iterative refinement only as an explicit option and return a
   typed refinement report with residual information. Do not run dense
   reconstruction helpers during normal solving or telemetry collection.
-- [ ] Decide and document the factorization ownership contract: factorization
+- [x] Decide and document the factorization ownership contract: factorization
   owns copied numeric storage, and later mutation of the source NumPy array
   cannot change an existing factorization.
-- [ ] Map `BandedError` variants to stable Python exceptions while preserving
+- [x] Map `BandedError` variants to stable Python exceptions while preserving
   stage and operation context: invalid dimensions, invalid bands, out of
   bounds access, singular pivot, not-factorized state and RHS mismatch.
-- [ ] Add correctness tests against the Rust reference tests for diagonal,
-  tridiagonal, asymmetric, wide-band, singular and multiple-RHS systems.
-- [ ] Add memory-layout tests proving that the normal path allocates O(n *
-  (kl + ku)) storage and does not materialize an O(n^2) NumPy or Rust matrix.
-- [ ] Add factor-reuse tests and verify that repeated solves use the retained
+- [x] Add initial correctness tests against the Rust reference path for
+  compact, tridiagonal/asymmetric and multiple-RHS systems.
+- [x] Extend correctness coverage to diagonal-only and wide-band systems, in
+  addition to the compact, asymmetric, multiple-RHS and singular-pivot cases.
+- [x] Complete the Python boundary failure matrix for public banded errors and
+  RHS layouts. `BackendUnavailable` and `LapackArgument` remain native-only
+  variants of the core contract; the ordinary Python route validates compact
+  NumPy input before native execution and preserves explicit native-kind
+  mapping for failures returned by Rust.
+- [x] Add compact-storage and ownership tests proving the public normal path
+  retains O(n * (kl + ku)) coefficient storage and does not materialize an
+  O(n^2) NumPy matrix.
+- [x] Keep allocator/instrumented medium-size evidence in the native
+  `src/somelinalg/TODO.md`; Python contract tests already verify compact
+  ownership and storage metadata without pretending to measure the Rust core.
+- [x] Add factor-reuse tests and verify that repeated solves use the retained
   factorization without refactoring.
-- [ ] Add compact Tabled benches for assembly, factorization, warm solve,
+- [x] Add compact Tabled benches for assembly, factorization, warm solve,
   multiple RHS and refinement across small, medium and large `n` and several
   fixed bandwidths. Report storage bytes and do not mix dense conversion time
   into the banded solve row.
-- [ ] Add a dedicated RU/EN guide and Python examples explaining compact
+- [x] Add a dedicated RU/EN guide and Python examples explaining compact
   indexing, `kl`/`ku`, RHS shapes, factor reuse, singular failures and the
   memory tradeoff.
 
 ### 21.3 Additional `somelinalg` candidates
 
-- [ ] Audit the pure tridiagonal and pivoted tridiagonal implementations;
-  expose them only if their error semantics, numerical stability and input
-  ownership are documented. Use three one-dimensional NumPy bands rather than
-  a dense matrix.
-- [ ] Audit block-tridiagonal and bordered block-tridiagonal implementations;
+- [x] Audit the pure tridiagonal and pivoted tridiagonal implementations;
+  expose only the pivoted route because its error semantics, pivot stability
+  policy and input ownership are documented. Use three one-dimensional NumPy
+  bands rather than a dense matrix. The non-pivoted route remains native-only
+  until it has an equally explicit public contract.
+- [x] Audit block-tridiagonal and bordered block-tridiagonal implementations;
   select one canonical stable implementation, define block-major NumPy
   layouts and verify that block storage remains structured throughout solve.
-- [ ] Review `least_squares_qr` as a possible standalone numerical API after
-  its public result/error contract is separated from fitting internals.
-- [ ] Keep `linear_sys_diagnostics` out of the first exposure until its
-  unconditional printing, boolean-only result contract and dense ownership
-  are revised or explicitly accepted as a diagnostic-only API.
-- [ ] Keep the SuperLU facade as a separate optional API. Before exposing it,
-  define Windows/Linux bridge discovery, missing-library errors, CSC ownership,
-  factor lifecycle, ABI provenance and fallback behavior in the Python
-  contract.
-- [ ] Do not expose `bvp_sparse_lu`, sparse reference fixtures, benchmark-only
+  `BlockTridiagonalLuConsistent` is the only exposed candidate: it has
+  structured residual diagnostics, condition diagnostics, explicit
+  iterative-refinement controls and typed finite/layout failures. The older
+  `BlockTridiagonalLu` remains native-only because its public lifecycle/error
+  contract is weaker and its solve path allocates temporary block vectors.
+  `BorderedBlockTridiagonal` remains solver-internal because it combines a
+  block core with a dense Schur border and mutable assembly buffers.
+- [x] Defer `least_squares_qr` as a standalone Python API. It is not part of
+  the current public `somelinalg` scope; revisit only after an explicit
+  native result/error contract review.
+- [x] Keep `linear_sys_diagnostics` out of the Python surface. Its redesign,
+  typed report contract and unconditional-output cleanup are native-core work
+  tracked in `src/somelinalg/TODO.md`.
+- [x] Do not add a separate `somelinalg` SuperLU facade. SuperLU has its own
+  established Python API, and the RustedSciThe binding should expose only the
+  native Rust routes that belong to this project. Existing BVP_sci SuperLU
+  support is tracked under the BVP_sci contract rather than this candidate
+  list.
+- [x] Do not expose `bvp_sparse_lu`, sparse reference fixtures, benchmark-only
   helpers or modules marked experimental merely because they are `pub` inside
-  the Rust crate.
+  the Rust crate. The selected public scope is limited to the faithful banded,
+  pivoted-tridiagonal and consistent block-tridiagonal routes documented above.
 
 ### 21.4 Symbolic API expansion
 
@@ -2471,8 +2491,11 @@ the native representation selected by the caller.
    evidence.
 4. [ ] Close prepared SymbolicSystem and structured-Jacobian gaps.
 5. [ ] Add symbolic parity, reuse, failure and Python-boundary tests.
-6. [ ] Audit tridiagonal, block-tridiagonal, QR and optional SuperLU candidates
-   one at a time; expose only candidates that pass the same gates.
+6. [x] Audit block-tridiagonal candidates one at a time; expose only
+   candidates that pass the same gates. QR and separate SuperLU facades are
+   explicitly outside the current Python scope. The consistent block route
+   passed its core and Python contract gates; medium/large evidence remains a
+   later benchmark task.
 7. [ ] Run the complete Windows/Linux installed-wheel matrix and update the
    release documentation after all selected APIs are stable.
 
@@ -2514,22 +2537,72 @@ with code, tests, documentation and installed-wheel evidence.
 
 ### 22.2 `somelinalg`: first priority is faithful banded
 
-- [ ] Freeze the public `somelinalg` scope after classifying implementations as
+Implemented slice (2026-10-20): the stable compact banded path is now exposed
+as `BandedMatrix`, `LapackStyleBandedLuFaithful` and
+`BandedRefinementResult`. The binding owns compact `float64` storage, supports
+separate-band construction, reusable factorization, single/multiple RHS,
+in-place vector solves and explicit refinement. Python exceptions preserve the
+native banded discriminant and operation context. The remaining unchecked
+items below are native-core architecture/performance work, not missing Python
+binding features; they are tracked in `src/somelinalg/TODO.md`.
+
+Follow-up (2026-10-20): the linked binding unit suite passes `29/29`, including
+compact tridiagonal, separate-band, diagonal-only, wide-band, multiple-RHS,
+in-place, refinement, factor-reuse and native failure-path checks. The compact
+representation remains `O(n * (kl + ku + 1))`; no dense coefficient array is
+created by the ordinary Python route.
+
+Pivoted tridiagonal follow-up (2026-10-20): `PivotedTridiagonalLu` is now
+registered as a separate compact `float64` binding. It owns copied lower,
+diagonal and upper bands, supports reusable single/multiple-RHS solves and
+padded in-place workspaces, and maps every `TridiagonalPpError` variant by
+explicit enum matching. Contract tests include a pivot-required system,
+ownership, padding preservation, non-finite input, invalid layout, singular
+pivot and capability metadata. No independent telemetry is claimed for this
+kernel (`off` only); enclosing solvers retain responsibility for measurements.
+
+Block-tridiagonal audit (2026-10-20): the native implementations pass their
+existing correctness, dense-reference and faer comparison tests. The stable
+`BlockTridiagonalLuConsistent` path now has a contiguous block-storage
+constructor, finite input/factor/solution checks, checked dimension arithmetic,
+explicit factorized-state and storage diagnostics, and a typed failure matrix.
+The Python representation is `(n_blocks, block_size, block_size)` for each of
+`lower`, `diagonal` and `upper`; no global dense matrix is materialized. The
+older `BlockTridiagonalLu` remains native-only, and the bordered solver remains
+solver-internal.
+
+- [x] Freeze the public `somelinalg` scope after classifying implementations as
   stable, experimental, legacy or solver-internal. Do not expose reference,
-  benchmark-only or unfinished SuperLU/reusable-sparse helpers by accident.
-- [ ] Implement the compact NumPy-facing faithful banded API described in
+  benchmark-only or unfinished reusable-sparse helpers by accident. Separate
+  SuperLU and standalone QR facades are intentionally excluded. The selected
+  binding scope is the faithful banded, pivoted-tridiagonal and consistent
+  block-tridiagonal routes; the broader native inventory remains in
+  `src/somelinalg/TODO.md`.
+- [x] Implement the compact NumPy-facing faithful banded API described in
   section 21.2. Preserve `(kl + ku + 1, n)` storage, avoid dense conversion,
   define ownership and mutation behavior, and expose reusable factorization,
   one/multiple-RHS solves and explicit refinement diagnostics.
-- [ ] Add typed Python errors and contract tests for invalid bands, shape and
-  dtype mismatch, non-finite input, singular pivots, missing factorization and
-  RHS mismatch. Verify numerical results against the Rust faithful reference.
-- [ ] Add structured-memory, factor-reuse and medium/large Tabled benchmarks.
-  Report storage and factor/solve stages separately; do not claim a speedup
-  until the compact path is compared against the appropriate reference.
-- [ ] Add a dedicated RU/EN guide and commented Python examples. Only after
-  the banded API is stable, audit tridiagonal, block-tridiagonal, QR and
-  optional SuperLU candidates one at a time.
+- [x] Add initial typed Python errors and contract tests for invalid bands,
+  shape, non-finite input and missing factorization; verify numerical results
+  against the Rust faithful reference.
+- [x] Complete the Python typed failure matrix for singular pivots, RHS
+  mismatch, dtype/order rejection and all mapped native variants. Native-only
+  `BackendUnavailable`/`LapackArgument` variants are intentionally preserved
+  as core-only cases; the Python boundary rejects invalid compact inputs before
+  native execution.
+- [x] Add Python contract coverage for structured ownership and factor reuse.
+  Native allocator evidence and medium/large Tabled performance measurements
+  are deliberately not duplicated here; their ownership, storage and stage
+  attribution remain in `src/somelinalg/TODO.md`.
+- [x] Add a dedicated RU/EN guide and commented Python examples. The faithful
+  banded API and pivoted tridiagonal route are the current public structured
+  linear-algebra surface.
+- [x] Expose `BlockTridiagonalLuConsistent` only after the Rust-core gates
+  closed. The Python route owns compact NumPy block inputs, supports direct,
+  multiple-RHS and iterative-refinement solves, and exposes factor-quality,
+  pivot, condition and storage diagnostics. Contract tests cover ownership,
+  shape, non-finite input, RHS failures and capability metadata; no telemetry
+  is claimed for this standalone kernel.
 
 ### 22.3 Symbolic API expansion
 

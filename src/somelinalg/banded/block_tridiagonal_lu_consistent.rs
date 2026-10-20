@@ -39,6 +39,10 @@ impl BlockTridiagonalLuConsistent {
             return Err(BandedError::DimensionMismatch);
         }
 
+        n_blocks
+            .checked_mul(block_size)
+            .ok_or(BandedError::DimensionMismatch)?;
+
         let block_len = block_size
             .checked_mul(block_size)
             .ok_or(BandedError::DimensionMismatch)?;
@@ -83,7 +87,27 @@ impl BlockTridiagonalLuConsistent {
 
     #[inline]
     pub fn n(&self) -> usize {
-        self.n_blocks * self.block_size
+        self.n_blocks.saturating_mul(self.block_size)
+    }
+
+    /// Whether `factor_from` completed successfully for the current matrix.
+    #[inline]
+    pub fn is_factorized(&self) -> bool {
+        self.is_factorized
+    }
+
+    /// Approximate bytes occupied by the retained structured factors.
+    pub fn storage_bytes(&self) -> usize {
+        let block_len = self.block_size.saturating_mul(self.block_size);
+        let factor_values = self.n_blocks.saturating_mul(block_len).saturating_add(
+            self.n_blocks
+                .saturating_sub(1)
+                .saturating_mul(block_len.saturating_mul(2)),
+        );
+        let pivot_values = self.n_blocks.saturating_mul(self.block_size);
+        factor_values
+            .saturating_mul(std::mem::size_of::<f64>())
+            .saturating_add(pivot_values.saturating_mul(std::mem::size_of::<usize>()))
     }
 
     #[inline]
@@ -110,6 +134,7 @@ impl BlockTridiagonalLuConsistent {
         if a.n_blocks() != self.n_blocks || a.block_size() != self.block_size {
             return Err(BandedError::DimensionMismatch);
         }
+        a.validate_finite()?;
 
         let bs = self.block_size;
         let nb = self.n_blocks;
@@ -182,6 +207,12 @@ impl BlockTridiagonalLuConsistent {
             )?;
         }
 
+        validate_factor_finite(
+            &self.diag_lu,
+            &self.lower_fac,
+            &self.upper_fac,
+            self.block_size,
+        )?;
         self.is_factorized = true;
         // Keep the production diagnostic on the block representation.  The
         // dense oracle below is intentionally retained for tests and offline
@@ -247,6 +278,7 @@ impl BlockTridiagonalLuConsistent {
         if rhs.len() != self.n() {
             return Err(BandedError::DimensionMismatch);
         }
+        validate_rhs_finite(rhs)?;
 
         let bs = self.block_size;
         let nb = self.n_blocks;
@@ -285,6 +317,8 @@ impl BlockTridiagonalLuConsistent {
             upper_solve_vector_in_place(&self.diag_lu[block_idx], bs, cur)?;
         }
 
+        validate_solution_finite(rhs)?;
+
         Ok(())
     }
 
@@ -299,13 +333,23 @@ impl BlockTridiagonalLuConsistent {
         }
 
         let n = self.n();
-        if ldb < n || rhs.len() < nrhs.saturating_mul(ldb) {
+        let required_len = nrhs.checked_mul(ldb).ok_or(BandedError::InvalidRhsLayout {
+            rhs_len: rhs.len(),
+            n,
+            nrhs,
+            ldb,
+        })?;
+        if ldb < n || rhs.len() < required_len {
             return Err(BandedError::InvalidRhsLayout {
                 rhs_len: rhs.len(),
                 n,
                 nrhs,
                 ldb,
             });
+        }
+
+        for col in 0..nrhs {
+            validate_rhs_finite(&rhs[col * ldb..col * ldb + n])?;
         }
 
         for col in 0..nrhs {
@@ -699,6 +743,102 @@ pub struct BlockNormDiagnostics {
     pub upper_fac_linf: Option<f64>,
     pub min_abs_diag_u: f64,
     pub max_abs_diag_u: f64,
+}
+
+fn validate_factor_finite(
+    diag_lu: &[Vec<f64>],
+    lower_fac: &[Vec<f64>],
+    upper_fac: &[Vec<f64>],
+    block_size: usize,
+) -> Result<(), BandedError> {
+    for (block, values) in diag_lu.iter().enumerate() {
+        if let Some((index, value)) = values
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(BandedError::NonFiniteFactor {
+                stage: "block_tridiagonal.factor",
+                block,
+                index,
+                value,
+            });
+        }
+    }
+    for (block, values) in lower_fac.iter().enumerate() {
+        if let Some((index, value)) = values
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(BandedError::NonFiniteFactor {
+                stage: "block_tridiagonal.lower_factor",
+                block,
+                index,
+                value,
+            });
+        }
+    }
+    for (block, values) in upper_fac.iter().enumerate() {
+        if let Some((index, value)) = values
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, value)| !value.is_finite())
+        {
+            return Err(BandedError::NonFiniteFactor {
+                stage: "block_tridiagonal.upper_factor",
+                block,
+                index,
+                value,
+            });
+        }
+    }
+    let expected_len = block_size.saturating_mul(block_size);
+    if diag_lu
+        .iter()
+        .chain(lower_fac)
+        .chain(upper_fac)
+        .any(|block| block.len() != expected_len)
+    {
+        return Err(BandedError::DimensionMismatch);
+    }
+    Ok(())
+}
+
+fn validate_rhs_finite(rhs: &[f64]) -> Result<(), BandedError> {
+    if let Some((index, value)) = rhs
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(BandedError::NonFiniteInput {
+            stage: "block_tridiagonal.rhs",
+            row: index,
+            col: 0,
+            value,
+        });
+    }
+    Ok(())
+}
+
+fn validate_solution_finite(solution: &[f64]) -> Result<(), BandedError> {
+    if let Some((index, value)) = solution
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(BandedError::NonFiniteSolution {
+            stage: "block_tridiagonal.solve",
+            index,
+            value,
+        });
+    }
+    Ok(())
 }
 
 fn dense_block_linf(block: &[f64]) -> f64 {
@@ -1358,6 +1498,87 @@ mod tests {
         }
 
         a
+    }
+
+    #[test]
+    fn constructor_rejects_total_dimension_overflow_before_allocation() {
+        let error = BlockTridiagonalLuConsistent::new(usize::MAX, 2).unwrap_err();
+        assert!(matches!(error, BandedError::DimensionMismatch));
+    }
+
+    #[test]
+    fn factorization_rejects_nonfinite_matrix_without_publishing_state() {
+        let mut matrix = small_block_system();
+        matrix.diag_blocks_mut()[0][0] = f64::NAN;
+
+        let mut factor = BlockTridiagonalLuConsistent::new(2, 2).unwrap();
+        let error = factor.factor_from(&matrix).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BandedError::NonFiniteInput {
+                stage: "block_tridiagonal.diagonal",
+                ..
+            }
+        ));
+        assert!(!factor.is_factorized());
+        assert!(factor.cached_factor_residual_relative().is_none());
+    }
+
+    #[test]
+    fn solve_rejects_nonfinite_rhs_before_mutating_it() {
+        let matrix = small_block_system();
+        let mut factor = BlockTridiagonalLuConsistent::new(2, 2).unwrap();
+        factor.factor_from(&matrix).unwrap();
+
+        let mut rhs = vec![1.0, f64::NAN, 3.0, 4.0];
+        let original = rhs.clone();
+        let error = factor.solve_in_place(&mut rhs).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BandedError::NonFiniteInput {
+                stage: "block_tridiagonal.rhs",
+                row: 1,
+                ..
+            }
+        ));
+        assert_eq!(rhs[0], original[0]);
+        assert!(rhs[1].is_nan() && original[1].is_nan());
+        assert_eq!(rhs[2..], original[2..]);
+    }
+
+    #[test]
+    fn multiple_rhs_checks_all_active_columns_before_mutating_any_column() {
+        let matrix = small_block_system();
+        let mut factor = BlockTridiagonalLuConsistent::new(2, 2).unwrap();
+        factor.factor_from(&matrix).unwrap();
+
+        let mut rhs = vec![1.0, 2.0, 3.0, 4.0, 99.0, 5.0, 6.0, f64::INFINITY, 8.0, 99.0];
+        let original = rhs.clone();
+        let error = factor.solve_multiple_in_place(&mut rhs, 2, 5).unwrap_err();
+
+        assert!(matches!(
+            error,
+            BandedError::NonFiniteInput {
+                stage: "block_tridiagonal.rhs",
+                row: 2,
+                ..
+            }
+        ));
+        assert_eq!(rhs, original);
+    }
+
+    #[test]
+    fn successful_factorization_publishes_lifecycle_and_storage_diagnostics() {
+        let matrix = small_block_system();
+        let mut factor = BlockTridiagonalLuConsistent::new(2, 2).unwrap();
+
+        assert!(!factor.is_factorized());
+        assert!(factor.storage_bytes() > 0);
+        factor.factor_from(&matrix).unwrap();
+        assert!(factor.is_factorized());
+        assert!(factor.cached_factor_residual_relative().is_some());
     }
 
     #[test]

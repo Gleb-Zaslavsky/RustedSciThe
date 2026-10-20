@@ -22,16 +22,15 @@ use rustedscithe_core::numerical::BVP_Damp::generated_solver_handoff::{
 };
 use rustedscithe_core::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use rustedscithe_core::numerical::BVP_Damp::telemetry::{
-    BvpCallbackStage, BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode,
-    BvpTelemetrySnapshot,
+    BvpCallbackStage, BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode, BvpTelemetrySnapshot,
 };
-use rustedscithe_core::symbolic::bvp::telemetry::BvpLambdifyTelemetrySnapshot;
 use rustedscithe_core::somelinalg::banded::{
     FallbackPolicy, LinearSolverConfig, LinearSolverPolicy,
 };
 use rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError;
 use rustedscithe_core::symbolic::bvp::legacy::BvpSymbolicAssemblyBackend;
 use rustedscithe_core::symbolic::bvp::telemetry::BvpLambdifyExecutionPolicy;
+use rustedscithe_core::symbolic::bvp::telemetry::BvpLambdifyTelemetrySnapshot;
 use rustedscithe_core::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use rustedscithe_core::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use rustedscithe_core::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
@@ -502,7 +501,10 @@ fn snapshot_maps(
         ("linear_solves", native.linear_solves),
         ("factorizations", native.factorizations),
         ("factorization_cache_hits", native.factorization_cache_hits),
-        ("factorization_invalidations", native.factorization_invalidations),
+        (
+            "factorization_invalidations",
+            native.factorization_invalidations,
+        ),
         ("rhs_solves", native.rhs_solves),
         ("grid_refinements", native.grid_refinements),
     ]
@@ -531,10 +533,7 @@ fn snapshot_maps(
             "symbolic_operations_ms",
             telemetry.timings.symbolic_operations,
         ),
-        (
-            "grid_refinement_ms",
-            telemetry.timings.grid_refinement,
-        ),
+        ("grid_refinement_ms", telemetry.timings.grid_refinement),
     ]
     .into_iter()
     .map(|(name, duration)| (name.to_owned(), duration.as_secs_f64() * 1000.0))
@@ -567,10 +566,7 @@ fn snapshot_detail_maps(
     ];
     if timings_enabled {
         for (name, scope) in scopes {
-            scope_timings_ms.insert(
-                format!("{name}_ms"),
-                scope.elapsed.as_secs_f64() * 1000.0,
-            );
+            scope_timings_ms.insert(format!("{name}_ms"), scope.elapsed.as_secs_f64() * 1000.0);
         }
         for stage in &telemetry.timings.callback_stage_timings {
             let name = match stage.stage {
@@ -658,33 +654,93 @@ fn snapshot_callback_maps(
     if let Some(snapshot) = telemetry.direct_banded_jacobian {
         if telemetry.telemetry_mode.collects_counters() {
             counters.extend([
-            ("direct_banded_calls".to_owned(), snapshot.calls),
-            ("direct_banded_work_items".to_owned(), snapshot.work_items),
-            ("direct_banded_errors".to_owned(), snapshot.errors),
-            ("direct_banded_evaluator_calls".to_owned(), snapshot.evaluator_calls),
-            ("direct_banded_storage_writes".to_owned(), snapshot.storage_writes),
-            ("direct_banded_parallel_dispatches".to_owned(), snapshot.parallel_dispatches),
-            ("direct_banded_sequential_dispatches".to_owned(), snapshot.sequential_dispatches),
-            ("direct_banded_diagonal_dispatches".to_owned(), snapshot.diagonal_dispatches),
-            ("direct_banded_entry_dispatches".to_owned(), snapshot.entry_dispatches),
-            ("direct_banded_effective_task_count".to_owned(), snapshot.effective_task_count),
-            ("prepared_atom_evaluators".to_owned(), snapshot.prepared_atom_evaluators),
-            ("prepared_atom_nodes".to_owned(), snapshot.prepared_atom_nodes),
-            ("prepared_atom_add_nodes".to_owned(), snapshot.prepared_atom_add_nodes),
-            ("prepared_atom_mul_nodes".to_owned(), snapshot.prepared_atom_mul_nodes),
-            ("prepared_atom_powi_nodes".to_owned(), snapshot.prepared_atom_powi_nodes),
-            ("prepared_atom_pow_nodes".to_owned(), snapshot.prepared_atom_pow_nodes),
-            ("prepared_atom_builtin_nodes".to_owned(), snapshot.prepared_atom_builtin_nodes),
-            ("prepared_atom_custom_nodes".to_owned(), snapshot.prepared_atom_custom_nodes),
+                ("direct_banded_calls".to_owned(), snapshot.calls),
+                ("direct_banded_work_items".to_owned(), snapshot.work_items),
+                ("direct_banded_errors".to_owned(), snapshot.errors),
+                (
+                    "direct_banded_evaluator_calls".to_owned(),
+                    snapshot.evaluator_calls,
+                ),
+                (
+                    "direct_banded_storage_writes".to_owned(),
+                    snapshot.storage_writes,
+                ),
+                (
+                    "direct_banded_parallel_dispatches".to_owned(),
+                    snapshot.parallel_dispatches,
+                ),
+                (
+                    "direct_banded_sequential_dispatches".to_owned(),
+                    snapshot.sequential_dispatches,
+                ),
+                (
+                    "direct_banded_diagonal_dispatches".to_owned(),
+                    snapshot.diagonal_dispatches,
+                ),
+                (
+                    "direct_banded_entry_dispatches".to_owned(),
+                    snapshot.entry_dispatches,
+                ),
+                (
+                    "direct_banded_effective_task_count".to_owned(),
+                    snapshot.effective_task_count,
+                ),
+                (
+                    "prepared_atom_evaluators".to_owned(),
+                    snapshot.prepared_atom_evaluators,
+                ),
+                (
+                    "prepared_atom_nodes".to_owned(),
+                    snapshot.prepared_atom_nodes,
+                ),
+                (
+                    "prepared_atom_add_nodes".to_owned(),
+                    snapshot.prepared_atom_add_nodes,
+                ),
+                (
+                    "prepared_atom_mul_nodes".to_owned(),
+                    snapshot.prepared_atom_mul_nodes,
+                ),
+                (
+                    "prepared_atom_powi_nodes".to_owned(),
+                    snapshot.prepared_atom_powi_nodes,
+                ),
+                (
+                    "prepared_atom_pow_nodes".to_owned(),
+                    snapshot.prepared_atom_pow_nodes,
+                ),
+                (
+                    "prepared_atom_builtin_nodes".to_owned(),
+                    snapshot.prepared_atom_builtin_nodes,
+                ),
+                (
+                    "prepared_atom_custom_nodes".to_owned(),
+                    snapshot.prepared_atom_custom_nodes,
+                ),
             ]);
         }
         if telemetry.telemetry_mode.collects_timings() {
             timings_ms.extend([
-            ("direct_banded_elapsed_ms".to_owned(), snapshot.elapsed.as_secs_f64() * 1000.0),
-            ("direct_banded_argument_prepare_ms".to_owned(), snapshot.argument_prepare_elapsed.as_secs_f64() * 1000.0),
-            ("direct_banded_evaluator_ms".to_owned(), snapshot.evaluator_elapsed.as_secs_f64() * 1000.0),
-            ("direct_banded_storage_write_ms".to_owned(), snapshot.storage_write_elapsed.as_secs_f64() * 1000.0),
-            ("direct_banded_assembly_alloc_ms".to_owned(), snapshot.assembly_alloc_elapsed.as_secs_f64() * 1000.0),
+                (
+                    "direct_banded_elapsed_ms".to_owned(),
+                    snapshot.elapsed.as_secs_f64() * 1000.0,
+                ),
+                (
+                    "direct_banded_argument_prepare_ms".to_owned(),
+                    snapshot.argument_prepare_elapsed.as_secs_f64() * 1000.0,
+                ),
+                (
+                    "direct_banded_evaluator_ms".to_owned(),
+                    snapshot.evaluator_elapsed.as_secs_f64() * 1000.0,
+                ),
+                (
+                    "direct_banded_storage_write_ms".to_owned(),
+                    snapshot.storage_write_elapsed.as_secs_f64() * 1000.0,
+                ),
+                (
+                    "direct_banded_assembly_alloc_ms".to_owned(),
+                    snapshot.assembly_alloc_elapsed.as_secs_f64() * 1000.0,
+                ),
             ]);
         }
     }
@@ -700,12 +756,24 @@ fn snapshot_preparation_timings(telemetry: &BvpTelemetrySnapshot) -> HashMap<Str
         for (name, duration) in [
             ("generation_total_ms", snapshot.total),
             ("generation_discretization_ms", snapshot.discretization),
-            ("generation_symbolic_jacobian_ms", snapshot.symbolic_jacobian),
+            (
+                "generation_symbolic_jacobian_ms",
+                snapshot.symbolic_jacobian,
+            ),
             ("generation_find_bandwidth_ms", snapshot.find_bandwidth),
-            ("generation_backend_selection_ms", snapshot.backend_selection),
+            (
+                "generation_backend_selection_ms",
+                snapshot.backend_selection,
+            ),
             ("generation_runtime_binding_ms", snapshot.runtime_binding),
-            ("generation_lambdify_jacobian_compile_ms", snapshot.lambdify_jacobian_compile),
-            ("generation_lambdify_residual_compile_ms", snapshot.lambdify_residual_compile),
+            (
+                "generation_lambdify_jacobian_compile_ms",
+                snapshot.lambdify_jacobian_compile,
+            ),
+            (
+                "generation_lambdify_residual_compile_ms",
+                snapshot.lambdify_residual_compile,
+            ),
         ] {
             timings.insert(name.to_owned(), duration.as_secs_f64() * 1000.0);
         }
@@ -714,10 +782,16 @@ fn snapshot_preparation_timings(telemetry: &BvpTelemetrySnapshot) -> HashMap<Str
         for (name, duration) in [
             ("atom_boundary_conditions_ms", snapshot.boundary_conditions),
             ("atom_discretization_ms", snapshot.discretization),
-            ("atom_boundary_application_ms", snapshot.boundary_application),
+            (
+                "atom_boundary_application_ms",
+                snapshot.boundary_application,
+            ),
             ("atom_flat_list_ms", snapshot.flat_list),
             ("atom_consistency_ms", snapshot.consistency),
-            ("atom_bounds_and_tolerances_ms", snapshot.bounds_and_tolerances),
+            (
+                "atom_bounds_and_tolerances_ms",
+                snapshot.bounds_and_tolerances,
+            ),
             ("atom_total_ms", snapshot.total),
         ] {
             timings.insert(name.to_owned(), duration.as_secs_f64() * 1000.0);
@@ -1451,7 +1525,8 @@ impl BvpDampSolver {
             snapshot_detail_maps(&stats.telemetry);
         let (callback_counters, callback_timings_ms) = snapshot_callback_maps(&stats.telemetry);
         let preparation_timings_ms = snapshot_preparation_timings(&stats.telemetry);
-        let storage_estimated = (!storage_bytes.is_empty()).then_some(stats.telemetry.storage.estimated);
+        let storage_estimated =
+            (!storage_bytes.is_empty()).then_some(stats.telemetry.storage.estimated);
         Ok(BvpDampSolution {
             solver_name: "bvp_damp".to_owned(),
             mesh: self.solver.x_mesh.iter().copied().collect(),
@@ -1823,7 +1898,8 @@ impl BvpDampNaiveSolver {
             snapshot_detail_maps(&stats.telemetry);
         let (callback_counters, callback_timings_ms) = snapshot_callback_maps(&stats.telemetry);
         let preparation_timings_ms = snapshot_preparation_timings(&stats.telemetry);
-        let storage_estimated = (!storage_bytes.is_empty()).then_some(stats.telemetry.storage.estimated);
+        let storage_estimated =
+            (!storage_bytes.is_empty()).then_some(stats.telemetry.storage.estimated);
         // Frozen's compatibility postprocessor returns node-major storage;
         // preserve the stable Python solution convention `(state, node)`.
         let values = (0..matrix.ncols())

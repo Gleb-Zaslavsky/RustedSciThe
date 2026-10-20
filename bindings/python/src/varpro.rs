@@ -393,12 +393,7 @@ impl VarProSolver {
             })?;
             builder
                 .solve_with_solver(self.solver)
-                .map(|result| {
-                    VarProSolution::from_native(
-                        result,
-                        self.telemetry_mode,
-                    )
-                })
+                .map(|result| VarProSolution::from_native(result, self.telemetry_mode))
                 .map_err(map_error)
         })
     }

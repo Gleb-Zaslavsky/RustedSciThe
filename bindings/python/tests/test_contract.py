@@ -20,6 +20,10 @@ import rustedscithe.facade as python_facade
 
 from rustedscithe import (
     AotArtifactError,
+    BandedMatrix,
+    BandedRefinementResult,
+    BlockTridiagonalLuConsistent,
+    BlockTridiagonalRefinementResult,
     BvpError,
     BvpDampSolution,
     BvpDampFrozenSolver,
@@ -47,6 +51,8 @@ from rustedscithe import (
     GavinFittingSolution,
     Lsode2Solver,
     Lsode2Solution,
+    LapackStyleBandedLuFaithful,
+    PivotedTridiagonalLu,
     LowessResult,
     LeastSquaresBSpline,
     NonlinearSolution,
@@ -86,6 +92,307 @@ from rustedscithe import (
     spline_resample,
     symbols,
 )
+
+
+def test_faithful_banded_api_preserves_compact_storage_and_factor_reuse():
+    """The Python contract must retain packed bands and reusable LU state."""
+
+    compact = np.asarray(
+        [
+            [0.0, 1.0, 1.0, 1.0],
+            [4.0, 4.0, 4.0, 4.0],
+            [2.0, 2.0, 2.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    matrix = BandedMatrix(4, 1, 1, compact)
+    assert matrix.shape == (3, 4)
+    assert matrix.storage_bytes == compact.nbytes
+    np.testing.assert_array_equal(matrix.values(), compact)
+
+    lu = LapackStyleBandedLuFaithful(4, 1, 1)
+    lu.factor(matrix)
+    assert lu.is_factorized
+    assert lu.ldab == 4
+    assert lu.factor_residual_relative(matrix) < 1e-12
+    np.testing.assert_allclose(
+        lu.solve(np.asarray([6.0, 13.0, 20.0, 22.0])),
+        [1.0, 2.0, 3.0, 4.0],
+    )
+    in_place = np.asarray([6.0, 13.0, 20.0, 22.0], dtype=np.float64)
+    lu.solve_in_place(in_place)
+    np.testing.assert_allclose(in_place, [1.0, 2.0, 3.0, 4.0])
+
+    rhs = np.asarray(
+        [[6.0, 9.0], [13.0, 8.0], [20.0, 2.0], [22.0, 0.0]],
+        dtype=np.float64,
+    )
+    np.testing.assert_allclose(
+        lu.solve_multiple(rhs),
+        [[1.0, 2.0], [2.0, 1.0], [3.0, 0.0], [4.0, 0.0]],
+    )
+
+    # The factorization owns its numeric copy; changing the input cannot alter
+    # a previously factored operator or its subsequent solves.
+    compact[1, 1] = 99.0
+    np.testing.assert_allclose(
+        lu.solve(np.asarray([6.0, 13.0, 20.0, 22.0])),
+        [1.0, 2.0, 3.0, 4.0],
+    )
+
+
+def test_faithful_banded_api_supports_separate_bands_and_refinement_report():
+    diagonal = np.full(4, 4.0)
+    lower = np.asarray([[2.0, 2.0, 2.0, 0.0]], dtype=np.float64)
+    upper = np.asarray([[0.0, 1.0, 1.0, 1.0]], dtype=np.float64)
+    matrix = BandedMatrix.from_bands(diagonal, lower, upper)
+    lu = LapackStyleBandedLuFaithful(4, 1, 1)
+    lu.factor(matrix)
+
+    report = lu.solve_with_refinement(
+        matrix,
+        np.asarray([6.0, 13.0, 20.0, 22.0]),
+        max_iters=2,
+        tolerance=1e-12,
+    )
+    assert isinstance(report, BandedRefinementResult)
+    assert report.converged
+    assert report.relative_residual_inf < 1e-12
+    np.testing.assert_allclose(report.solution_array(), [1.0, 2.0, 3.0, 4.0])
+
+
+def test_faithful_banded_api_supports_diagonal_and_wide_band_systems():
+    diagonal = BandedMatrix.from_bands(np.asarray([2.0, 3.0, 4.0]))
+    diagonal_lu = LapackStyleBandedLuFaithful(3, 0, 0)
+    diagonal_lu.factor(diagonal)
+    np.testing.assert_allclose(
+        diagonal_lu.solve(np.asarray([2.0, 6.0, 12.0])), [1.0, 2.0, 3.0]
+    )
+
+    matrix = BandedMatrix.from_bands(
+        np.full(5, 5.0),
+        np.asarray(
+            [[1.0, 1.0, 1.0, 1.0, 0.0], [0.25, 0.25, 0.25, 0.0, 0.0]],
+            dtype=np.float64,
+        ),
+        np.asarray([[0.0, 1.0, 1.0, 1.0, 1.0]], dtype=np.float64),
+    )
+    wide_lu = LapackStyleBandedLuFaithful(5, 2, 1)
+    wide_lu.factor(matrix)
+    np.testing.assert_allclose(
+        wide_lu.solve(np.asarray([7.0, 14.0, 21.25, 28.5, 29.75])),
+        [1.0, 2.0, 3.0, 4.0, 5.0],
+    )
+
+
+def test_faithful_banded_api_rejects_invalid_shape_nonfinite_and_lifecycle():
+    with pytest.raises(InvalidConfigurationError):
+        BandedMatrix(3, 1, 1, np.ones((2, 3), dtype=np.float64))
+    with pytest.raises(InvalidConfigurationError):
+        BandedMatrix(3, 1, 1, np.asarray([[1.0, np.nan, 1.0]] * 3))
+
+    lu = LapackStyleBandedLuFaithful(3, 1, 1)
+    with pytest.raises(SolverError) as error:
+        lu.solve(np.ones(3, dtype=np.float64))
+    assert error.value.native_kind == "NotFactorized"
+    assert error.value.stage == "solve"
+
+    with pytest.raises(InvalidConfigurationError) as invalid_epsilon:
+        LapackStyleBandedLuFaithful(3, 1, 1, pivot_epsilon=-1.0)
+    assert getattr(invalid_epsilon.value, "stage", None) is None
+
+
+def test_faithful_banded_api_maps_native_failure_kinds_without_debug_parsing():
+    singular = BandedMatrix(
+        3,
+        1,
+        1,
+        np.zeros((3, 3), dtype=np.float64),
+    )
+    lu = LapackStyleBandedLuFaithful(3, 1, 1)
+    with pytest.raises(SolverError) as singular_error:
+        lu.factor(singular)
+    assert singular_error.value.stage == "factor"
+    assert singular_error.value.solver == "lapack_banded"
+    assert singular_error.value.native_kind in {"ZeroPivot", "Singular"}
+
+    valid = BandedMatrix(3, 1, 1, np.asarray(
+        [[1.0, 1.0, 0.0], [4.0, 4.0, 4.0], [2.0, 2.0, 0.0]],
+        dtype=np.float64,
+    ))
+    lu.factor(valid)
+    with pytest.raises(InvalidConfigurationError) as rhs_error:
+        lu.solve(np.ones(2, dtype=np.float64))
+    assert rhs_error.value.native_kind == "DimensionMismatch"
+
+    with pytest.raises(InvalidConfigurationError):
+        lu.solve_multiple(np.ones((2, 1), dtype=np.float64))
+
+    with pytest.raises(InvalidConfigurationError) as layout_error:
+        lu.solve_in_place(np.ones((3, 1), dtype=np.float64).reshape(-1)[::2])
+    assert layout_error.value.stage == "solve"
+
+    with pytest.raises(InvalidConfigurationError) as band_error:
+        valid.set(0, 2, 1.0)
+    assert band_error.value.native_kind == "OutOfBounds"
+
+
+def test_faithful_banded_capabilities_describe_a_kernel_not_a_solver():
+    banded = capabilities("lapack_banded")
+    assert banded.frontends == []
+    assert banded.layouts == ["banded"]
+    assert banded.executions == ["factor", "solve", "solve_multiple", "refinement"]
+    assert banded.policies == ["sequential"]
+    assert banded.telemetry_modes == ["off"]
+    assert banded.supports_continuation is False
+
+
+def test_pivoted_tridiagonal_api_solves_pivot_required_system_without_densifying():
+    """The compact pivoted route must handle a tiny leading diagonal safely."""
+
+    lower = np.asarray([2.0, 1.0, 1.0], dtype=np.float64)
+    diagonal = np.asarray([1.0e-12, 2.0, 2.0, 2.0], dtype=np.float64)
+    upper = np.asarray([1.0, 1.0, 1.0], dtype=np.float64)
+    x_true = np.asarray([1.0, -2.0, 0.5, 3.0], dtype=np.float64)
+    rhs = np.asarray(
+        [
+            diagonal[0] * x_true[0] + upper[0] * x_true[1],
+            lower[0] * x_true[0] + diagonal[1] * x_true[1] + upper[1] * x_true[2],
+            lower[1] * x_true[1] + diagonal[2] * x_true[2] + upper[2] * x_true[3],
+            lower[2] * x_true[2] + diagonal[3] * x_true[3],
+        ],
+        dtype=np.float64,
+    )
+
+    lu = PivotedTridiagonalLu(lower, diagonal, upper)
+    assert lu.n == 4
+    assert lu.pivot_epsilon == pytest.approx(1.0e-14)
+    assert len(lu.ipiv) == 4
+    assert lu.ipiv[0] == 1
+    assert lu.storage_bytes > 0
+    np.testing.assert_allclose(lu.solve(rhs), x_true, rtol=1e-12, atol=1e-12)
+
+    rhs_in_place = rhs.copy()
+    lu.solve_in_place(rhs_in_place)
+    np.testing.assert_allclose(rhs_in_place, x_true, rtol=1e-12, atol=1e-12)
+
+
+def test_pivoted_tridiagonal_api_owns_bands_and_supports_multiple_rhs_layouts():
+    lower = np.asarray([2.0, 1.0], dtype=np.float64)
+    diagonal = np.asarray([3.0, 4.0, 5.0], dtype=np.float64)
+    upper = np.asarray([0.5, 0.25], dtype=np.float64)
+    lu = PivotedTridiagonalLu(lower, diagonal, upper)
+    lower[:] = 100.0
+    diagonal[:] = 100.0
+    upper[:] = 100.0
+
+    rhs = np.asarray([[4.0, 1.0], [7.0, 2.0], [8.0, 3.0]], dtype=np.float64)
+    expected = np.column_stack([lu.solve(rhs[:, column]) for column in range(2)])
+    np.testing.assert_allclose(lu.solve_multiple(rhs), expected)
+
+    stride = 5
+    padded = np.full(2 * stride, -99.0, dtype=np.float64)
+    padded[0:3] = rhs[:, 0]
+    padded[stride : stride + 3] = rhs[:, 1]
+    padding_before = padded[[3, 4, 8, 9]].copy()
+    lu.solve_multiple_in_place(padded, nrhs=2, stride=stride)
+    np.testing.assert_allclose(padded[0:3], expected[:, 0])
+    np.testing.assert_allclose(padded[stride : stride + 3], expected[:, 1])
+    np.testing.assert_array_equal(padded[[3, 4, 8, 9]], padding_before)
+
+
+def test_pivoted_tridiagonal_api_reports_typed_failures_and_capabilities():
+    with pytest.raises(InvalidConfigurationError):
+        PivotedTridiagonalLu(
+            np.ones(2), np.ones(3), np.ones(2), pivot_epsilon=-1.0
+        )
+    with pytest.raises(InvalidConfigurationError):
+        PivotedTridiagonalLu(
+            np.ones(2), np.asarray([1.0, np.nan, 1.0]), np.ones(2)
+        )
+
+    with pytest.raises(SolverError) as singular:
+        PivotedTridiagonalLu(np.zeros(2), np.zeros(3), np.zeros(2))
+    assert singular.value.native_kind == "ZeroPivot"
+    assert singular.value.stage == "factor"
+    assert singular.value.solver == "tridiagonal_lu_pp"
+
+    lu = PivotedTridiagonalLu(np.ones(2), np.full(3, 2.0), np.ones(2))
+    with pytest.raises(InvalidConfigurationError):
+        lu.solve(np.ones(2, dtype=np.float64))
+    with pytest.raises(InvalidConfigurationError):
+        lu.solve(np.asarray([1.0, np.inf, 2.0], dtype=np.float64))
+
+    capabilities_record = capabilities("pivoted_tridiagonal")
+    assert capabilities_record.frontends == []
+    assert capabilities_record.executions == ["factor", "solve", "solve_multiple"]
+    assert capabilities_record.layouts == ["tridiagonal"]
+    assert capabilities_record.telemetry_modes == ["off"]
+    assert capabilities("tridiagonal_lu_pp").solver == "pivoted_tridiagonal"
+
+
+def test_block_tridiagonal_api_solves_compact_system_and_reports_diagnostics():
+    lower = np.asarray([[[0.25, 0.0], [0.0, 0.25]]], dtype=np.float64)
+    diagonal = np.asarray(
+        [
+            [[4.0, 1.0], [2.0, 3.0]],
+            [[5.0, 1.0], [1.0, 4.0]],
+        ],
+        dtype=np.float64,
+    )
+    upper = np.asarray([[[0.5, 0.0], [0.0, 0.5]]], dtype=np.float64)
+    matrix = np.block([[diagonal[0], upper[0]], [lower[0], diagonal[1]]])
+    x_true = np.asarray([1.0, -2.0, 0.5, 3.0], dtype=np.float64)
+    rhs = matrix @ x_true
+
+    lu = BlockTridiagonalLuConsistent(lower, diagonal, upper)
+    assert lu.n_blocks == 2
+    assert lu.block_size == 2
+    assert lu.n == 4
+    assert lu.is_factorized is True
+    assert lu.storage_bytes > 0
+    assert np.isfinite(lu.factor_residual_relative)
+    assert len(lu.pivot_diagnostics()) == 2
+    assert len(lu.condition_diagnostics()) == 2
+    np.testing.assert_allclose(lu.solve(rhs), x_true, rtol=1e-12, atol=1e-12)
+
+    rhs_multiple = np.column_stack([rhs, 2.0 * rhs])
+    np.testing.assert_allclose(
+        lu.solve_multiple(rhs_multiple), np.column_stack([x_true, 2.0 * x_true])
+    )
+
+    report = lu.solve_with_refinement(rhs, refinement_steps=2)
+    assert isinstance(report, BlockTridiagonalRefinementResult)
+    assert report.requested_steps == 2
+    np.testing.assert_allclose(report.solution_array(), x_true, rtol=1e-12, atol=1e-12)
+
+
+def test_block_tridiagonal_api_owns_inputs_and_maps_typed_failures():
+    lower = np.zeros((1, 2, 2), dtype=np.float64)
+    diagonal = np.asarray([np.eye(2), 2.0 * np.eye(2)], dtype=np.float64)
+    upper = np.zeros((1, 2, 2), dtype=np.float64)
+    lu = BlockTridiagonalLuConsistent(lower, diagonal, upper)
+    diagonal[:] = 100.0
+
+    np.testing.assert_allclose(lu.solve(np.ones(4)), np.asarray([1.0, 1.0, 0.5, 0.5]))
+    with pytest.raises(InvalidConfigurationError) as nonfinite:
+        BlockTridiagonalLuConsistent(
+            lower, np.asarray([[[1.0, np.nan], [0.0, 1.0]], np.eye(2)]), upper
+        )
+    assert nonfinite.value.native_kind == "NonFiniteInput"
+    assert nonfinite.value.solver == "block_tridiagonal"
+
+    with pytest.raises(InvalidConfigurationError):
+        lu.solve(np.ones(3))
+    with pytest.raises(InvalidConfigurationError):
+        lu.solve(np.asarray([1.0, 2.0, np.inf, 4.0]))
+
+    capabilities_record = capabilities("block_tridiagonal")
+    assert capabilities_record.frontends == []
+    assert capabilities_record.layouts == ["block_tridiagonal"]
+    assert capabilities_record.executions == ["factor", "solve", "solve_multiple", "refinement"]
+    assert capabilities_record.telemetry_modes == ["off"]
+    assert capabilities("block_tridiagonal_lu_consistent").solver == "block_tridiagonal"
 
 
 def test_animation_api_rejects_invalid_inputs_before_opening_a_window():

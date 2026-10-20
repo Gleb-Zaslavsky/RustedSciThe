@@ -50,4 +50,8 @@ pub use solver_policy::{FallbackPolicy, LinearSolveError, LinearSolverConfig, Li
 
 pub use linear_solver::{LinearSolver, LinearSystemRef, build_solver_for_system};
 pub use node_major_layout::NodeMajorLayout;
+pub use pure_tridiagonal::{
+    DEFAULT_TRIDIAGONAL_PIVOT_EPSILON, TridiagonalBand, TridiagonalError, TridiagonalLu,
+    TridiagonalLuPp, TridiagonalPpError,
+};
 pub use solver_factory::factor_block_tridiagonal;
