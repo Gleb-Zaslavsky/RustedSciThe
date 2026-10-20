@@ -1,0 +1,166 @@
+# Build and local workspace state.
+/target/
+/bindings/python/target/
+# Local Python environments are development tools, never package inputs.
+/.venv-gavin/
+/.venv-gavin-win/
+/bindings/python/.venv/
+/bindings/python/venv/
+/trash/
+/.kilo/
+/.vscode/
+/.idea/
+/PY/
+/idea/
+/.codegpt/
+
+# Evidence, planning and generated AOT output.
+/plans/
+/test_reports/
+/output_*/
+**/aot/
+**/generated/
+**/build/
+**/cache/
+
+# Outside src/, only these trees are repository inputs worth keeping.
+/*
+!/.gitignore
+!/Cargo.toml
+!/Cargo.lock
+!/LICENSE.txt
+!/README.md
+!/src/
+!/src/**
+!/scripts/
+!/scripts/**
+!/benches/
+!/benches/**
+!/examples/
+!/examples/**
+!/bindings/
+!/bindings/**
+/bindings/python/target/
+!/bindings/python/**/*.md
+!/bindings/python/TODO.md
+!/performance/
+!/performance/**
+/performance/runs/
+/performance/local/
+
+# Generated/interchange artifacts are ignored in every allowed tree.
+*.txt
+*.log
+*.py
+*.f
+*.c
+*.cpp
+*.h
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.svg
+*.csv
+*.def
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.exp
+*.o
+*.pdb
+\Makefile
+
+# Ordinary Markdown remains ignored, as in the previous policy.
+*.md
+!README.md
+!/performance/TODO.md
+!/performance/METRIC_CONTRACTS.md
+!**/*[Gg][Uu][Ii][Dd][Ee]*.md
+!/bindings/python/TODO.md
+!/bindings/python/**/*.md
+!/bindings/python/**/*.py
+!/src/somelinalg/TODO.md
+/bindings/python/**/__pycache__/
+/bindings/python/**/*.py[cod]
+
+# Keep the project license and selected maintained Markdown documents.
+!LICENSE.txt
+!src/numerical/Nonlinear_systems/TODO.md
+!src/numerical/Nonlinear_systems/STORY_TESTS.md
+!src/numerical/Nonlinear_systems/fixtures/tp1907_rst_parity_fixture.txt
+!src/numerical/Nonlinear_systems/NONLINEAR_SYSTEMS_USER_GUIDE_EN.md
+!src/numerical/Nonlinear_systems/NONLINEAR_SYSTEMS_USER_GUIDE_RU.md
+!src/symbolic/TODO.md
+!src/numerical/BVP_Damp/TODO.md
+!src/numerical/LSODE2/TODO.md
+!src/numerical/BE/TODO.md
+!src/numerical/BE/BE_*.md
+!src/numerical/BDF/TODO.md
+!src/numerical/optimization/TODO.md
+!src/numerical/Radau/RADAU_USER_GUIDE_EN.md
+!src/numerical/Radau/RADAU_USER_GUIDE_RU.md
+!src/numerical/optimization/OPTIMIZATION_USER_GUIDE_EN.md
+!src/numerical/optimization/OPTIMIZATION_USER_GUIDE_RU.md
+!src/RST_ARCHITECTURAL_GUIDELINE.md
+!src/numerical/BDF/BDF_*.md
+
+# Story/test Markdown is always trackable, including mixed-case names.
+!**/*[tT][eE][sS][tT]*.md
+!**/*[sS][tT][oO][rR][yY]*.md
+
+# Maintained text task examples are repository inputs, not generated logs.
+# Keep this exception after the global *.txt rule so it wins for nested files.
+!/examples/task_docs/
+!/examples/task_docs/**
+
+# The Gavin Python reference is intentionally versioned, but remains excluded
+# from the published Rust crate by Cargo.toml.
+!/src/numerical/optimization/gavin_reference/
+!/src/numerical/optimization/gavin_reference/**
+/src/numerical/optimization/gavin_reference/__pycache__/
+/src/numerical/optimization/gavin_reference/**/__pycache__/
+/src/numerical/optimization/gavin_reference/**/*.py[cod]
+/src/numerical/optimization/gavin_reference/*.egg-info/
+/src/numerical/optimization/gavin_reference/**/*.egg-info/
+
+# Vendored SciPy IVP numerical references are versioned for parity work, but
+# remain repository-only and are excluded from Cargo publication.
+!/src/numerical/ivp_scipy_reference/
+!/src/numerical/ivp_scipy_reference/**
+!/src/numerical/ivp_scipy_reference/SCIPY_LICENSE.txt
+/src/numerical/ivp_scipy_reference/__pycache__/
+/src/numerical/ivp_scipy_reference/**/__pycache__/
+/src/numerical/ivp_scipy_reference/**/*.py[cod]
+/src/numerical/ivp_scipy_reference/*.egg-info/
+/src/numerical/ivp_scipy_reference/**/*.egg-info/
+/src/numerical/ivp_scipy_reference/.venv/
+/src/numerical/ivp_scipy_reference/venv/
+
+# Vendored SciPy BVP reference follows the same repository-only policy.
+!/src/numerical/BVP_sci/scipy_reference/
+!/src/numerical/BVP_sci/scipy_reference/**
+!/src/numerical/BVP_sci/scipy_reference/SCIPY_LICENSE.txt
+!src/numerical/BVP_sci/scipy_reference/README.md
+!src/numerical/BVP_sci/scipy_reference/TODO.md
+/src/numerical/BVP_sci/scipy_reference/__pycache__/
+/src/numerical/BVP_sci/scipy_reference/**/__pycache__/
+/src/numerical/BVP_sci/scipy_reference/**/*.py[cod]
+/src/numerical/BVP_sci/scipy_reference/*.egg-info/
+/src/numerical/BVP_sci/scipy_reference/**/*.egg-info/
+/src/numerical/BVP_sci/scipy_reference/.venv/
+/src/numerical/BVP_sci/scipy_reference/venv/
+
+# Sparse LU reference sources are versioned but are not included in Cargo builds.
+!/src/somelinalg/sparse_lu_reference/
+!/src/somelinalg/sparse_lu_reference/**
+/src/somelinalg/sparse_lu_reference/__pycache__/
+/src/somelinalg/sparse_lu_reference/**/__pycache__/
+/src/somelinalg/sparse_lu_reference/**/*.py[cod]
+/src/somelinalg/sparse_lu_reference/*.egg-info/
+/src/somelinalg/sparse_lu_reference/**/*.egg-info/
+/src/somelinalg/sparse_lu_reference/.venv/
+/src/somelinalg/sparse_lu_reference/venv/
