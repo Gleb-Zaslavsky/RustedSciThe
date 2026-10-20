@@ -10,7 +10,7 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
 
-const DIMENSION: usize = 16;
+const DIMENSION: usize = 128;
 const HORIZON: f64 = 0.01;
 
 fn artifact_root() -> Result<PathBuf, RunnerError> {

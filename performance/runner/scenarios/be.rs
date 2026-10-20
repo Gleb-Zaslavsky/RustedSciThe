@@ -3,8 +3,8 @@ use crate::registry::ScenarioOutput;
 use RustedSciThe::numerical::BE::{
     BE, BeSolverOptions, BeStatus, BeSymbolicAssemblyBackend, BeTelemetryMode,
 };
+use RustedSciThe::numerical::ivp_workloads::{WorkloadKind, build_workload};
 use RustedSciThe::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetryExecution, IvpWarmStage};
-use RustedSciThe::symbolic::symbolic_engine::Expr;
 use RustedSciThe::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
 use std::hint::black_box;
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use std::time::Instant;
 mod shared_bench_support;
 
 pub fn run_diffusion_chain() -> Result<ScenarioOutput, RunnerError> {
-    const DIMENSION: usize = 32;
+    const DIMENSION: usize = 64;
     const STEP: f64 = 0.001;
     const FINAL_TIME: f64 = 0.016;
 
@@ -44,7 +44,7 @@ pub fn run_diffusion_chain() -> Result<ScenarioOutput, RunnerError> {
         )));
     }
     let (times, states) = solver.trajectory();
-    if times.is_empty()
+    if times.len() != BE_STEPS + 1
         || states.nrows() != times.len()
         || states.ncols() != DIMENSION
         || times.iter().any(|time| !time.is_finite())
@@ -92,7 +92,8 @@ const FRONTEND_EXPR: u8 = 0;
 const FRONTEND_ATOM: u8 = 1;
 const ROUTE_LAMBDIFY: u8 = 0;
 const ROUTE_AOT: u8 = 1;
-const BE_STEPS: usize = 40;
+const BE_DIMENSION: usize = 64;
+const BE_STEPS: usize = 16;
 const BE_H: f64 = 0.001;
 const BE_T_END: f64 = BE_STEPS as f64 * BE_H;
 
@@ -180,11 +181,21 @@ fn run_symbolic_cell_phase<const FRONTEND_ID: u8, const ROUTE_ID: u8>(
             ],
             native_scopes: Vec::new(),
             counters: Vec::new(),
-            diagnostics: vec![(
-                "final_mass".into(),
-                "conserved quantity".into(),
-                final_state.iter().sum(),
-            )],
+            diagnostics: vec![
+                (
+                    "final_state_min".into(),
+                    "state".into(),
+                    final_state.iter().copied().fold(f64::INFINITY, f64::min),
+                ),
+                (
+                    "final_state_max".into(),
+                    "state".into(),
+                    final_state
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, f64::max),
+                ),
+            ],
         });
     }
     let detailed = run_once(frontend, route, BeTelemetryMode::Detailed)?;
@@ -215,34 +226,41 @@ fn run_symbolic_cell_phase<const FRONTEND_ID: u8, const ROUTE_ID: u8>(
     }
 
     let final_state = detailed.states.row(detailed.states.nrows() - 1);
-    let final_mass = final_state.iter().sum::<f64>();
-    let min_concentration = detailed
+    let minimum = detailed
         .states
         .iter()
         .copied()
         .fold(f64::INFINITY, f64::min);
+    let maximum = detailed
+        .states
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
     if (detailed.times.last().copied().unwrap_or(f64::NAN) - BE_T_END).abs() > 1.0e-12
-        || (final_mass - 1.0).abs() > 1.0e-10
-        || min_concentration < -1.0e-10
+        || minimum < -1.0e-10
+        || maximum > 1.0
+        || detailed.states.ncols() != BE_DIMENSION
         || detailed.states.iter().any(|value| !value.is_finite())
     {
         return Err(RunnerError::Scenario(format!(
-            "BE symbolic combustion invariant failed: t_end={}, mass={final_mass:e}, min={min_concentration:e}",
+            "BE symbolic diffusion invariant failed: t_end={}, min={minimum:e}, max={maximum:e}",
             detailed.times.last().copied().unwrap_or(f64::NAN)
         )));
     }
-    let reference = combustion_rk4_reference(&detailed.times);
-    let mut max_reference_error = 0.0_f64;
+    let reference = diffusion_rk4_reference(&detailed.times);
+    let mut max_scaled_reference_error = 0.0_f64;
     for (row_index, expected) in reference.iter().enumerate() {
         for (actual, expected) in detailed.states.row(row_index).iter().zip(expected) {
-            max_reference_error = max_reference_error.max((actual - expected).abs());
+            let scale = 0.02 + 0.03 * expected.abs();
+            max_scaled_reference_error =
+                max_scaled_reference_error.max((actual - expected).abs() / scale);
         }
     }
-    // Backward Euler is first-order; this bound covers its expected O(h)
-    // discretization error while still catching wrong equations/routes.
-    if max_reference_error > 5.0e-6 {
+    // This scale-aware bound allows Backward Euler's O(h) error while catching
+    // a wrong symbolic route or a materially incorrect trajectory.
+    if max_scaled_reference_error > 1.0 {
         return Err(RunnerError::Scenario(format!(
-            "BE symbolic combustion disagrees with independent RK4 reference: max_error={max_reference_error:e}"
+            "BE symbolic diffusion disagrees with independent RK4 reference: max_scaled_error={max_scaled_reference_error:e}"
         )));
     }
 
@@ -324,21 +342,28 @@ fn run_symbolic_cell_phase<const FRONTEND_ID: u8, const ROUTE_ID: u8>(
     ]);
 
     let mut diagnostics = vec![
-        ("final_mass".into(), "conserved quantity".into(), final_mass),
+        (
+            "final_state_min".into(),
+            "state".into(),
+            final_state.iter().copied().fold(f64::INFINITY, f64::min),
+        ),
+        (
+            "final_state_max".into(),
+            "state".into(),
+            final_state
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max),
+        ),
         (
             "off_vs_detailed_max_diff".into(),
             "absolute".into(),
             max_trajectory_diff,
         ),
         (
-            "max_rk4_reference_abs_error".into(),
-            "absolute".into(),
-            max_reference_error,
-        ),
-        (
-            "minimum_concentration".into(),
-            "state".into(),
-            min_concentration,
+            "rk4_max_scaled_error".into(),
+            "scaled".into(),
+            max_scaled_reference_error,
         ),
     ];
     for stage in [
@@ -382,7 +407,7 @@ fn run_symbolic_cell_phase<const FRONTEND_ID: u8, const ROUTE_ID: u8>(
         native_scopes: Vec::new(),
         counters: vec![
             ("trajectory_points".into(), detailed.times.len() as u64),
-            ("state_dimension".into(), 3),
+            ("state_dimension".into(), BE_DIMENSION as u64),
             ("residual_evaluations".into(), snapshot.residual_evaluations),
             ("jacobian_evaluations".into(), snapshot.jacobian_evaluations),
             (
@@ -414,42 +439,54 @@ fn diagnose<const FRONTEND_ID: u8, const ROUTE_ID: u8>(
     run_symbolic_cell_phase::<FRONTEND_ID, ROUTE_ID>(true)
 }
 
-fn combustion_rk4_reference(times: &[f64]) -> Vec<[f64; 3]> {
-    fn rhs(y: [f64; 3]) -> [f64; 3] {
-        let [fuel, radical, _product] = y;
-        let reaction = 0.1 * fuel * radical;
-        let secondary = 0.2 * radical * radical;
-        [
-            -0.3 * fuel + reaction,
-            0.3 * fuel - reaction - secondary,
-            secondary,
-        ]
+fn diffusion_rk4_reference(times: &[f64]) -> Vec<Vec<f64>> {
+    fn rhs(time: f64, state: &[f64]) -> Vec<f64> {
+        (0..state.len())
+            .map(|index| {
+                let left = if index == 0 { 0.0 } else { state[index - 1] };
+                let right = if index + 1 == state.len() {
+                    0.0
+                } else {
+                    state[index + 1]
+                };
+                -20.0 * state[index]
+                    + 4.0 * (left - 2.0 * state[index] + right)
+                    + 0.20 * (-time).exp()
+                    - 0.010 * state[index] * state[index]
+            })
+            .collect()
     }
-    fn add_scaled(y: [f64; 3], k: [f64; 3], scale: f64) -> [f64; 3] {
-        [
-            y[0] + scale * k[0],
-            y[1] + scale * k[1],
-            y[2] + scale * k[2],
-        ]
+    fn add_scaled(state: &[f64], derivative: &[f64], scale: f64) -> Vec<f64> {
+        state
+            .iter()
+            .zip(derivative)
+            .map(|(value, rate)| value + scale * rate)
+            .collect()
     }
 
-    let mut state = [0.9, 0.1, 0.0];
+    // This independently integrates the canonical workload at a finer step
+    // than BE, providing a correctness guard without timing the oracle.
+    const REFINEMENT: usize = 8;
+    let workload = build_workload(WorkloadKind::DiffusionChain, BE_DIMENSION);
+    let mut state = workload.initial_state.as_slice().to_vec();
     let mut reference = Vec::with_capacity(times.len());
-    reference.push(state);
+    reference.push(state.clone());
     for interval in times.windows(2) {
-        let dt = (interval[1] - interval[0]) / 100.0;
-        for _ in 0..100 {
-            let k1 = rhs(state);
-            let k2 = rhs(add_scaled(state, k1, 0.5 * dt));
-            let k3 = rhs(add_scaled(state, k2, 0.5 * dt));
-            let k4 = rhs(add_scaled(state, k3, dt));
-            state = [
-                state[0] + dt * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0]) / 6.0,
-                state[1] + dt * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1]) / 6.0,
-                state[2] + dt * (k1[2] + 2.0 * k2[2] + 2.0 * k3[2] + k4[2]) / 6.0,
-            ];
+        let dt = (interval[1] - interval[0]) / REFINEMENT as f64;
+        let mut time = interval[0];
+        for _ in 0..REFINEMENT {
+            let k1 = rhs(time, &state);
+            let k2 = rhs(time + 0.5 * dt, &add_scaled(&state, &k1, 0.5 * dt));
+            let k3 = rhs(time + 0.5 * dt, &add_scaled(&state, &k2, 0.5 * dt));
+            let k4 = rhs(time + dt, &add_scaled(&state, &k3, dt));
+            state = state
+                .iter()
+                .zip(k1.iter().zip(k2.iter().zip(k3.iter().zip(k4.iter()))))
+                .map(|(value, (a, (b, (c, d))))| value + dt * (a + 2.0 * b + 2.0 * c + d) / 6.0)
+                .collect();
+            time += dt;
         }
-        reference.push(state);
+        reference.push(state.clone());
     }
     reference
 }
@@ -460,21 +497,23 @@ fn run_once(
     telemetry: BeTelemetryMode,
 ) -> Result<BeRun, RunnerError> {
     let full_started = Instant::now();
-    let equations = vec![
-        Expr::parse_expression("-0.3*fuel+rate*fuel*radical"),
-        Expr::parse_expression("0.3*fuel-rate*fuel*radical-0.2*radical^2"),
-        Expr::parse_expression("0.2*radical^2"),
-    ];
+    let workload = build_workload(WorkloadKind::DiffusionChain, BE_DIMENSION);
+    let parameter_names = workload
+        .parameter_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let parameter_values = workload.parameter_values;
     let options = BeSolverOptions::new(
-        equations,
-        vec!["fuel".into(), "radical".into(), "product".into()],
-        "t".into(),
+        workload.equations,
+        workload.variables,
+        workload.time_variable,
         1.0e-10,
         16,
         Some(BE_H),
         0.0,
         BE_T_END,
-        nalgebra::DVector::from_vec(vec![0.9, 0.1, 0.0]),
+        workload.initial_state,
     )
     .with_telemetry_mode(telemetry)
     .with_symbolic_assembly_backend(frontend.public());
@@ -493,10 +532,10 @@ fn run_once(
     let mut solver = BE::try_new_with_options(options)
         .map_err(|error| RunnerError::Scenario(format!("BE setup: {error}")))?;
     solver
-        .try_set_equation_parameters(Some(&["rate"]))
+        .try_set_equation_parameters(Some(&parameter_names))
         .map_err(|error| RunnerError::Scenario(format!("BE parameter schema: {error}")))?;
     solver
-        .set_parameter_values(nalgebra::DVector::from_vec(vec![0.1]))
+        .set_parameter_values(parameter_values)
         .map_err(|error| RunnerError::Scenario(format!("BE parameter binding: {error}")))?;
     let setup_ms = setup_started.elapsed().as_secs_f64() * 1_000.0;
 
@@ -513,7 +552,10 @@ fn run_once(
         )));
     }
     let (times, states) = solver.trajectory();
-    if times.is_empty() || states.nrows() != times.len() || states.ncols() != 3 {
+    if times.len() != BE_STEPS + 1
+        || states.nrows() != times.len()
+        || states.ncols() != BE_DIMENSION
+    {
         return Err(RunnerError::Scenario(
             "BE produced an invalid trajectory shape".into(),
         ));
@@ -540,18 +582,18 @@ fn run_once(
 macro_rules! be_scenario {
     ($frontend_id:ident, $frontend:literal, $frontend_key:literal, $route_id:ident, $execution:literal, $suffix:literal) => {
         crate::registry::Scenario {
-            id: concat!("be_combustion_", $frontend_key, "_", $suffix),
+            id: concat!("be_diff64_", $frontend_key, "_", $suffix),
             solver: "be",
             groups: &["ivp", "stiff", "be-matrix"],
-            workload: "parameterized combustion chain, dimension=3, 40 fixed steps, t=[0,0.04]",
+            workload: "parameterized diffusion chain, dimension=64, 16 fixed steps, t=[0,0.016]",
             frontend: $frontend,
             execution: $execution,
             linear_algebra: "Dense (fixed implementation)",
             parallel_policy: "Sequential (fixed; no parallel dispatch API)",
             telemetry: "off wall gate + Detailed stage diagnostic",
-            version: 1,
+            version: 2,
             gate_metrics: &["scenario_wall_ms"],
-            description: "Matched BE parameterized combustion route; layout and dispatch are intentionally fixed",
+            description: "Matched BE canonical diffusion-chain route; dense layout and sequential dispatch are fixed",
             run: run_symbolic_cell::<{ $frontend_id }, { $route_id }>,
             diagnose: Some(diagnose::<{ $frontend_id }, { $route_id }>),
         }
