@@ -183,6 +183,7 @@ fn record(args: RecordArgs) -> Result<(), RunnerError> {
                         && (metric.median <= 0.0
                             || metric.mad / metric.median > args.max_relative_mad)
                 }) {
+                    persist_run(&run_dir, scenario.id, &series, None)?;
                     errors.push((
                         5,
                         format!(

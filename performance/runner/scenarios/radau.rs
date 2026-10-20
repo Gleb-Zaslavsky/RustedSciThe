@@ -1,14 +1,14 @@
 use crate::error::RunnerError;
 use crate::registry::{Scenario, ScenarioOutput};
-use RustedSciThe::numerical::Radau::{
-    RadauAotConfig, RadauConfig, RadauExecution, RadauExecutionPolicy, RadauFrontend,
-    RadauMatrixLayout, RadauOutputPolicy, RadauProblem, RadauSolver, RadauTelemetryMode,
-};
-use RustedSciThe::numerical::ivp_workloads::{WorkloadKind, build_workload};
 use std::fs;
 use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
+use RustedSciThe::numerical::ivp_workloads::{build_workload, WorkloadKind};
+use RustedSciThe::numerical::Radau::{
+    RadauAotConfig, RadauConfig, RadauExecution, RadauExecutionPolicy, RadauFrontend,
+    RadauMatrixLayout, RadauOutputPolicy, RadauProblem, RadauSolver, RadauTelemetryMode,
+};
 
 const DIMENSION: usize = 16;
 const HORIZON: f64 = 0.01;
@@ -388,16 +388,20 @@ pub fn diagnose(scenario: &Scenario) -> Result<ScenarioOutput, RunnerError> {
             )));
         }
     };
-    let policy = match scenario.parallel_policy {
-        "Sequential" => RadauExecutionPolicy::Sequential,
-        "Parallel(min_work=1)" => RadauExecutionPolicy::Parallel { min_work: 1 },
-        other => {
-            return Err(RunnerError::Scenario(format!(
-                "unsupported Radau policy {other}"
-            )));
-        }
-    };
+    let policy = execution_policy(scenario.parallel_policy)?;
     solve_workload(frontend, layout, execution, policy, true)
+}
+
+fn execution_policy(label: &str) -> Result<RadauExecutionPolicy, RunnerError> {
+    match label {
+        "Sequential" => Ok(RadauExecutionPolicy::Sequential),
+        // The registry uses the concise label; the explicit form is retained
+        // for callers that want the threshold visible in scenario metadata.
+        "Parallel" | "Parallel(min_work=1)" => Ok(RadauExecutionPolicy::Parallel { min_work: 1 }),
+        other => Err(RunnerError::Scenario(format!(
+            "unsupported Radau policy {other}"
+        ))),
+    }
 }
 
 // These exports are intentionally explicit: the registry uses stable scenario
@@ -451,6 +455,7 @@ declare_route!(
     RadauExecution::Lambdify,
     RadauExecutionPolicy::Parallel { min_work: 1 }
 );
+
 declare_route!(
     lambdify_expr_sparse_par,
     RadauFrontend::ExprLegacy,
@@ -571,3 +576,26 @@ declare_route!(
     RadauExecution::Aot,
     RadauExecutionPolicy::Parallel { min_work: 1 }
 );
+
+#[cfg(test)]
+mod tests {
+    use super::execution_policy;
+    use RustedSciThe::numerical::Radau::RadauExecutionPolicy;
+
+    #[test]
+    fn registry_parallel_label_resolves_to_the_route_threshold() {
+        assert_eq!(
+            execution_policy("Parallel").unwrap(),
+            RadauExecutionPolicy::Parallel { min_work: 1 }
+        );
+        assert_eq!(
+            execution_policy("Parallel(min_work=1)").unwrap(),
+            RadauExecutionPolicy::Parallel { min_work: 1 }
+        );
+        assert_eq!(
+            execution_policy("Sequential").unwrap(),
+            RadauExecutionPolicy::Sequential
+        );
+        assert!(execution_policy("Auto").is_err());
+    }
+}
