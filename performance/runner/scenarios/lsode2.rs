@@ -487,20 +487,53 @@ pub fn diagnose(scenario: &Scenario) -> Result<ScenarioOutput, RunnerError> {
             )));
         }
     };
-    let execution = match (scenario.execution, scenario.parallel_policy) {
-        ("Lambdify", "Sequential") => ExecutionRoute::LambdifySequential,
-        ("Lambdify", "Parallel") => ExecutionRoute::LambdifyParallel,
-        ("Lambdify", "Auto") => ExecutionRoute::LambdifyAuto,
-        ("AOT(warm-cache)", "Whole") => ExecutionRoute::AotWhole,
-        ("AOT(warm-cache)", "Parallel2") => ExecutionRoute::AotParallel2,
-        _ => {
-            return Err(RunnerError::Scenario(format!(
-                "unsupported LSODE2 route {}",
-                scenario.id
-            )));
-        }
-    };
+    let execution =
+        execution_route(scenario.execution, scenario.parallel_policy).ok_or_else(|| {
+            RunnerError::Scenario(format!("unsupported LSODE2 route {}", scenario.id))
+        })?;
     solve_route(assembly, matrix, execution, true)
+}
+
+fn execution_route(execution: &str, policy: &str) -> Option<ExecutionRoute> {
+    match (execution, policy) {
+        ("Lambdify", "Sequential") => Some(ExecutionRoute::LambdifySequential),
+        ("Lambdify", "Parallel(min_work=1)") => Some(ExecutionRoute::LambdifyParallel),
+        ("Lambdify", "Auto(min_work=1)") => Some(ExecutionRoute::LambdifyAuto),
+        ("AOT(warm-cache)", "Whole(default chunks)") => Some(ExecutionRoute::AotWhole),
+        ("AOT(warm-cache)", "Parallel2") => Some(ExecutionRoute::AotParallel2),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_lsode2_matrix_policy_has_an_execution_route() {
+        let scenarios = crate::registry::SCENARIOS.iter().filter(|scenario| {
+            scenario.solver == "lsode2" && scenario.groups.contains(&"lsode2-matrix")
+        });
+
+        let mut count = 0;
+        for scenario in scenarios {
+            count += 1;
+            assert!(
+                execution_route(scenario.execution, scenario.parallel_policy).is_some(),
+                "unhandled LSODE2 execution metadata for {}: {}/{}",
+                scenario.id,
+                scenario.execution,
+                scenario.parallel_policy
+            );
+        }
+        assert_eq!(count, 30, "LSODE2 route matrix changed; review its parser");
+    }
+
+    #[test]
+    fn unknown_lsode2_execution_policy_is_rejected() {
+        assert!(execution_route("Lambdify", "Parallel").is_none());
+        assert!(execution_route("AOT(warm-cache)", "Whole").is_none());
+    }
 }
 
 declare_route!(

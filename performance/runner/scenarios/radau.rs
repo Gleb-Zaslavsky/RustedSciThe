@@ -1,14 +1,14 @@
 use crate::error::RunnerError;
 use crate::registry::{Scenario, ScenarioOutput};
-use std::fs;
-use std::hint::black_box;
-use std::path::PathBuf;
-use std::time::Instant;
-use RustedSciThe::numerical::ivp_workloads::{build_workload, WorkloadKind};
 use RustedSciThe::numerical::Radau::{
     RadauAotConfig, RadauConfig, RadauExecution, RadauExecutionPolicy, RadauFrontend,
     RadauMatrixLayout, RadauOutputPolicy, RadauProblem, RadauSolver, RadauTelemetryMode,
 };
+use RustedSciThe::numerical::ivp_workloads::{WorkloadKind, build_workload};
+use std::fs;
+use std::hint::black_box;
+use std::path::PathBuf;
+use std::time::Instant;
 
 const DIMENSION: usize = 16;
 const HORIZON: f64 = 0.01;
