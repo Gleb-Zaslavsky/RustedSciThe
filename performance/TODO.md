@@ -1,0 +1,625 @@
+# Performance Regression Gates: Implementation Checklist
+
+Decision date: 2026-10-20.
+Source requirements: user specification sections 1-25, including the separate
+section 24 on preserving experimental reports.
+
+This checklist tracks the implementation and validation status of the opt-in
+runner. The CLI, storage, comparison and 189 scenarios exist. The runner has
+passed its current Debug contract/correctness suite, but it has no recorded
+baseline and is not yet validated as a production regression gate. No historical
+Markdown timing will be imported as a baseline.
+
+## Implementation Audit (2026-10-20)
+
+This section records the observed implementation state, so an unchecked item
+below is not automatically interpreted as missing code. Some items are policy
+or cross-platform verification requirements that need dedicated tests or a real
+Release run.
+
+- Implemented: static 189-scenario registry; addressable solver/scenario/group
+  selection; route-matrix tests for the registered solver families; Release-only
+  record/live-compare; dirty-source rejection by default; 3 warmups/15 samples
+  by default; isolated child measurement with timeout and per-scenario error
+  collection; raw samples and median/MAD/min/max; versioned strict baseline
+  validation; no-clobber writes with explicit `--force`; run reports under
+  `performance/runs/`; regression confirmation on a second series.
+- Verified in Debug on 2026-10-20: `cargo test --features perf-gates --bin
+  perf-gates` passed all 28 tests, including the registered non-AOT scenario
+  correctness gates and solver-matrix contract tests. `perf-gates list --all`
+  returned 189 scenarios without running numerical work. A separate smoke
+  passed all 56 registered AOT scenarios with TCC 0.9.27, one warmup and three
+  samples each; this does not validate Release timing stability.
+- Still blocks a clean shared baseline: the source tree must be reviewed and
+  committed; the target machine must be registered and its alias profile
+  reviewed; then a Release calibration must establish that selected gate
+  metrics are measurable and stable. AOT prerequisites/routes were checked on
+  the current Windows/TCC target and must be rechecked if the target changes.
+- The checkout is dirty at this audit. Do not use `--allow-dirty-source` for
+  the shared baseline; freeze and commit the intended source candidate first.
+- Still blocks calling the system a validated regression gate: automated tests
+  for machine/profile lifecycle, child failure/timeout behavior, comparison
+  confirmation/noise boundaries, path safety, and cross-platform file/process
+  behavior remain incomplete. The stage-scope and source-field audits are
+  recorded below and in [`METRIC_CONTRACTS.md`](METRIC_CONTRACTS.md); some
+  reset/optional-stage contracts remain open.
+
+### Stage-Scope Audit (2026-10-20)
+
+The primary gate is `scenario_wall_ms`, measured with telemetry Off. It is safe for
+before/after comparison of the *same scenario contract*, not as a cross-solver
+ranking: workload lifecycles differ. All instrumented stage values come from a
+separate diagnostic execution and must not be added to the gate or interpreted
+as its decomposition unless the native scope contract explicitly says so.
+The ID is currently an outer scenario-wall interval rather than a uniform
+solver-only interval: for example, BVP_sci constructs mesh/state inputs inside
+it and BE parses/builds its equation task inside it. Keep this exact boundary in
+the scenario contract and report; do not compare the shared metric ID across
+different solvers as if the scopes were identical.
+
+| Scenario family | Off-mode `scenario_wall_ms` interval | Diagnostic timing contract | Absence / overlap finding |
+| --- | --- | --- | --- |
+| BDF | Solver construction/preparation plus `try_solve`; setup and solve are also measured as nested wall scopes | Separate `Detailed` solve; backend preparation, integration, factorization, linear solve, residual/Jacobian and preparation totals | Native step/factor/solve scopes are nested; AOT gates are warm-cache after runner warmup, not cold-build amortization |
+| Radau | Workload assembly/preparation plus solve; setup and solve are reported separately | Separate `Timings` solve; native report declares parent/child/standalone scope metadata | Zero-initialized stages that did not run are omitted; telemetry run is trajectory/step-count checked against Off |
+| LSODE2 | Construction, explicit `prepare`, and solve; each also has an individual wall timer | Separate `Detailed` lifecycle; callback totals plus cold preparation snapshot stages | Cold stages are emitted only when marked recorded; diagnostic run is checked for status, trajectory and requested AOT provenance |
+| BVP_Damp | Construction/configuration, initial preparation, initial solve, continuation rebinds/solves, and AOT continuation preparation | Separate `Detailed` full series; residual/Jacobian/linear/factorization and optional frontend-generation stages | Stage totals span the diagnostic lifecycle/continuation; they are not per-solve values and must not be summed with outer wall scopes |
+| BVP_sci | Mesh/state assembly, solver build, and solve; build and solve also reported separately | Separate `Detailed` solve; optional native `Option<f64>` stages and recorded AOT cold/warm stages | `None` stays absent; cold AOT build is not represented by warm-cache samples after runner warmup |
+| BE | Equation construction/parsing, solver setup/configuration, and solve; setup and solve are also reported separately | Separate `Detailed` solve; recorded cold/warm IVP stages plus BE accumulated factorization/solve totals | `recorded=false` stages stay absent; warm per-operation stages and accumulated BE totals overlap |
+| Nonlinear systems | Complete `run_once` lifecycle, with setup/binding/solve subscopes where exposed | Separate detailed result; preparation stages and native solve statistics | Optional preparation stages remain absent; native solve stage totals are diagnostic and may overlap |
+| Optimisation | Complete fitting `run_once`, including route setup and solve | Separate detailed fitting result with solver statistics | Residual/Jacobian/linear/total durations are diagnostic subscopes, not additive with `scenario_wall_ms` |
+| Banded LU microcase | Matrix assembly through factor/solve is measured by the scenario's explicit timers | Direct factorization/solve instrumentation, no nonlinear-solver telemetry mode | This is a standalone linear-algebra workload, not a solver full-lifecycle comparison |
+
+The runner completes every telemetry-Off warmup and measured sample before it
+starts any instrumented diagnostic run. A regression test fixes this ordering.
+`scenario_wall_ms` is the explicit gate ID; it measures each scenario's declared
+outer interval and is only comparable within the same versioned scenario
+contract. Each metric records its phase (`gate_off` or
+`instrumented_diagnostic`), runner-local scope, and optional parent scope in the
+run report and baseline schema 3. Native zero-initialized stages that are
+structurally absent remain omitted by adapters; if a stage is emitted with a
+numeric zero, the runner preserves it as a measured zero. The generic runner
+does not infer a missing stage from a zero value. The route-by-route mapping of
+every native field, reset boundary and cumulative/last-solve meaning remains an
+open audit before baselines are treated as portable evidence.
+
+## First Shared Baseline: Readiness
+
+The code can collect baselines, but collection is intentionally a manual
+Release-only step and has not been run. Before the first shared recording:
+
+- [x] Run the Debug correctness/unit matrix and inspect `perf-gates list`;
+  listing returned 189 scenarios without numerical work. The current Windows
+  target's AOT prerequisites and all registered AOT routes were also smoke-
+  checked separately.
+- [ ] Register the target machine once and review its profile for accidental
+  personal data. Registration creates a versioned alias profile in the checkout,
+  so commit that reviewed file together with the runner before recording.
+- [x] AOT readiness on the current Windows target: TCC 0.9.27 is available and
+  all 56 registered AOT scenarios passed Debug smoke with requested-route
+  assertions. This does not establish Release performance or include optional
+  SuperLU in the portable matrix. Dynamic prerequisite-aware `list`/`dry-run`
+  reporting remains a follow-up task.
+- [ ] Commit the reviewed runner, scenario corpus, machine profile and docs.
+  The default `record` path rejects a dirty or unversioned checkout.
+- [ ] In Release, calibrate a representative subset first. If durations and
+  MAD are acceptable, record the selected scenarios with the default
+  warmup/sample counts, inspect correctness diagnostics, then run `compare` on
+  unchanged source to check repeatability. Expand to the full registry only
+  after this calibration; do not hide noisy or unmeasurably short scenarios.
+- [ ] Do not regard initial measurements as regression gates until durations,
+  noise and thresholds are reviewed. Do not check in placeholder baselines.
+
+## 1. Initial Inspection and Design Decisions
+
+- [x] Inspect Cargo targets, features, release/bench profiles and local flags.
+  `Cargo.toml` has many independent `harness = false` benches, default features
+  are empty, release uses LTO, one codegen unit and `panic = "abort"`.
+  `.cargo/config.toml` sets `-Ctarget-cpu=native`.
+- [x] Identify reusable workload definitions:
+  `src/numerical/ivp_workloads.rs` exports `build_workload`, `dense_coupled`
+  and `parameter_continuation_target`; fixed-size Robertson ignores the
+  dimension argument. Do not invent a "Robertson large" label for that fixture.
+- [x] Inspect `benches/bdf_workloads.rs`, `radau_workloads.rs`,
+  `lsode2_workloads.rs`, `bvp_damp_workloads.rs`, `bvp_sci_matched.rs`,
+  and `benches/support/bdf_bench_support.rs` as integration starting points.
+  Compact report rows often contain formatted strings; use numerical values
+  before formatting, not parsed table cells.
+- [x] Inspect `src/symbolic/View/microbench.rs`: useful preparation,
+  differentiation and lowering experiments currently live under `cfg(test)`.
+  A normal binary cannot directly call their private test functions.
+- [x] Inspect `benches/faer_sparse_vs_lapack_style_benches.rs`:
+  deterministic banded fixtures, known solution, faithful banded LU and faer
+  comparisons are available as a starting point; builders are currently local.
+- [x] Inspect telemetry contracts in BDF, Radau and BVP_sci:
+  `Off / Counters / Timings / Detailed`; Timings alone does not collect counters.
+  Detailed may also retain traces, so its cost is not merely two scalar channels.
+- [x] Inspect `src/Utils/test_reporting.rs`: canonical reports plus release
+  archives already exist. Preserve their paths, formats and lifecycle.
+- [x] Identify allocation-audit examples:
+  `benches/nonlinear_systems_allocation_audit.rs` and
+  `benches/be_history_allocation_audit.rs`. Global allocator accounting is
+  executable-local instrumentation, not a production solver service.
+- [x] Choose a repository-level `performance/` area and an explicit binary
+  target with private modules; no workspace crate or public solver framework.
+- [x] Make planning files trackable without exposing generated run reports.
+  The current Cargo publication allowlist does not include `performance/`.
+- [x] Audit the runner's primary Off-mode interval and diagnostic-run separation
+  across all registered solver families; findings are summarized in the stage
+  scope table above. Instrumented timing values are never used as a decomposition
+  of `scenario_wall_ms`; their source phase/scope is recorded separately.
+- [x] Ensure instrumented diagnostics cannot bias later Off-mode samples: all
+  Off-mode warmups and gate samples finish before any diagnostic execution.
+  Separate diagnostic correctness/parity checks remain intact.
+- [x] Store runner-level metric phase and scope metadata, with optional parent
+  scopes, alongside samples; bump the baseline schema rather than silently
+  reinterpreting older records.
+- [x] Preserve measured zero-valued stage timings and counters; absence remains
+  an omitted metric/counter and is never filled with a fabricated zero. Optional
+  diagnostic timings may have fewer samples than the scenario run count; the
+  available sample count is retained rather than padding missing observations.
+- [x] Audit emitted diagnostic metric IDs against source fields, units and
+  applicable routes; record known cumulative, nested and reset semantics in
+  `METRIC_CONTRACTS.md`. Do not infer lifecycle semantics from field names.
+- [x] Preserve Radau and BVP_sci native timing kind/stage/parent per emitted
+  metric using the existing baseline scope fields. Export BVP_Damp's typed
+  aggregate scope durations separately; do not invent parent relations for
+  scalar stages when the native API does not define them.
+- [ ] Establish native reset/last-call semantics with source-level tests for
+  fields whose contract is currently undocumented; until then, keep them
+  described as snapshot-lifecycle aggregates in the ledger.
+
+## 2. Preserve Existing Infrastructure
+
+- [ ] Keep every existing STORY_TESTS document at its current path, with its
+  history and conclusions intact; no automatic editing, renaming or extraction.
+- [ ] Leave existing `test_reports` contents and reporting helpers unchanged.
+  Gate outputs belong under `performance/runs/<run-id>/`, not in old suites.
+- [ ] Keep all existing benches, ignored stories and PowerShell release matrices
+  independently runnable. Never run `cargo test` as a scenario implementation.
+- [ ] Reuse `Tabled` for compact presentation, not a second reporting framework.
+- [ ] Extract only small task builders when direct reuse is impossible. Preserve
+  equations, dimensions, seeds, tolerances, telemetry and correctness assertions.
+  Present a justification before any substantial STORY-test refactor.
+- [ ] Keep baseline schemas, machine metadata and verdict logic outside
+  `src/numerical`, `src/symbolic`, `src/somelinalg` and their public APIs.
+- [ ] Test that record/compare neither touch STORY files nor create, overwrite
+  or delete existing experimental reports, including inherited report env vars.
+
+## 3. Target and Module Organization
+
+Proposed layout; create implementation files when their work starts:
+
+```text
+performance/
+  README.md
+  TODO.md
+  runner/
+    main.rs               # CLI and parent/child orchestration
+    registry.rs           # stable IDs, selectors, metadata
+    scenarios/            # a few domain modules, direct solver calls
+    environment.rs        # machine identity and build/runtime provenance
+    measurement.rs        # scopes, repetition, sample collection
+    baseline.rs           # schema, validation, storage
+    comparison.rs         # pure statistics and verdicts
+    report.rs             # console and persisted run results
+  machines/<alias>.toml
+  baselines/<machine>/<environment>/<scenario>.toml
+  runs/<run-id>/           # ignored; no development-history database
+```
+
+- [x] Add explicit `[[bin]] name = "perf-gates"` with
+  `path = "performance/runner/main.rs"` and `required-features = ["perf-gates"]`.
+  Keep the feature off by default; avoid accidental CLI default-selection changes
+  when adding the second binary (check `cargo run`/`default-run`).
+- [x] Set an explicit target test policy so routine library tests do not run
+  numerical gates; runner unit tests remain addressable via `--bin perf-gates`.
+- [x] Keep modules private and use a static registry with function pointers.
+  Avoid plugin systems, dynamic discovery or a new hierarchy of solver traits.
+- [ ] Reuse existing clap, toml, tabled, chrono, tempfile, fs2 and sysinfo where
+  appropriate. Review direct serialization/UUID dependencies if needed; keep
+  new runner-only dependencies optional and enabled only by `perf-gates`.
+- [ ] Resolve Cargo packaging when the target is introduced: explicitly include
+  its Rust sources if the published manifest declares it; exclude baselines,
+  local state and run artifacts. Verify with `cargo package --list`.
+- [ ] Do not attach runner modules to `lib.rs` or change solver hot paths.
+
+## 4. CLI, Registry and Addressable Runs
+
+- [x] Implement `list`, `record`, `compare`, and explicit machine registration.
+- [x] Use the same selection code for record/compare/list. Support `--solver`,
+  `--scenario`, `--group`, and `--all`; use exactly one selector kind for
+  record/compare initially. List without a selector lists metadata only.
+- [x] Reject missing selection, conflicting selectors, unknown IDs and empty
+  matches before any numerical computation; never silently run all scenarios.
+- [x] Define unique stable scenario IDs independent of module/test names,
+  solver key, groups, scenario version, prerequisites and launch function.
+- [x] List registered scenario metadata and baseline state without loading
+  solvers or compiling AOT.
+- [ ] Report actual availability of optional scenario prerequisites in `list`;
+  currently the list does not probe for TCC or native bridge libraries.
+- [x] Implement compare `--dry-run` for selection, machine, baseline schema and
+  compatibility checks without solving or recording.
+- [ ] Extend `compare --dry-run` to validate scenario prerequisites. It currently
+  does not probe AOT compilers/bridges.
+- [x] Ensure `compare --solver bdf` launches only registered BDF scenarios.
+- [x] Resolve report/baseline roots from `CARGO_MANIFEST_DIR`, independent of
+  cwd. Machine aliases are validated and scenario IDs come from the static
+  registry; retain path-safety tests as an open verification item below.
+- [x] Provide Windows PowerShell and Linux shell command examples. Build once,
+  then run the binary; build jobs and numerical worker counts are distinct.
+
+## 5. Machine Identity and Reproducible Environment
+
+- [x] Generate an installation identity on explicit registration and persist
+  it in the OS user configuration directory. The ID uses random input plus a
+  timestamp; concurrent registration still needs a dedicated test/guard.
+- [x] Store an alias/installation-ID profile in `machines/`; the current
+  profile contains no username, hostname, serial number or personal path.
+- [x] Validate `--machine` against the local installation ID; an alias cannot
+  authorize comparison against another installation. Unknown machine is not
+  PASS. Registration/copy-mismatch behavior still needs dedicated tests.
+- [ ] Distinguish Windows/MSVC and Linux/GNU environments, even on one computer.
+- [ ] Separate hard compatibility fields from informational provenance.
+  Hard fields include target, optimization/CPU flags, enabled features, worker
+  configuration, telemetry and workload/route/cache contract.
+- [x] Record runtime `rustc --version`, OS/CPU description, source revision,
+  dirty-tree state and Cargo.lock content fingerprint. Source and dependency
+  changes remain comparable and are visible provenance, not hard compatibility
+  keys: those changes are what gates test.
+- [ ] Report compiler changes without automatically rejecting comparison.
+  Check effective optimization flags separately; show all compatibility reasons.
+- [ ] Capture build-time compiler and executable artifact provenance
+  reliably. Runtime `rustc --version` and current Git HEAD do not prove how an
+  already-built binary was produced. Keep capture runner-specific; avoid a
+  mandatory library build step.
+- [ ] Record effective Rayon/faer/BLAS thread settings and AOT compiler/bridge
+  provenance where applicable; do not assume a single env var controls all pools.
+- [ ] Reject silent backend fallback as equivalent performance evidence
+  (especially requested SuperLU actually using Sparse faer).
+- [ ] Allow only documented environment inputs; report relevant overrides.
+  Do not dump all environment variables into profiles or reports.
+- [ ] Document power/thermal/background-load conditions and VM/container limits.
+  Same machine identity alone does not guarantee stable timings.
+
+## 6. Measurement and Process Lifecycle
+
+- [x] Run each measured scenario/series in a sequential child process for
+  global interning, caches, thread pools and panics. Parent launch/IPC time is
+  outside the child's measured solve; no independent heavy scenarios overlap.
+- [x] Handle child exit/abort/timeout and malformed output as errors, continue
+  remaining selected scenarios and preserve diagnostics. `catch_unwind` cannot
+  recover a release `panic = "abort"`. Dedicated failure/timeout tests remain
+  open in section 12.
+- [ ] Define fresh, warm-prepared and continuation contracts explicitly. Reset
+  state before each independent sample; a solved instance is not a fresh solve.
+- [ ] Define cold preparation using fresh process/cache state. Warmup must not
+  accidentally turn a cold AOT build into a cache hit. Restrict cache cleanup
+  to runner-owned temporary directories.
+- [x] Use configurable 3 warmups and 15 samples by default; retain raw samples,
+  median, MAD, min/max and units. Preallocate sample storage.
+- [ ] Keep parsing/input construction outside solve timers. Give preparation
+  and end-to-end separate metrics/scenarios when they are the subject.
+- [ ] Keep runner formatting, filesystem I/O, correctness checks and telemetry
+  snapshot copying outside timers. Document unavoidable native output costs.
+- [ ] Turn solver logging off for normal performance scenarios; isolate any
+  deliberate logging-overhead measurement with its own contract.
+- [ ] Use black_box and correctness checks to keep work observable. For short
+  callbacks use a fixed/configured batch, record its size and normalize honestly.
+- [ ] Do not silently discard outliers or keep rerunning until a fast result
+  appears. Record interruption, timeout and all confirmation samples.
+
+## 7. Telemetry and Metric Contracts
+
+- [x] Measure uninstrumented full-solve time with native telemetry Off as the
+  primary operational gate; collect instrumented diagnostics in a separate
+  solve where the native solver exposes telemetry.
+- [ ] Use Timings for duration-only diagnostics and Detailed when counters are
+  also needed. Record trace settings and never toggle modes inside a sample.
+- [ ] Map actual native fields to stable metric IDs, units and scope versions.
+  Preserve measured-zero vs unavailable; an unmeasured stage must not appear as
+  0 ms. Current adapters are mixed: BVP_sci/BE preserve optional `None` or
+  `recorded=false`, Radau omits zero stages, while some Detailed stats serialize
+  zero-valued durations directly. For the latter, prove the stage executes for
+  every sample or add an explicit availability representation before baselining
+  that diagnostic metric.
+- [x] Declare regression-gate metrics independently from diagnostic timings.
+  Initial scenarios gate on `scenario_wall_ms`; nested stage scopes are retained
+  in raw measurements but do not independently decide PASS/FAIL.
+- [x] Declare the top-level Off gate interval and separate diagnostic execution
+  for the currently registered scenario families; see the audit table above.
+  Never sum callback, Newton, factorization and total timers as if disjoint.
+- [ ] Encode stage-level inclusive/nested/overlapping relationships in a
+  structured runner-local metric contract rather than relying only on unit
+  strings such as `ms/instrumented/nested`.
+- [ ] Distinguish last-solve from cumulative continuation timers and snapshot
+  deltas for BVP_Damp, BVP_sci and any repeated-solve route. Verify reset and
+  baseline-delta behavior at scenario boundaries, including AOT cache warmups.
+- [ ] Retain counters as diagnostic work evidence, without maintaining a second
+  independent SciPy algorithmic oracle. A counter change must be visible even
+  when elapsed time improves; explain whether work or cost per operation changed.
+- [ ] Keep native numerical correctness checks authoritative. Performance PASS
+  cannot override wrong solutions, nonfinite outputs or unexpected solve status.
+- [ ] Add allocation counts/bytes as a later isolated diagnostic pass, reusing
+  established allocator-audit ideas. Do not contaminate timing baselines with
+  global atomic allocation accounting or call allocated bytes "retained memory".
+
+## 8. Baseline Storage and Updates
+
+- [x] Define and validate versioned strict TOML baseline schema (version 2),
+  including scenario contract, metrics, thresholds and raw sample data. Machine
+  profile schema validation and broader corruption tests remain open.
+- [ ] Fix equations, input identity, dimensions, seeds, tolerances, route and
+  cache lifecycle per scenario; increment version on a semantic change.
+- [x] Reject unknown baseline schema versions, unknown/missing fields, nonfinite or
+  negative durations, invalid thresholds, empty samples and inconsistent stats.
+- [ ] Store raw samples as the basis for derived statistics; validate any
+  persisted summaries on read so two competing truths cannot develop.
+- [ ] `record` checks correctness and stability before publication. Refuse to
+  publish noisy or invalid baselines; never overwrite an old good one on failure.
+- [x] Implement no-clobber publication and explicit `--force`, using a temporary
+  file and rollback path for replacement. Concurrent-writer and interruption
+  behavior on Windows/Linux still need dedicated tests.
+- [ ] `compare`, including dry-run, is read-only for profiles/baselines.
+  Missing or incompatible data receives an explicit non-success verdict.
+- [ ] Keep tolerances reviewed/versioned; no automatic relaxation or baseline
+  promotion after failures. Document Git review for intentional replacements.
+- [ ] Separate metric compatibility from optional diagnostics availability;
+  missing a required metric is not an automatic PASS.
+
+## 9. Comparison, Noise and Exit Status
+
+- [x] Implement median/MAD/min/max and relative-change calculations, with
+  unit-tested pure comparison logic.
+  Use per-metric tolerances; 10% total / 15% stage are calibration candidates,
+  not universal constants. Do not assert that a 2% delta proves a regression.
+- [ ] Define minimum measurable duration and relative dispersion policy for
+  both baseline and current samples. Batch tiny operations or mark them
+  diagnostic-only; avoid dividing by a zero baseline or a timer-resolution floor.
+- [ ] Select a few substantial stages as gates; avoid making every microtimer
+  independently fail a large suite through accumulated measurement noise.
+- [x] Run one independent confirmation series when a metric exceeds tolerance.
+  Confirm the same metric across series, not merely any failure in each series.
+- [ ] Return FAIL only when both valid, sufficiently stable series confirm the
+  regression. Contradictory or excessively noisy evidence yields UNSTABLE.
+- [ ] Check dispersion even when the first median passes; high variance is
+  not PASS. Retain both series separately and cap confirmation attempts.
+- [ ] Show improvements without automatic rebaselining. These gates are an
+  engineering policy, not a claim of statistical significance from MAD alone.
+- [ ] Complete the public verdict model: comparison currently distinguishes
+  PASS/FAIL/UNSTABLE, while missing baseline, unknown machine, incompatibility
+  and execution errors are typed runner errors. Decide whether a separate
+  transient `RECHECK` verdict is needed after confirmation.
+- [ ] Implement exit codes: 0 success, 1 regression, 2 execution/config error,
+  3 missing baseline/unknown machine, 4 incompatibility, 5 unstable.
+  Define aggregate precedence explicitly (2 > 4 > 3 > 1 > 5 > 0), keep every
+  per-scenario verdict and never infer success from the last completed row.
+
+## 10. Scenario Corpus and Roadmap
+
+### Required Tier-1 profiling matrix
+
+The intended first-class solver set is `BVP_Damp`, `BVP_sci`, `LSODE2`,
+`Radau`, `BDF`, `BE`, `Nonlinear_systems`, and `optimisation`. The last two
+are module families but are treated as solver families in this registry.
+For every route actually supported by a solver, scenarios should identify:
+
+- symbolic frontend: ExprLegacy versus AtomView;
+- execution route: Lambdify versus AOT;
+- callback dispatch: Sequential versus Parallel (and Auto only where useful);
+- linear algebra layout: Dense, Sparse, Banded (only where the solver exposes it);
+- uninstrumented full wall time and separate, explicitly instrumented stage
+  timings/counters;
+- workload, dimensions, backend/layout, cache lifecycle and continuation
+  contract.
+
+Do not fabricate unsupported cross-product cells. Preserve each solver's
+native options and label omissions as unsupported or not yet covered. Existing
+STORY_TESTS Markdown and benchmark matrices are the primary source for fixture
+and scope contracts; reuse public fixture builders where possible. Do not
+parse Tabled Markdown or run an entire test module as a performance scenario.
+
+- [x] Add BVP_Damp workload(s) and matched ExprLegacy/AtomView routes for both
+  Damped and Frozen APIs. Damped reuses the dashboard oscillator/nonlinear
+  fixtures; Frozen uses the exact linear fixture established by its Rust tests
+  because it has a distinct per-state boundary-condition contract. Cover all
+  supported Dense/Sparse/Banded Lambdify dispatch routes and Sparse/Banded AOT
+  Auto; deliberately omit Dense AOT. The 66-cell matrix passed runner Debug
+  correctness tests and all 12 AOT routes passed TCC smoke with warmups/repeats.
+  AOT currently invalidates its prepared runtime on parameter rebind, so each
+  continuation point re-prepares and reports `continuation_prepare_ms`.
+- [x] Add BVP_sci matched ExprLegacy/AtomView full-solve routes for
+  Dense/Sparse/Banded with Lambdify Sequential/Parallel/Auto and AOT
+  Sequential/Parallel. All 30 routes use the scalar exponential reference,
+  validate exact-solution accuracy and Off-versus-Detailed parity, and confirm
+  AOT selection. The scalar Banded layout correctly uses `(0,0)` bandwidth;
+  optional SuperLU is excluded from the portable default matrix.
+- [x] Add matched ExprLegacy/AtomView BE routes for Lambdify and AOT on one
+  parameterized combustion workload. BE's layout and dispatch are fixed Dense
+  and Sequential; no Sparse/Banded or parallel cells are fabricated. Every
+  route checks conservation, trajectory validity, Off-vs-Detailed parity and
+  actual requested execution. BDF's fixed diffusion matrix covers its
+  registered Lambdify/AOT and sequential/parallel modes; Radau's matrix covers
+  its supported layout/frontend/execution/policy axes.
+- [x] Add a matched LSODE2 diffusion matrix: 2 symbolic frontends x 3 supported
+  layouts x Lambdify Sequential/Parallel/Auto and AOT Whole/Parallel2. Keep the
+  BDF-only faithful controller fixed across cells and retain Robertson as a
+  separate representative scenario. AOT execution uses runner-owned cached
+  artifacts; correctness/telemetry checks run independently of baseline
+  recording.
+- [x] For BVP_Damp, BVP_sci, LSODE2, Radau, BE and nonlinear systems, declare
+  each supported `Dense`/`Sparse`/`Banded` layout as its own matched comparison
+  axis. BDF currently has no Dense/Sparse/Banded choice in this API and must be
+  explicitly marked `not-applicable`, not given invented layout variants.
+  Registered matrices include the supported layouts; optional SuperLU and
+  experimental routes are intentionally outside the portable initial set.
+- [x] Register Sequential/Parallel comparison pairs wherever a selected solver
+  exposes that execution policy. Release evidence still needs a recorded Rayon
+  worker profile; a one-worker run is not evidence for parallel break-even.
+- [x] Add representative Nonlinear_systems routes for Lambdify and AOT,
+  ExprLegacy and AtomView, and Sequential/Parallel where supported. The
+  six-cell 64-variable quadratic-chain matrix keeps Dense fixed, covers
+  Lambdify Sequential/Parallel for each frontend, and marks AOT dispatch as
+  not-applicable. Off-mode wall gates check a known root; Detailed-mode runs
+  verify numerical parity and report available native stages.
+- [x] Add supported `optimisation` routes without presuming AOT or parallel
+  support: Gavin ExprLegacy/AtomView x Marquardt/Quadratic/Nielsen; standalone
+  `FittingSolver` ExprLegacy/AtomView x Lambdify Sequential/Parallel; native
+  ExprLegacy/Sequential VarPro; and separate UniversalFitting LM/Gavin/VarPro
+  facade routes. All 14 use one deterministic 201-sample workload, check
+  recovered parameters and R-squared, and compare telemetry-Off against Detailed.
+  Method-specific counters and timings remain distinct; no unavailable timing
+  is synthesized as zero.
+- [x] Keep telemetry-Off full-solve wall-clock gates distinct from instrumented
+  stage diagnostics. Expose native preparation, residual/Jacobian, linear
+  algebra, accepted/rejected-step or iteration stages only when the solver
+  reports them; use `None`/unavailable rather than zero for absent stages.
+  Remaining work is auditing and testing exact scope/reset semantics per route.
+- [x] Add route-matrix contract tests for the current solver families, checking
+  unique IDs and registered supported frontend/execution/layout/policy cells.
+- [ ] Extend matrix tests to prove every matched pair differs only along its
+  declared axis and that unsupported combinations are explicitly documented.
+- [ ] Reuse current bench/story fixture functions as much as possible. If a
+  builder is private, extract only a small shared fixture after verifying the
+  existing bench/story semantics remain unchanged.
+
+IDs below are proposed stable names. Register them only after freezing the
+configuration and source fixture. Large experimental matrices remain separate.
+IDs in the table below were proposed during the initial design; the first
+prototype subset is now implemented and expanded. Large experimental matrices
+remain separate. The current registry contains 189 scenarios: shared LSODE2,
+Radau, BVP_sci, BE and Nonlinear_systems cases; 24 matched Radau diffusion
+routes; 8 matched BDF diffusion routes; 30 matched LSODE2 diffusion routes;
+66 BVP_Damp routes; 30 matched BVP_sci routes; 4 matched BE combustion routes;
+6 matched Nonlinear_systems routes; 14 matched optimization routes; and the
+faithful compact banded LU fixture. Baseline capture remains pending.
+
+| Priority | Proposed scenario | Source to reuse | Scope / correctness |
+| --- | --- | --- | --- |
+| P0 | `symbolic_expr_preparation` | `View/microbench.rs`, `ivp_workloads.rs` | Fixed expression family; derivative/value parity |
+| P0 | `symbolic_atom_preparation` | Same equations, existing conversion/Jacobian APIs | Conversion, differentiation, evaluator preparation |
+| P0 | `symbolic_atom_prepared_eval` | Existing production prepared evaluator | Batched residual/Jacobian, fixed inputs and output order |
+| P0 | `bdf_robertson` | `ivp_workloads.rs`, `benches/support/bdf_bench_support.rs` | Shared benchmark builder; ExprLegacy, telemetry Off, finished status and mass invariant |
+| P0 | `bdf_diff64_*` | `benches/support/bdf_bench_support.rs`, `benches/bdf_workloads.rs`, `benches/bdf_backend_matrix.rs` | 64 states; both frontends, Lambdify sequential/parallel, AOT Whole/Parallel2; telemetry-Off gate plus Detailed diagnostics |
+| P0 | `banded_faithful_tridiagonal` | `faer_sparse_vs_lapack_style_benches.rs` | Compact band storage, known solution, normalized residual |
+| P0 | `radau_robertson`, `radau_diffusion_chain_16_banded` | Shared IVP workload corpus and Radau story contract | Full solve, final-time/finite-state checks, Robertson mass invariant, accepted/rejected step counters |
+| P0 | `radau_diffusion_chain_16_banded_atomview` | Same Radau IVP workload, layout and solver policy | Matched AtomView route; same final-time and finite-state checks |
+| P1 | `lsode2_robertson` | Shared workloads, LSODE2 workload benches | Fixed BDF controller, solve and trajectory invariant |
+| P0 | `lsode2_diff32_*` | `benches/lsode2_workloads.rs`, shared IVP workload corpus | 32-state matched frontend/layout/execution matrix; telemetry-Off gate plus Detailed diagnostics |
+| P0 | `bvp_sci_exp_*` | Public BVP_sci builder and SciPy parity fixture | 30 matched frontend/layout/execution routes; exact profile, typed status, telemetry parity |
+| P0 | `be_diffusion_chain_32` | `benches/support/be_bench_support.rs` | Native analytic Jacobian, telemetry Off, trajectory bounds |
+| P0 | `be_combustion_{expr,atom}_{lambdify,aot}` | BE symbolic backend and generated-IVP lifecycle APIs | 3-state parameterized combustion; fixed Dense/sequential; conservation and route parity |
+| P0 | `nonlinear_quadratic_chain_16` | `nonlinear_frontend_matrix.rs` | ExprLegacy preparation/bind/solve, known root and residual norm |
+| P1 | `bvp_sci_parameter_continuation` | `bvp_sci_matched.rs`, existing stories | Fixed mesh policy, fresh/warm scopes, analytic family |
+| P1 | `bvp_damp_combustion` | `bvp_damp_workloads.rs`, classic corpus | Fixed supported backend and validated solution |
+| P1 | `nonlinear_prepared_callbacks` | Nonlinear frontend/preparation benches | Residual/Jacobian and prepared solve scopes |
+| P2 | AOT, parallel and optional backend variants | Existing lifecycle/worker stories | Explicit caches, compiler, workers and actual route |
+
+- [x] Choose an initial fixed BDF workload from the existing shared benchmark helper:
+  `bdf_robertson`, ExprLegacy, telemetry Off, with the helper's established
+  tolerance and interval. The independent Banded scenario uses a fixed 4096-row
+  compact tridiagonal system. These are initial adapters, not calibrated gates.
+- [x] Add fixed LSODE2 and Radau workloads using the shared IVP equation corpus.
+  Radau uses its public symbolic API with telemetry off and checks final time,
+  finite states, the Robertson mass invariant and adaptive-step counts. Its
+  diffusion case retains a banded layout instead of using the dense-only
+  convenience solve in the Criterion helper.
+- [x] Add a small BVP_sci exponential reference case (`y'=-y`, `y(0)=1`) with
+  exact-profile and residual checks using the public builder and Dense layout.
+- [x] Add a BE diffusion scenario from its existing Criterion support helper
+  and a nonlinear quadratic-chain scenario from the existing frontend matrix.
+- [x] Add matched BDF and Radau AtomView scenarios alongside ExprLegacy cases.
+  Each pair keeps equations, dimensions, tolerances, layout and execution policy
+  fixed while changing only symbolic assembly frontend.
+- [x] Expand Radau's fixed 16-state diffusion workload to all 24 supported
+  cells: ExprLegacy/AtomView x Lambdify/AOT x Dense/Sparse/Banded x
+  Sequential/Parallel. The AOT adapter uses a runner-owned BuildIfMissing
+  cache, separate from baselines/reports, and warmups establish warm-cache
+  measurements; its preparation metric remains visible.
+- [x] Expand BDF's fixed 64-state diffusion workload to the native route set:
+  ExprLegacy/AtomView x Lambdify Sequential/Parallel x AOT Whole/Parallel2.
+  BDF has no selectable matrix layout, so every route records layout as
+  not-applicable (fixed Dense implementation). AOT uses runner-owned BuildIfMissing
+  artifacts and requires warmups; every route has an Off-mode wall gate and a
+  separate Detailed solve for stage/counter diagnostics and trajectory parity.
+- [x] Collect Radau's telemetry-Off full-solve wall time and run a separate
+  `Timings` diagnostic solve for native stages. Stage metrics are labeled
+  instrumented and do not affect the wall-clock gate.
+- [x] Add BE frontend/execution routes and emit only native-recorded cold AOT
+  and warm callback stages. An absent stage remains absent; detailed scopes are
+  separate from the telemetry-Off wall-clock gate.
+- [x] Require at least one warmup for AOT scenarios so a cold compiler build
+  cannot be mixed into warm-cache timing samples.
+- [ ] Add prerequisite-aware AOT listing/dry-run checks for the configured C
+  compiler and ensure a requested AOT route cannot silently fall back.
+- [ ] Calibrate the chosen fixed workloads and verify sample duration/noise in
+  Release on the target machine before publishing any baseline.
+- [ ] Add only necessary shared fixture extraction, with provenance comments
+  and matching old-test checks. Never include an entire test module in runner.
+- [ ] Protect symbolic correctness for tiny nonzero coefficients, large powers,
+  function boundaries and nonfinite classification using existing diagnostics.
+  Do not benchmark an incorrect result merely because it is fast.
+- [ ] Keep the new opt-in `PreparedAtomSystem` as a separately named experimental
+  scenario if measured; it must not replace the production evaluator baseline.
+- [ ] Select one or two meaningful graph sizes for symbolic hot paths and
+  separate preparation from repeated evaluation and caller-owned scratch reuse.
+- [ ] Extend solver/backend coverage incrementally. SuperLU/AOT prerequisites
+  are opt-in; absence cannot silently substitute another route.
+
+## 11. Reports and Errors
+
+- [x] Print compact Tabled output for comparison metrics, with machine and
+  environment context, baseline/current values, MAD, delta, threshold and
+  verdict. Recording output is still line-oriented, and scope/reset context
+  needs the route-by-route audit above.
+- [x] Persist machine-readable run data and a concise Markdown report under a
+  unique run directory, including raw samples, metadata and failure causes.
+  JSON serialization dependency, if added, stays runner-only.
+- [ ] Preserve typed config, selection, identity, schema, I/O, subprocess,
+  scenario and correctness errors with source chains; avoid parsing Debug text.
+- [ ] Report missing baseline, skipped prerequisites, crashes and fallback
+  explicitly; an empty or partially completed matrix is not success.
+- [ ] Keep diagnostic reports bounded and useful; do not build a parallel
+  research-history store or automatically append engineering conclusions.
+
+## 12. Automated Verification
+
+- [ ] Test selection before computation using fake launch counters; prove BDF
+  selection cannot execute another solver. Test list and dry-run do no work.
+- [ ] Test registration, alias/UUID mismatch, independent OS environments,
+  fingerprint ordering and informational compiler/source changes.
+- [ ] Test TOML roundtrip, corrupt schemas, invalid durations, missing metrics,
+  no-clobber, force, concurrent writers and interrupted publication.
+- [ ] Test comparison with synthetic samples only: threshold boundaries,
+  confirmed same-metric regression, conflicting series, high MAD, zero/tiny
+  durations, improvements, missing data and aggregate exit precedence.
+- [ ] Test child failure/timeout/abort handling and continuation to the next
+  selected scenario without relying on timing-sensitive sleeps for statistics.
+- [ ] Test no writes to existing STORY files/test_reports/baselines in compare.
+- [x] Run numerical smoke tests in Debug for all registered scenario adapters
+  and route-matrix contract tests. On 2026-10-20, all 133 non-AOT scenarios
+  passed their correctness gates and all 56 AOT scenarios passed with TCC.
+  Shared-fixture changes still require targeted regression checks. Preserve
+  existing benchmark compilation and test semantics.
+- [ ] Test Windows/MSVC and Linux/GNU path handling, process launch, locking,
+  file replacement and local configuration lookup.
+
+## 13. Delivery Order and Acceptance
+
+- [x] Pass A: implement the opt-in runner, stable scenario registry, baseline
+  format, Release-only timing commands, reports and solver route matrices.
+- [x] Pass B: pass the current Debug runner suite and non-AOT scenario
+  correctness gates; verify the full registry can be listed without solving.
+- [ ] Pass C: finish the remaining baseline-readiness checks above, especially
+  per-route scope review, machine profile review and clean committed source.
+- [ ] Pass D: calibrate representative scenarios in Release, record the first
+  reviewed baselines, and compare unchanged source for repeatability. Do not
+  fabricate placeholder baselines or treat noisy measurements as gates.
+- [ ] Before calling this a regression-gate system, complete synthetic tests for
+  confirmation/noise/exit behavior, lifecycle and path-safety tests, and the
+  Windows/Linux process and atomic-file matrix. Add allocation diagnostics only
+  later and only where they help localize regressions.
+- [ ] Keep capturing reviewed performance baselines before substantial symbolic
+  hot-path refactors; retain source and build provenance for interpretation.
+- [ ] Acceptance: `compare --solver bdf` runs only BDF scenarios, uses this
+  machine/environment's baseline, confirms regressions, rejects unstable or
+  missing evidence, and leaves all existing research infrastructure independent.

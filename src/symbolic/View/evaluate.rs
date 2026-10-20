@@ -99,6 +99,37 @@ pub type EvaluationSymbolFn = Arc<
         + Sync,
 >;
 
+/// Typed failure contract for prepared Atom evaluation.
+///
+/// The success path intentionally carries no diagnostic allocation. These
+/// variants are constructed only when preparation or evaluation fails, which
+/// keeps the prepared residual/Jacobian callback path suitable for hot loops.
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum PreparedEvaluationError {
+    #[error("prepared evaluator expected {expected} argument(s), got {actual}")]
+    Arity { expected: usize, actual: usize },
+    #[error("variable {symbol} is not in the prepared evaluator variable list")]
+    UnknownVariable { symbol: Symbol },
+    #[error("the prepared evaluator does not support the imaginary unit")]
+    UnsupportedImaginaryUnit,
+    #[error("large coefficients are not supported in the prepared evaluator")]
+    UnsupportedCoefficient,
+    #[error("prepared evaluator received a non-finite constant: {value}")]
+    NonFiniteConstant { value: f64 },
+    #[error("builtin function {function} requires exactly one argument, got {actual}")]
+    InvalidBuiltinArity { function: Symbol, actual: usize },
+    #[error("unsupported builtin function {function}")]
+    UnsupportedBuiltin { function: Symbol },
+    #[error("missing function {function}")]
+    MissingFunction { function: Symbol },
+    #[error("custom function {function} requires the general evaluator")]
+    CustomFunctionRequiresGeneralEvaluator { function: Symbol },
+    #[error("function {function} received an invalid argument {input}")]
+    Domain { function: Symbol, input: f64 },
+    #[error("custom function {function} failed: {message}")]
+    Callback { function: Symbol, message: String },
+}
+
 static EMPTY_ATOM_CONST_MAP: Lazy<HashMap<Atom, f64>> = Lazy::new(HashMap::default);
 
 /// Registry of numeric callbacks for symbolic function names.
@@ -205,6 +236,33 @@ struct EvaluationWorkspace {
     symbol_map: FloatSymbolMap,
     atom_map: HashMap<Atom, f64>,
     arg_buffer: Vec<f64>,
+}
+
+/// Caller-owned reusable scratch for prepared evaluator execution.
+///
+/// The existing thread-local path remains the convenient solver adapter. This
+/// explicit owner is useful when a caller already controls worker lifetimes or
+/// wants to prove allocation reuse in a long continuation. It is deliberately
+/// not shared between threads; one scratch value belongs to one active
+/// evaluation stream.
+#[derive(Default)]
+pub struct PreparedEvaluationScratch {
+    workspace: EvaluationWorkspace,
+}
+
+impl PreparedEvaluationScratch {
+    /// Return the current capacity of the reusable scalar workspace.
+    ///
+    /// This is intended for allocation-retention diagnostics. Callers should
+    /// not use it as a sizing requirement because evaluator plans may change
+    /// their internal operation shape.
+    pub fn capacity(&self) -> usize {
+        self.workspace
+            .results
+            .capacity()
+            .max(self.workspace.arg_buffer.capacity())
+            .max(self.workspace.cache.map.capacity())
+    }
 }
 
 thread_local! {
@@ -368,8 +426,21 @@ impl FunctionMap {
 impl PreparedEvaluator {
     /// Compile `atom` into a reusable numeric evaluation plan.
     pub fn new(atom: &Atom, vars: &[Symbol], function_map: &FunctionMap) -> Result<Self, String> {
+        Self::new_typed(atom, vars, function_map).map_err(|error| error.to_string())
+    }
+
+    /// Compile `atom` while preserving a typed preparation failure.
+    ///
+    /// This is the preferred boundary for new solver and language adapters.
+    /// The compatibility [`Self::new`] method remains available for older
+    /// callers that still consume `String` errors.
+    pub fn new_typed(
+        atom: &Atom,
+        vars: &[Symbol],
+        function_map: &FunctionMap,
+    ) -> Result<Self, PreparedEvaluationError> {
         let context = PreparedVariableContext::new(vars);
-        Self::new_with_context(atom, &context, function_map)
+        Self::new_with_context_typed(atom, &context, function_map)
     }
 
     /// Compile an atom while reusing a caller-owned variable ABI.
@@ -384,12 +455,20 @@ impl PreparedEvaluator {
         context: &PreparedVariableContext,
         function_map: &FunctionMap,
     ) -> Result<Self, String> {
+        Self::new_with_context_typed(atom, context, function_map).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn new_with_context_typed(
+        atom: &Atom,
+        context: &PreparedVariableContext,
+        function_map: &FunctionMap,
+    ) -> Result<Self, PreparedEvaluationError> {
         let mut compiler = PreparedCompiler {
             nodes: Vec::new(),
             cache: HashMap::default(),
             var_index: &context.var_index,
         };
-        let root = compiler.compile_view(atom.as_view())?;
+        let root = compiler.compile_view_typed(atom.as_view())?;
         let plain_numeric = function_map.is_empty()
             && compiler
                 .nodes
@@ -442,6 +521,76 @@ impl PreparedEvaluator {
         self.evaluate_with_function_map(values, &self.function_map)
     }
 
+    /// Evaluate the prepared plan with a typed failure contract.
+    #[inline]
+    pub fn evaluate_typed(&self, values: &[f64]) -> Result<f64, PreparedEvaluationError> {
+        self.evaluate_with_function_map_typed(values, &self.function_map)
+    }
+
+    /// Evaluate with caller-owned reusable scratch and typed failures.
+    ///
+    /// No workspace allocation is performed after the first sufficiently
+    /// large call. The fast constant/identity paths return before touching the
+    /// scratch value at all.
+    #[inline]
+    pub fn evaluate_with_scratch_typed(
+        &self,
+        values: &[f64],
+        scratch: &mut PreparedEvaluationScratch,
+    ) -> Result<f64, PreparedEvaluationError> {
+        if let Some(value) = self.evaluate_fast_flat_typed(values)? {
+            return Ok(value);
+        }
+        if self.plain_numeric {
+            self.evaluate_plain_numeric_typed(PreparedInput::Flat(values), &mut scratch.workspace)
+        } else {
+            self.evaluate_with_workspace_typed(
+                PreparedInput::Flat(values),
+                &self.function_map,
+                &mut scratch.workspace,
+            )
+        }
+    }
+
+    /// Compatibility wrapper for caller-owned scratch execution.
+    #[inline]
+    pub fn evaluate_with_scratch(
+        &self,
+        values: &[f64],
+        scratch: &mut PreparedEvaluationScratch,
+    ) -> Result<f64, String> {
+        self.evaluate_with_scratch_typed(values, scratch)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Evaluate an IVP expression from borrowed time, parameter and state
+    /// slices using caller-owned scratch.
+    #[inline]
+    pub(crate) fn evaluate_ivp_with_scratch_typed(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        scratch: &mut PreparedEvaluationScratch,
+    ) -> Result<f64, PreparedEvaluationError> {
+        if let Some(value) = self.evaluate_fast_ivp_typed(time, parameters, state)? {
+            return Ok(value);
+        }
+        if self.plain_numeric {
+            self.evaluate_plain_numeric_ivp_typed(time, parameters, state, &mut scratch.workspace)
+        } else {
+            self.evaluate_with_workspace_typed(
+                PreparedInput::Ivp {
+                    time,
+                    parameters,
+                    state,
+                },
+                &self.function_map,
+                &mut scratch.workspace,
+            )
+        }
+    }
+
     /// Evaluate the prepared plan with an explicit function map override.
     pub fn evaluate_with_function_map(
         &self,
@@ -453,6 +602,23 @@ impl PreparedEvaluator {
         }
         let mut workspace = EvaluationWorkspace::default();
         self.evaluate_with_workspace(PreparedInput::Flat(values), function_map, &mut workspace)
+    }
+
+    /// Evaluate with an explicit function map and preserve typed failures.
+    pub fn evaluate_with_function_map_typed(
+        &self,
+        values: &[f64],
+        function_map: &FunctionMap,
+    ) -> Result<f64, PreparedEvaluationError> {
+        if let Some(value) = self.evaluate_fast_flat_typed(values)? {
+            return Ok(value);
+        }
+        let mut workspace = EvaluationWorkspace::default();
+        self.evaluate_with_workspace_typed(
+            PreparedInput::Flat(values),
+            function_map,
+            &mut workspace,
+        )
     }
 
     /// Evaluate using scratch storage local to the current worker thread.
@@ -478,6 +644,27 @@ impl PreparedEvaluator {
         })
     }
 
+    pub(crate) fn evaluate_thread_local_typed(
+        &self,
+        values: &[f64],
+    ) -> Result<f64, PreparedEvaluationError> {
+        if let Some(value) = self.evaluate_fast_flat_typed(values)? {
+            return Ok(value);
+        }
+        EVALUATION_WORKSPACE.with(|workspace| {
+            let mut workspace = workspace.borrow_mut();
+            if self.plain_numeric {
+                self.evaluate_plain_numeric_typed(PreparedInput::Flat(values), &mut workspace)
+            } else {
+                self.evaluate_with_workspace_typed(
+                    PreparedInput::Flat(values),
+                    &self.function_map,
+                    &mut workspace,
+                )
+            }
+        })
+    }
+
     /// Evaluate an IVP callback without flattening time, parameters and state
     /// into a temporary argument vector. The prepared node indices retain the
     /// public flat ABI, while this adapter resolves those indices directly
@@ -493,27 +680,62 @@ impl PreparedEvaluator {
         }
         EVALUATION_WORKSPACE.with(|workspace| {
             let mut workspace = workspace.borrow_mut();
+            if self.plain_numeric {
+                self.evaluate_plain_numeric_ivp_unchecked(time, parameters, state, &mut workspace)
+            } else {
+                self.evaluate_with_workspace(
+                    PreparedInput::Ivp {
+                        time,
+                        parameters,
+                        state,
+                    },
+                    &self.function_map,
+                    &mut workspace,
+                )
+            }
+        })
+    }
+
+    pub(crate) fn evaluate_thread_local_ivp_typed(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+    ) -> Result<f64, PreparedEvaluationError> {
+        if let Some(value) = self.evaluate_fast_ivp_typed(time, parameters, state)? {
+            return Ok(value);
+        }
+        EVALUATION_WORKSPACE.with(|workspace| {
+            let mut workspace = workspace.borrow_mut();
             let input = PreparedInput::Ivp {
                 time,
                 parameters,
                 state,
             };
             if self.plain_numeric {
-                self.evaluate_plain_numeric_ivp(time, parameters, state, &mut workspace)
+                self.evaluate_plain_numeric_ivp_typed(time, parameters, state, &mut workspace)
             } else {
-                self.evaluate_with_workspace(input, &self.function_map, &mut workspace)
+                self.evaluate_with_workspace_typed(input, &self.function_map, &mut workspace)
             }
         })
     }
 
     #[inline]
     fn evaluate_fast_flat(&self, values: &[f64]) -> Result<Option<f64>, String> {
+        self.evaluate_fast_flat_typed(values)
+            .map_err(|error| error.to_string())
+    }
+
+    #[inline]
+    fn evaluate_fast_flat_typed(
+        &self,
+        values: &[f64],
+    ) -> Result<Option<f64>, PreparedEvaluationError> {
         if values.len() != self.vars.len() {
-            return Err(format!(
-                "Prepared evaluator expected {} argument(s), got {}",
-                self.vars.len(),
-                values.len()
-            ));
+            return Err(PreparedEvaluationError::Arity {
+                expected: self.vars.len(),
+                actual: values.len(),
+            });
         }
         Ok(match self.fast_path {
             Some(PreparedFastPath::Constant(value)) => Some(value),
@@ -529,13 +751,23 @@ impl PreparedEvaluator {
         parameters: &[f64],
         state: &[f64],
     ) -> Result<Option<f64>, String> {
+        self.evaluate_fast_ivp_typed(time, parameters, state)
+            .map_err(|error| error.to_string())
+    }
+
+    #[inline]
+    fn evaluate_fast_ivp_typed(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+    ) -> Result<Option<f64>, PreparedEvaluationError> {
         let input_len = 1 + parameters.len() + state.len();
         if input_len != self.vars.len() {
-            return Err(format!(
-                "Prepared evaluator expected {} argument(s), got {}",
-                self.vars.len(),
-                input_len
-            ));
+            return Err(PreparedEvaluationError::Arity {
+                expected: self.vars.len(),
+                actual: input_len,
+            });
         }
         Ok(self.evaluate_fast_ivp_unchecked(time, parameters, state))
     }
@@ -743,12 +975,28 @@ impl PreparedEvaluator {
         input: PreparedInput<'_>,
         workspace: &mut EvaluationWorkspace,
     ) -> Result<f64, String> {
+        self.evaluate_plain_numeric_with_policy::<false>(input, workspace)
+            .map_err(|error| error.to_string())
+    }
+
+    fn evaluate_plain_numeric_typed(
+        &self,
+        input: PreparedInput<'_>,
+        workspace: &mut EvaluationWorkspace,
+    ) -> Result<f64, PreparedEvaluationError> {
+        self.evaluate_plain_numeric_with_policy::<true>(input, workspace)
+    }
+
+    fn evaluate_plain_numeric_with_policy<const STRICT_DOMAINS: bool>(
+        &self,
+        input: PreparedInput<'_>,
+        workspace: &mut EvaluationWorkspace,
+    ) -> Result<f64, PreparedEvaluationError> {
         if input.len() != self.vars.len() {
-            return Err(format!(
-                "Prepared evaluator expected {} argument(s), got {}",
-                self.vars.len(),
-                input.len()
-            ));
+            return Err(PreparedEvaluationError::Arity {
+                expected: self.vars.len(),
+                actual: input.len(),
+            });
         }
 
         workspace.results.resize(self.nodes.len(), 0.0);
@@ -776,13 +1024,14 @@ impl PreparedEvaluator {
                 }
                 PreparedNode::Pow { base, exp } => results[*base].powf(results[*exp]),
                 PreparedNode::Builtin { symbol, arg } => {
-                    evaluate_builtin_function(*symbol, results[*arg])?
+                    evaluate_builtin_function_with_policy::<STRICT_DOMAINS>(*symbol, results[*arg])?
                 }
                 PreparedNode::Custom { symbol, .. } => {
-                    return Err(format!(
-                        "Custom function {} requires the general evaluator",
-                        symbol
-                    ));
+                    return Err(
+                        PreparedEvaluationError::CustomFunctionRequiresGeneralEvaluator {
+                            function: *symbol,
+                        },
+                    );
                 }
             };
         }
@@ -797,23 +1046,22 @@ impl PreparedEvaluator {
     /// dispatch here avoids matching on `PreparedInput` for every variable
     /// node while preserving the same time/parameter/state ordering.
     #[inline]
-    fn evaluate_plain_numeric_ivp(
+    fn evaluate_plain_numeric_ivp_typed(
         &self,
         time: f64,
         parameters: &[f64],
         state: &[f64],
         workspace: &mut EvaluationWorkspace,
-    ) -> Result<f64, String> {
+    ) -> Result<f64, PreparedEvaluationError> {
         let input_len = 1 + parameters.len() + state.len();
         if input_len != self.vars.len() {
-            return Err(format!(
-                "Prepared evaluator expected {} argument(s), got {}",
-                self.vars.len(),
-                input_len
-            ));
+            return Err(PreparedEvaluationError::Arity {
+                expected: self.vars.len(),
+                actual: input_len,
+            });
         }
 
-        self.evaluate_plain_numeric_ivp_unchecked(time, parameters, state, workspace)
+        self.evaluate_plain_numeric_ivp_unchecked_typed(time, parameters, state, workspace)
     }
 
     #[inline]
@@ -824,6 +1072,33 @@ impl PreparedEvaluator {
         state: &[f64],
         workspace: &mut EvaluationWorkspace,
     ) -> Result<f64, String> {
+        self.evaluate_plain_numeric_ivp_unchecked_with_policy::<false>(
+            time, parameters, state, workspace,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[inline]
+    fn evaluate_plain_numeric_ivp_unchecked_typed(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        workspace: &mut EvaluationWorkspace,
+    ) -> Result<f64, PreparedEvaluationError> {
+        self.evaluate_plain_numeric_ivp_unchecked_with_policy::<true>(
+            time, parameters, state, workspace,
+        )
+    }
+
+    #[inline]
+    fn evaluate_plain_numeric_ivp_unchecked_with_policy<const STRICT_DOMAINS: bool>(
+        &self,
+        time: f64,
+        parameters: &[f64],
+        state: &[f64],
+        workspace: &mut EvaluationWorkspace,
+    ) -> Result<f64, PreparedEvaluationError> {
         workspace.results.resize(self.nodes.len(), 0.0);
         let results = &mut workspace.results;
         for (index, node) in self.nodes.iter().enumerate() {
@@ -853,13 +1128,14 @@ impl PreparedEvaluator {
                 }
                 PreparedNode::Pow { base, exp } => results[*base].powf(results[*exp]),
                 PreparedNode::Builtin { symbol, arg } => {
-                    evaluate_builtin_function(*symbol, results[*arg])?
+                    evaluate_builtin_function_with_policy::<STRICT_DOMAINS>(*symbol, results[*arg])?
                 }
                 PreparedNode::Custom { symbol, .. } => {
-                    return Err(format!(
-                        "Custom function {} requires the general evaluator",
-                        symbol
-                    ));
+                    return Err(
+                        PreparedEvaluationError::CustomFunctionRequiresGeneralEvaluator {
+                            function: *symbol,
+                        },
+                    );
                 }
             };
         }
@@ -873,12 +1149,30 @@ impl PreparedEvaluator {
         function_map: &FunctionMap,
         workspace: &mut EvaluationWorkspace,
     ) -> Result<f64, String> {
+        self.evaluate_with_workspace_with_policy::<false>(input, function_map, workspace)
+            .map_err(|error| error.to_string())
+    }
+
+    fn evaluate_with_workspace_typed(
+        &self,
+        input: PreparedInput<'_>,
+        function_map: &FunctionMap,
+        workspace: &mut EvaluationWorkspace,
+    ) -> Result<f64, PreparedEvaluationError> {
+        self.evaluate_with_workspace_with_policy::<true>(input, function_map, workspace)
+    }
+
+    fn evaluate_with_workspace_with_policy<const STRICT_DOMAINS: bool>(
+        &self,
+        input: PreparedInput<'_>,
+        function_map: &FunctionMap,
+        workspace: &mut EvaluationWorkspace,
+    ) -> Result<f64, PreparedEvaluationError> {
         if input.len() != self.vars.len() {
-            return Err(format!(
-                "Prepared evaluator expected {} argument(s), got {}",
-                self.vars.len(),
-                input.len()
-            ));
+            return Err(PreparedEvaluationError::Arity {
+                expected: self.vars.len(),
+                actual: input.len(),
+            });
         }
 
         workspace.results.resize(self.nodes.len(), 0.0);
@@ -896,64 +1190,77 @@ impl PreparedEvaluator {
         let mut atom_map_ready = false;
 
         for (index, node) in self.nodes.iter().enumerate() {
-            results[index] =
-                match node {
-                    PreparedNode::Const(value) => *value,
-                    PreparedNode::Var(var_index) => input.get(*var_index),
-                    PreparedNode::Add(args) => {
-                        let mut value = 0.0;
-                        for &arg in args.iter() {
-                            value += results[arg];
-                        }
-                        value
+            results[index] = match node {
+                PreparedNode::Const(value) => *value,
+                PreparedNode::Var(var_index) => input.get(*var_index),
+                PreparedNode::Add(args) => {
+                    let mut value = 0.0;
+                    for &arg in args.iter() {
+                        value += results[arg];
                     }
-                    PreparedNode::Mul(args) => {
-                        let mut value = 1.0;
-                        for &arg in args.iter() {
-                            value *= results[arg];
-                        }
-                        value
+                    value
+                }
+                PreparedNode::Mul(args) => {
+                    let mut value = 1.0;
+                    for &arg in args.iter() {
+                        value *= results[arg];
                     }
-                    PreparedNode::PowI { base, exponent } => {
-                        evaluate_integer_power(results[*base], *exponent)
-                    }
-                    PreparedNode::Pow { base, exp } => {
-                        let base_eval = results[*base];
-                        let exp_eval = results[*exp];
-                        base_eval.powf(exp_eval)
-                    }
-                    PreparedNode::Builtin { symbol, arg } => {
-                        evaluate_builtin_function(*symbol, results[*arg])?
-                    }
-                    PreparedNode::Custom { symbol, args } => {
-                        arg_buffer.clear();
-                        arg_buffer.extend(args.iter().map(|i| results[*i]));
+                    value
+                }
+                PreparedNode::PowI { base, exponent } => {
+                    evaluate_integer_power(results[*base], *exponent)
+                }
+                PreparedNode::Pow { base, exp } => {
+                    let base_eval = results[*base];
+                    let exp_eval = results[*exp];
+                    base_eval.powf(exp_eval)
+                }
+                PreparedNode::Builtin { symbol, arg } => {
+                    evaluate_builtin_function_with_policy::<STRICT_DOMAINS>(*symbol, results[*arg])?
+                }
+                PreparedNode::Custom { symbol, args } => {
+                    arg_buffer.clear();
+                    arg_buffer.extend(args.iter().map(|i| results[*i]));
 
-                        if let Some(fun) = function_map.get_symbol(symbol) {
-                            if !symbol_map_ready {
-                                self.vars.iter().copied().enumerate().for_each(
-                                    |(index, symbol)| {
-                                        symbol_map.insert(symbol, input.get(index));
-                                    },
-                                );
-                                symbol_map_ready = true;
-                            }
-                            fun(arg_buffer, symbol_map, function_map, cache)?
-                        } else if let Some(fun) = function_map.get(symbol) {
-                            if !atom_map_ready {
-                                self.var_atoms.iter().cloned().enumerate().for_each(
-                                    |(index, atom)| {
-                                        atom_map.insert(atom, input.get(index));
-                                    },
-                                );
-                                atom_map_ready = true;
-                            }
-                            fun(arg_buffer, atom_map, function_map, cache)?
-                        } else {
-                            return Err(format!("Missing function {}", symbol));
+                    if let Some(fun) = function_map.get_symbol(symbol) {
+                        if !symbol_map_ready {
+                            self.vars
+                                .iter()
+                                .copied()
+                                .enumerate()
+                                .for_each(|(index, symbol)| {
+                                    symbol_map.insert(symbol, input.get(index));
+                                });
+                            symbol_map_ready = true;
                         }
+                        fun(arg_buffer, symbol_map, function_map, cache).map_err(|message| {
+                            PreparedEvaluationError::Callback {
+                                function: *symbol,
+                                message,
+                            }
+                        })?
+                    } else if let Some(fun) = function_map.get(symbol) {
+                        if !atom_map_ready {
+                            self.var_atoms
+                                .iter()
+                                .cloned()
+                                .enumerate()
+                                .for_each(|(index, atom)| {
+                                    atom_map.insert(atom, input.get(index));
+                                });
+                            atom_map_ready = true;
+                        }
+                        fun(arg_buffer, atom_map, function_map, cache).map_err(|message| {
+                            PreparedEvaluationError::Callback {
+                                function: *symbol,
+                                message,
+                            }
+                        })?
+                    } else {
+                        return Err(PreparedEvaluationError::MissingFunction { function: *symbol });
                     }
-                };
+                }
+            };
         }
 
         Ok(results[self.root])
@@ -967,7 +1274,7 @@ struct PreparedCompiler<'a> {
 }
 
 impl<'a> PreparedCompiler<'a> {
-    fn compile_view(&mut self, view: AtomView<'a>) -> Result<usize, String> {
+    fn compile_view_typed(&mut self, view: AtomView<'a>) -> Result<usize, PreparedEvaluationError> {
         if let Some(index) = self.cache.get(&view) {
             return Ok(*index);
         }
@@ -975,11 +1282,14 @@ impl<'a> PreparedCompiler<'a> {
         let node = match view {
             AtomView::Num(n) => match n.get_coeff_view() {
                 CoefficientView::Natural(num, den) => PreparedNode::Const(num as f64 / den as f64),
-                CoefficientView::Float(value) => PreparedNode::Const(value),
+                CoefficientView::Float(value) => {
+                    if !value.is_finite() {
+                        return Err(PreparedEvaluationError::NonFiniteConstant { value });
+                    }
+                    PreparedNode::Const(value)
+                }
                 CoefficientView::Large(_) => {
-                    return Err(
-                        "Large coefficients are not supported in the prepared evaluator".into(),
-                    );
+                    return Err(PreparedEvaluationError::UnsupportedCoefficient);
                 }
             },
             AtomView::Var(v) => {
@@ -991,15 +1301,10 @@ impl<'a> PreparedCompiler<'a> {
                         "e" => PreparedNode::Const(std::f64::consts::E),
                         "pi" => PreparedNode::Const(std::f64::consts::PI),
                         "i" => {
-                            return Err(
-                                "The prepared evaluator does not support the imaginary unit".into(),
-                            );
+                            return Err(PreparedEvaluationError::UnsupportedImaginaryUnit);
                         }
                         _ => {
-                            return Err(format!(
-                                "Variable {} not in prepared evaluator variable list",
-                                symbol.get_stripped_name()
-                            ));
+                            return Err(PreparedEvaluationError::UnknownVariable { symbol });
                         }
                     }
                 }
@@ -1008,17 +1313,22 @@ impl<'a> PreparedCompiler<'a> {
                 let symbol = f.get_symbol();
                 if is_builtin_function(symbol) {
                     if f.get_nargs() != 1 {
-                        return Err(format!(
-                            "Builtin function {} requires exactly one argument",
-                            symbol
-                        ));
+                        return Err(PreparedEvaluationError::InvalidBuiltinArity {
+                            function: symbol,
+                            actual: f.get_nargs(),
+                        });
                     }
-                    let arg = self.compile_view(f.iter().next().unwrap())?;
+                    let arg = self.compile_view_typed(f.iter().next().ok_or(
+                        PreparedEvaluationError::InvalidBuiltinArity {
+                            function: symbol,
+                            actual: 0,
+                        },
+                    )?)?;
                     PreparedNode::Builtin { symbol, arg }
                 } else {
                     let mut args = Vec::with_capacity(f.get_nargs());
                     for arg in f.iter() {
-                        args.push(self.compile_view(arg)?);
+                        args.push(self.compile_view_typed(arg)?);
                     }
                     PreparedNode::Custom {
                         symbol,
@@ -1028,27 +1338,27 @@ impl<'a> PreparedCompiler<'a> {
             }
             AtomView::Pow(p) => {
                 let (base, exp) = p.get_base_exp();
-                let base = self.compile_view(base)?;
+                let base = self.compile_view_typed(base)?;
                 if let Some(exponent) = packed_integer_exponent(exp) {
                     PreparedNode::PowI { base, exponent }
                 } else {
                     PreparedNode::Pow {
                         base,
-                        exp: self.compile_view(exp)?,
+                        exp: self.compile_view_typed(exp)?,
                     }
                 }
             }
             AtomView::Mul(m) => {
                 let mut args = Vec::with_capacity(m.get_nargs());
                 for arg in m.iter() {
-                    args.push(self.compile_view(arg)?);
+                    args.push(self.compile_view_typed(arg)?);
                 }
                 PreparedNode::Mul(args.into_boxed_slice())
             }
             AtomView::Add(a) => {
                 let mut args = Vec::with_capacity(a.get_nargs());
                 for arg in a.iter() {
-                    args.push(self.compile_view(arg)?);
+                    args.push(self.compile_view_typed(arg)?);
                 }
                 PreparedNode::Add(args.into_boxed_slice())
             }
@@ -1107,6 +1417,24 @@ pub fn evaluate_with_symbols(
     atom.evaluate_with_symbols(const_map, function_map)
 }
 
+/// Typed compatibility evaluation for atom-keyed bindings.
+pub fn evaluate_typed(
+    atom: &Atom,
+    const_map: &HashMap<Atom, f64>,
+    function_map: &FunctionMap,
+) -> Result<f64, PreparedEvaluationError> {
+    atom.evaluate_typed(const_map, function_map)
+}
+
+/// Typed compatibility evaluation for symbol-keyed bindings.
+pub fn evaluate_with_symbols_typed(
+    atom: &Atom,
+    const_map: &FloatSymbolMap,
+    function_map: &FunctionMap,
+) -> Result<f64, PreparedEvaluationError> {
+    atom.evaluate_with_symbols_typed(const_map, function_map)
+}
+
 /// Compile an owned atom into a reusable prepared evaluator.
 pub fn prepare_evaluator(
     atom: &Atom,
@@ -1114,6 +1442,15 @@ pub fn prepare_evaluator(
     function_map: &FunctionMap,
 ) -> Result<PreparedEvaluator, String> {
     PreparedEvaluator::new(atom, vars, function_map)
+}
+
+/// Compile an owned atom while preserving typed preparation failures.
+pub fn prepare_evaluator_typed(
+    atom: &Atom,
+    vars: &[Symbol],
+    function_map: &FunctionMap,
+) -> Result<PreparedEvaluator, PreparedEvaluationError> {
+    PreparedEvaluator::new_typed(atom, vars, function_map)
 }
 
 /// Evaluate an owned atom exactly over rational coefficients.
@@ -1150,6 +1487,28 @@ impl Atom {
         let mut cache = EvaluationCache::default();
         self.as_view()
             .evaluate_with_symbols_impl(const_map, function_map, &mut cache)
+    }
+
+    /// Typed compatibility evaluator using atom-keyed bindings.
+    pub fn evaluate_typed(
+        &self,
+        const_map: &HashMap<Atom, f64>,
+        function_map: &FunctionMap,
+    ) -> Result<f64, PreparedEvaluationError> {
+        let mut cache = EvaluationCache::default();
+        self.as_view()
+            .evaluate_impl_typed(const_map, function_map, &mut cache)
+    }
+
+    /// Typed compatibility evaluator using symbol-keyed bindings.
+    pub fn evaluate_with_symbols_typed(
+        &self,
+        const_map: &FloatSymbolMap,
+        function_map: &FunctionMap,
+    ) -> Result<f64, PreparedEvaluationError> {
+        let mut cache = EvaluationCache::default();
+        self.as_view()
+            .evaluate_with_symbols_impl_typed(const_map, function_map, &mut cache)
     }
 
     /// Compile this atom into a reusable prepared evaluator.
@@ -1194,6 +1553,26 @@ impl<'a> AtomView<'a> {
     ) -> Result<f64, String> {
         let mut cache = EvaluationCache::default();
         self.evaluate_with_symbols_impl(const_map, function_map, &mut cache)
+    }
+
+    /// Typed compatibility evaluator using atom-keyed bindings.
+    pub fn evaluate_typed(
+        &self,
+        const_map: &HashMap<Atom, f64>,
+        function_map: &FunctionMap,
+    ) -> Result<f64, PreparedEvaluationError> {
+        let mut cache = EvaluationCache::default();
+        self.evaluate_impl_typed(const_map, function_map, &mut cache)
+    }
+
+    /// Typed compatibility evaluator using symbol-keyed bindings.
+    pub fn evaluate_with_symbols_typed(
+        &self,
+        const_map: &FloatSymbolMap,
+        function_map: &FunctionMap,
+    ) -> Result<f64, PreparedEvaluationError> {
+        let mut cache = EvaluationCache::default();
+        self.evaluate_with_symbols_impl_typed(const_map, function_map, &mut cache)
     }
 
     /// Evaluate this borrowed atom view exactly when every intermediate stays rational.
@@ -1456,6 +1835,93 @@ impl<'a> AtomView<'a> {
         }
     }
 
+    /// Typed recursive interpreter for atom-keyed compatibility bindings.
+    fn evaluate_impl_typed(
+        &self,
+        const_map: &HashMap<Atom, f64>,
+        function_map: &FunctionMap,
+        cache: &mut EvaluationCache,
+    ) -> Result<f64, PreparedEvaluationError> {
+        if let Some(value) = const_lookup(const_map, *self) {
+            return Ok(*value);
+        }
+
+        match self {
+            AtomView::Num(n) => match n.get_coeff_view() {
+                CoefficientView::Natural(num, den) => Ok(num as f64 / den as f64),
+                CoefficientView::Float(value) => Ok(value),
+                CoefficientView::Large(_) => Err(PreparedEvaluationError::UnsupportedCoefficient),
+            },
+            AtomView::Var(v) => match v.get_symbol().get_stripped_name() {
+                "e" => Ok(std::f64::consts::E),
+                "pi" => Ok(std::f64::consts::PI),
+                "i" => Err(PreparedEvaluationError::UnsupportedImaginaryUnit),
+                _ => Err(PreparedEvaluationError::UnknownVariable {
+                    symbol: v.get_symbol(),
+                }),
+            },
+            AtomView::Fun(f) => {
+                let name = f.get_symbol();
+                if is_builtin_function(name) {
+                    if f.get_nargs() != 1 {
+                        return Err(PreparedEvaluationError::InvalidBuiltinArity {
+                            function: name,
+                            actual: f.get_nargs(),
+                        });
+                    }
+                    let arg = f.iter().next().expect("checked builtin arity");
+                    let value = arg.evaluate_impl_typed(const_map, function_map, cache)?;
+                    return evaluate_builtin_function_typed(name, value);
+                }
+                if let Some(value) = cache.get_view(*self) {
+                    return Ok(*value);
+                }
+                let mut args = Vec::with_capacity(f.get_nargs());
+                for arg in f.iter() {
+                    args.push(arg.evaluate_impl_typed(const_map, function_map, cache)?);
+                }
+                let function = function_map
+                    .get(&name)
+                    .ok_or(PreparedEvaluationError::MissingFunction { function: name })?;
+                let value = function(&args, const_map, function_map, cache).map_err(|message| {
+                    PreparedEvaluationError::Callback {
+                        function: name,
+                        message,
+                    }
+                })?;
+                cache.insert_view(*self, value);
+                Ok(value)
+            }
+            AtomView::Pow(p) => {
+                let (base, exp) = p.get_base_exp();
+                let base_value = base.evaluate_impl_typed(const_map, function_map, cache)?;
+                if let AtomView::Num(n) = exp {
+                    if let CoefficientView::Natural(num, den) = n.get_coeff_view() {
+                        if den == 1 && num <= i32::MAX as i64 && num >= i32::MIN as i64 {
+                            return Ok(base_value.powi(num as i32));
+                        }
+                    }
+                }
+                let exponent = exp.evaluate_impl_typed(const_map, function_map, cache)?;
+                Ok(base_value.powf(exponent))
+            }
+            AtomView::Mul(m) => {
+                let mut result = 1.0;
+                for arg in m.iter() {
+                    result *= arg.evaluate_impl_typed(const_map, function_map, cache)?;
+                }
+                Ok(result)
+            }
+            AtomView::Add(a) => {
+                let mut result = 0.0;
+                for arg in a.iter() {
+                    result += arg.evaluate_impl_typed(const_map, function_map, cache)?;
+                }
+                Ok(result)
+            }
+        }
+    }
+
     /// Recursive interpreter for packed atoms using symbol-keyed floating-point bindings.
     fn evaluate_with_symbols_impl(
         &self,
@@ -1580,6 +2046,104 @@ impl<'a> AtomView<'a> {
             }
         }
     }
+
+    /// Typed recursive interpreter for symbol-keyed compatibility bindings.
+    fn evaluate_with_symbols_impl_typed(
+        &self,
+        const_map: &FloatSymbolMap,
+        function_map: &FunctionMap,
+        cache: &mut EvaluationCache,
+    ) -> Result<f64, PreparedEvaluationError> {
+        match self {
+            AtomView::Num(n) => match n.get_coeff_view() {
+                CoefficientView::Natural(num, den) => Ok(num as f64 / den as f64),
+                CoefficientView::Float(value) => Ok(value),
+                CoefficientView::Large(_) => Err(PreparedEvaluationError::UnsupportedCoefficient),
+            },
+            AtomView::Var(v) => {
+                let symbol = v.get_symbol();
+                if let Some(value) = const_map.get(&symbol) {
+                    return Ok(*value);
+                }
+                match symbol.get_stripped_name() {
+                    "e" => Ok(std::f64::consts::E),
+                    "pi" => Ok(std::f64::consts::PI),
+                    "i" => Err(PreparedEvaluationError::UnsupportedImaginaryUnit),
+                    _ => Err(PreparedEvaluationError::UnknownVariable { symbol }),
+                }
+            }
+            AtomView::Fun(f) => {
+                let name = f.get_symbol();
+                if is_builtin_function(name) {
+                    if f.get_nargs() != 1 {
+                        return Err(PreparedEvaluationError::InvalidBuiltinArity {
+                            function: name,
+                            actual: f.get_nargs(),
+                        });
+                    }
+                    let arg = f.iter().next().expect("checked builtin arity");
+                    let value =
+                        arg.evaluate_with_symbols_impl_typed(const_map, function_map, cache)?;
+                    return evaluate_builtin_function_typed(name, value);
+                }
+                if let Some(value) = cache.get_view(*self) {
+                    return Ok(*value);
+                }
+                let mut args = Vec::with_capacity(f.get_nargs());
+                for arg in f.iter() {
+                    args.push(arg.evaluate_with_symbols_impl_typed(
+                        const_map,
+                        function_map,
+                        cache,
+                    )?);
+                }
+                let value = if let Some(function) = function_map.get_symbol(&name) {
+                    function(&args, const_map, function_map, cache)
+                } else if let Some(function) = function_map.get(&name) {
+                    function(&args, &EMPTY_ATOM_CONST_MAP, function_map, cache)
+                } else {
+                    return Err(PreparedEvaluationError::MissingFunction { function: name });
+                }
+                .map_err(|message| PreparedEvaluationError::Callback {
+                    function: name,
+                    message,
+                })?;
+                cache.insert_view(*self, value);
+                Ok(value)
+            }
+            AtomView::Pow(p) => {
+                let (base, exp) = p.get_base_exp();
+                let base_value =
+                    base.evaluate_with_symbols_impl_typed(const_map, function_map, cache)?;
+                if let AtomView::Num(n) = exp {
+                    if let CoefficientView::Natural(num, den) = n.get_coeff_view() {
+                        if den == 1 && num <= i32::MAX as i64 && num >= i32::MIN as i64 {
+                            return Ok(base_value.powi(num as i32));
+                        }
+                    }
+                }
+                let exponent =
+                    exp.evaluate_with_symbols_impl_typed(const_map, function_map, cache)?;
+                Ok(base_value.powf(exponent))
+            }
+            AtomView::Mul(m) => {
+                let mut result = 1.0;
+                for arg in m.iter() {
+                    result *=
+                        arg.evaluate_with_symbols_impl_typed(const_map, function_map, cache)?;
+                }
+                Ok(result)
+            }
+            AtomView::Add(a) => {
+                let mut result = 0.0;
+                for arg in a.iter() {
+                    result +=
+                        arg.evaluate_with_symbols_impl_typed(const_map, function_map, cache)?;
+                }
+                Ok(result)
+            }
+        }
+    }
 }
 
 #[inline]
@@ -1610,6 +2174,19 @@ fn is_builtin_function(symbol: Symbol) -> bool {
 
 #[inline]
 fn evaluate_builtin_function(symbol: Symbol, arg_eval: f64) -> Result<f64, String> {
+    evaluate_builtin_function_with_policy::<false>(symbol, arg_eval)
+        .map_err(|error| error.to_string())
+}
+
+#[inline]
+fn evaluate_builtin_function_with_policy<const STRICT_DOMAINS: bool>(
+    symbol: Symbol,
+    arg_eval: f64,
+) -> Result<f64, PreparedEvaluationError> {
+    if STRICT_DOMAINS {
+        return evaluate_builtin_function_typed(symbol, arg_eval);
+    }
+
     Ok(match symbol {
         s if s == Atom::EXP => arg_eval.exp(),
         s if s == Atom::LOG => arg_eval.ln(),
@@ -1622,7 +2199,69 @@ fn evaluate_builtin_function(symbol: Symbol, arg_eval: f64) -> Result<f64, Strin
         s if s == Atom::ATAN => arg_eval.atan(),
         s if s == Atom::ACOT => std::f64::consts::FRAC_PI_2 - arg_eval.atan(),
         s if s == Atom::SQRT => arg_eval.sqrt(),
-        _ => return Err(format!("Unsupported builtin function {}", symbol)),
+        _ => return Err(PreparedEvaluationError::UnsupportedBuiltin { function: symbol }),
+    })
+}
+
+#[inline]
+fn evaluate_builtin_function_typed(
+    symbol: Symbol,
+    arg_eval: f64,
+) -> Result<f64, PreparedEvaluationError> {
+    Ok(match symbol {
+        s if s == Atom::EXP => arg_eval.exp(),
+        s if s == Atom::LOG => {
+            if !(arg_eval > 0.0) {
+                return Err(PreparedEvaluationError::Domain {
+                    function: symbol,
+                    input: arg_eval,
+                });
+            }
+            arg_eval.ln()
+        }
+        s if s == Atom::SIN => arg_eval.sin(),
+        s if s == Atom::COS => arg_eval.cos(),
+        s if s == Atom::TAN => arg_eval.tan(),
+        s if s == Atom::COT => {
+            let tangent = arg_eval.tan();
+            if tangent == 0.0 {
+                return Err(PreparedEvaluationError::Domain {
+                    function: symbol,
+                    input: arg_eval,
+                });
+            }
+            tangent.recip()
+        }
+        s if s == Atom::ASIN => {
+            if !(-1.0..=1.0).contains(&arg_eval) {
+                return Err(PreparedEvaluationError::Domain {
+                    function: symbol,
+                    input: arg_eval,
+                });
+            }
+            arg_eval.asin()
+        }
+        s if s == Atom::ACOS => {
+            if !(-1.0..=1.0).contains(&arg_eval) {
+                return Err(PreparedEvaluationError::Domain {
+                    function: symbol,
+                    input: arg_eval,
+                });
+            }
+            arg_eval.acos()
+        }
+        s if s == Atom::ATAN => arg_eval.atan(),
+        s if s == Atom::ACOT => std::f64::consts::FRAC_PI_2 - arg_eval.atan(),
+        s if s == Atom::SQRT => {
+            if !(arg_eval >= 0.0) {
+                return Err(PreparedEvaluationError::Domain {
+                    function: symbol,
+                    input: arg_eval,
+                });
+            }
+            arg_eval.sqrt()
+        }
+        _ => return Err(PreparedEvaluationError::UnsupportedBuiltin { function: symbol }),
     })
 }
 
@@ -1665,7 +2304,8 @@ mod test {
     use ahash::HashMap;
 
     use super::{
-        ExactSymbolMap, FunctionMap, evaluate_exact, evaluate_exact_with_symbols, prepare_evaluator,
+        ExactSymbolMap, FunctionMap, PreparedEvaluationError, PreparedEvaluationScratch,
+        evaluate_exact, evaluate_exact_with_symbols, prepare_evaluator, prepare_evaluator_typed,
     };
     use crate::symbolic::View::{atom::Atom, coefficient::Coefficient};
     use crate::{parse, symbol};
@@ -1763,6 +2403,184 @@ mod test {
             .evaluate_thread_local_ivp(time, &parameters, &[state[0]])
             .unwrap_err();
         assert!(error.contains("expected 4 argument(s), got 3"));
+    }
+
+    #[test]
+    fn typed_preparation_rejects_unknown_variable_without_string_matching() {
+        let x = symbol!("x");
+        let z = parse!("z").unwrap();
+        let error = prepare_evaluator_typed(&z, &[x], &FunctionMap::new())
+            .err()
+            .expect("unknown variable must fail preparation");
+        assert!(matches!(
+            error,
+            PreparedEvaluationError::UnknownVariable { symbol } if symbol.get_stripped_name() == "z"
+        ));
+    }
+
+    #[test]
+    fn typed_evaluation_reports_shape_and_domain_failures() {
+        let x = symbol!("x");
+        let evaluator = prepare_evaluator_typed(
+            &parse!("log(x) + sqrt(x)").unwrap(),
+            &[x],
+            &FunctionMap::new(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            evaluator.evaluate_typed(&[]),
+            Err(PreparedEvaluationError::Arity {
+                expected: 1,
+                actual: 0
+            })
+        ));
+        assert!(matches!(
+            evaluator.evaluate_typed(&[-1.0]),
+            Err(PreparedEvaluationError::Domain { function, input })
+                if function == Atom::LOG && input == -1.0
+        ));
+
+        let sqrt = prepare_evaluator_typed(&parse!("sqrt(x)").unwrap(), &[x], &FunctionMap::new())
+            .unwrap();
+        assert!(matches!(
+            sqrt.evaluate_typed(&[f64::NAN]),
+            Err(PreparedEvaluationError::Domain { function, input })
+                if function == Atom::SQRT && input.is_nan()
+        ));
+    }
+
+    #[test]
+    fn legacy_atom_and_atom_view_typed_evaluators_preserve_context() {
+        let x = symbol!("x");
+        let atom = Atom::new_var(x);
+        let mut values = super::FloatSymbolMap::default();
+        values.insert(x, 2.5);
+
+        assert_eq!(
+            atom.evaluate_with_symbols_typed(&values, &FunctionMap::new()),
+            Ok(2.5)
+        );
+        assert_eq!(
+            atom.as_view()
+                .evaluate_with_symbols_typed(&values, &FunctionMap::new()),
+            Ok(2.5)
+        );
+
+        let missing = Atom::new_var(symbol!("missing"))
+            .evaluate_with_symbols_typed(&values, &FunctionMap::new())
+            .unwrap_err();
+        assert!(matches!(
+            missing,
+            PreparedEvaluationError::UnknownVariable { symbol }
+                if symbol.get_stripped_name() == "missing"
+        ));
+
+        let log_expr = crate::symbolic::symbolic_engine::Expr::parse_expression("log(x)");
+        let log_atom = super::super::conversions::try_expr_to_atom(&log_expr).unwrap();
+        let domain = log_atom
+            .evaluate_with_symbols_typed(&[(x, -1.0)].into_iter().collect(), &FunctionMap::new())
+            .unwrap_err();
+        assert!(matches!(
+            domain,
+            PreparedEvaluationError::Domain { function, input }
+                if function == Atom::LOG && input == -1.0
+        ));
+    }
+
+    #[test]
+    fn typed_evaluation_preserves_missing_function_and_callback_context() {
+        let x = symbol!("x");
+        let expr = parse!("f(x)").unwrap();
+        let missing = prepare_evaluator_typed(&expr, &[x], &FunctionMap::new())
+            .unwrap()
+            .evaluate_typed(&[1.0])
+            .err()
+            .expect("missing function must fail evaluation");
+        assert!(matches!(
+            missing,
+            PreparedEvaluationError::MissingFunction { function }
+                if function.get_stripped_name() == "f"
+        ));
+
+        let mut functions = FunctionMap::new();
+        functions.insert_fn(symbol!("f"), |_args, _consts, _functions, _cache| {
+            Err("callback rejected the trial point".to_string())
+        });
+        let callback_error = prepare_evaluator_typed(&expr, &[x], &functions)
+            .unwrap()
+            .evaluate_typed(&[1.0])
+            .err()
+            .expect("callback failure must remain typed");
+        assert!(matches!(
+            callback_error,
+            PreparedEvaluationError::Callback { function, message }
+                if function.get_stripped_name() == "f"
+                    && message == "callback rejected the trial point"
+        ));
+    }
+
+    #[test]
+    fn caller_owned_scratch_reuses_capacity_and_matches_thread_local_values() {
+        let x = symbol!("x");
+        let evaluator = prepare_evaluator_typed(
+            &parse!("sin(x) + x^3 + 2").unwrap(),
+            &[x],
+            &FunctionMap::new(),
+        )
+        .unwrap();
+        let mut scratch = PreparedEvaluationScratch::default();
+
+        let first = evaluator
+            .evaluate_with_scratch_typed(&[1.25], &mut scratch)
+            .unwrap();
+        let results_capacity = scratch.workspace.results.capacity();
+        let argument_capacity = scratch.workspace.arg_buffer.capacity();
+        let second = evaluator
+            .evaluate_with_scratch_typed(&[2.5], &mut scratch)
+            .unwrap();
+
+        assert_eq!(first, 1.25_f64.sin() + 1.25_f64.powi(3) + 2.0);
+        assert_eq!(second, 2.5_f64.sin() + 2.5_f64.powi(3) + 2.0);
+        assert_eq!(scratch.workspace.results.capacity(), results_capacity);
+        assert_eq!(scratch.workspace.arg_buffer.capacity(), argument_capacity);
+
+        let thread_local = evaluator.evaluate_typed(&[2.5]).unwrap();
+        assert_eq!(second, thread_local);
+    }
+
+    #[test]
+    fn caller_owned_scratch_ivp_path_preserves_flat_schema_and_shape_errors() {
+        let t = symbol!("t");
+        let p = symbol!("p");
+        let y = symbol!("y");
+        let evaluator = prepare_evaluator_typed(
+            &parse!("t + 2*p + y^2").unwrap(),
+            &[t, p, y],
+            &FunctionMap::new(),
+        )
+        .unwrap();
+        let mut scratch = PreparedEvaluationScratch::default();
+
+        let parts = evaluator
+            .evaluate_ivp_with_scratch_typed(0.5, &[2.0], &[3.0], &mut scratch)
+            .unwrap();
+        let flat = evaluator
+            .evaluate_with_scratch_typed(&[0.5, 2.0, 3.0], &mut scratch)
+            .unwrap();
+        assert_eq!(parts, flat);
+
+        let error = evaluator
+            .evaluate_ivp_with_scratch_typed(0.5, &[], &[3.0], &mut scratch)
+            .err()
+            .expect("invalid IVP shape must remain typed");
+        assert!(matches!(
+            error,
+            PreparedEvaluationError::Arity {
+                expected: 3,
+                actual: 2
+            }
+        ));
     }
 
     #[test]

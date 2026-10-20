@@ -1,5 +1,79 @@
 # TODO: Coordinated ExprLegacy to Prepared AtomView Migration
 
+## Python binding prerequisites (2026-10-20)
+
+The Python symbolic API must consume stable native contracts rather than reach
+into packed Atom internals. The following native gates are prerequisites for
+the public `PreparedSymbolicSystem` facade planned in
+`bindings/python/TODO.md`:
+
+- [x] Keep the AtomView small-constant/scientific-notation regression suite as
+  a mandatory correctness gate for direct Atom evaluation and the prepared
+  IVP residual/Jacobian routes. The debug diagnostics cover scalar leaves,
+  composed powers, cancellation, subnormals and non-finite classification.
+- [ ] Extend that same regression gate to every generated/AOT evaluator route
+  before it is exposed through Python.
+- [x] Define a typed conversion failure for unsupported Atom conversion and
+  oversized/non-finite coefficients. The native IVP preparation path now uses
+  it, preserves residual/Jacobian context and exposes `source()`; conversion
+  failures no longer silently become zero or panic on that route.
+- [x] Add a typed evaluator contract for the prepared hot path: invalid
+  argument shape, unknown variables, missing callbacks, callback failures and
+  real-domain failures are represented without parsing diagnostic strings.
+  The success path keeps the existing fast paths and reusable thread-local
+  workspace.
+- [x] Extend the typed contract to the legacy `Atom::evaluate` and
+  `AtomView::evaluate` compatibility methods. Their original `String` results
+  remain intentionally supported for old callers, while parallel
+  `evaluate_typed` and `evaluate_with_symbols_typed` methods preserve direct
+  error variants for new language adapters. The legacy lambdify/evaluate path
+  intentionally preserves IEEE-754 `NaN`/infinity behavior; strict domain
+  rejection is limited to the explicit typed route and is regression-tested.
+- [x] Add a caller-owned reusable scratch contract to prepared scalar
+  evaluation. It preserves the explicit variable order, avoids the
+  thread-local boundary when the caller owns a worker stream, and is covered
+  by capacity-stability tests.
+- [x] Generalize that contract around immutable residual/Jacobian payloads,
+  explicit input order and batch-owned scratch buffers. `View::prepared`
+  exposes `PreparedAtomSystem`, stable row-major Jacobian metadata and
+  caller-owned output/scratch without exposing the packed node layout.
+- [x] Stabilize the sparse Jacobian metadata contract: `shape()`, sorted
+  candidate columns, optional bandwidth filtering and deterministic row-major
+  nonzero ordering are documented and covered by repeated-run tests.
+- [x] Finish documenting `PreparedSparseAtomSystem` ownership/lifecycle and
+  move the public metadata/runtime contract into `View::prepared`; the
+  solver-independent `PreparedAtomSystem` is the intended Python boundary.
+- [x] Provide native parity tests for scalar, vector, residual and Jacobian
+  evaluation in the current IVP core before exposing the prepared facade.
+  Tests compare values, shape failures and the new typed conversion failure,
+  not only solver convergence.
+- [x] Keep ExprLegacy compatibility and AtomNative execution as separate,
+  measurable routes. A compatibility conversion must remain visible in
+  provenance and must not be reported as a native Atom route.
+
+### Prepared runtime integration debt (2026-10-20)
+
+- [ ] Keep `PreparedAtomSystem` opt-in until it has a solver-by-solver
+  integration contract. Existing `Atom::evaluate`, `AtomView::evaluate` and
+  prepared evaluator callbacks must remain behaviorally compatible while the
+  new runtime is not selected explicitly.
+- [ ] Integrate `PreparedAtomSystem` into BVP/IVP only through a measured
+  migration. Add componentwise residual/Jacobian parity gates, typed failure
+  parity, allocation/high-water retention checks and cold/warm telemetry before
+  changing any solver route or default.
+- [ ] Add representative performance gates for the new runtime versus the
+  current ExprLegacy and AtomView routes. Separate preparation, argument
+  binding, scalar evaluation, output writes and full callback time; do not
+  infer a solver speedup from a standalone symbolic microbenchmark.
+- [ ] Verify that the migration does not add operations to existing callback
+  loops or change their IEEE-754 non-finite behavior. Keep legacy lambdify
+  semantics and strict typed domain errors as distinct contracts.
+- [ ] Measure binary-size and compile-time impact of the public prepared
+  runtime. The new API may increase code size, but any increase must be
+  documented and justified by the measured reusable-buffer path.
+- [ ] After the gates pass, decide independently for each solver whether the
+  prepared runtime becomes an opt-in backend, an Auto candidate or a default.
+
 ## AtomView small-constant fidelity regression (2026-10-19)
 
 - [x] Keep the debug-only `View::atomview_diagnostics` probes for the minimal
@@ -573,12 +647,14 @@ add or update its diagnostics in the same change.
 The first symbolic slice follows the BVP baseline and ownership work described
 in its local plan:
 
-- [ ] Add `PreparedAtomSystem` composition around residual atoms,
+- [x] Add `PreparedAtomSystem` composition around residual atoms,
   `PreparedSparseAtomSystem`, ordered input schema, and fixed nonzero layout.
-- [ ] Add Sequential `residual_into` and `jacobian_values_into` with typed
+- [x] Add Sequential `residual_into` and `jacobian_values_into` with typed
   errors and reusable caller-owned buffers.
-- [ ] Add unit parity against Expr evaluation and the current Atom-to-Expr
-  Jacobian route.
+- [x] Add unit parity against Expr evaluation and the current Atom-to-Expr
+  Jacobian route. The prepared runtime tests cover residual/Jacobian values,
+  deterministic row-major locations, domain failures and output/input shape
+  failures.
 - [ ] Add conversion/allocation counters proving preparation converts once and
   warm callbacks do not round-trip.
 - [ ] Integrate the BVP_Damp Lambdify AtomView branch first.

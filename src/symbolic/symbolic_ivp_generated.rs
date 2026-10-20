@@ -613,7 +613,15 @@ impl fmt::Display for SymbolicIvpGeneratedError {
     }
 }
 
-impl std::error::Error for SymbolicIvpGeneratedError {}
+impl std::error::Error for SymbolicIvpGeneratedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::IvpBackend(error) => Some(error),
+            Self::AotLifecycle(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<IvpBackendError> for SymbolicIvpGeneratedError {
     fn from(value: IvpBackendError) -> Self {

@@ -8,6 +8,93 @@ use super::{
     state::{State, Symbol},
 };
 
+use std::error::Error;
+use std::fmt;
+
+/// Typed failure raised when a boxed expression cannot be represented by the
+/// packed Atom contract without losing information or panicking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NonFiniteConstantKind {
+    /// IEEE-754 not-a-number.
+    Nan,
+    /// Positive infinity.
+    PositiveInfinity,
+    /// Negative infinity.
+    NegativeInfinity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AtomConversionError {
+    /// A symbolic constant is not a finite `f64` value.
+    NonFiniteConstant { kind: NonFiniteConstantKind },
+    /// The packed coefficient representation cannot be converted losslessly.
+    UnsupportedCoefficient { representation: String },
+    /// A packed function is not part of the stable boxed `Expr` vocabulary.
+    UnsupportedFunction { name: String },
+    /// A packed n-ary node has no operands and cannot become an `Expr` tree.
+    EmptyComposite { operator: &'static str },
+    /// A packed unary function has an invalid argument count.
+    InvalidFunctionArity { name: String, actual: usize },
+    /// The conversion failed while preparing one residual equation.
+    Residual {
+        index: usize,
+        source: Box<AtomConversionError>,
+    },
+}
+
+impl fmt::Display for AtomConversionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFiniteConstant { kind } => {
+                write!(
+                    formatter,
+                    "non-finite symbolic constant cannot enter Atom: {kind:?}"
+                )
+            }
+            Self::UnsupportedCoefficient { representation } => {
+                write!(
+                    formatter,
+                    "unsupported packed coefficient representation: {representation}"
+                )
+            }
+            Self::UnsupportedFunction { name } => {
+                write!(formatter, "unsupported packed symbolic function: {name}")
+            }
+            Self::EmptyComposite { operator } => {
+                write!(formatter, "empty packed {operator} node cannot become Expr")
+            }
+            Self::InvalidFunctionArity { name, actual } => {
+                write!(
+                    formatter,
+                    "packed function {name} expects one argument, got {actual}"
+                )
+            }
+            Self::Residual { index, source } => {
+                write!(formatter, "residual {index}: {source}")
+            }
+        }
+    }
+}
+
+fn non_finite_constant_kind(value: f64) -> NonFiniteConstantKind {
+    if value.is_nan() {
+        NonFiniteConstantKind::Nan
+    } else if value.is_sign_positive() {
+        NonFiniteConstantKind::PositiveInfinity
+    } else {
+        NonFiniteConstantKind::NegativeInfinity
+    }
+}
+
+impl Error for AtomConversionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Residual { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) fn approximate_f64_atom(value: f64) -> Atom {
     let n = value as i64;
     if n as f64 == value {
@@ -165,64 +252,100 @@ fn gcd_i128(mut lhs: i128, mut rhs: i128) -> i128 {
 // ── Atom → Expr ───────────────────────────────────────────────────────────────
 
 /// Convert a packed [`Atom`] into a classical boxed [`Expr`] tree.
+///
+/// This compatibility wrapper retains the historical infallible API. New
+/// preparation boundaries must use [`try_atom_to_expr`] so unsupported packed
+/// data becomes a typed error instead of a panic.
 pub fn atom_to_expr(atom: &Atom) -> Expr {
+    try_atom_to_expr(atom).expect("Atom-to-Expr conversion failed")
+}
+
+/// Fallible packed-to-boxed conversion for typed preparation boundaries.
+pub fn try_atom_to_expr(atom: &Atom) -> Result<Expr, AtomConversionError> {
     view_to_expr(atom.as_view())
 }
 
-fn view_to_expr(view: AtomView<'_>) -> Expr {
+fn view_to_expr(view: AtomView<'_>) -> Result<Expr, AtomConversionError> {
     match view {
         AtomView::Num(n) => match n.get_coeff_view() {
             CoefficientView::Natural(num, den) => {
                 if den == 1 {
-                    Expr::Const(num as f64)
+                    Ok(Expr::Const(num as f64))
                 } else {
-                    Expr::Div(
+                    Ok(Expr::Div(
                         Box::new(Expr::Const(num as f64)),
                         Box::new(Expr::Const(den as f64)),
-                    )
+                    ))
                 }
             }
-            CoefficientView::Float(value) => Expr::Const(value),
-            CoefficientView::Large(_) => panic!("Large coefficients not supported"),
+            CoefficientView::Float(value) if value.is_finite() => Ok(Expr::Const(value)),
+            CoefficientView::Float(value) => Err(AtomConversionError::NonFiniteConstant {
+                kind: non_finite_constant_kind(value),
+            }),
+            CoefficientView::Large(_) => Err(AtomConversionError::UnsupportedCoefficient {
+                representation: "large".to_owned(),
+            }),
         },
         AtomView::Var(v) => {
             let sym = v.get_symbol();
             let name = sym.get_stripped_name().to_string();
-            Expr::Var(name)
+            Ok(Expr::Var(name))
         }
         AtomView::Fun(f) => {
             let sym = f.get_symbol();
-            let mut args: Vec<Expr> = f.iter().map(view_to_expr).collect();
+            let name = sym.get_stripped_name().to_string();
+            let args: Vec<Expr> = f.iter().map(view_to_expr).collect::<Result<_, _>>()?;
+            let argument = || {
+                if args.len() == 1 {
+                    Ok(Box::new(args[0].clone()))
+                } else {
+                    Err(AtomConversionError::InvalidFunctionArity {
+                        name: name.clone(),
+                        actual: args.len(),
+                    })
+                }
+            };
             match sym.get_id() {
-                id if id == State::EXP.get_id() => Expr::Exp(Box::new(args.remove(0))),
-                id if id == State::LOG.get_id() => Expr::Ln(Box::new(args.remove(0))),
-                id if id == State::SIN.get_id() => Expr::sin(Box::new(args.remove(0))),
-                id if id == State::COS.get_id() => Expr::cos(Box::new(args.remove(0))),
-                id if id == State::TAN.get_id() => Expr::tg(Box::new(args.remove(0))),
-                id if id == State::COT.get_id() => Expr::ctg(Box::new(args.remove(0))),
-                id if id == State::ASIN.get_id() => Expr::arcsin(Box::new(args.remove(0))),
-                id if id == State::ACOS.get_id() => Expr::arccos(Box::new(args.remove(0))),
-                id if id == State::ATAN.get_id() => Expr::arctg(Box::new(args.remove(0))),
-                id if id == State::ACOT.get_id() => Expr::arcctg(Box::new(args.remove(0))),
-                _ => panic!("Unsupported function: {}", sym.get_stripped_name()),
+                id if id == State::EXP.get_id() => Ok(Expr::Exp(argument()?)),
+                id if id == State::LOG.get_id() => Ok(Expr::Ln(argument()?)),
+                id if id == State::SIN.get_id() => Ok(Expr::sin(argument()?)),
+                id if id == State::COS.get_id() => Ok(Expr::cos(argument()?)),
+                id if id == State::TAN.get_id() => Ok(Expr::tg(argument()?)),
+                id if id == State::COT.get_id() => Ok(Expr::ctg(argument()?)),
+                id if id == State::ASIN.get_id() => Ok(Expr::arcsin(argument()?)),
+                id if id == State::ACOS.get_id() => Ok(Expr::arccos(argument()?)),
+                id if id == State::ATAN.get_id() => Ok(Expr::arctg(argument()?)),
+                id if id == State::ACOT.get_id() => Ok(Expr::arcctg(argument()?)),
+                _ => Err(AtomConversionError::UnsupportedFunction { name }),
             }
         }
         AtomView::Pow(p) => {
             let (base, exp) = p.get_base_exp();
-            Expr::Pow(Box::new(view_to_expr(base)), Box::new(view_to_expr(exp)))
+            Ok(Expr::Pow(
+                Box::new(view_to_expr(base)?),
+                Box::new(view_to_expr(exp)?),
+            ))
         }
         AtomView::Mul(m) => {
             let mut it = m.iter();
-            let first = view_to_expr(it.next().unwrap());
-            it.fold(first, |acc, v| {
-                Expr::Mul(Box::new(acc), Box::new(view_to_expr(v)))
+            let first = it
+                .next()
+                .ok_or(AtomConversionError::EmptyComposite {
+                    operator: "product",
+                })
+                .and_then(view_to_expr)?;
+            it.try_fold(first, |acc, v| {
+                Ok(Expr::Mul(Box::new(acc), Box::new(view_to_expr(v)?)))
             })
         }
         AtomView::Add(a) => {
             let mut it = a.iter();
-            let first = view_to_expr(it.next().unwrap());
-            it.fold(first, |acc, v| {
-                Expr::Add(Box::new(acc), Box::new(view_to_expr(v)))
+            let first = it
+                .next()
+                .ok_or(AtomConversionError::EmptyComposite { operator: "sum" })
+                .and_then(view_to_expr)?;
+            it.try_fold(first, |acc, v| {
+                Ok(Expr::Add(Box::new(acc), Box::new(view_to_expr(v)?)))
             })
         }
     }
@@ -231,60 +354,78 @@ fn view_to_expr(view: AtomView<'_>) -> Expr {
 // ── Expr → Atom ───────────────────────────────────────────────────────────────
 
 /// Convert a classical boxed [`Expr`] tree into a packed [`Atom`].
+///
+/// This compatibility wrapper retains the historical infallible API. New
+/// preparation boundaries should prefer [`try_expr_to_atom`] to reject
+/// non-finite constants before entering packed arithmetic.
 pub fn expr_to_atom(expr: &Expr) -> Atom {
+    try_expr_to_atom(expr).expect("Expr-to-Atom conversion failed")
+}
+
+/// Fallible boxed-to-packed conversion for typed preparation boundaries.
+pub fn try_expr_to_atom(expr: &Expr) -> Result<Atom, AtomConversionError> {
     match expr {
         Expr::Var(name) => {
             let sym = Symbol::new(crate::wrap_symbol!(name.as_str()));
-            Atom::new_var(sym)
+            Ok(Atom::new_var(sym))
         }
-        Expr::Const(v) => approximate_f64_atom(*v),
+        Expr::Const(v) if v.is_finite() => Ok(approximate_f64_atom(*v)),
+        Expr::Const(v) => Err(AtomConversionError::NonFiniteConstant {
+            kind: non_finite_constant_kind(*v),
+        }),
         Expr::Add(_, _) => {
             let mut terms = Vec::new();
             collect_add_terms(expr, &mut terms);
-            let atoms = terms.into_iter().map(expr_to_atom).collect::<Vec<_>>();
+            let atoms = terms
+                .into_iter()
+                .map(try_expr_to_atom)
+                .collect::<Result<Vec<_>, _>>()?;
             let views = atoms.iter().map(|atom| atom.as_view()).collect::<Vec<_>>();
-            Atom::add_many(&views)
+            Ok(Atom::add_many(&views))
         }
-        Expr::Sub(l, r) => expr_to_atom(l) - expr_to_atom(r),
+        Expr::Sub(l, r) => Ok(try_expr_to_atom(l)? - try_expr_to_atom(r)?),
         Expr::Mul(_, _) => {
             let mut factors = Vec::new();
             collect_mul_factors(expr, &mut factors);
-            let atoms = factors.into_iter().map(expr_to_atom).collect::<Vec<_>>();
+            let atoms = factors
+                .into_iter()
+                .map(try_expr_to_atom)
+                .collect::<Result<Vec<_>, _>>()?;
             let views = atoms.iter().map(|atom| atom.as_view()).collect::<Vec<_>>();
-            Atom::mul_many(&views)
+            Ok(Atom::mul_many(&views))
         }
-        Expr::Div(l, r) => expr_to_atom(l) / expr_to_atom(r),
-        Expr::Pow(b, e) => expr_to_atom(b).pow(expr_to_atom(e)),
-        Expr::Exp(x) => FunctionBuilder::new(Atom::EXP)
-            .add_arg(expr_to_atom(x))
-            .finish(),
-        Expr::Ln(x) => FunctionBuilder::new(Atom::LOG)
-            .add_arg(expr_to_atom(x))
-            .finish(),
-        Expr::sin(x) => FunctionBuilder::new(Atom::SIN)
-            .add_arg(expr_to_atom(x))
-            .finish(),
-        Expr::cos(x) => FunctionBuilder::new(Atom::COS)
-            .add_arg(expr_to_atom(x))
-            .finish(),
-        Expr::tg(x) => FunctionBuilder::new(Atom::TAN)
-            .add_arg(expr_to_atom(x))
-            .finish(),
-        Expr::ctg(x) => FunctionBuilder::new(Atom::COT)
-            .add_arg(expr_to_atom(x))
-            .finish(),
-        Expr::arcsin(x) => FunctionBuilder::new(Atom::ASIN)
-            .add_arg(expr_to_atom(x))
-            .finish(),
-        Expr::arccos(x) => FunctionBuilder::new(Atom::ACOS)
-            .add_arg(expr_to_atom(x))
-            .finish(),
-        Expr::arctg(x) => FunctionBuilder::new(Atom::ATAN)
-            .add_arg(expr_to_atom(x))
-            .finish(),
-        Expr::arcctg(x) => FunctionBuilder::new(Atom::ACOT)
-            .add_arg(expr_to_atom(x))
-            .finish(),
+        Expr::Div(l, r) => Ok(try_expr_to_atom(l)? / try_expr_to_atom(r)?),
+        Expr::Pow(b, e) => Ok(try_expr_to_atom(b)?.pow(try_expr_to_atom(e)?)),
+        Expr::Exp(x) => Ok(FunctionBuilder::new(Atom::EXP)
+            .add_arg(try_expr_to_atom(x)?)
+            .finish()),
+        Expr::Ln(x) => Ok(FunctionBuilder::new(Atom::LOG)
+            .add_arg(try_expr_to_atom(x)?)
+            .finish()),
+        Expr::sin(x) => Ok(FunctionBuilder::new(Atom::SIN)
+            .add_arg(try_expr_to_atom(x)?)
+            .finish()),
+        Expr::cos(x) => Ok(FunctionBuilder::new(Atom::COS)
+            .add_arg(try_expr_to_atom(x)?)
+            .finish()),
+        Expr::tg(x) => Ok(FunctionBuilder::new(Atom::TAN)
+            .add_arg(try_expr_to_atom(x)?)
+            .finish()),
+        Expr::ctg(x) => Ok(FunctionBuilder::new(Atom::COT)
+            .add_arg(try_expr_to_atom(x)?)
+            .finish()),
+        Expr::arcsin(x) => Ok(FunctionBuilder::new(Atom::ASIN)
+            .add_arg(try_expr_to_atom(x)?)
+            .finish()),
+        Expr::arccos(x) => Ok(FunctionBuilder::new(Atom::ACOS)
+            .add_arg(try_expr_to_atom(x)?)
+            .finish()),
+        Expr::arctg(x) => Ok(FunctionBuilder::new(Atom::ATAN)
+            .add_arg(try_expr_to_atom(x)?)
+            .finish()),
+        Expr::arcctg(x) => Ok(FunctionBuilder::new(Atom::ACOT)
+            .add_arg(try_expr_to_atom(x)?)
+            .finish()),
     }
 }
 
@@ -693,6 +834,30 @@ mod tests {
 
         assert_eq!(expr_to_atom(&sum), Atom::add_many(&views));
         assert_eq!(expr_to_atom(&product), Atom::mul_many(&views));
+    }
+
+    #[test]
+    fn fallible_conversion_preserves_small_finite_constants() {
+        let coefficient = -5.09024475e-16;
+        let atom = try_expr_to_atom(&Expr::Const(coefficient)).unwrap();
+        let roundtrip = atom_to_expr(&atom);
+
+        match roundtrip {
+            Expr::Const(value) => assert_eq!(value, coefficient),
+            other => panic!("small constant changed shape: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fallible_conversion_rejects_nonfinite_constants() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = try_expr_to_atom(&Expr::Const(value)).unwrap_err();
+            match error {
+                AtomConversionError::NonFiniteConstant { kind }
+                    if kind == non_finite_constant_kind(value) => {}
+                other => panic!("unexpected conversion error: {other:?}"),
+            }
+        }
     }
 
     /// Sub normalizes away: the round-trip produces Add(x, Mul(y, -1)).

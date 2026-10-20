@@ -40,6 +40,7 @@ pub mod normalize;
 mod operation_corpus_tests;
 pub mod parser;
 mod pipeline_examples;
+pub mod prepared;
 pub mod printer;
 #[cfg(test)]
 mod scalar_jacobian_story_tests;
@@ -49,19 +50,27 @@ pub mod transform;
 pub use atom::{Atom, AtomCore, AtomView};
 pub use atomview_diagnostics::{AtomViewFidelityReport, compare_expr_and_atom};
 pub use coefficient::Coefficient;
+pub use conversions::{
+    AtomConversionError, NonFiniteConstantKind, atom_to_expr, expr_to_atom, try_atom_to_expr,
+    try_expr_to_atom,
+};
 pub use derivative::{DerivativeError, try_derivative};
 pub use diagnostics::{
     ExpressionMetrics, OperationCounts, PowerClass, inspect_atoms, inspect_exprs,
 };
 pub use evaluate::{
     EvaluationCache, EvaluationFn, EvaluationSymbolFn, ExactConstMap, ExactSymbolMap,
-    FloatSymbolMap, FunctionMap, PreparedEvaluator, evaluate, evaluate_exact,
-    evaluate_exact_with_symbols, evaluate_with_symbols, prepare_evaluator,
+    FloatSymbolMap, FunctionMap, PreparedEvaluationError, PreparedEvaluationScratch,
+    PreparedEvaluator, evaluate, evaluate_exact, evaluate_exact_with_symbols, evaluate_typed,
+    evaluate_with_symbols, evaluate_with_symbols_typed, prepare_evaluator, prepare_evaluator_typed,
 };
 pub use jacobian::{
     PreparedSparseAtomSystem, SparseAtomJacobianEntry,
     calc_sparse_jacobian_atom_from_atoms_with_bandwidth, calc_sparse_jacobian_atom_with_bandwidth,
 };
 pub use parser::parse;
+pub use prepared::{
+    PreparedAtomSystem, PreparedAtomSystemError, PreparedAtomSystemScratch, PreparedJacobianEntry,
+};
 pub use printer::{PrintOptions, print, print_debug, print_with_options};
 pub use state::{State, Symbol, Workspace};

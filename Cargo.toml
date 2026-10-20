@@ -28,6 +28,9 @@ include = [
     "examples/**/*.rs",
     "examples/task_docs/reference/**/*.txt",
     "benches/**/*.rs",
+    # Optional repository-only performance runner source; profiles, baselines
+    # and generated reports remain outside the published crate payload.
+    "performance/runner/**/*.rs",
     # Repository-only material. Cargo include patterns support gitignore-style
     # negation, so keep these exclusions explicit instead of relying on a
     # broad source allowlist to remain correct forever.
@@ -103,9 +106,18 @@ openblas-system = ["lapack", "dep:openblas-src"]
 superlu = []
 # Compatibility alias for the original diagnostic feature name.
 superlu-experimental = ["superlu"]
+# The standalone performance gate runner is opt-in and has no library impact.
+perf-gates = []
 
 [package.metadata.rust-analyzer]
 cargo = { features = ["arrayfire", "cuda"] }
+
+[[bin]]
+name = "perf-gates"
+path = "performance/runner/main.rs"
+required-features = ["perf-gates"]
+test = true
+bench = false
 
 
 [profile.release]

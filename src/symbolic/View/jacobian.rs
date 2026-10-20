@@ -11,14 +11,14 @@ use std::sync::Arc;
 
 use super::{
     Atom, AtomView, DerivativeError,
-    conversions::expr_to_atom,
+    conversions::{AtomConversionError, try_expr_to_atom},
     state::{Symbol, Workspace},
 };
 use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetry};
 use crate::symbolic::symbolic_engine::Expr;
 
 /// One nonzero sparse Jacobian entry produced by the View-native symbolic path.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SparseAtomJacobianEntry {
     pub row: usize,
     pub col: usize,
@@ -67,8 +67,34 @@ impl PreparedSparseAtomSystem {
         variable_names: &[String],
         variables_for_all_discrete: &[Vec<String>],
     ) -> Self {
-        let atoms = functions.iter().map(expr_to_atom).collect::<Vec<_>>();
-        Self::from_owned_atoms(atoms, variable_names, variables_for_all_discrete)
+        Self::try_from_exprs(functions, variable_names, variables_for_all_discrete)
+            .expect("Expr-to-Atom preparation failed")
+    }
+
+    /// Fallible variant of [`Self::from_exprs`] for typed preparation paths.
+    ///
+    /// The residual index is preserved in the error so a caller can identify
+    /// which equation contained a non-finite constant or unsupported node.
+    pub fn try_from_exprs(
+        functions: &[Expr],
+        variable_names: &[String],
+        variables_for_all_discrete: &[Vec<String>],
+    ) -> Result<Self, AtomConversionError> {
+        let atoms = functions
+            .iter()
+            .enumerate()
+            .map(|(index, function)| {
+                try_expr_to_atom(function).map_err(|source| AtomConversionError::Residual {
+                    index,
+                    source: Box::new(source),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::from_owned_atoms(
+            atoms,
+            variable_names,
+            variables_for_all_discrete,
+        ))
     }
 
     /// Prepare sparse lookup data starting from already packed residual atoms.
@@ -165,6 +191,14 @@ impl PreparedSparseAtomSystem {
         self.atoms.is_empty()
     }
 
+    /// Return the symbolic Jacobian shape as `(rows, columns)`.
+    ///
+    /// This is metadata only; it does not inspect or materialize derivative
+    /// values and is therefore safe to query on a callback hot path.
+    pub fn shape(&self) -> (usize, usize) {
+        (self.atoms.len(), self.variable_symbols.len())
+    }
+
     /// Access the prepared packed residual atoms.
     pub fn atoms(&self) -> &[Atom] {
         &self.atoms
@@ -178,6 +212,11 @@ impl PreparedSparseAtomSystem {
     /// Access sparse column indices relevant to each residual row.
     pub fn column_indices_per_row(&self) -> &[Vec<usize>] {
         &self.column_indices_per_row
+    }
+
+    /// Return the sorted derivative candidates for one residual row.
+    pub fn candidate_columns_for_row(&self, row: usize) -> Option<&[usize]> {
+        self.column_indices_per_row.get(row).map(Vec::as_slice)
     }
 
     /// Number of derivative candidates retained after dependency filtering.
@@ -203,6 +242,10 @@ impl PreparedSparseAtomSystem {
         &self,
         bandwidth: Option<(usize, usize)>,
     ) -> Result<Vec<SparseAtomJacobianEntry>, SparseAtomJacobianError> {
+        // Rayon preserves the indexed order of `par_iter().enumerate()` in
+        // `collect`, while each candidate list is sorted during preparation.
+        // Consequently the returned layout is deterministic row-major
+        // `(row, column)` order even when differentiation runs in parallel.
         let n_vars = self.variable_symbols.len();
         let rows: Result<Vec<Vec<SparseAtomJacobianEntry>>, SparseAtomJacobianError> = self
             .atoms
@@ -373,7 +416,7 @@ fn band_limited_columns(sorted_cols: &[usize], left: usize, right: usize) -> &[u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::symbolic::View::conversions::atom_to_expr;
+    use crate::symbolic::View::conversions::{atom_to_expr, expr_to_atom};
 
     fn parse_expr(input: &str) -> Expr {
         Expr::parse_expression(input)
@@ -413,6 +456,74 @@ mod tests {
             rendered.iter().any(|(r, c, _)| *r == 1 && *c == 2),
             "missing dF1/dx2"
         );
+    }
+
+    #[test]
+    fn sparse_metadata_and_entries_have_stable_contract() {
+        let functions = vec![parse_expr("x0 + x2"), parse_expr("x1^2 + x2")];
+        let variable_names = ["x0", "x1", "x2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let dependencies = vec![
+            vec!["x2".to_string(), "x0".to_string(), "x0".to_string()],
+            vec!["x2".to_string(), "x1".to_string()],
+        ];
+        let prepared =
+            PreparedSparseAtomSystem::from_exprs(&functions, &variable_names, &dependencies);
+
+        assert_eq!(prepared.shape(), (2, 3));
+        assert_eq!(prepared.candidate_columns_for_row(0), Some(&[0, 2][..]));
+        assert_eq!(prepared.candidate_columns_for_row(1), Some(&[1, 2][..]));
+        assert_eq!(prepared.candidate_columns_for_row(2), None);
+
+        let first = prepared
+            .try_calc_sparse_jacobian_with_bandwidth(None)
+            .unwrap();
+        let second = prepared
+            .try_calc_sparse_jacobian_with_bandwidth(None)
+            .unwrap();
+        assert_eq!(first, second);
+        assert!(
+            first
+                .windows(2)
+                .all(|entries| (entries[0].row, entries[0].col)
+                    <= (entries[1].row, entries[1].col)),
+            "sparse entries must be returned in row-major order"
+        );
+    }
+
+    #[test]
+    fn fallible_preparation_keeps_residual_context() {
+        let functions = vec![
+            parse_expr("x0 + 1"),
+            Expr::Const(f64::NAN),
+            parse_expr("x1"),
+        ];
+        let variable_names = vec!["x0".to_string(), "x1".to_string()];
+        let dependencies = vec![vec!["x0".to_string()], vec![], vec!["x1".to_string()]];
+
+        let error = match PreparedSparseAtomSystem::try_from_exprs(
+            &functions,
+            &variable_names,
+            &dependencies,
+        ) {
+            Ok(_) => panic!("non-finite residual should be rejected"),
+            Err(error) => error,
+        };
+
+        match error {
+            AtomConversionError::Residual { index, source } => {
+                assert_eq!(index, 1);
+                assert!(matches!(
+                    *source,
+                    AtomConversionError::NonFiniteConstant {
+                        kind: super::super::conversions::NonFiniteConstantKind::Nan,
+                    }
+                ));
+            }
+            other => panic!("unexpected preparation error: {other:?}"),
+        }
     }
 
     #[test]

@@ -30,7 +30,9 @@ use crate::symbolic::ivp_telemetry::{
 };
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::View::atom::Atom;
-use crate::symbolic::View::conversions::{atom_to_expr, expr_to_atom};
+use crate::symbolic::View::conversions::{
+    AtomConversionError, atom_to_expr, try_expr_to_atom,
+};
 use crate::symbolic::View::evaluate::{
     FunctionMap, PreparedEvaluator, PreparedEvaluatorMetrics, PreparedVariableContext,
 };
@@ -119,6 +121,14 @@ pub enum IvpBackendError {
     AotBuildOutputDirMissing,
     /// Native AtomView preparation failed before a callback was published.
     AtomPreparationFailure { stage: String, message: String },
+    /// A boxed expression could not be lowered into the packed Atom route.
+    ///
+    /// Keep the source error typed so callers can distinguish a conversion
+    /// defect from evaluator compilation or numerical execution failure.
+    AtomConversionFailure {
+        context: String,
+        source: AtomConversionError,
+    },
     /// Native symbolic differentiation failed at a specific Jacobian entry.
     AtomDifferentiationFailure {
         row: usize,
@@ -206,6 +216,9 @@ impl fmt::Display for IvpBackendError {
             ),
             Self::AtomPreparationFailure { stage, message } => {
                 write!(f, "AtomView preparation failed during {stage}: {message}")
+            }
+            Self::AtomConversionFailure { context, source } => {
+                write!(f, "AtomView expression conversion failed at {context}: {source}")
             }
             Self::AtomDifferentiationFailure { row, col, source } => write!(
                 f,
@@ -311,6 +324,7 @@ impl IvpBackendError {
 impl std::error::Error for IvpBackendError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::AtomConversionFailure { source, .. } => Some(source),
             Self::AtomDifferentiationFailure { source, .. } => Some(source),
             _ => None,
         }
@@ -2166,7 +2180,7 @@ pub(crate) fn prepare_native_atom_jacobian(
         variables,
         equation_parameters,
         telemetry,
-    );
+    )?;
     let result = prepare_native_atom_jacobian_from_system(&system, variables, telemetry);
     telemetry.record_cold_stage(IvpColdStage::AtomJacobianPreparation, preparation_started);
     result
@@ -2178,16 +2192,30 @@ fn prepare_native_atom_system(
     variables: &[String],
     equation_parameters: Option<&[String]>,
     telemetry: &IvpTelemetry,
-) -> PreparedNativeAtomSystem {
+) -> Result<PreparedNativeAtomSystem, IvpBackendError> {
     let conversion_started = telemetry.start_cold_stage(IvpColdStage::ExprToAtom);
-    let atoms: Arc<[Atom]> = equations
+    let atoms = equations
         .iter()
-        .map(expr_to_atom)
-        .collect::<Vec<_>>()
-        .into();
+        .enumerate()
+        .map(|(index, expression)| {
+            try_expr_to_atom(expression).map_err(|source| {
+                IvpBackendError::AtomConversionFailure {
+                    context: format!("residual {index}"),
+                    source,
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>();
     telemetry.record_cold_stage(IvpColdStage::ExprToAtom, conversion_started);
+    let atoms: Arc<[Atom]> = match atoms {
+        Ok(atoms) => atoms.into(),
+        Err(error) => {
+            telemetry.record_error();
+            return Err(error);
+        }
+    };
 
-    PreparedNativeAtomSystem {
+    Ok(PreparedNativeAtomSystem {
         atoms,
         context: PreparedVariableContext::new(&native_argument_symbols(
             time_arg,
@@ -2195,7 +2223,7 @@ fn prepare_native_atom_system(
             equation_parameters,
         )),
         function_map: FunctionMap::new(),
-    }
+    })
 }
 
 fn prepare_native_atom_jacobian_from_system(
@@ -2283,7 +2311,12 @@ fn prepare_native_atom_jacobian_from_explicit(
             })
         })
         .map(|(row, col, expr)| {
-            let atom = expr_to_atom(expr);
+            let atom = try_expr_to_atom(expr).map_err(|source| {
+                IvpBackendError::AtomConversionFailure {
+                    context: format!("explicit Jacobian entry ({row}, {col})"),
+                    source,
+                }
+            })?;
             PreparedEvaluator::new_with_context(&atom, &system.context, &system.function_map)
                 .map(|evaluator| PreparedNativeAtomJacobianEntry {
                     row,
@@ -2324,7 +2357,7 @@ fn compile_native_atom_residual(
         variables,
         equation_parameters,
         &telemetry,
-    );
+    )?;
     compile_native_atom_residual_from_system(
         &system,
         variables,
@@ -2803,7 +2836,7 @@ pub fn prepare_symbolic_ivp_problem(
                 &variables,
                 options.equation_parameters.as_deref(),
                 &telemetry,
-            );
+            )?;
             drop(atom_residual_preparation);
             let atom_jacobian_preparation =
                 telemetry.scoped_cold_stage(IvpColdStage::AtomJacobianPreparation);
@@ -3007,7 +3040,7 @@ pub fn prepare_symbolic_ivp_residual_problem(
                 &variables,
                 options.equation_parameters.as_deref(),
                 &telemetry,
-            );
+            )?;
             let native_atoms = Arc::clone(&atom_system.atoms);
             let native_residual = compile_native_atom_residual_from_system(
                 &atom_system,
@@ -3098,6 +3131,33 @@ fn validate_ivp_argument_schema(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomview_preparation_rejects_nonfinite_constant_with_typed_error() {
+        let error = match prepare_symbolic_ivp_residual_problem(
+            vec![Expr::Const(f64::NAN)],
+            vec!["y".to_string()],
+            "t".to_string(),
+            SymbolicIvpProblemOptions::new()
+                .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::AtomView),
+        ) {
+            Ok(_) => panic!("AtomView must reject a non-finite symbolic coefficient"),
+            Err(error) => error,
+        };
+
+        match error {
+            IvpBackendError::AtomConversionFailure { context, source } => {
+                assert_eq!(context, "residual 0");
+                assert!(matches!(
+                    source,
+                    AtomConversionError::NonFiniteConstant {
+                        kind: crate::symbolic::View::NonFiniteConstantKind::Nan,
+                    }
+                ));
+            }
+            other => panic!("unexpected AtomView preparation error: {other:?}"),
+        }
+    }
 
     #[test]
     fn linked_aot_residual_workspace_reuses_flat_arguments() {
