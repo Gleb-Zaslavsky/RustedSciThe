@@ -489,12 +489,21 @@ IDs below are proposed stable names. Register them only after freezing the
 configuration and source fixture. Large experimental matrices remain separate.
 IDs in the table below were proposed during the initial design; the first
 prototype subset is now implemented and expanded. Large experimental matrices
-remain separate. The current registry contains 189 scenarios: shared LSODE2,
+remain separate. The initial registry contained 189 scenarios: shared LSODE2,
 Radau, BVP_sci, BE and Nonlinear_systems cases; 24 matched Radau diffusion
 routes; 8 matched BDF diffusion routes; 30 matched LSODE2 diffusion routes;
 66 BVP_Damp routes; 30 matched BVP_sci routes; 4 matched BE combustion routes;
 6 matched Nonlinear_systems routes; 14 matched optimization routes; and the
-faithful compact banded LU fixture. Baseline capture remains pending.
+faithful compact banded LU fixture. Baseline capture remains in progress.
+
+Update 2026-10-21: the registry now contains 199 scenarios. Ten new entries
+form the addressable `bvp-large` group: four six-state BVP_sci story-workload
+routes on a 257-node mesh and six BVP_Damp chemical combustion-1000 routes
+across ExprLegacy/AtomView, Sparse/Banded and selected Lambdify/AOT
+combinations. These are separate solver-native fixtures, not a cross-solver
+parity claim. Debug correctness, AOT smoke and Off-versus-Detailed parity pass;
+release baseline recording and compare are still pending. The older compact
+BVP matrices remain separate and unchanged.
 
 | Priority | Proposed scenario | Source to reuse | Scope / correctness |
 | --- | --- | --- | --- |

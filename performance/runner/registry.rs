@@ -719,6 +719,7 @@ impl ScenarioRegistry {
     pub fn iter(&self) -> impl Iterator<Item = &'static Scenario> {
         CORE_SCENARIOS
             .iter()
+            .chain(crate::scenarios::bvp_large::SCENARIOS.iter())
             .chain(crate::scenarios::bvp_damp::SCENARIOS.iter().flatten())
             .chain(crate::scenarios::bvp_sci::MATRIX_SCENARIOS.iter().flatten())
             .chain(crate::scenarios::be::MATRIX_SCENARIOS.iter())

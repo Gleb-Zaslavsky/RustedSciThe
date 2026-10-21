@@ -1,11 +1,13 @@
 # Performance Regression Gates
 
-Status: initial opt-in runner implemented, 2026-10-20. It currently contains
-189 scenarios, including full supported-route matrices for Radau (24 cells),
+Status: opt-in runner and initial Windows baselines in progress, 2026-10-21.
+It currently contains 199 scenarios, including full supported-route matrices for Radau (24 cells),
 BDF (8 cells), LSODE2 (30 cells), BVP_Damp (66 cells), BVP_sci (30 cells),
-BE (4 cells), Nonlinear_systems (6 cells), and optimisation (14 cells). No
-baselines have been recorded, so the runner is not yet a release-quality
-regression gate.
+BE (4 cells), Nonlinear_systems (6 cells), optimisation (14 cells), and a
+separate ten-cell `bvp-large` group. Initial BDF, Radau and BE baselines have
+been recorded and compared on the Windows development machine; large BVP
+baselines are pending. The runner is not yet a complete cross-platform
+release-quality regression gate.
 See [TODO.md](TODO.md) for validation and coverage gaps.
 
 This repository tool will detect performance changes in selected, fixed
@@ -88,6 +90,16 @@ Off-versus-Detailed parity, and actual AOT selection where requested. The
 scalar Banded route uses `(0,0)` bandwidth; block bandwidth belongs to larger
 systems. The optional SuperLU bridge is deliberately excluded from this
 portable matrix so Sparse measures StandardFaer.
+
+The `bvp-large` group adds six-state full solves to avoid calibrating BVP
+baselines from tiny scalar tasks. BVP_sci uses its established combustion-like
+story equations on a fixed 257-node mesh with Sparse/Faer across
+ExprLegacy/AtomView and Lambdify/AOT. BVP_Damp uses the separate chemical
+combustion-1000 fixture with a curated Sparse/Banded frontend and execution
+set. These are not a cross-solver parity pair. Each timed sample is
+telemetry-Off, then a separate Detailed run checks counters and solution
+parity. These large workloads have their own IDs and baselines, leaving the
+compact route matrices intact.
 
 BE adds four matched parameterized-combustion routes: ExprLegacy/AtomView x
 Lambdify/AOT. Dense linear algebra and sequential execution are fixed properties
