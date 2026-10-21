@@ -91,15 +91,22 @@ scalar Banded route uses `(0,0)` bandwidth; block bandwidth belongs to larger
 systems. The optional SuperLU bridge is deliberately excluded from this
 portable matrix so Sparse measures StandardFaer.
 
-The `bvp-large` group adds six-state full solves to avoid calibrating BVP
-baselines from tiny scalar tasks. BVP_sci uses its established combustion-like
-story equations on a fixed 257-node mesh with Sparse/Faer across
-ExprLegacy/AtomView and Lambdify/AOT. BVP_Damp uses the separate chemical
-combustion-1000 fixture with a curated Sparse/Banded frontend and execution
-set. These are not a cross-solver parity pair. Each timed sample is
-telemetry-Off, then a separate Detailed run checks counters and solution
-parity. These large workloads have their own IDs and baselines, leaving the
-compact route matrices intact.
+The `bvp-large` group uses established combustion workloads rather than
+millisecond-scale toy problems: BVP_sci uses its six-state combustion equations
+on 1000 nodes with Sparse/Faer across ExprLegacy/AtomView and Lambdify/AOT;
+BVP_Damp uses its six-state chemical combustion-3000 fixture across a curated
+Sparse/Banded frontend and execution set. The two solvers use different
+equations and are not a cross-solver parity pair. Each timed sample runs with
+telemetry Off; a separate Detailed execution captures stage timings and checks
+counter and solution parity. These workloads have their own IDs and baselines,
+leaving the compact route matrices intact.
+
+For stage-level performance baselines, prefer a complete solve taking at least
+tens of milliseconds and, where practical, hundreds of milliseconds or longer.
+Several-millisecond toy solves remain useful for fast correctness matrices but
+are too sensitive to scheduler and timer noise to anchor performance baselines.
+Detailed stage measurements are diagnostic and must be collected separately
+from the telemetry-Off gate samples.
 
 BE adds four matched parameterized-combustion routes: ExprLegacy/AtomView x
 Lambdify/AOT. Dense linear algebra and sequential execution are fixed properties

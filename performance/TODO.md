@@ -496,14 +496,24 @@ routes; 8 matched BDF diffusion routes; 30 matched LSODE2 diffusion routes;
 6 matched Nonlinear_systems routes; 14 matched optimization routes; and the
 faithful compact banded LU fixture. Baseline capture remains in progress.
 
-Update 2026-10-21: the registry now contains 199 scenarios. Ten new entries
-form the addressable `bvp-large` group: four six-state BVP_sci story-workload
-routes on a 257-node mesh and six BVP_Damp chemical combustion-1000 routes
-across ExprLegacy/AtomView, Sparse/Banded and selected Lambdify/AOT
-combinations. These are separate solver-native fixtures, not a cross-solver
-parity claim. Debug correctness, AOT smoke and Off-versus-Detailed parity pass;
-release baseline recording and compare are still pending. The older compact
-BVP matrices remain separate and unchanged.
+Update 2026-10-21: the registry now contains 199 scenarios. Ten addressable
+`bvp-large` entries use solver-native combustion workloads: four BVP_sci routes
+on the established six-state combustion equations with 1000 nodes, plus six
+BVP_Damp chemical combustion-3000 routes across ExprLegacy/AtomView,
+Sparse/Banded and selected Lambdify/AOT combinations. They are not a
+cross-solver parity claim. An initial 257-node BVP_sci workload was rejected
+for baseline use because its ~2 ms solve produced unstable wall-time MAD even
+with 201 samples. The larger fixtures now pass Debug correctness and
+Off-versus-Detailed parity; release recording and comparison remain pending.
+The older compact BVP matrices remain separate and unchanged.
+
+The first release record attempt on the original 257-node BVP_sci fixture
+rejected its AtomView AOT sample at MAD/median 0.105; comparison also found the
+ExprLegacy AOT row unstable. This was workload resolution, not a solver
+correctness or counter-parity failure. The replacement scenarios are now
+explicitly sized for at least tens-of-milliseconds solve work and useful stage
+timing; Debug correctness passes, while authoritative Release baselines remain
+to be recorded and compared on an idle machine.
 
 | Priority | Proposed scenario | Source to reuse | Scope / correctness |
 | --- | --- | --- | --- |

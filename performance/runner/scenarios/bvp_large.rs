@@ -1,7 +1,8 @@
 //! Large, established combustion workloads for the two BVP solvers.
 //!
-//! The BVP_sci rows reuse its six-state combustion-like story fixture. The
-//! BVP_Damp rows use the established chemical combustion-1000 fixture. They
+//! The BVP_sci rows reuse its six-state combustion story equations on a
+//! 1000-node mesh. The BVP_Damp rows use the established chemical
+//! combustion-3000 fixture. They
 //! have separate equations and are not presented as cross-solver parity rows.
 
 use crate::error::RunnerError;
@@ -31,8 +32,8 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
 
-const NODES: usize = 257;
-const DAMP_STEPS: usize = 1_000;
+const NODES: usize = 1_000;
+const DAMP_STEPS: usize = 3_000;
 
 #[derive(Clone, Copy)]
 enum Frontend {
@@ -151,18 +152,41 @@ fn combustion_equations() -> Vec<Expr> {
     ]
 }
 
-fn bvp_sci_combustion_like_equations() -> Vec<Expr> {
-    [
-        "q",
-        "-0.5*q + 0.2*exp(Teta)*C0",
-        "J0",
-        "-0.3*J0 - 0.5*C0 + 0.1*Teta",
-        "J1",
-        "-0.2*J1 - 0.3*C1 + 0.05*C0^2",
+fn bvp_sci_combustion_equations() -> Vec<Expr> {
+    let unknowns = Expr::parse_vector_expression(vec!["Teta", "q", "C0", "J0", "C1", "J1"]);
+    let [teta, q, c0, j0, _c1, j1] = unknowns.as_slice() else {
+        unreachable!("six-state BVP_sci combustion equations")
+    };
+    let dt = Expr::Const(600.0);
+    let t_scale = Expr::Const(600.0);
+    let lambda = Expr::Const(0.07);
+    let q_heat = Expr::Const(3000.0 * 1e3 * 0.034);
+    let a = Expr::Const(1.3e5);
+    let e = Expr::Const(5000.0 * 4.184);
+    let m = Expr::Const(34.2 / 1000.0);
+    let r_g = Expr::Const(8.314);
+    let ro_m = Expr::Const((34.2 / 1000.0) * 2e6 / (8.314 * 1500.0));
+    let qm = Expr::Const((3e-4_f64).powi(2) / 600.0);
+    let qs = Expr::Const((3e-4_f64).powi(2));
+    let pe_q = Expr::Const(0.0090168);
+    let ro_d = Expr::Const(2.88e-4);
+    let pe_d = Expr::Const(1.50e-3);
+    let minus = Expr::Const(-1.0);
+    let m_reag = Expr::Const(0.342);
+    let rate = a
+        * Expr::exp(-e / (r_g * (teta.clone() * t_scale + dt)))
+        * c0.clone()
+        * (ro_m.clone() / m_reag);
+
+    vec![
+        q.clone() / lambda,
+        q.clone() * pe_q - q_heat * rate.clone() * qm,
+        j0.clone() / ro_d.clone(),
+        j0.clone() * pe_d.clone()
+            - (m.clone() * minus * rate.clone() * ro_m.clone() / m.clone()) * qs.clone(),
+        j1.clone() / ro_d,
+        j1.clone() * pe_d - (m.clone() * rate.clone() * ro_m.clone() / m.clone()) * qs.clone(),
     ]
-    .into_iter()
-    .map(Expr::parse_expression)
-    .collect()
 }
 
 fn combustion_boundary_values() -> HashMap<String, Vec<(usize, f64)>> {
@@ -185,11 +209,9 @@ fn bvp_sci_once(case: BvpSciCase, mode: BvpSciTelemetryMode) -> Result<BvpSciRun
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let initial_state = (0..NODES)
-        .flat_map(|_| [0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
-        .collect::<Vec<_>>();
+    let initial_state = vec![0.99; NODES * 6];
     let frontend = case.frontend;
-    let mut builder = BvpSciSolverBuilder::new(bvp_sci_combustion_like_equations(), states)
+    let mut builder = BvpSciSolverBuilder::new(bvp_sci_combustion_equations(), states)
         .with_independent_variable("x")
         .with_mesh_and_initial_state(mesh, initial_state)
         .with_boundary_callback(|left, right, _parameters, residual| {
@@ -204,8 +226,8 @@ fn bvp_sci_once(case: BvpSciCase, mode: BvpSciTelemetryMode) -> Result<BvpSciRun
         .with_frontend(frontend.assembly())
         .with_matrix_layout(BvpSciMatrixLayout::Sparse)
         .with_execution_policy(BvpSciExecutionPolicy::Sequential)
-        .with_tolerance(1e-5)
-        .with_limits(1_024, 40, 0)
+        .with_tolerance(1e-6)
+        .with_limits(NODES * 2, 40, 4)
         .with_telemetry(mode)
         .with_output_policy(BvpSciOutputPolicy::MeshAndValues);
     if matches!(case.route, Route::Aot) {
@@ -217,9 +239,9 @@ fn bvp_sci_once(case: BvpSciCase, mode: BvpSciTelemetryMode) -> Result<BvpSciRun
         builder = builder.with_aot_generated_backend(config);
     }
     let setup_started = Instant::now();
-    let mut solver = builder
-        .build()
-        .map_err(|error| RunnerError::Scenario(format!("BVP_sci combustion build: {error:?}")))?;
+    let mut solver = builder.build().map_err(|error| {
+        RunnerError::Scenario(format!("BVP_sci combustion-1000 build: {error:?}"))
+    })?;
     let setup_ms = setup_started.elapsed().as_secs_f64() * 1e3;
     if solver.plan().is_aot() != matches!(case.route, Route::Aot) {
         return Err(RunnerError::Scenario(format!(
@@ -228,9 +250,9 @@ fn bvp_sci_once(case: BvpSciCase, mode: BvpSciTelemetryMode) -> Result<BvpSciRun
         )));
     }
     let solve_started = Instant::now();
-    let solution = solver
-        .solve()
-        .map_err(|error| RunnerError::Scenario(format!("BVP_sci combustion solve: {error:?}")))?;
+    let solution = solver.solve().map_err(|error| {
+        RunnerError::Scenario(format!("BVP_sci combustion-1000 solve: {error:?}"))
+    })?;
     let solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
     if solution.status != BvpSciStatus::Success
         || solution.y.len() != solution.x.len() * 6
@@ -239,7 +261,7 @@ fn bvp_sci_once(case: BvpSciCase, mode: BvpSciTelemetryMode) -> Result<BvpSciRun
         || solution.residual_norm > 1e-4
     {
         return Err(RunnerError::Scenario(format!(
-            "BVP_sci combustion invalid result: status={:?}, nodes={}, residual={:e}",
+            "BVP_sci combustion-1000 invalid result: status={:?}, nodes={}, residual={:e}",
             solution.status,
             solution.x.len(),
             solution.residual_norm
@@ -248,7 +270,7 @@ fn bvp_sci_once(case: BvpSciCase, mode: BvpSciTelemetryMode) -> Result<BvpSciRun
     let boundary_error = bvp_sci_boundary_error(&solution);
     if boundary_error > 1e-6 {
         return Err(RunnerError::Scenario(format!(
-            "BVP_sci combustion boundary error is too large: {boundary_error:e}"
+            "BVP_sci combustion-1000 boundary error is too large: {boundary_error:e}"
         )));
     }
     let telemetry = solver.plan().telemetry_snapshot();
@@ -301,7 +323,7 @@ fn bvp_sci_phase(case: BvpSciCase, diagnostic: bool) -> Result<ScenarioOutput, R
         .fold(0.0_f64, f64::max);
     if solution_diff > 1e-8 {
         return Err(RunnerError::Scenario(format!(
-            "BVP_sci telemetry changed combustion solution by {solution_diff:e}"
+            "BVP_sci telemetry changed combustion-1000 solution by {solution_diff:e}"
         )));
     }
     let snapshot = measured.telemetry;
@@ -753,7 +775,7 @@ macro_rules! sci_scenario {
             id: $id,
             solver: "bvp_sci",
             groups: &["bvp", "bvp-large", "bvp-sci-large"],
-            workload: "six-state BVP_sci combustion-like story system; nodes=257; sparse collocation",
+            workload: "six-state BVP_sci combustion story system; nodes=1000; sparse collocation",
             frontend: $frontend,
             execution: $execution,
             linear_algebra: "Sparse-faer",
@@ -761,7 +783,7 @@ macro_rules! sci_scenario {
             telemetry: "off wall gate + Detailed stage diagnostic",
             version: 1,
             gate_metrics: &["scenario_wall_ms"],
-            description: "Large BVP_sci solve using the established six-state combustion-like story equations",
+            description: "Large BVP_sci solve using the established six-state combustion story equations",
             run: $run,
             diagnose: Some(bvp_sci_diagnose::<$frontend_id, $route_id>),
         }
@@ -774,7 +796,7 @@ macro_rules! damp_scenario {
             id: $id,
             solver: "bvp_damp",
             groups: &["bvp", "bvp-large", "bvp-damp-large"],
-            workload: "six-state chemical combustion; n_steps=1000; one full solve",
+            workload: "six-state chemical combustion; n_steps=3000; one full solve",
             frontend: $frontend,
             execution: $execution,
             linear_algebra: $layout,
@@ -782,7 +804,7 @@ macro_rules! damp_scenario {
             telemetry: "off wall gate + Detailed stage diagnostic",
             version: 1,
             gate_metrics: &["scenario_wall_ms"],
-            description: "Large BVP_Damp combustion workload matched to the established 1000-step story corpus",
+            description: "Large BVP_Damp combustion workload matched to the established 3000-step story corpus",
             run: $run,
             diagnose: Some(bvp_damp_diagnose::<$frontend_id, $layout_id, $route_id>),
         }
@@ -791,7 +813,7 @@ macro_rules! damp_scenario {
 
 pub static SCENARIOS: [Scenario; 10] = [
     sci_scenario!(
-        "bvp_sci_combustion257_expr_lambdify_sparse",
+        "bvp_sci_combustion1000_expr_lambdify_sparse",
         0,
         "ExprLegacy",
         0,
@@ -799,7 +821,7 @@ pub static SCENARIOS: [Scenario; 10] = [
         bvp_sci_run::<0, 0>
     ),
     sci_scenario!(
-        "bvp_sci_combustion257_atom_lambdify_sparse",
+        "bvp_sci_combustion1000_atom_lambdify_sparse",
         1,
         "AtomViewNative",
         0,
@@ -807,7 +829,7 @@ pub static SCENARIOS: [Scenario; 10] = [
         bvp_sci_run::<1, 0>
     ),
     sci_scenario!(
-        "bvp_sci_combustion257_expr_aot_sparse",
+        "bvp_sci_combustion1000_expr_aot_sparse",
         0,
         "ExprLegacy",
         1,
@@ -815,7 +837,7 @@ pub static SCENARIOS: [Scenario; 10] = [
         bvp_sci_run::<0, 1>
     ),
     sci_scenario!(
-        "bvp_sci_combustion257_atom_aot_sparse",
+        "bvp_sci_combustion1000_atom_aot_sparse",
         1,
         "AtomViewNative",
         1,
@@ -823,7 +845,7 @@ pub static SCENARIOS: [Scenario; 10] = [
         bvp_sci_run::<1, 1>
     ),
     damp_scenario!(
-        "bvp_damp_combustion1000_expr_lambdify_sparse",
+        "bvp_damp_combustion3000_expr_lambdify_sparse",
         0,
         "ExprLegacy",
         0,
@@ -833,7 +855,7 @@ pub static SCENARIOS: [Scenario; 10] = [
         bvp_damp_run::<0, 0, 0>
     ),
     damp_scenario!(
-        "bvp_damp_combustion1000_atom_lambdify_sparse",
+        "bvp_damp_combustion3000_atom_lambdify_sparse",
         1,
         "AtomView",
         0,
@@ -843,7 +865,7 @@ pub static SCENARIOS: [Scenario; 10] = [
         bvp_damp_run::<1, 0, 0>
     ),
     damp_scenario!(
-        "bvp_damp_combustion1000_atom_lambdify_banded",
+        "bvp_damp_combustion3000_atom_lambdify_banded",
         1,
         "AtomView",
         1,
@@ -853,7 +875,7 @@ pub static SCENARIOS: [Scenario; 10] = [
         bvp_damp_run::<1, 1, 0>
     ),
     damp_scenario!(
-        "bvp_damp_combustion1000_expr_aot_banded",
+        "bvp_damp_combustion3000_expr_aot_banded",
         0,
         "ExprLegacy",
         1,
@@ -863,7 +885,7 @@ pub static SCENARIOS: [Scenario; 10] = [
         bvp_damp_run::<0, 1, 1>
     ),
     damp_scenario!(
-        "bvp_damp_combustion1000_atom_aot_sparse",
+        "bvp_damp_combustion3000_atom_aot_sparse",
         1,
         "AtomView",
         0,
@@ -873,7 +895,7 @@ pub static SCENARIOS: [Scenario; 10] = [
         bvp_damp_run::<1, 0, 1>
     ),
     damp_scenario!(
-        "bvp_damp_combustion1000_atom_aot_banded",
+        "bvp_damp_combustion3000_atom_aot_banded",
         1,
         "AtomView",
         1,
@@ -900,13 +922,13 @@ mod tests {
             SCENARIOS
                 .iter()
                 .filter(|scenario| scenario.solver == "bvp_sci")
-                .all(|scenario| scenario.workload.contains("nodes=257"))
+                .all(|scenario| scenario.workload.contains("nodes=1000"))
         );
         assert!(
             SCENARIOS
                 .iter()
                 .filter(|scenario| scenario.solver == "bvp_damp")
-                .all(|scenario| scenario.workload.contains("n_steps=1000"))
+                .all(|scenario| scenario.workload.contains("n_steps=3000"))
         );
     }
 
