@@ -1103,7 +1103,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(nonlinear.len(), 6);
         assert!(nonlinear.iter().all(|scenario| {
-            scenario.workload == "quadratic-chain, dimension=64, known root, parameter p0=1"
+            scenario.workload == "quadratic-chain, dimension=512, known root, parameter p0=1"
                 && scenario.linear_algebra == "Dense (fixed nalgebra implementation)"
         }));
         for frontend in ["ExprLegacy", "AtomView"] {
@@ -1144,7 +1144,7 @@ mod tests {
         assert!(optimization.iter().all(|scenario| {
             scenario.execution == "Lambdify"
                 && scenario.workload
-                    == "exponential-sinusoidal fit, 201 samples, 4 fitted parameters"
+                    == "exponential-sinusoidal fit, 20001 samples, 4 fitted parameters"
                 && scenario.linear_algebra == "Dense (fixed fitting implementation)"
                 && scenario.gate_metrics == ["scenario_wall_ms"]
         }));

@@ -1,12 +1,12 @@
 # Performance Regression Gates
 
-Status: opt-in runner and initial Windows baselines in progress, 2026-10-21.
+Status: opt-in runner and initial Windows baselines recorded, 2026-10-21.
 It currently contains 199 scenarios, including full supported-route matrices for Radau (24 cells),
 BDF (8 cells), LSODE2 (30 cells), BVP_Damp (66 cells), BVP_sci (30 cells),
 BE (4 cells), Nonlinear_systems (6 cells), optimisation (14 cells), and a
-separate ten-cell `bvp-large` group. Initial BDF, Radau and BE baselines have
-been recorded and compared on the Windows development machine; large BVP
-baselines are pending. The runner is not yet a complete cross-platform
+separate ten-cell `bvp-large` group. Initial BDF, Radau, BE and large BVP
+baselines have been recorded and compared successfully on the Windows
+development machine. The runner is not yet a complete cross-platform
 release-quality regression gate.
 See [TODO.md](TODO.md) for validation and coverage gaps.
 
@@ -116,7 +116,7 @@ and that the requested AOT runtime is actually selected. Separate cold AOT
 preparation/build/link and warm callback timings are emitted only when native
 telemetry reports those stages.
 
-Nonlinear_systems adds six matched dense Newton routes on the same 64-variable
+Nonlinear_systems adds six matched dense Newton routes on the same 512-variable
 quadratic-chain system with a known root: both frontends use Lambdify
 Sequential/Parallel, while AOT is represented once per frontend because its
 generated route has no callback-dispatch option. The fixed Dense implementation
@@ -125,7 +125,7 @@ root, residual and Off-versus-Detailed parity; preparation and native solve
 stages are reported from the Detailed diagnostic run.
 
 Optimisation adds 14 symbolic fitting routes on one deterministic
-201-observation exponential/sinusoidal dataset. Gavin covers ExprLegacy and
+20,001-observation exponential/sinusoidal dataset. Gavin covers ExprLegacy and
 AtomView for its three damping-update policies; classic `FittingSolver` covers
 both frontends with Lambdify Sequential/Parallel; VarPro is represented through
 its native ExprLegacy/Sequential API; and UniversalFitting gets a separate
@@ -133,6 +133,8 @@ route for each of LM, Gavin, and VarPro. No AOT or unsupported VarPro frontend /
 dispatch cells are fabricated. Each route checks recovered coefficients,
 R-squared, and Off-versus-Detailed result parity. Detailed callback and linear
 stages are included only where the native telemetry type reports them.
+These larger suites can be selected independently with `--group nonlinear-large`
+and `--group optimization-large` when recording or comparing baselines.
 
 The primary wall-clock gate must use telemetry Off. Every telemetry-Off
 warmup and gate sample is collected before instrumented diagnostics begin.

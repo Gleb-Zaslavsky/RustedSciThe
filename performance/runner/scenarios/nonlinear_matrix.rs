@@ -21,7 +21,8 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
 
-const DIMENSION: usize = 64;
+// Keep the dense Newton solve large enough to provide stable stage timing.
+const DIMENSION: usize = 512;
 const FRONTEND_EXPR: u8 = 0;
 const FRONTEND_ATOM: u8 = 1;
 const ROUTE_LAMBDIFY: u8 = 0;
@@ -447,16 +448,22 @@ macro_rules! nonlinear_scenario {
      $route_id:ident, $execution:literal, $route_key:literal,
      $policy_id:ident, $policy:literal, $suffix:literal) => {
         Scenario {
-            id: concat!("nonlinear_quad64_", $frontend_key, "_", $suffix),
+            id: concat!("nonlinear_quad512_", $frontend_key, "_", $suffix),
             solver: "nonlinear-systems",
-            groups: &["nonlinear", "nonlinear-matrix", "symbolic", "dense"],
-            workload: "quadratic-chain, dimension=64, known root, parameter p0=1",
+            groups: &[
+                "nonlinear",
+                "nonlinear-matrix",
+                "nonlinear-large",
+                "symbolic",
+                "dense",
+            ],
+            workload: "quadratic-chain, dimension=512, known root, parameter p0=1",
             frontend: $frontend,
             execution: $execution,
             linear_algebra: "Dense (fixed nalgebra implementation)",
             parallel_policy: $policy,
             telemetry: "off wall gate + Detailed stage diagnostic",
-            version: 1,
+            version: 2,
             gate_metrics: &["scenario_wall_ms"],
             description: concat!(
                 "Matched dense Newton ",
@@ -537,3 +544,42 @@ pub static MATRIX_SCENARIOS: [Scenario; 6] = [
         "aot"
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::MATRIX_SCENARIOS;
+
+    #[test]
+    fn large_nonlinear_lambdify_routes_pass_debug_correctness() {
+        for scenario in MATRIX_SCENARIOS
+            .iter()
+            .filter(|scenario| !scenario.execution.starts_with("AOT"))
+        {
+            let output =
+                (scenario.run)().unwrap_or_else(|error| panic!("{} failed: {error}", scenario.id));
+            assert!(
+                output
+                    .diagnostics
+                    .iter()
+                    .any(|(name, _, _)| name == "max_solution_error"),
+                "{} omitted its root-error check",
+                scenario.id
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "builds both 512-variable generated AOT backends; run explicitly before recording gates"]
+    fn large_nonlinear_aot_routes_pass_debug_correctness_and_telemetry_parity() {
+        for scenario in MATRIX_SCENARIOS
+            .iter()
+            .filter(|scenario| scenario.execution.starts_with("AOT"))
+        {
+            (scenario.run)().unwrap_or_else(|error| panic!("{} failed: {error}", scenario.id));
+            (scenario
+                .diagnose
+                .expect("nonlinear AOT route must provide diagnostics"))(scenario)
+            .unwrap_or_else(|error| panic!("{} diagnostics failed: {error}", scenario.id));
+        }
+    }
+}

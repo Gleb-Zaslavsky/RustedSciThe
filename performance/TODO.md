@@ -460,7 +460,7 @@ parse Tabled Markdown or run an entire test module as a performance scenario.
   worker profile; a one-worker run is not evidence for parallel break-even.
 - [x] Add representative Nonlinear_systems routes for Lambdify and AOT,
   ExprLegacy and AtomView, and Sequential/Parallel where supported. The
-  six-cell 64-variable quadratic-chain matrix keeps Dense fixed, covers
+  six-cell 512-variable quadratic-chain matrix keeps Dense fixed, covers
   Lambdify Sequential/Parallel for each frontend, and marks AOT dispatch as
   not-applicable. Off-mode wall gates check a known root; Detailed-mode runs
   verify numerical parity and report available native stages.
@@ -468,7 +468,7 @@ parse Tabled Markdown or run an entire test module as a performance scenario.
   support: Gavin ExprLegacy/AtomView x Marquardt/Quadratic/Nielsen; standalone
   `FittingSolver` ExprLegacy/AtomView x Lambdify Sequential/Parallel; native
   ExprLegacy/Sequential VarPro; and separate UniversalFitting LM/Gavin/VarPro
-  facade routes. All 14 use one deterministic 201-sample workload, check
+  facade routes. All 14 use one deterministic 20,001-sample workload, check
   recovered parameters and R-squared, and compare telemetry-Off against Detailed.
   Method-specific counters and timings remain distinct; no unavailable timing
   is synthesized as zero.
@@ -503,8 +503,10 @@ BVP_Damp chemical combustion-3000 routes across ExprLegacy/AtomView,
 Sparse/Banded and selected Lambdify/AOT combinations. They are not a
 cross-solver parity claim. An initial 257-node BVP_sci workload was rejected
 for baseline use because its ~2 ms solve produced unstable wall-time MAD even
-with 201 samples. The larger fixtures now pass Debug correctness and
-Off-versus-Detailed parity; release recording and comparison remain pending.
+with 201 samples. The larger fixtures passed Debug correctness and
+Off-versus-Detailed parity. Release baselines have now been recorded and
+compared successfully: all six BVP_Damp combustion-3000 scenarios passed, and
+all four BVP_sci combustion-1000 scenarios passed.
 The older compact BVP matrices remain separate and unchanged.
 
 The first release record attempt on the original 257-node BVP_sci fixture
@@ -512,8 +514,22 @@ rejected its AtomView AOT sample at MAD/median 0.105; comparison also found the
 ExprLegacy AOT row unstable. This was workload resolution, not a solver
 correctness or counter-parity failure. The replacement scenarios are now
 explicitly sized for at least tens-of-milliseconds solve work and useful stage
-timing; Debug correctness passes, while authoritative Release baselines remain
-to be recorded and compared on an idle machine.
+timing. Release baseline comparisons completed successfully on the registered
+Windows development machine; BVP_sci's four routes also matched their discrete
+solver counters and final mesh dimensions. See the machine-specific reports
+under `performance/runs/` for the measured samples and diagnostics.
+
+Update 2026-10-21: replaced the undersized nonlinear/optimization gate
+workloads before collecting their baselines. Nonlinear_systems now uses a
+512-variable known-root dense quadratic chain (six matched frontend,
+execution and dispatch routes); optimisation now uses 20,001 samples of the
+existing exponential/sinusoidal fit across its 14 supported routes. IDs and
+scenario versions were advanced so earlier small-workload measurements cannot
+be mistaken for these baselines. Debug correctness and release stability still
+passed for all six nonlinear routes, including both generated AOT cells, and
+all 14 optimization routes, including Off-versus-Detailed fit parity. Release
+stability/baseline capture remain open. The groups are independently selectable
+as `nonlinear-large` and `optimization-large`.
 
 | Priority | Proposed scenario | Source to reuse | Scope / correctness |
 | --- | --- | --- | --- |

@@ -23,7 +23,9 @@ use nalgebra::DVector;
 use std::hint::black_box;
 use std::time::Instant;
 
-const SAMPLES: usize = 201;
+// 20k observations keep fitting gates above timer-noise scale while retaining
+// the same deterministic model and four-parameter optimization problem.
+const SAMPLES: usize = 20_001;
 const EXPECTED: [f64; 4] = [2.0, 0.5, 1.0, 2.0];
 const FAMILY_GAVIN: u8 = 0;
 const FAMILY_FITTING: u8 = 1;
@@ -787,16 +789,22 @@ macro_rules! optimization_scenario {
     ($family:ident, $frontend_id:ident, $frontend:literal, $frontend_key:literal,
      $policy_id:ident, $policy:literal, $gavin_policy_id:ident, $method:literal, $suffix:literal) => {
         Scenario {
-            id: concat!("optimization_fit201_", $suffix),
+            id: concat!("optimization_fit20001_", $suffix),
             solver: "optimisation",
-            groups: &["optimization", $method, "fitting", "lambdify"],
-            workload: "exponential-sinusoidal fit, 201 samples, 4 fitted parameters",
+            groups: &[
+                "optimization",
+                "optimization-large",
+                $method,
+                "fitting",
+                "lambdify",
+            ],
+            workload: "exponential-sinusoidal fit, 20001 samples, 4 fitted parameters",
             frontend: $frontend,
             execution: "Lambdify",
             linear_algebra: "Dense (fixed fitting implementation)",
             parallel_policy: $policy,
             telemetry: "off wall gate + Detailed native stage diagnostics",
-            version: 1,
+            version: 2,
             gate_metrics: &["scenario_wall_ms"],
             description: concat!(
                 "Matched ",
@@ -969,3 +977,38 @@ pub static MATRIX_SCENARIOS: [Scenario; 14] = [
         "universal_varpro_expr"
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::MATRIX_SCENARIOS;
+
+    #[test]
+    fn large_optimization_routes_pass_debug_correctness_and_telemetry_parity() {
+        for scenario in MATRIX_SCENARIOS.iter() {
+            let output =
+                (scenario.run)().unwrap_or_else(|error| panic!("{} failed: {error}", scenario.id));
+            assert!(
+                output
+                    .diagnostics
+                    .iter()
+                    .any(|(name, _, _)| name == "known_parameter_max_error"),
+                "{} omitted its known-parameter check",
+                scenario.id
+            );
+            let detailed = scenario
+                .diagnose
+                .expect("optimization matrix must provide diagnostics")(
+                scenario
+            )
+            .unwrap_or_else(|error| panic!("{} diagnostics failed: {error}", scenario.id));
+            assert!(
+                detailed
+                    .diagnostics
+                    .iter()
+                    .any(|(name, _, _)| name == "off_vs_detailed_max_parameter_diff"),
+                "{} omitted its Off-versus-Detailed parity check",
+                scenario.id
+            );
+        }
+    }
+}
