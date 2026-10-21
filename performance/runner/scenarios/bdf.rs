@@ -1,7 +1,7 @@
 use crate::error::RunnerError;
 use crate::registry::{Scenario, ScenarioOutput};
-use RustedSciThe::numerical::BDF::BDF_api::{BdfTelemetryMode, ODEsolver};
-use RustedSciThe::numerical::ivp_workloads::WorkloadKind;
+use RustedSciThe::numerical::BDF::BDF_api::{BdfSolverOptions, BdfTelemetryMode, ODEsolver};
+use RustedSciThe::numerical::ivp_workloads::{WorkloadKind, build_workload};
 use RustedSciThe::symbolic::codegen::codegen_runtime_api::{
     recommended_dense_jacobian_chunking_for_parallelism,
     recommended_residual_chunking_for_parallelism,
@@ -17,64 +17,8 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
 
-// Reuse the established BDF benchmark construction so the gate follows the
-// same equation, tolerances, integration interval and symbolic route.
 #[path = "../../../benches/support/bdf_bench_support.rs"]
 mod shared_bench_support;
-
-pub fn run_robertson() -> Result<ScenarioOutput, RunnerError> {
-    let full_solve_started = Instant::now();
-    let setup_started = Instant::now();
-    let mut solver = shared_bench_support::make_solver(
-        WorkloadKind::Robertson,
-        1,
-        IvpSymbolicAssemblyBackend::ExprLegacy,
-    );
-    let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
-
-    let solve_started = Instant::now();
-    solver.solve();
-    let solve_ms = solve_started.elapsed().as_secs_f64() * 1000.0;
-    let scenario_wall_ms = full_solve_started.elapsed().as_secs_f64() * 1000.0;
-
-    if solver.get_status() != "finished" {
-        return Err(RunnerError::Scenario(format!(
-            "BDF Robertson did not finish: status={}",
-            solver.get_status()
-        )));
-    }
-    let final_state = shared_bench_support::final_state(&solver);
-    if final_state.is_empty() || final_state.iter().any(|value| !value.is_finite()) {
-        return Err(RunnerError::Scenario(
-            "BDF Robertson produced an empty or non-finite final state".into(),
-        ));
-    }
-    let mass_error = (final_state.iter().sum::<f64>() - 1.0).abs();
-    if mass_error > 1e-5 {
-        return Err(RunnerError::Scenario(format!(
-            "BDF Robertson mass invariant failed: |sum(y)-1|={mass_error:e}"
-        )));
-    }
-    black_box(&final_state);
-
-    Ok(ScenarioOutput {
-        metrics: vec![
-            ("solver_setup_ms".into(), "ms".into(), setup_ms),
-            ("solve_ms".into(), "ms".into(), solve_ms),
-            ("scenario_wall_ms".into(), "ms".into(), scenario_wall_ms),
-        ],
-        native_scopes: Vec::new(),
-        counters: vec![("state_dimension".into(), final_state.len() as u64)],
-        diagnostics: vec![
-            ("final_time".into(), "time".into(), 0.1),
-            (
-                "mass_invariant_abs_error".into(),
-                "absolute".into(),
-                mass_error,
-            ),
-        ],
-    })
-}
 
 #[derive(Clone, Copy)]
 enum BdfRoute {
@@ -141,20 +85,39 @@ impl BdfRoute {
     }
 }
 
-const DIMENSION: usize = 64;
+const DIMENSION: usize = 256;
+const T_BOUND: f64 = 0.01;
+const MAX_STEP: f64 = 0.001;
 
 fn make_diffusion_solver(
     assembly: IvpSymbolicAssemblyBackend,
     route: BdfRoute,
     telemetry: BdfTelemetryMode,
 ) -> Result<ODEsolver, RunnerError> {
-    let solver = shared_bench_support::make_solver_with_telemetry_and_policy(
-        WorkloadKind::DiffusionChain,
-        DIMENSION,
-        assembly,
-        telemetry,
-        route.lambdify_policy(),
-    );
+    let workload = build_workload(WorkloadKind::DiffusionChain, DIMENSION);
+    let mut options = BdfSolverOptions::for_bdf(
+        workload.equations,
+        workload.variables,
+        workload.time_variable,
+        0.0,
+        workload.initial_state,
+        T_BOUND,
+        MAX_STEP,
+        1.0e-7,
+        1.0e-10,
+        None,
+        false,
+        Some(MAX_STEP),
+    )
+    .with_symbolic_assembly_backend(assembly)
+    .with_lambdify_execution_policy(route.lambdify_policy())
+    .with_telemetry_mode(telemetry);
+    if !workload.parameter_names.is_empty() {
+        options = options
+            .with_equation_parameters(workload.parameter_names)
+            .with_equation_parameter_values(workload.parameter_values);
+    }
+    let solver = ODEsolver::new_with_options(options);
     match route.aot_config()? {
         Some(config) => Ok(solver.with_generated_backend_config(config)),
         None => Ok(solver),
@@ -399,3 +362,26 @@ declare_diffusion_route!(
     IvpSymbolicAssemblyBackend::AtomView,
     BdfRoute::AotParallel2
 );
+
+#[cfg(test)]
+mod tests {
+    use super::diffusion_expr_lambdify_seq;
+
+    #[test]
+    fn extended_diffusion_gate_solves_a_256_state_problem() {
+        let output = diffusion_expr_lambdify_seq().expect("BDF extended diffusion solve");
+        let wall_ms = output
+            .metrics
+            .iter()
+            .find(|(id, _, _)| id == "scenario_wall_ms")
+            .expect("wall gate metric")
+            .2;
+        assert!(wall_ms.is_finite() && wall_ms > 0.0);
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|(id, _, value)| id == "final_state_min" && value.is_finite())
+        );
+    }
+}

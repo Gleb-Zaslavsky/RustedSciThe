@@ -2,16 +2,18 @@
 
 Status: Windows Debug contract suite passes; targeted Windows Release baseline
 comparisons have passed for selected workloads, 2026-10-21. The registry
-contains 199 scenarios, including full supported-route matrices for Radau (24
+contains 196 scenarios, including full supported-route matrices for Radau (24
 cells), BDF (8 cells), LSODE2 (30 cells), BVP_Damp (66 cells), BVP_sci (30
 cells), BE (4 cells), Nonlinear_systems (6 cells), optimisation (14 cells),
-plus standalone and large-workload scenarios. The registered Windows profile
-currently has baselines for 100 active scenario IDs. All six nonlinear and
-fourteen optimisation workloads passed targeted Release comparisons; several
-other solver families and large BVP workloads also passed comparisons.
-Baselines are local and Git-ignored, and were recorded from a dirty source
-revision, so they are not a clean shared reference. The runner is not yet a
-complete release-quality regression gate.
+plus standalone and large-workload scenarios. The previous Windows calibration
+had local baseline files for 100 active scenario IDs. Those BDF/LSODE2 workload
+IDs have now been superseded by longer workload contracts and require new
+baselines; Robertson micro-solves are no longer registered. Earlier clean-source
+recording passed most other selected groups.
+All six nonlinear and fourteen optimisation workloads passed targeted Release
+comparisons; several other solver families and large BVP workloads also passed
+comparisons. Baselines are local and Git-ignored, not a portable shared
+reference. The runner is not yet a complete release-quality regression gate.
 See [TODO.md](TODO.md) for validation and coverage gaps.
 
 This repository tool will detect performance changes in selected, fixed
@@ -54,12 +56,12 @@ registry must not advertise combinations the solver does not implement.
 Matched frontend or policy comparisons use identical equations, dimensions,
 layout, tolerances, and lifecycle except for the named axis.
 
-The current registry reuses the existing BDF benchmark helper for BDF, the
-shared IVP equation corpus and public APIs for LSODE2/Radau, BE benchmark
+The current registry reuses shared IVP equation fixtures and public APIs for
+BDF/LSODE2/Radau, BE benchmark
 support, a nonlinear workload from the Criterion matrix, BVP_sci full-solve
 routes, and one faithful compact banded solve. Its current matched
 ExprLegacy/AtomView pairs cover BDF, Radau, LSODE2, BVP_Damp, BVP_sci, and BE. BDF additionally has a fixed
-64-state diffusion matrix covering both frontends with Lambdify
+256-state diffusion matrix covering both frontends with Lambdify
 Sequential/Parallel and AOT Whole/Parallel2. BDF uses its fixed Dense
 implementation and does not expose a selectable layout axis. AOT uses a
 runner-owned BuildIfMissing cache, `tcc`, and warmups. Radau additionally has a
@@ -67,12 +69,13 @@ complete fixed-workload matrix for the supported combinations:
 ExprLegacy/AtomView x Lambdify/AOT x Dense/Sparse/Banded x
 Sequential/Parallel. Its AOT route uses a runner-owned BuildIfMissing cache,
 requires `tcc` on PATH, and uses at least one warmup to keep cold compilation
-out of measured warm samples. LSODE2 has a fixed 32-state diffusion matrix for
+out of measured warm samples. LSODE2 has a fixed 256-state diffusion matrix for
 ExprLegacy/AtomView x Dense/Sparse/Banded x Lambdify Sequential/Parallel/Auto
-and AOT Whole/Parallel2. It fixes LSODE2 to its BDF-only faithful controller
+and AOT Whole/Parallel2, integrating to `t=0.05` with `max_step=0.001`. It
+fixes LSODE2 to its BDF-only faithful controller
 so the matrix isolates frontend, execution, layout, and callback policy rather
-than mixing controller changes. The original small Robertson scenario remains
-as a separate low-cost representative gate.
+than mixing controller changes. Tiny Robertson cases remain correctness
+coverage in the solver suites, not performance-registry gates.
 
 For BVP_Damp, 44 Damped cells cover the existing oscillator and nonlinear
 dashboard workloads across both frontends, all three layouts and Lambdify
@@ -171,10 +174,9 @@ using the same profile avoids accidentally registering a Debug environment.
 cargo run --release --features perf-gates --bin perf-gates -- list
 cargo run --release --features perf-gates --bin perf-gates -- machine register --name home
 cargo run --release --features perf-gates --bin perf-gates -- list --solver bdf
-cargo run --release --features perf-gates --bin perf-gates -- record --scenario bdf_robertson --machine home
-cargo run --release --features perf-gates --bin perf-gates -- compare --scenario bdf_robertson --machine home --dry-run
-cargo run --release --features perf-gates --bin perf-gates -- compare --solver bdf --machine home
-cargo run --release --features perf-gates --bin perf-gates -- compare --all --machine home
+cargo run --release --features perf-gates --bin perf-gates -- record --group bdf-matrix --machine home
+cargo run --release --features perf-gates --bin perf-gates -- list --group bdf-matrix
+cargo run --release --features perf-gates --bin perf-gates -- compare --group bdf-matrix --machine home
 ```
 
 `record` and `compare` require an explicit selector. An unknown selector is an
@@ -200,6 +202,87 @@ these machine-specific files are not a portable shared reference corpus.
 `--allow-dirty-source` is an explicit diagnostic escape hatch; the
 baseline records the revision, dirty flag and lockfile fingerprint, so that
 such a reference is visibly non-clean rather than silently misrepresented.
+
+### PowerShell Helpers (Windows)
+
+The scripts in `scripts/` keep common commands consistent and print Cargo
+output directly to the terminal. They do not redirect logs or modify
+`test_reports/`. Run them from any working directory; each resolves the
+repository root from its own path.
+
+On a new Windows installation, register a local machine alias and inspect the
+compiler and scenario inventory:
+
+```powershell
+.\scripts\perf_gates_register_machine.ps1 -Name windows-dev
+```
+
+To use a specific installed Rustup toolchain, pass its exact toolchain name.
+The helper scopes `RUSTUP_TOOLCHAIN` to the command sequence, so both `rustc`
+and `cargo` use the selected installation:
+
+```powershell
+.\scripts\perf_gates_register_machine.ps1 -Name windows-stable -Toolchain stable-x86_64-pc-windows-msvc
+```
+
+The generic runner performs one addressed record or compare. Exactly one of
+`-Solver`, `-Group` or `-Scenario` is required. Defaults are 10 warmups, 101
+measured runs and a maximum relative MAD of 5%; adjust counts for the workload,
+not the stability threshold:
+
+```powershell
+.\scripts\perf_gates_run.ps1 -Action Record -Group radau-matrix -Machine windows-dev -Runs 201
+.\scripts\perf_gates_run.ps1 -Action Compare -Group radau-matrix -Machine windows-dev -Runs 201
+.\scripts\perf_gates_run.ps1 -Action Record -Group bdf-matrix -Machine windows-dev -Runs 301
+.\scripts\perf_gates_run.ps1 -Action Record -Scenario radau_diff256_aot_atom_banded_seq -Machine windows-dev -Runs 201 -Force
+```
+
+`-Force` replaces an existing baseline only during `Record`; use it only when
+replacement is intentional. `Record` requires a clean source tree by default.
+`-AllowDirtySource` is an explicit local diagnostic escape hatch and should
+not be used for shared references.
+
+Do not use extra repetitions as a substitute for workload duration. The
+2026-10-21 clean-source record exposed that the former BDF 64-state and LSODE2
+128-state diffusion routes were too short for robust gates; Robertson
+micro-solves were below useful wall-clock resolution. The registry now uses
+BDF diffusion with 256 states and LSODE2 diffusion with 256 states over
+`t=[0,0.05]`, retaining all supported route cells. Old IDs remain only as
+inactive local baseline history. More samples improve the estimate of spread,
+but do not remove scheduler noise from a tiny solve. New BDF/LSODE2 baselines
+must be recorded from the new IDs after Debug correctness checks, and their
+per-sample durations reviewed before accepting them as gates.
+
+The first-tier helper runs only curated performance group(s) for one solver.
+It intentionally does not use `--all` or include every short correctness-matrix
+cell. Backward Euler runs both its matrix and larger diffusion-chain workload:
+
+```powershell
+.\scripts\perf_gates_first_tier.ps1 -Solver bdf -Action Record -Machine windows-dev -Runs 301
+.\scripts\perf_gates_first_tier.ps1 -Solver bdf -Action Compare -Machine windows-dev -Runs 301
+.\scripts\perf_gates_first_tier.ps1 -Solver bvp-sci -Action Record -Machine windows-dev -Runs 101
+.\scripts\perf_gates_first_tier.ps1 -Solver optimisation -Action Compare -Machine windows-dev -Runs 101
+```
+
+Supported `-Solver` values are `bdf`, `radau`, `lsode2`, `be`, `bvp-sci`,
+`bvp-damp`, `nonlinear-systems` and `optimisation`. The helper maps each to
+its large or matched performance group; `be` runs both `be-matrix` and
+`large-system`. Add `-Toolchain stable-x86_64-pc-windows-msvc` to select a
+Rustup toolchain. Use `-Force` only with `-Action Record` to intentionally
+replace existing baselines.
+
+The same runner CLI can be invoked directly on Linux after registering that
+host locally, for example:
+
+```sh
+cargo run --release --features perf-gates --bin perf-gates -- machine register --name linux-dev
+cargo run --release --features perf-gates --bin perf-gates -- record --group radau-matrix --machine linux-dev --warmups 10 --runs 201 --max-relative-mad 0.05
+cargo run --release --features perf-gates --bin perf-gates -- compare --group radau-matrix --machine linux-dev --warmups 10 --runs 201 --max-relative-mad 0.05
+```
+
+PowerShell helpers are convenience wrappers, not a platform abstraction; the
+Rust CLI remains the source of truth for selection and baseline policy. Never
+compare against a baseline from another machine or environment ID.
 
 Machine registration creates a local installation identity under the user's
 OS configuration directory and a small alias profile under

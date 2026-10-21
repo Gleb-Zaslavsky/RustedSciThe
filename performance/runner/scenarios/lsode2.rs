@@ -15,97 +15,9 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
 
-const DIMENSION: usize = 128;
-const T_BOUND: f64 = 0.01;
-
-/// Keep the original small Robertson case as a stable, inexpensive sanity gate.
-pub fn run_robertson() -> Result<ScenarioOutput, RunnerError> {
-    let full_started = Instant::now();
-    let workload = build_workload(WorkloadKind::Robertson, 3);
-    let config = Lsode2ProblemConfig::new(
-        workload.equations,
-        workload.variables,
-        workload.time_variable,
-        0.0,
-        workload.initial_state,
-        0.25,
-        0.02,
-        1.0e-7,
-        1.0e-9,
-    )
-    .with_controller(Lsode2ControllerConfig::bdf_only())
-    .with_faithful_bdf_solve(200_000, 200_000)
-    .with_telemetry(IvpTelemetry::disabled());
-
-    let setup_started = Instant::now();
-    let mut solver = Lsode2Solver::new(config).map_err(|error| {
-        RunnerError::Scenario(format!("LSODE2 Robertson construction: {error}"))
-    })?;
-    let setup_ms = setup_started.elapsed().as_secs_f64() * 1_000.0;
-    let prepare_started = Instant::now();
-    solver
-        .prepare()
-        .map_err(|error| RunnerError::Scenario(format!("LSODE2 Robertson prepare: {error}")))?;
-    let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1_000.0;
-    let solve_started = Instant::now();
-    let solution = solver
-        .solve_with_summary()
-        .map_err(|error| RunnerError::Scenario(format!("LSODE2 Robertson solve: {error}")))?;
-    let solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
-    let scenario_wall_ms = full_started.elapsed().as_secs_f64() * 1_000.0;
-
-    if !matches!(
-        solution.status.as_str(),
-        "finished" | "finished_native_faithful" | "finished_native_faithful_partial"
-    ) || solution
-        .final_t
-        .is_none_or(|time| (time - 0.25).abs() > 1.0e-10)
-        || solution.variable_count != 3
-        || solution
-            .final_y
-            .as_ref()
-            .is_none_or(|state| state.len() != 3 || state.iter().any(|value| !value.is_finite()))
-    {
-        return Err(RunnerError::Scenario(format!(
-            "LSODE2 Robertson returned invalid result: status={}, final_t={:?}, n={}",
-            solution.status, solution.final_t, solution.variable_count
-        )));
-    }
-    let final_state = solution.final_y.as_ref().expect("checked final state");
-    let mass_error = (final_state.iter().sum::<f64>() - 1.0).abs();
-    if mass_error > 1.0e-5 {
-        return Err(RunnerError::Scenario(format!(
-            "LSODE2 Robertson mass invariant failed: {mass_error:e}"
-        )));
-    }
-    black_box(final_state);
-
-    Ok(ScenarioOutput {
-        metrics: vec![
-            ("solver_setup_ms".into(), "ms".into(), setup_ms),
-            ("prepare_ms".into(), "ms".into(), prepare_ms),
-            ("solve_ms".into(), "ms".into(), solve_ms),
-            ("scenario_wall_ms".into(), "ms".into(), scenario_wall_ms),
-        ],
-        native_scopes: Vec::new(),
-        counters: vec![
-            ("state_dimension".into(), solution.variable_count as u64),
-            ("trajectory_points".into(), solution.time_points as u64),
-        ],
-        diagnostics: vec![
-            (
-                "final_time".into(),
-                "time".into(),
-                solution.final_t.unwrap(),
-            ),
-            (
-                "mass_invariant_abs_error".into(),
-                "absolute".into(),
-                mass_error,
-            ),
-        ],
-    })
-}
+const DIMENSION: usize = 256;
+const T_BOUND: f64 = 0.05;
+const MAX_STEP: f64 = 0.001;
 
 #[derive(Clone, Copy)]
 enum MatrixRoute {
@@ -193,7 +105,7 @@ fn make_config(
         0.0,
         workload.initial_state,
         T_BOUND,
-        0.001,
+        MAX_STEP,
         1.0e-7,
         1.0e-10,
     )
@@ -720,3 +632,23 @@ declare_route!(
     MatrixRoute::Banded,
     ExecutionRoute::AotParallel2
 );
+
+#[cfg(test)]
+mod extended_workload_tests {
+    use super::diff_expr_banded_lambdify_seq;
+
+    #[test]
+    fn extended_diffusion_gate_reaches_its_256_state_endpoint() {
+        let output = diff_expr_banded_lambdify_seq().expect("LSODE2 extended diffusion solve");
+        let accepted_steps = output
+            .diagnostics
+            .iter()
+            .find(|(id, _, _)| id == "accepted_steps")
+            .expect("accepted-step diagnostic")
+            .2;
+        assert!(accepted_steps >= 100.0, "expected an extended integration");
+        assert!(output.metrics.iter().any(|(id, _, value)| {
+            id == "scenario_wall_ms" && value.is_finite() && *value > 0.0
+        }));
+    }
+}

@@ -5,10 +5,12 @@ Source requirements: user specification sections 1-25, including the separate
 section 24 on preserving experimental reports.
 
 This checklist tracks the implementation and validation status of the opt-in
-runner. The registry currently contains 199 scenarios. On 2026-10-21, the
-registered Windows development profile has local baseline files for 100 active
-scenario IDs; 180 TOML files exist because the directory also retains prior
-scenario IDs. Baselines and machine profiles are Git-ignored local state. The
+runner. The registry currently contains 196 scenarios. The previous Windows
+calibration had baselines for 100 active IDs; the former BDF/LSODE2 route IDs
+have since been superseded by longer workloads, and Robertson micro-solves
+were removed from the registry. Fresh baselines for the new BDF/LSODE2 IDs are
+pending. Local baseline directories retain inactive IDs as history. Baselines
+and machine profiles are Git-ignored local state. The
 runner is useful for controlled local comparisons but is not yet validated as
 a cross-platform regression gate. No historical Markdown timing is imported as
 a baseline.
@@ -54,15 +56,17 @@ Windows status is summarized after the baseline records.
   recorded below and in [`METRIC_CONTRACTS.md`](METRIC_CONTRACTS.md); some
   reset/optional-stage contracts remain open.
 
-Current Windows baseline coverage: the 100 active baseline IDs comprise the
-measured BDF, Radau, LSODE2, BE, `bvp-large`, nonlinear-large and
-optimization-large workloads. The 99 active scenarios without baselines are
+Historical Windows baseline coverage: the prior 100 active baseline IDs comprised
+the measured BDF, Radau, LSODE2, BE, `bvp-large`, nonlinear-large and
+optimization-large workloads. The 99 then-active scenarios without baselines were
 the 66 compact BVP_Damp route-matrix cells, 30 compact BVP_sci exponential
 cells, and three small standalone fixtures. These remain correctness/route
 coverage, not approved performance baselines; do not make `compare --all` the
 pre-release command until a deliberate policy is chosen for these short
 workloads. Baseline TOMLs for inactive scenario IDs are retained as history and
-are not current coverage.
+are not current coverage. BDF and LSODE2 have since received new scenario IDs;
+their old TOMLs do not satisfy the new workload contract and must not be treated
+as current baselines.
 
 ### Stage-Scope Audit (2026-10-20)
 
@@ -539,6 +543,19 @@ compared successfully: all six BVP_Damp combustion-3000 scenarios passed, and
 all four BVP_sci combustion-1000 scenarios passed.
 The older compact BVP matrices remain separate and unchanged.
 
+Workload calibration correction, 2026-10-21: the 199-scenario inventory
+contained BDF 64-state / `t=0.01`, LSODE2 128-state / `t=0.01`, and three
+Robertson micro-solves. Release recording showed the BDF routes were only a few
+milliseconds and Robertson was below useful wall-clock resolution; additional
+samples alone cannot remove that per-sample noise. The current registry is
+therefore 196 scenarios: BDF now uses 256-state diffusion, LSODE2 uses
+256-state diffusion over `t=[0,0.05]` with `max_step=0.001`, and Robertson
+micro-solves are removed from performance selection (numerical correctness
+remains covered by solver tests). New scenario IDs make the changed workload
+contract explicit; old baseline files are inactive history. Debug route smoke
+and registry contract tests pass; clean Release baselines remain to be
+collected after the source candidate is committed.
+
 The first release record attempt on the original 257-node BVP_sci fixture
 rejected its AtomView AOT sample at MAD/median 0.105; comparison also found the
 ExprLegacy AOT row unstable. This was workload resolution, not a solver
@@ -612,13 +629,10 @@ sample batch.
 | P0 | `symbolic_expr_preparation` | `View/microbench.rs`, `ivp_workloads.rs` | Fixed expression family; derivative/value parity |
 | P0 | `symbolic_atom_preparation` | Same equations, existing conversion/Jacobian APIs | Conversion, differentiation, evaluator preparation |
 | P0 | `symbolic_atom_prepared_eval` | Existing production prepared evaluator | Batched residual/Jacobian, fixed inputs and output order |
-| P0 | `bdf_robertson` | `ivp_workloads.rs`, `benches/support/bdf_bench_support.rs` | Shared benchmark builder; ExprLegacy, telemetry Off, finished status and mass invariant |
-| P0 | `bdf_diff64_*` | `benches/support/bdf_bench_support.rs`, `benches/bdf_workloads.rs`, `benches/bdf_backend_matrix.rs` | 64 states; both frontends, Lambdify sequential/parallel, AOT Whole/Parallel2; telemetry-Off gate plus Detailed diagnostics |
+| P0 | `bdf_diff256_*` | Shared `DiffusionChain` IVP fixture and BDF API | 256 states; both frontends, Lambdify sequential/parallel, AOT Whole/Parallel2; telemetry-Off gate plus Detailed diagnostics |
 | P0 | `banded_faithful_tridiagonal` | `faer_sparse_vs_lapack_style_benches.rs` | Compact band storage, known solution, normalized residual |
-| P0 | `radau_robertson`, `radau_diffusion_chain_16_banded` | Shared IVP workload corpus and Radau story contract | Full solve, final-time/finite-state checks, Robertson mass invariant, accepted/rejected step counters |
-| P0 | `radau_diffusion_chain_16_banded_atomview` | Same Radau IVP workload, layout and solver policy | Matched AtomView route; same final-time and finite-state checks |
-| P1 | `lsode2_robertson` | Shared workloads, LSODE2 workload benches | Fixed BDF controller, solve and trajectory invariant |
-| P0 | `lsode2_diff32_*` | `benches/lsode2_workloads.rs`, shared IVP workload corpus | 32-state matched frontend/layout/execution matrix; telemetry-Off gate plus Detailed diagnostics |
+| P0 | `radau_diff256_*` | Shared IVP workload corpus and Radau story contract | 256-state diffusion, all 24 supported frontend/execution/layout/dispatch cells |
+| P0 | `lsode2_diff256_t050_*` | Shared `DiffusionChain` fixture and LSODE2 API | 256-state, `t=0.05`; matched frontend/layout/execution/dispatch matrix; telemetry-Off gate plus Detailed diagnostics |
 | P0 | `bvp_sci_exp_*` | Public BVP_sci builder and SciPy parity fixture | 30 matched frontend/layout/execution routes; exact profile, typed status, telemetry parity |
 | P0 | `be_diffusion_chain_32` | `benches/support/be_bench_support.rs` | Native analytic Jacobian, telemetry Off, trajectory bounds |
 | P0 | `be_combustion_{expr,atom}_{lambdify,aot}` | BE symbolic backend and generated-IVP lifecycle APIs | 3-state parameterized combustion; fixed Dense/sequential; conservation and route parity |
@@ -630,8 +644,8 @@ sample batch.
 
 - [x] Choose an initial fixed BDF workload from the existing shared benchmark helper:
   `bdf_robertson`, ExprLegacy, telemetry Off, with the helper's established
-  tolerance and interval. The independent Banded scenario uses a fixed 4096-row
-  compact tridiagonal system. These are initial adapters, not calibrated gates.
+  tolerance and interval. This was only an initial adapter; the submillisecond
+  Robertson gate was later removed after Release stability measurements.
 - [x] Add fixed LSODE2 and Radau workloads using the shared IVP equation corpus.
   Radau uses its public symbolic API with telemetry off and checks final time,
   finite states, the Robertson mass invariant and adaptive-step counts. Its
@@ -649,12 +663,20 @@ sample batch.
   Sequential/Parallel. The AOT adapter uses a runner-owned BuildIfMissing
   cache, separate from baselines/reports, and warmups establish warm-cache
   measurements; its preparation metric remains visible.
-- [x] Expand BDF's fixed 64-state diffusion workload to the native route set:
+- [x] Expand BDF's diffusion workload to the native route set:
   ExprLegacy/AtomView x Lambdify Sequential/Parallel x AOT Whole/Parallel2.
   BDF has no selectable matrix layout, so every route records layout as
   not-applicable (fixed Dense implementation). AOT uses runner-owned BuildIfMissing
   artifacts and requires warmups; every route has an Off-mode wall gate and a
   separate Detailed solve for stage/counter diagnostics and trajectory parity.
+  The workload was later increased to 256 states after its 64-state runtime
+  proved too short for stable performance gating.
+- [x] Replace the too-short BDF and LSODE2 workloads with larger stable-gate
+  candidates and remove Robertson micro-solves from the performance registry.
+  Current BDF: 256-state diffusion. Current LSODE2: 256-state diffusion to
+  `t=0.05`, `max_step=0.001`. New IDs keep old baselines from being mistaken
+  for the revised workload contract; record and compare these only after a
+  clean-source Debug correctness pass.
 - [x] Collect Radau's telemetry-Off full-solve wall time and run a separate
   `Timings` diagnostic solve for native stages. Stage metrics are labeled
   instrumented and do not affect the wall-clock gate.
