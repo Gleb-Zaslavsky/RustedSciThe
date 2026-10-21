@@ -19,6 +19,7 @@ pub fn print_list(
     machine: Option<&MachineProfile>,
     env: &EnvironmentFingerprint,
     has_baseline: impl Fn(&Scenario) -> bool,
+    prerequisites: impl Fn(&Scenario) -> String,
 ) {
     println!(
         "Performance scenarios | target={} | profile={} | machine={}",
@@ -28,7 +29,7 @@ pub fn print_list(
     );
     for scenario in scenarios {
         println!(
-            "{} | solver={} | workload={} | frontend={} | execution={} | linalg={} | parallel={} | telemetry={} | groups={} | baseline={} | {}",
+            "{} | solver={} | workload={} | frontend={} | execution={} | linalg={} | parallel={} | telemetry={} | prerequisites={} | groups={} | baseline={} | {}",
             scenario.id,
             scenario.solver,
             scenario.workload,
@@ -37,6 +38,7 @@ pub fn print_list(
             scenario.linear_algebra,
             scenario.parallel_policy,
             scenario.telemetry,
+            prerequisites(scenario),
             scenario.groups.join(","),
             if machine.is_some() {
                 if has_baseline(scenario) {
@@ -253,35 +255,45 @@ pub fn print_compare(
             );
         }
     }
-    let mut verdict = aggregate_verdict(rows.iter().map(|row| row.verdict));
     if let Some(confirm) = confirmation {
         println!("Confirmation series:");
         println!(
             "{}",
             tabled::Table::new(confirm.iter().map(row).collect::<Vec<_>>())
         );
-        let confirmed_failure = rows.iter().any(|first| {
-            first.verdict == Verdict::Fail
-                && confirm
-                    .iter()
-                    .any(|second| second.id == first.id && second.verdict == Verdict::Fail)
-        });
-        let conflicting = rows.iter().any(|first| {
-            confirm
-                .iter()
-                .find(|second| second.id == first.id)
-                .is_some_and(|second| first.verdict != second.verdict)
-        });
-        verdict = if verdict == Verdict::Unstable || conflicting {
-            Verdict::Unstable
-        } else if confirmed_failure {
-            Verdict::Fail
-        } else {
-            Verdict::Pass
-        };
     }
+    let verdict = confirmed_verdict(rows, confirmation);
     println!("RESULT: {}", verdict_name(verdict));
     verdict
+}
+
+fn confirmed_verdict(
+    primary: &[MetricComparison],
+    confirmation: Option<&[MetricComparison]>,
+) -> Verdict {
+    let aggregate = aggregate_verdict(primary.iter().map(|row| row.verdict));
+    let Some(confirmation) = confirmation else {
+        return aggregate;
+    };
+    let confirmed_failure = primary.iter().any(|first| {
+        first.verdict == Verdict::Fail
+            && confirmation
+                .iter()
+                .any(|second| second.id == first.id && second.verdict == Verdict::Fail)
+    });
+    let conflicting = primary.iter().any(|first| {
+        confirmation
+            .iter()
+            .find(|second| second.id == first.id)
+            .is_some_and(|second| first.verdict != second.verdict)
+    });
+    if aggregate == Verdict::Unstable || conflicting {
+        Verdict::Unstable
+    } else if confirmed_failure {
+        Verdict::Fail
+    } else {
+        Verdict::Pass
+    }
 }
 
 fn row(comparison: &MetricComparison) -> MetricRow {
@@ -316,5 +328,43 @@ fn aggregate_verdict(verdicts: impl Iterator<Item = Verdict>) -> Verdict {
         Verdict::Fail
     } else {
         Verdict::Pass
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confirmed_verdict;
+    use crate::comparison::{MetricComparison, Verdict};
+
+    fn row(verdict: Verdict) -> MetricComparison {
+        MetricComparison {
+            id: "scenario_wall_ms".into(),
+            unit: "ms/off".into(),
+            baseline: 100.0,
+            current: 115.0,
+            tolerance: 0.1,
+            change: 0.15,
+            verdict,
+        }
+    }
+
+    #[test]
+    fn regression_requires_two_matching_stable_failures() {
+        assert_eq!(
+            confirmed_verdict(&[row(Verdict::Fail)], Some(&[row(Verdict::Fail)])),
+            Verdict::Fail
+        );
+        assert_eq!(
+            confirmed_verdict(&[row(Verdict::Fail)], Some(&[row(Verdict::Pass)])),
+            Verdict::Unstable
+        );
+        assert_eq!(
+            confirmed_verdict(&[row(Verdict::Pass)], Some(&[row(Verdict::Fail)])),
+            Verdict::Unstable
+        );
+        assert_eq!(
+            confirmed_verdict(&[row(Verdict::Unstable)], Some(&[row(Verdict::Unstable)])),
+            Verdict::Unstable
+        );
     }
 }

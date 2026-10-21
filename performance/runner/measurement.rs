@@ -547,7 +547,10 @@ mod tests {
 
     fn off_gate_sample() -> Result<ScenarioOutput, RunnerError> {
         let order = PHASE_ORDER.fetch_add(1, Ordering::SeqCst);
-        assert!(order < 3, "all gate samples must precede diagnostics");
+        assert!(
+            (2..5).contains(&order) || order < 2,
+            "warmups and all gate samples must precede diagnostics"
+        );
         Ok(ScenarioOutput {
             metrics: vec![("scenario_wall_ms".into(), "ms/off".into(), 2.0)],
             ..ScenarioOutput::default()
@@ -556,13 +559,16 @@ mod tests {
 
     fn timed_diagnostic(_: &Scenario) -> Result<ScenarioOutput, RunnerError> {
         let order = PHASE_ORDER.fetch_add(1, Ordering::SeqCst);
-        assert!(order >= 3, "diagnostics must run after gate sampling");
-        let metrics = if order == 3 {
+        assert!(
+            order >= 5,
+            "diagnostics must run after warmups and gate sampling"
+        );
+        let metrics = if order == 5 {
             vec![("stage_factorization".into(), "ms/timing".into(), 0.0)]
         } else {
             Vec::new()
         };
-        let native_scopes = if order == 3 {
+        let native_scopes = if order == 5 {
             vec![crate::registry::NativeMetricScope {
                 metric_id: "stage_factorization".into(),
                 stage: "Factorization".into(),
@@ -599,8 +605,8 @@ mod tests {
             run: off_gate_sample,
             diagnose: Some(timed_diagnostic),
         };
-        let result = measure(&scenario, 0, 3).unwrap();
-        assert_eq!(PHASE_ORDER.load(Ordering::SeqCst), 6);
+        let result = measure(&scenario, 2, 3).unwrap();
+        assert_eq!(PHASE_ORDER.load(Ordering::SeqCst), 8);
         let wall = result
             .metrics
             .iter()

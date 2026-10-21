@@ -10,6 +10,7 @@ mod comparison;
 mod environment;
 mod error;
 mod measurement;
+mod prerequisites;
 mod registry;
 mod report;
 mod scenarios;

@@ -6,6 +6,7 @@ pub enum RunnerError {
     Configuration(String),
     UnknownSelection(String),
     UnknownMachine(String),
+    Prerequisite { scenario: String, tool: String },
     MissingBaseline(String),
     IncompatibleBaseline(String),
     Scenario(String),
@@ -25,6 +26,7 @@ impl RunnerError {
             | Self::Toml(_)
             | Self::TomlEncode(_)
             | Self::Child(_) => 2,
+            Self::Prerequisite { .. } => 2,
             Self::MissingBaseline(_) | Self::UnknownMachine(_) => 3,
             Self::IncompatibleBaseline(_) => 4,
             Self::UnknownSelection(_) => 2,
@@ -39,6 +41,10 @@ impl fmt::Display for RunnerError {
             Self::Configuration(message) => write!(f, "invalid configuration: {message}"),
             Self::UnknownSelection(message) => write!(f, "unknown selection: {message}"),
             Self::UnknownMachine(message) => write!(f, "unknown machine: {message}"),
+            Self::Prerequisite { scenario, tool } => write!(
+                f,
+                "scenario {scenario} requires `{tool}` on PATH; install it or exclude this scenario"
+            ),
             Self::MissingBaseline(message) => write!(f, "no baseline: {message}"),
             Self::IncompatibleBaseline(message) => write!(f, "incompatible baseline: {message}"),
             Self::Scenario(message) => write!(f, "scenario failed: {message}"),
@@ -77,5 +83,36 @@ impl From<toml::de::Error> for RunnerError {
 impl From<toml::ser::Error> for RunnerError {
     fn from(value: toml::ser::Error) -> Self {
         Self::TomlEncode(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RunnerError;
+
+    #[test]
+    fn runner_errors_keep_the_documented_process_exit_classes() {
+        assert_eq!(
+            RunnerError::Configuration("bad option".into()).exit_code(),
+            2
+        );
+        assert_eq!(
+            RunnerError::UnknownSelection("bad id".into()).exit_code(),
+            2
+        );
+        assert_eq!(RunnerError::UnknownMachine("host".into()).exit_code(), 3);
+        assert_eq!(RunnerError::MissingBaseline("file".into()).exit_code(), 3);
+        assert_eq!(
+            RunnerError::IncompatibleBaseline("schema".into()).exit_code(),
+            4
+        );
+        assert_eq!(
+            RunnerError::Prerequisite {
+                scenario: "aot-case".into(),
+                tool: "tcc".into(),
+            }
+            .exit_code(),
+            2
+        );
     }
 }

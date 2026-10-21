@@ -27,9 +27,18 @@ pub struct EnvironmentFingerprint {
 
 pub fn register(alias: &str) -> Result<MachineProfile, RunnerError> {
     validate_component(alias)?;
-    let profile_path = machine_profile_path(alias);
+    let profile_path = machine_profile_path(alias)?;
     let local_path = local_identity_path()?;
-    let profile_id = read_profile_id(&profile_path)?;
+    register_at_paths(alias, &profile_path, &local_path)
+}
+
+fn register_at_paths(
+    alias: &str,
+    profile_path: &Path,
+    local_path: &Path,
+) -> Result<MachineProfile, RunnerError> {
+    validate_component(alias)?;
+    let profile_id = read_profile_id(profile_path, alias)?;
     let installation_id = if local_path.exists() {
         let local = fs::read_to_string(&local_path)?.trim().to_owned();
         if profile_id
@@ -73,13 +82,23 @@ pub fn register(alias: &str) -> Result<MachineProfile, RunnerError> {
 
 pub fn resolve(alias: &str) -> Result<MachineProfile, RunnerError> {
     validate_component(alias)?;
-    let path = machine_profile_path(alias);
-    let profile_id = read_profile_id(&path)?.ok_or_else(|| {
+    let path = machine_profile_path(alias)?;
+    let identity_path = local_identity_path()?;
+    resolve_at_paths(alias, &path, &identity_path)
+}
+
+fn resolve_at_paths(
+    alias: &str,
+    profile_path: &Path,
+    identity_path: &Path,
+) -> Result<MachineProfile, RunnerError> {
+    validate_component(alias)?;
+    let profile_id = read_profile_id(profile_path, alias)?.ok_or_else(|| {
         RunnerError::UnknownMachine(format!(
             "profile {alias:?} is not registered; run `machine register`"
         ))
     })?;
-    let local = fs::read_to_string(local_identity_path()?).map_err(|_| {
+    let local = fs::read_to_string(identity_path).map_err(|_| {
         RunnerError::UnknownMachine("this installation has no local machine identity".into())
     })?;
     let local = local.trim();
@@ -254,11 +273,12 @@ fn compatibility_id(
     format!("{}-{}-{hash:016x}", slug(target), profile)
 }
 
-pub fn machine_profile_path(alias: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+fn machine_profile_path(alias: &str) -> Result<PathBuf, RunnerError> {
+    validate_component(alias)?;
+    Ok(Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("performance")
         .join("machines")
-        .join(format!("{alias}.toml"))
+        .join(format!("{alias}.toml")))
 }
 
 pub fn find_local_profile() -> Option<MachineProfile> {
@@ -311,12 +331,22 @@ fn local_identity_path() -> Result<PathBuf, RunnerError> {
         .join("installation-id"))
 }
 
-fn read_profile_id(path: &Path) -> Result<Option<String>, RunnerError> {
+fn read_profile_id(path: &Path, expected_alias: &str) -> Result<Option<String>, RunnerError> {
     if !path.exists() {
         return Ok(None);
     }
     let contents = fs::read_to_string(path)?;
     let value = toml::Value::Table(toml::from_str::<toml::Table>(&contents)?);
+    let alias = value
+        .get("alias")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| RunnerError::Configuration(format!("{} lacks alias", path.display())))?;
+    if alias != expected_alias {
+        return Err(RunnerError::UnknownMachine(format!(
+            "profile file {} declares alias {alias:?}, expected {expected_alias:?}",
+            path.display()
+        )));
+    }
     value
         .get("installation_id")
         .and_then(toml::Value::as_str)
@@ -396,7 +426,10 @@ fn slug(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compatibility_id, source_is_dirty};
+    use super::{
+        compatibility_id, machine_profile_path, register_at_paths, resolve_at_paths,
+        source_is_dirty, validate_component,
+    };
     use std::path::Path;
     use std::process::Command;
 
@@ -442,6 +475,77 @@ mod tests {
                 "superlu",
             )
         );
+    }
+
+    #[test]
+    fn machine_alias_rejects_path_components_and_platform_separators() {
+        for alias in ["", "..", "../escape", "..\\escape", "nested/name", "a:b"] {
+            assert!(validate_component(alias).is_err(), "accepted {alias:?}");
+            assert!(
+                machine_profile_path(alias).is_err(),
+                "built path for {alias:?}"
+            );
+        }
+        let valid = machine_profile_path("windows_dev-1").unwrap();
+        assert!(valid.ends_with("windows_dev-1.toml"));
+    }
+
+    #[test]
+    fn registration_rejects_an_alias_bound_to_another_installation() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile_path = directory.path().join("machines/host.toml");
+        let identity_path = directory.path().join("config/installation-id");
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &profile_path,
+            r#"schema_version = 1
+alias = "host"
+installation_id = "install-A"
+"#,
+        )
+        .unwrap();
+        std::fs::write(&identity_path, "install-B\n").unwrap();
+
+        let error = register_at_paths("host", &profile_path, &identity_path).unwrap_err();
+        assert!(error.to_string().contains("another installation"));
+        assert_eq!(
+            std::fs::read_to_string(&identity_path).unwrap(),
+            "install-B\n"
+        );
+    }
+
+    #[test]
+    fn profile_alias_and_local_installation_must_both_match() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile_path = directory.path().join("machines/requested.toml");
+        let identity_path = directory.path().join("config/installation-id");
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &profile_path,
+            r#"schema_version = 1
+alias = "different"
+installation_id = "install-A"
+"#,
+        )
+        .unwrap();
+        std::fs::write(&identity_path, "install-A\n").unwrap();
+
+        let error = resolve_at_paths("requested", &profile_path, &identity_path).unwrap_err();
+        assert!(error.to_string().contains("expected \"requested\""));
+
+        std::fs::write(
+            &profile_path,
+            r#"schema_version = 1
+alias = "requested"
+installation_id = "install-A"
+"#,
+        )
+        .unwrap();
+        std::fs::write(&identity_path, "install-B\n").unwrap();
+        let error = resolve_at_paths("requested", &profile_path, &identity_path).unwrap_err();
+        assert!(error.to_string().contains("different installation"));
     }
 
     #[test]

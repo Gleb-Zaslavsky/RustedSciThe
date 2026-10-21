@@ -5,47 +5,64 @@ Source requirements: user specification sections 1-25, including the separate
 section 24 on preserving experimental reports.
 
 This checklist tracks the implementation and validation status of the opt-in
-runner. The CLI, storage, comparison and 189 scenarios exist. The runner has
-passed its current Debug contract/correctness suite, but it has no recorded
-baseline and is not yet validated as a production regression gate. No historical
-Markdown timing will be imported as a baseline.
+runner. The registry currently contains 199 scenarios. On 2026-10-21, the
+registered Windows development profile has local baseline files for 100 active
+scenario IDs; 180 TOML files exist because the directory also retains prior
+scenario IDs. Baselines and machine profiles are Git-ignored local state. The
+runner is useful for controlled local comparisons but is not yet validated as
+a cross-platform regression gate. No historical Markdown timing is imported as
+a baseline.
 
 ## Implementation Audit (2026-10-20)
 
 This section records the observed implementation state, so an unchecked item
 below is not automatically interpreted as missing code. Some items are policy
 or cross-platform verification requirements that need dedicated tests or a real
-Release run.
+Release run. The initial 2026-10-20 counts below are historical; the current
+Windows status is summarized after the baseline records.
 
-- Implemented: static 189-scenario registry; addressable solver/scenario/group
+- Implemented: static 199-scenario registry; addressable solver/scenario/group
   selection; route-matrix tests for the registered solver families; Release-only
   record/live-compare; dirty-source rejection by default; 3 warmups/15 samples
   by default; isolated child measurement with timeout and per-scenario error
   collection; raw samples and median/MAD/min/max; versioned strict baseline
   validation; no-clobber writes with explicit `--force`; run reports under
   `performance/runs/`; regression confirmation on a second series.
-- Verified in Debug on 2026-10-20: `cargo test --features perf-gates --bin
-  perf-gates` passed all 28 tests, including the registered non-AOT scenario
+- Verified in Debug on 2026-10-21: `cargo test --features perf-gates --bin
+  perf-gates` passed 47 tests with one intentionally ignored AOT test, including
+  the registered non-AOT scenario
   correctness gates and solver-matrix contract tests. `perf-gates list --all`
-  returned 189 scenarios without running numerical work. A separate smoke
+  returned 199 scenarios without running numerical work. A separate smoke
   passed all 56 registered AOT scenarios with TCC 0.9.27, one warmup and three
   samples each; this does not validate Release timing stability.
-- Still blocks a clean shared baseline: the source tree must be reviewed and
-  committed; generated files under `performance/baselines/` are excluded from
-  dirty-source detection so multiple solver baselines can be recorded in one
-  session. The target machine must be registered and its alias profile
-  reviewed; then a Release calibration must establish that selected gate
-  metrics are measurable and stable. AOT prerequisites/routes were checked on
-  the current Windows/TCC target and must be rechecked if the target changes.
+- Still blocks a clean shared-source record: the source tree must be reviewed
+  and committed. Baselines and machine profiles are local/ignored; generated
+  baselines are excluded from dirty-source detection so multi-solver
+  calibration does not require intermediate commits. Windows Release compares
+  are now complete for the six nonlinear and fourteen optimization active
+  scenarios; this does not imply that every registered route has a performance
+  baseline. AOT routes require `tcc`; `list`, `record` and `compare` preflight
+  it from PATH.
 - Historical audit note: the checkout was dirty then. Do not use
   `--allow-dirty-source` for shared baselines; freeze and commit the intended
   source candidate first. Generated baseline outputs themselves are excluded.
 - Still blocks calling the system a validated regression gate: automated tests
-  for machine/profile lifecycle, child failure/timeout behavior, comparison
-  confirmation/noise boundaries, path safety, and cross-platform file/process
-  behavior remain incomplete. The stage-scope and source-field audits are
+  for end-to-end scenario continuation, hard process termination during
+  publication and Linux file/process behavior remain incomplete. Windows
+  profile mismatch/path validation, child exit/timeout and publication rollback
+  now have direct tests. The stage-scope and source-field audits are
   recorded below and in [`METRIC_CONTRACTS.md`](METRIC_CONTRACTS.md); some
   reset/optional-stage contracts remain open.
+
+Current Windows baseline coverage: the 100 active baseline IDs comprise the
+measured BDF, Radau, LSODE2, BE, `bvp-large`, nonlinear-large and
+optimization-large workloads. The 99 active scenarios without baselines are
+the 66 compact BVP_Damp route-matrix cells, 30 compact BVP_sci exponential
+cells, and three small standalone fixtures. These remain correctness/route
+coverage, not approved performance baselines; do not make `compare --all` the
+pre-release command until a deliberate policy is chosen for these short
+workloads. Baseline TOMLs for inactive scenario IDs are retained as history and
+are not current coverage.
 
 ### Stage-Scope Audit (2026-10-20)
 
@@ -85,26 +102,28 @@ does not infer a missing stage from a zero value. The route-by-route mapping of
 every native field, reset boundary and cumulative/last-solve meaning remains an
 open audit before baselines are treated as portable evidence.
 
-## First Shared Baseline: Readiness
+## Windows Baseline Readiness (2026-10-21)
 
-The code can collect baselines, but collection is intentionally a manual
-Release-only step and has not been run. Before the first shared recording:
+Baseline collection is a manual Release-only step. Initial Windows calibration
+has been run; the remaining gates here are about making the data reproducible
+and finishing selected-scenario comparisons before the large release matrix.
 
 - [x] Run the Debug correctness/unit matrix and inspect `perf-gates list`;
-  listing returned 189 scenarios without numerical work. The current Windows
+  listing returned 199 scenarios without numerical work. The current Windows
   target's AOT prerequisites and all registered AOT routes were also smoke-
   checked separately.
-- [ ] Register the target machine once and review its profile for accidental
-  personal data. Registration creates a versioned alias profile in the checkout,
-  so commit that reviewed file together with the runner before recording.
+- [x] Register the target machine once and review its profile for accidental
+  personal data. Machine profiles and baselines are local installation outputs
+  and are Git-ignored; do not share/copy them as repository inputs.
 - [x] AOT readiness on the current Windows target: TCC 0.9.27 is available and
   all 56 registered AOT scenarios passed Debug smoke with requested-route
   assertions. This does not establish Release performance or include optional
-  SuperLU in the portable matrix. Dynamic prerequisite-aware `list`/`dry-run`
-  reporting remains a follow-up task.
-- [ ] Commit the reviewed runner, scenario corpus, machine profile and docs.
+  SuperLU in the portable matrix. `list`, `record` and `compare --dry-run` now
+  report/check the `tcc` PATH prerequisite for every AOT route.
+- [ ] Commit the reviewed runner, scenario corpus and docs; generate the local
+  machine profile after checkout instead of committing it.
   The default `record` path rejects a dirty or unversioned checkout.
-- [ ] In Release, calibrate a representative subset first. If durations and
+- [x] In Release, calibrate a representative subset first. If durations and
   MAD are acceptable, record the selected scenarios with the default
   warmup/sample counts, inspect correctness diagnostics, then run `compare` on
   unchanged source to check repeatability. Expand to the full registry only
@@ -218,13 +237,15 @@ performance/
   numerical gates; runner unit tests remain addressable via `--bin perf-gates`.
 - [x] Keep modules private and use a static registry with function pointers.
   Avoid plugin systems, dynamic discovery or a new hierarchy of solver traits.
-- [ ] Reuse existing clap, toml, tabled, chrono, tempfile, fs2 and sysinfo where
-  appropriate. Review direct serialization/UUID dependencies if needed; keep
-  new runner-only dependencies optional and enabled only by `perf-gates`.
-- [ ] Resolve Cargo packaging when the target is introduced: explicitly include
-  its Rust sources if the published manifest declares it; exclude baselines,
-  local state and run artifacts. Verify with `cargo package --list`.
-- [ ] Do not attach runner modules to `lib.rs` or change solver hot paths.
+- [x] Reuse existing clap, toml, tabled, tempfile and sysinfo dependencies.
+  `chrono` and `fs2` are not forced into runner code where the standard library
+  and atomic no-clobber publication suffice.
+- [x] Explicitly include `performance/runner/**/*.rs` in the package manifest;
+  machine profiles, baselines, local state and run artifacts are excluded.
+  `cargo package --list --allow-dirty` verified 22 runner sources are included
+  and no performance baseline/run artifacts leak into the package list.
+- [x] Keep runner modules private to the opt-in binary; no runner module is
+  attached to `lib.rs` and solver hot paths are unchanged.
 
 ## 4. CLI, Registry and Addressable Runs
 
@@ -238,12 +259,12 @@ performance/
   solver key, groups, scenario version, prerequisites and launch function.
 - [x] List registered scenario metadata and baseline state without loading
   solvers or compiling AOT.
-- [ ] Report actual availability of optional scenario prerequisites in `list`;
-  currently the list does not probe for TCC or native bridge libraries.
+- [x] Report actual availability of scenario prerequisites in `list`;
+  AOT rows show the resolved `tcc` executable or report it missing.
 - [x] Implement compare `--dry-run` for selection, machine, baseline schema and
   compatibility checks without solving or recording.
-- [ ] Extend `compare --dry-run` to validate scenario prerequisites. It currently
-  does not probe AOT compilers/bridges.
+- [x] Extend `compare --dry-run` to validate scenario prerequisites without
+  numerical work. AOT rows check that `tcc` is resolvable from `PATH`.
 - [x] Ensure `compare --solver bdf` launches only registered BDF scenarios.
 - [x] Resolve report/baseline roots from `CARGO_MANIFEST_DIR`, independent of
   cwd. Machine aliases are validated and scenario IDs come from the static
@@ -260,7 +281,8 @@ performance/
   profile contains no username, hostname, serial number or personal path.
 - [x] Validate `--machine` against the local installation ID; an alias cannot
   authorize comparison against another installation. Unknown machine is not
-  PASS. Registration/copy-mismatch behavior still needs dedicated tests.
+  PASS. Debug tests now cover copied-profile/installation mismatch, profile
+  alias mismatch and path-component rejection.
 - [ ] Distinguish Windows/MSVC and Linux/GNU environments, even on one computer.
 - [ ] Separate hard compatibility fields from informational provenance.
   Hard fields include target, optimization/CPU flags, enabled features, worker
@@ -291,8 +313,10 @@ performance/
   outside the child's measured solve; no independent heavy scenarios overlap.
 - [x] Handle child exit/abort/timeout and malformed output as errors, continue
   remaining selected scenarios and preserve diagnostics. `catch_unwind` cannot
-  recover a release `panic = "abort"`. Dedicated failure/timeout tests remain
-  open in section 12.
+  recover a release `panic = "abort"`; the parent treats abnormal nonzero child
+  termination as failure. Debug tests cover success, nonzero/abort-like exit
+  and timeout/reap. An end-to-end assertion that a later selected scenario
+  still runs after an earlier child failure remains open.
 - [ ] Define fresh, warm-prepared and continuation contracts explicitly. Reset
   state before each independent sample; a solved instance is not a fresh solve.
 - [ ] Define cold preparation using fresh process/cache state. Warmup must not
@@ -355,14 +379,19 @@ performance/
   cache lifecycle per scenario; increment version on a semantic change.
 - [x] Reject unknown baseline schema versions, unknown/missing fields, nonfinite or
   negative durations, invalid thresholds, empty samples and inconsistent stats.
-- [ ] Store raw samples as the basis for derived statistics; validate any
+- [x] Store raw samples as the basis for derived statistics; validate any
   persisted summaries on read so two competing truths cannot develop.
 - [ ] `record` checks correctness and stability before publication. Refuse to
   publish noisy or invalid baselines; never overwrite an old good one on failure.
-- [x] Implement no-clobber publication and explicit `--force`, using a temporary
-  file and rollback path for replacement. Concurrent-writer and interruption
-  behavior on Windows/Linux still need dedicated tests.
-- [ ] `compare`, including dry-run, is read-only for profiles/baselines.
+- [x] Implement no-clobber publication and explicit `--force`, using unique
+  `create_new` temporary files and a rollback path for replacement. Windows
+  tests cover concurrent no-clobber writers, forced replacement and temp
+  cleanup, including injected failure after staging the previous file and
+  recovery of that file. Hard process termination/power-loss recovery and Linux
+  behavior remain open.
+- [x] `compare`, including dry-run, reads but does not mutate profiles/baselines.
+  Windows dry-run and full compare were checked with before/after SHA-256; the
+  no-solve dry-run creates no run report.
   Missing or incompatible data receives an explicit non-success verdict.
 - [ ] Keep tolerances reviewed/versioned; no automatic relaxation or baseline
   promotion after failures. Document Git review for intentional replacements.
@@ -375,24 +404,25 @@ performance/
   unit-tested pure comparison logic.
   Use per-metric tolerances; 10% total / 15% stage are calibration candidates,
   not universal constants. Do not assert that a 2% delta proves a regression.
-- [ ] Define minimum measurable duration and relative dispersion policy for
-  both baseline and current samples. Batch tiny operations or mark them
-  diagnostic-only; avoid dividing by a zero baseline or a timer-resolution floor.
+- [x] Treat an exact zero current gate median as `UNSTABLE`; baseline gate
+  medians must be positive, and relative dispersion is checked for both series.
+- [ ] Decide a platform-specific minimum measurable duration/timer-resolution
+  floor for positive but tiny medians. Do not treat a representable tiny value
+  as proof that the host timer can resolve it.
 - [ ] Select a few substantial stages as gates; avoid making every microtimer
   independently fail a large suite through accumulated measurement noise.
 - [x] Run one independent confirmation series when a metric exceeds tolerance.
   Confirm the same metric across series, not merely any failure in each series.
-- [ ] Return FAIL only when both valid, sufficiently stable series confirm the
+- [x] Return FAIL only when both valid, sufficiently stable series confirm the
   regression. Contradictory or excessively noisy evidence yields UNSTABLE.
-- [ ] Check dispersion even when the first median passes; high variance is
+- [x] Check dispersion even when the first median passes; high variance is
   not PASS. Retain both series separately and cap confirmation attempts.
-- [ ] Show improvements without automatic rebaselining. These gates are an
+- [x] Show improvements without automatic rebaselining. These gates are an
   engineering policy, not a claim of statistical significance from MAD alone.
-- [ ] Complete the public verdict model: comparison currently distinguishes
-  PASS/FAIL/UNSTABLE, while missing baseline, unknown machine, incompatibility
-  and execution errors are typed runner errors. Decide whether a separate
-  transient `RECHECK` verdict is needed after confirmation.
-- [ ] Implement exit codes: 0 success, 1 regression, 2 execution/config error,
+- [x] Complete the public verdict model: keep PASS/FAIL/UNSTABLE; do not add a
+  separate transient `RECHECK` state. Conflicting confirmation samples map to
+  UNSTABLE, and configuration/execution failures remain typed runner errors.
+- [x] Implement exit codes: 0 success, 1 regression, 2 execution/config error,
   3 missing baseline/unknown machine, 4 incompatibility, 5 unstable.
   Define aggregate precedence explicitly (2 > 4 > 3 > 1 > 5 > 0), keep every
   per-scenario verdict and never infer success from the last completed row.
@@ -527,9 +557,55 @@ existing exponential/sinusoidal fit across its 14 supported routes. IDs and
 scenario versions were advanced so earlier small-workload measurements cannot
 be mistaken for these baselines. Debug correctness and release stability still
 passed for all six nonlinear routes, including both generated AOT cells, and
-all 14 optimization routes, including Off-versus-Detailed fit parity. Release
-stability/baseline capture remain open. The groups are independently selectable
-as `nonlinear-large` and `optimization-large`.
+all 14 optimization routes, including Off-versus-Detailed fit parity. At the
+time of this initial update, Release stability and baseline capture remained
+open; the later baseline status is recorded below. The groups are independently
+selectable as `nonlinear-large` and `optimization-large`.
+
+Initial optimization baseline follow-up, 2026-10-21: the first 20,001-sample Release
+record created 11 of 14 baselines. Both `FittingSolver` Parallel rows exceeded
+the runner's 600-second child timeout at 101 runs. A direct three-sample Release
+measurement confirmed this is extreme route cost, not a hung process: about
+3.11 s per solve versus 16.92 ms for the matched sequential ExprLegacy row.
+Code inspection found that `FittingLeastSquaresProblem` walks observations
+serially and forwards `Parallel { min_work: 1 }` into a one-residual symbolic
+evaluation for each point, causing repeated Rayon dispatch rather than
+parallelizing over the data batch. Do not treat this as a useful parallel
+speedup; a sample-batch parallel implementation is a separate optimization
+follow-up. In that initial attempt, the VarPro row was rejected at 5.2%
+outer-wall MAD/median, while its native solver timing MADs were below 0.3%.
+That unstable attempt was superseded by the 301-sample record and compare below;
+the Parallel rows were later recorded and individually compared with shorter
+repeat budgets.
+
+Baseline update, 2026-10-21: the six `nonlinear_quad512_*` Release baselines
+and all 14 `optimization_fit20001_*` baselines are now present for
+`windows-dev / windows-x86-64-release-3be3b406e86e4f83`. These records were
+captured from source revision `652ed95d9eb4` (dirty working tree); they are
+machine-local evidence, not portable performance claims. The six nonlinear
+scenarios were subsequently compared as a group and all passed.
+
+Representative optimization comparisons (each `RESULT: PASS`, with unchanged
+correctness and discrete solver counters):
+
+| Scenario | Samples | Wall median baseline -> current | Change | Interpretation |
+| --- | ---: | ---: | ---: | --- |
+| `optimization_fit20001_fitting_atom_parallel` | 31 | 3391.4466 -> 3287.4334 ms | -3.1% | Pass; Parallel route remains very expensive (~3.3 s/solve), so this is regression evidence, not evidence that parallel fitting is efficient. |
+| `optimization_fit20001_fitting_expr_parallel` | 31 | 3143.5244 -> 3196.8001 ms | +1.7% | Pass; detailed Jacobian and total timings are consistent with baseline within the 10% wall threshold. |
+| `optimization_fit20001_varpro_expr` | 301 | 10.1343 -> 10.5966 ms | +4.6% | Latest hash-verified comparison passes under the 10% threshold; counters, known-parameter error and R-squared match. |
+
+Follow-up, 2026-10-21: all six nonlinear scenarios passed Release comparison
+with 31 samples per route. All 14 optimization scenarios also passed targeted
+Release comparisons; the ten remaining routes used 31 samples, the two
+`FittingSolver` Parallel rows were separately compared at 31 samples, and
+`optimization_fit20001_varpro_expr` was finally compared at 301 samples. One
+earlier VarPro attempt was UNSTABLE and a subsequent report briefly observed a
+different baseline file; the final comparison checked the canonical baseline's
+SHA-256 before and after and found it unchanged. Only that hash-verified run is
+the authoritative VarPro result. The expensive `FittingSolver` Parallel route
+behavior remains a separate algorithmic performance follow-up: current
+implementation dispatches per observation and does not parallelize across the
+sample batch.
 
 | Priority | Proposed scenario | Source to reuse | Scope / correctness |
 | --- | --- | --- | --- |
@@ -587,7 +663,7 @@ as `nonlinear-large` and `optimization-large`.
   separate from the telemetry-Off wall-clock gate.
 - [x] Require at least one warmup for AOT scenarios so a cold compiler build
   cannot be mixed into warm-cache timing samples.
-- [ ] Add prerequisite-aware AOT listing/dry-run checks for the configured C
+- [x] Add prerequisite-aware AOT listing/dry-run checks for the configured C
   compiler and ensure a requested AOT route cannot silently fall back.
 - [ ] Calibrate the chosen fixed workloads and verify sample duration/noise in
   Release on the target machine before publishing any baseline.
@@ -623,15 +699,22 @@ as `nonlinear-large` and `optimization-large`.
 
 - [ ] Test selection before computation using fake launch counters; prove BDF
   selection cannot execute another solver. Test list and dry-run do no work.
-- [ ] Test registration, alias/UUID mismatch, independent OS environments,
-  fingerprint ordering and informational compiler/source changes.
-- [ ] Test TOML roundtrip, corrupt schemas, invalid durations, missing metrics,
-  no-clobber, force, concurrent writers and interrupted publication.
-- [ ] Test comparison with synthetic samples only: threshold boundaries,
-  confirmed same-metric regression, conflicting series, high MAD, zero/tiny
-  durations, improvements, missing data and aggregate exit precedence.
-- [ ] Test child failure/timeout/abort handling and continuation to the next
-  selected scenario without relying on timing-sensitive sleeps for statistics.
+- [x] Test machine registration identity mismatch, profile alias mismatch and
+  unsafe path aliases. Independent OS environments, fingerprint ordering and
+  informational compiler/source changes remain open.
+- [x] Test baseline TOML roundtrip, raw sample/stat consistency, no-clobber,
+  force replacement, concurrent writers and injected publication-failure
+  rollback.
+- [ ] Expand malformed-schema/invalid-value coverage and test behavior under
+  hard process termination during publication.
+- [x] Test synthetic threshold boundaries, confirmed same-metric regression,
+  conflicting confirmation series, high MAD and improvements.
+- [x] Add synthetic comparison cases for zero/tiny durations, missing/extra
+  metrics and aggregate batch exit-code precedence. Zero gate-time is explicitly
+  UNSTABLE rather than being misreported as a perfect performance improvement.
+- [x] Test child success, nonzero/abort-like failure, timeout and reaping.
+- [ ] Test continuation to the next selected scenario after child failure;
+  avoid timing-sensitive sleeps for measurement-statistics tests.
 - [ ] Test no writes to existing STORY files/test_reports/baselines in compare.
 - [x] Run numerical smoke tests in Debug for all registered scenario adapters
   and route-matrix contract tests. On 2026-10-20, all 133 non-AOT scenarios
@@ -648,7 +731,8 @@ as `nonlinear-large` and `optimization-large`.
 - [x] Pass B: pass the current Debug runner suite and non-AOT scenario
   correctness gates; verify the full registry can be listed without solving.
 - [ ] Pass C: finish the remaining baseline-readiness checks above, especially
-  per-route scope review, machine profile review and clean committed source.
+  per-route scope review and clean committed source. Machine profiles and
+  baseline TOMLs remain local and are not part of the commit.
 - [ ] Pass D: calibrate representative scenarios in Release, record the first
   reviewed baselines, and compare unchanged source for repeatability. Do not
   fabricate placeholder baselines or treat noisy measurements as gates.

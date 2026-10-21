@@ -3,7 +3,11 @@ use crate::error::RunnerError;
 use crate::measurement::{MeasurementSeries, MetricStats};
 use crate::registry::Scenario;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -549,13 +553,28 @@ fn metric_value(metric: &MetricStats, tolerance: f64) -> toml::Value {
 }
 
 fn publish_no_clobber(path: &Path, contents: &str, force: bool) -> Result<(), RunnerError> {
-    let temporary = path.with_extension(format!("toml.tmp-{}", std::process::id()));
-    fs::write(&temporary, contents)?;
+    publish_no_clobber_with_hook(path, contents, force, || Ok(()))
+}
+
+fn publish_no_clobber_with_hook(
+    path: &Path,
+    contents: &str,
+    force: bool,
+    before_publish: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), RunnerError> {
+    let temporary = create_temporary_file(path, contents)?;
     if force {
-        let backup = path.with_extension(format!("toml.backup-{}", std::process::id()));
+        let backup = unique_sibling_path(path, "backup");
         let had_previous = path.exists();
         if had_previous {
             fs::rename(path, &backup)?;
+        }
+        if let Err(error) = before_publish() {
+            if had_previous {
+                let _ = fs::rename(&backup, path);
+            }
+            let _ = fs::remove_file(&temporary);
+            return Err(RunnerError::Io(error));
         }
         if let Err(error) = fs::rename(&temporary, path) {
             if had_previous {
@@ -579,6 +598,37 @@ fn publish_no_clobber(path: &Path, contents: &str, force: bool) -> Result<(), Ru
             Err(RunnerError::Io(error))
         }
     }
+}
+
+fn create_temporary_file(path: &Path, contents: &str) -> Result<PathBuf, RunnerError> {
+    for _ in 0..128 {
+        let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = path.with_extension(format!("toml.tmp-{}-{sequence}", std::process::id()));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(RunnerError::Io(error)),
+        };
+        if let Err(error) = file.write_all(contents.as_bytes()) {
+            drop(file);
+            let _ = fs::remove_file(&temporary);
+            return Err(RunnerError::Io(error));
+        }
+        return Ok(temporary);
+    }
+    Err(RunnerError::Configuration(format!(
+        "could not allocate a unique temporary file beside {}",
+        path.display()
+    )))
+}
+
+fn unique_sibling_path(path: &Path, role: &str) -> PathBuf {
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("toml.{role}-{}-{sequence}", std::process::id()))
 }
 
 #[cfg(test)]
@@ -747,6 +797,32 @@ mod tests {
         };
 
         write(&path, &machine, &environment, scenario, &series, 0.1, false).unwrap();
+        let original_contents = fs::read_to_string(&path).unwrap();
+        assert!(write(&path, &machine, &environment, scenario, &series, 0.1, false).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original_contents);
+
+        let mut replacement = series.clone();
+        let gate = replacement
+            .metrics
+            .iter_mut()
+            .find(|metric| metric.id == "scenario_wall_ms")
+            .unwrap();
+        gate.samples = vec![18.0, 20.0, 22.0];
+        gate.median = 20.0;
+        gate.mad = 2.0;
+        gate.min = 18.0;
+        gate.max = 22.0;
+        write(
+            &path,
+            &machine,
+            &environment,
+            scenario,
+            &replacement,
+            0.1,
+            true,
+        )
+        .unwrap();
+
         let decoded = read(&path).unwrap();
         assert_eq!(decoded["schema_version"].as_integer(), Some(3));
         assert_eq!(
@@ -757,6 +833,62 @@ mod tests {
             decoded["metrics"]["setup_ms"]["median"].as_float(),
             Some(0.0)
         );
+        assert_eq!(
+            decoded["metrics"]["scenario_wall_ms"]["median"].as_float(),
+            Some(20.0)
+        );
         assert_eq!(decoded["source_dirty"].as_bool(), Some(false));
+        let entries = fs::read_dir(directory.path()).unwrap().count();
+        assert_eq!(
+            entries, 1,
+            "temporary/backup artifacts should be cleaned up"
+        );
+        let before_read = fs::read(&path).unwrap();
+        let _ = read(&path).unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before_read,
+            "read must not mutate baseline"
+        );
+    }
+
+    #[test]
+    fn concurrent_no_clobber_writers_publish_one_complete_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("race.toml");
+        let writers = 8;
+        let results = std::thread::scope(|scope| {
+            (0..writers)
+                .map(|index| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        publish_no_clobber(path, &format!("complete-payload-{index}"), false)
+                    })
+                })
+                .map(|writer| writer.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let published = fs::read_to_string(&path).unwrap();
+        assert!((0..writers).any(|index| published == format!("complete-payload-{index}")));
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_force_publication_restores_previous_file_and_cleans_staging_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("baseline.toml");
+        fs::write(&path, "old-complete-baseline").unwrap();
+
+        let result = publish_no_clobber_with_hook(&path, "new-baseline", true, || {
+            Err(std::io::Error::other(
+                "simulated interruption before publish",
+            ))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old-complete-baseline");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 }

@@ -104,7 +104,11 @@ pub fn compare(
         let change = (metric.median - baseline_median) / baseline_median;
         let relative_mad = metric.mad / metric.median.max(f64::MIN_POSITIVE);
         let baseline_relative_mad = saved_mad / baseline_median;
-        let verdict = if relative_mad > max_relative_mad || baseline_relative_mad > max_relative_mad
+        // A zero wall-time median is below the timer's useful resolution, not
+        // evidence of an infinite speedup. Keep it visible as unstable data.
+        let verdict = if metric.median <= 0.0
+            || relative_mad > max_relative_mad
+            || baseline_relative_mad > max_relative_mad
         {
             Verdict::Unstable
         } else if change > tolerance {
@@ -198,8 +202,12 @@ mod tests {
         let baseline = baseline_value();
         let pass = compare(&baseline, &current(105.0, 1.0), 0.1).unwrap();
         assert_eq!(pass[0].verdict, Verdict::Pass);
+        let improvement = compare(&baseline, &current(90.0, 1.0), 0.1).unwrap();
+        assert_eq!(improvement[0].verdict, Verdict::Pass);
         let fail = compare(&baseline, &current(111.0, 1.0), 0.1).unwrap();
         assert_eq!(fail[0].verdict, Verdict::Fail);
+        let passing_median_but_noisy = compare(&baseline, &current(105.0, 20.0), 0.1).unwrap();
+        assert_eq!(passing_median_but_noisy[0].verdict, Verdict::Unstable);
         let noisy = compare(&baseline, &current(111.0, 20.0), 0.1).unwrap();
         assert_eq!(noisy[0].verdict, Verdict::Unstable);
     }
@@ -211,7 +219,48 @@ mod tests {
         current.metrics[0].unit = "seconds".into();
         assert!(compare(&baseline, &current, 0.1).is_err());
         current.metrics[0].id = "other".into();
-        assert!(compare(&baseline, &current, 0.1).is_err());
+        let error = compare(&baseline, &current, 0.1).unwrap_err();
+        assert!(matches!(error, RunnerError::IncompatibleBaseline(_)));
+    }
+
+    #[test]
+    fn zero_gate_duration_is_unstable_but_positive_tiny_duration_is_finite() {
+        let baseline = baseline_value();
+        let zero = compare(&baseline, &current(0.0, 0.0), 0.1).unwrap();
+        assert_eq!(zero[0].verdict, Verdict::Unstable);
+
+        let tiny = compare(&baseline, &current(1.0e-300, 0.0), 0.1).unwrap();
+        assert_eq!(tiny[0].verdict, Verdict::Pass);
+        assert!(tiny[0].change.is_finite());
+    }
+
+    #[test]
+    fn rejects_missing_and_extra_gate_metrics() {
+        let baseline = baseline_value();
+        let mut missing = current(100.0, 1.0);
+        missing.metrics.clear();
+        assert!(matches!(
+            compare(&baseline, &missing, 0.1),
+            Err(RunnerError::IncompatibleBaseline(_))
+        ));
+
+        let mut extra = current(100.0, 1.0);
+        extra.metrics.push(MetricStats {
+            id: "extra_ms".into(),
+            unit: "ms".into(),
+            phase: "gate_off".into(),
+            scope: "scenario_component".into(),
+            parent_scope: Some("scenario_outer_wall".into()),
+            samples: vec![1.0, 1.0, 1.0],
+            median: 1.0,
+            mad: 0.0,
+            min: 1.0,
+            max: 1.0,
+        });
+        assert!(matches!(
+            compare(&baseline, &extra, 0.1),
+            Err(RunnerError::IncompatibleBaseline(_))
+        ));
     }
 
     #[test]

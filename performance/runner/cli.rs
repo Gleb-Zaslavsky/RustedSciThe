@@ -3,13 +3,14 @@ use crate::comparison::{self, Verdict};
 use crate::environment;
 use crate::error::RunnerError;
 use crate::measurement::{self, CounterStats, MeasurementSeries};
+use crate::prerequisites;
 use crate::registry::{self, Scenario, Selector};
 use crate::report;
 use clap::{Args, Parser, Subcommand};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -146,11 +147,28 @@ fn list(args: OptionalSelector) -> Result<(), RunnerError> {
     };
     let machine = environment::fingerprint();
     let local = environment::find_local_profile();
-    report::print_list(&selected, local.as_ref(), &machine, |scenario| {
-        local
-            .as_ref()
-            .is_some_and(|profile| baseline::path(profile, &machine, scenario).is_file())
-    });
+    report::print_list(
+        &selected,
+        local.as_ref(),
+        &machine,
+        |scenario| {
+            local
+                .as_ref()
+                .is_some_and(|profile| baseline::path(profile, &machine, scenario).is_file())
+        },
+        |scenario| {
+            let status = prerequisites::status_for_scenario(scenario);
+            if status.is_empty() {
+                "none".to_owned()
+            } else {
+                status
+                    .iter()
+                    .map(|item| item.display())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        },
+    );
     Ok(())
 }
 
@@ -175,6 +193,14 @@ fn record(args: RecordArgs) -> Result<(), RunnerError> {
     let mut errors: Vec<(i32, String)> = Vec::new();
     let mut created = 0usize;
     for scenario in selected {
+        if let Some(tool) = prerequisites::missing_required_tool(scenario) {
+            let error = RunnerError::Prerequisite {
+                scenario: scenario.id.into(),
+                tool: tool.into(),
+            };
+            errors.push((error.exit_code(), error.to_string()));
+            continue;
+        }
         let target = baseline::path(&machine, &env, scenario);
         match isolated_measure(scenario, args.warmups, args.runs) {
             Ok(series) => {
@@ -261,6 +287,14 @@ fn compare(args: CompareArgs) -> Result<(), RunnerError> {
     let mut unstable = 0usize;
     let mut dry_run_checked = 0usize;
     for scenario in selected {
+        if let Some(tool) = prerequisites::missing_required_tool(scenario) {
+            let error = RunnerError::Prerequisite {
+                scenario: scenario.id.into(),
+                tool: tool.into(),
+            };
+            errors.push((error.exit_code(), error.to_string()));
+            continue;
+        }
         let baseline_path = baseline::path(&machine, &env, scenario);
         let saved = match baseline::read(&baseline_path) {
             Ok(value) => value,
@@ -437,23 +471,7 @@ fn isolated_measure(
         let mut bytes = Vec::new();
         stderr.read_to_end(&mut bytes).map(|_| bytes)
     });
-    let started = std::time::Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            break;
-        }
-        if started.elapsed() >= CHILD_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(RunnerError::Child(format!(
-                "{} exceeded {} second timeout",
-                scenario.id,
-                CHILD_TIMEOUT.as_secs()
-            )));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let status = child.wait()?;
+    let status = wait_for_child(&mut child, CHILD_TIMEOUT, scenario.id)?;
     let stdout = stdout_reader
         .join()
         .map_err(|_| RunnerError::Child("child stdout reader panicked".into()))??;
@@ -472,6 +490,28 @@ fn isolated_measure(
         .map_err(|error| RunnerError::Child(format!("child output is not UTF-8: {error}")))?;
     let value = toml::Value::Table(toml::from_str::<toml::Table>(&stdout)?);
     series_from_toml(&value)
+}
+
+fn wait_for_child(
+    child: &mut Child,
+    timeout: Duration,
+    scenario_id: &str,
+) -> Result<ExitStatus, RunnerError> {
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RunnerError::Child(format!(
+                "{scenario_id} exceeded {:.3} second timeout",
+                timeout.as_secs_f64()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn validate_compatibility(
@@ -1084,5 +1124,84 @@ mod tests {
         } else {
             assert!(require_release_measurement().is_ok());
         }
+    }
+
+    #[test]
+    fn batch_exit_code_uses_documented_failure_precedence() {
+        let mixed = batch_error(vec![
+            (5, "unstable".into()),
+            (1, "regression".into()),
+            (3, "missing baseline".into()),
+            (4, "incompatible".into()),
+            (2, "configuration".into()),
+        ]);
+        assert_eq!(mixed.exit_code(), 2);
+
+        let without_execution_error = batch_error(vec![
+            (5, "unstable".into()),
+            (1, "regression".into()),
+            (3, "missing baseline".into()),
+            (4, "incompatible".into()),
+        ]);
+        assert_eq!(without_execution_error.exit_code(), 4);
+
+        let regression_over_unstable =
+            batch_error(vec![(5, "unstable".into()), (1, "regression".into())]);
+        assert_eq!(regression_over_unstable.exit_code(), 1);
+    }
+
+    #[test]
+    fn child_wait_reports_success_and_nonzero_exit_without_confusing_them() {
+        let mut success = child_exiting_with(0).spawn().unwrap();
+        assert!(
+            wait_for_child(&mut success, Duration::from_secs(5), "success")
+                .unwrap()
+                .success()
+        );
+
+        let mut failure = child_exiting_with(7).spawn().unwrap();
+        let status = wait_for_child(&mut failure, Duration::from_secs(5), "failure").unwrap();
+        assert!(!status.success());
+
+        // A release panic=abort is observed by the parent as an abnormal exit.
+        let mut abort_like = child_exiting_with(101).spawn().unwrap();
+        let status = wait_for_child(&mut abort_like, Duration::from_secs(5), "abort-like").unwrap();
+        assert!(!status.success());
+    }
+
+    #[test]
+    fn child_timeout_kills_and_reaps_a_blocked_process() {
+        let mut child = child_that_waits().spawn().unwrap();
+        let error = wait_for_child(&mut child, Duration::from_millis(250), "blocked").unwrap_err();
+        assert!(error.to_string().contains("blocked exceeded"));
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    fn child_exiting_with(code: u8) -> Command {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/D", "/C", &format!("exit {code}")]);
+        command
+    }
+
+    #[cfg(unix)]
+    fn child_exiting_with(code: u8) -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", &format!("exit {code}")]);
+        command
+    }
+
+    #[cfg(windows)]
+    fn child_that_waits() -> Command {
+        let mut command = Command::new("powershell.exe");
+        command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+        command
+    }
+
+    #[cfg(unix)]
+    fn child_that_waits() -> Command {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        command
     }
 }
