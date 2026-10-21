@@ -47,6 +47,8 @@
 !/performance/**
 /performance/runs/
 /performance/local/
+/performance/baselines/
+/performance/machines/
 
 # Generated/interchange artifacts are ignored in every allowed tree.
 *.txt
