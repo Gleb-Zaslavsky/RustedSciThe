@@ -56,7 +56,7 @@ macro_rules! radau_route {
             linear_algebra: $layout,
             parallel_policy: $policy,
             telemetry: "off wall gate + Timings stage diagnostic",
-            version: 3,
+            version: 4,
             gate_metrics: &["scenario_wall_ms"],
             description: "Matched Radau diffusion route; AOT requires tcc and uses the runner-owned warm cache",
             run: $run,
