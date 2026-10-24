@@ -56,10 +56,10 @@ fn benchmark_telemetry_modes(c: &mut Criterion) {
         ("detailed", BdfTelemetryMode::Detailed),
     ];
     let mut group = c.benchmark_group("bdf_telemetry_full_solve");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(1));
+    group.sample_size(30);
+    group.measurement_time(Duration::from_secs(3));
 
-    for dimension in [1, 3, 16, 64] {
+    for dimension in [1, 16, 64, 256, 512] {
         let mut reference_solver = make_solver(dimension, BdfTelemetryMode::Off);
         reference_solver.solve();
         let reference = final_state(&reference_solver);
