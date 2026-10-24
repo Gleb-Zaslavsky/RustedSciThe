@@ -4668,5 +4668,22 @@ gate also passed after promotion with 31 samples: 371.9799 ms current versus
 893.4410 ms baseline (-58.4%); preparation fell from 878.9134 to 358.8082 ms,
 and all discrete work counters remained unchanged. The gate report is
 `performance/runs/1792882046393-19292`. No allocator-level claim is made.
-The shared baseline still needs a forced refresh from a clean committed
-revision so the reference is reproducible rather than marked dirty.
+
+The shared Windows baseline was then refreshed from clean source revision
+`30529b8f86fc`, using 31 samples. The recorded medians are:
+
+| Metric | Median | MAD |
+| --- | ---: | ---: |
+| Scenario wall | 330.6238 ms | 12.1193 ms |
+| Preparation | 318.8043 ms | 12.1098 ms |
+| Solve | 12.1722 ms | 0.3444 ms |
+| Jacobian stage | 1.9288 ms | 0.1156 ms |
+| Residual stage | 2.3762 ms | 0.1608 ms |
+| Linear stage | 5.3143 ms | 0.1254 ms |
+| Factorization stage | 4.0100 ms | 0.0746 ms |
+
+This clean-revision baseline is the reproducible reference for subsequent
+comparisons; it is distinct from the preceding post-promotion comparison
+against the older baseline. The machine baseline is
+`performance/baselines/windows-dev/windows-x86-64-release-3be3b406e86e4f83/bvp_damp_combustion3000_expr_lambdify_sparse.toml`,
+and the recording report is `performance/runs/1792882557593-19792`.

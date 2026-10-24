@@ -3114,6 +3114,10 @@ optimizations. ExprLegacy and AtomView remain independent supported frontends.
   `BVP_DAMP_STORY_PERFORMANCE.md` and the machine-readable test report; the
   former scan/compiler is now retained only through an explicit comparison
   selector and parity tests.
-- [ ] Refresh the shared performance baseline with `perf-gates --force` only
-  after committing a clean source revision. Do not publish a dirty-source
-  baseline as the reproducible reference.
+- [x] Refresh the shared performance baseline from clean source revision
+  `30529b8f86fc`: `bvp_damp_combustion3000_expr_lambdify_sparse`, 31 samples.
+  The recorded medians are 330.6238 ms scenario wall (MAD 12.1193 ms),
+  318.8043 ms preparation (MAD 12.1098 ms), and 12.1722 ms solve
+  (MAD 0.3444 ms). Baseline:
+  `performance/baselines/windows-dev/windows-x86-64-release-3be3b406e86e4f83/bvp_damp_combustion3000_expr_lambdify_sparse.toml`;
+  run report: `performance/runs/1792882557593-19792`.
