@@ -6,8 +6,8 @@
 //! Lambdify evaluator implementation and its optional execution policy.
 
 use super::symbolic::{
-    LambdifyExecutionPolicy, PreparationStage, PreparationTelemetryRecorder, SymbolicBackendKind,
-    SymbolicEvaluationBackend,
+    ExprJacobianPreparationPolicy, LambdifyExecutionPolicy, PreparationStage,
+    PreparationTelemetryRecorder, SymbolicBackendKind, SymbolicEvaluationBackend,
 };
 use crate::global::THRESHOLD as SYMBOLIC_ZERO_THRESHOLD;
 use crate::numerical::Nonlinear_systems::error::SolveError;
@@ -66,6 +66,7 @@ impl LegacyLambdifySymbolicBackend {
         variables: &[String],
         equation_parameters: Option<&[String]>,
         execution_policy: LambdifyExecutionPolicy,
+        jacobian_preparation: ExprJacobianPreparationPolicy,
         mut preparation_recorder: Option<&mut PreparationTelemetryRecorder>,
     ) -> Result<Self, SolveError> {
         let differentiation_started = std::time::Instant::now();
@@ -79,16 +80,27 @@ impl LegacyLambdifySymbolicBackend {
 
         if let Some(parameters) = equation_parameters {
             jacobian.set_params(parameters.to_vec());
-            jacobian.calc_jacobian();
-        } else {
-            jacobian.calc_jacobian();
         }
+        let (symbolic_jacobian, differentiated_entries) = match jacobian_preparation {
+            ExprJacobianPreparationPolicy::LegacyDense => {
+                jacobian.calc_jacobian();
+                (
+                    jacobian.symbolic_jacobian,
+                    equations.len().saturating_mul(variables.len()),
+                )
+            }
+            ExprJacobianPreparationPolicy::DependencyAware => {
+                let (symbolic_jacobian, entries) =
+                    dependency_aware_expr_jacobian(equations, variables);
+                (symbolic_jacobian, entries)
+            }
+        };
         if let Some(recorder) = preparation_recorder.as_mut() {
             recorder.record(
                 PreparationStage::JacobianDifferentiation,
                 differentiation_started,
-                Some(1),
-                Some(equations.len() * variables.len()),
+                Some(differentiated_entries as u64),
+                Some(differentiated_entries),
             );
         }
 
@@ -117,7 +129,6 @@ impl LegacyLambdifySymbolicBackend {
                 Some(equations.len()),
             );
         }
-        let symbolic_jacobian = jacobian.symbolic_jacobian;
         let mut jacobian_nonzero_rows_by_column = vec![Vec::new(); variables.len()];
         for (row_index, row) in symbolic_jacobian.iter().enumerate() {
             for (column_index, entry) in row.iter().enumerate() {
@@ -160,6 +171,56 @@ impl LegacyLambdifySymbolicBackend {
             jacobian_nonzero_rows_by_column,
         })
     }
+}
+
+/// Builds the same dense symbolic Jacobian shape while differentiating only
+/// variables that are structurally present in each equation.
+fn dependency_aware_expr_jacobian(
+    equations: &[Expr],
+    variables: &[String],
+) -> (Vec<Vec<Expr>>, usize) {
+    use std::collections::HashSet;
+
+    const PARALLEL_MIN_DERIVATIVES: usize = 256;
+    let row_dependencies = equations
+        .iter()
+        .map(|equation| {
+            let present = equation
+                .all_arguments_are_variables()
+                .into_iter()
+                .collect::<HashSet<_>>();
+            variables
+                .iter()
+                .enumerate()
+                .filter_map(|(column, variable)| present.contains(variable).then_some(column))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let derivative_count = row_dependencies.iter().map(Vec::len).sum::<usize>();
+    let differentiate_row = |(equation, dependencies): (&Expr, &Vec<usize>)| {
+        let mut row = vec![Expr::Const(0.0); variables.len()];
+        for &column in dependencies {
+            row[column] = equation.diff(&variables[column]).simplify();
+        }
+        row
+    };
+    let use_parallel = rayon::current_num_threads() > 1
+        && equations.len() > 1
+        && derivative_count >= PARALLEL_MIN_DERIVATIVES;
+    let symbolic_jacobian = if use_parallel {
+        equations
+            .par_iter()
+            .zip(row_dependencies.par_iter())
+            .map(differentiate_row)
+            .collect()
+    } else {
+        equations
+            .iter()
+            .zip(row_dependencies.iter())
+            .map(differentiate_row)
+            .collect()
+    };
+    (symbolic_jacobian, derivative_count)
 }
 
 impl SymbolicEvaluationBackend for LegacyLambdifySymbolicBackend {

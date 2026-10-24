@@ -75,7 +75,7 @@
 //! #### Function Compilation (Multiple Backends)
 //! - **Dense (nalgebra)**: `lambdify_jacobian_DMatrix_par()`, `lambdify_residual_DVector()`
 //! - **Sparse (faer)**: `lambdify_jacobian_SparseColMat_parallel2()`, `lambdify_residual_Col_parallel2()`
-//! - **Sparse (sprs)**: `lambdify_jacobian_CsMat()`, `lambdify_residual_CsVec()`
+//! - **Sparse (sprs)**: historical `Sparse_1` compatibility callbacks; deprecated.
 //! - Historical `Sparse_2`/nalgebra `CsMatrix` BVP runtime was removed because
 //!   its solver implementation was incomplete.
 //!
@@ -319,11 +319,15 @@ pub enum BvpBackendKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BvpMatrixBackend {
     Dense,
+    #[deprecated(
+        note = "historical sprs Sparse_1 compatibility backend; use FaerSparseCol, Dense, or Banded"
+    )]
     SprsCsMat,
     FaerSparseCol,
     Banded,
 }
 
+#[allow(deprecated)]
 impl BvpMatrixBackend {
     pub const fn legacy_method(self) -> &'static str {
         match self {
@@ -1369,6 +1373,9 @@ pub enum BvpBackendIntegrationError {
     /// must regenerate the residual/Jacobian callbacks before reusing the
     /// prepared-solver entry point.
     PreparedRuntimeInvalidated { reason: String },
+    /// A selected opt-in prepared callback runtime could not be constructed
+    /// from the already generated symbolic problem.
+    PreparedCallbackPreparationFailed { runtime: String, message: String },
     /// AtomView was selected as the symbolic AOT route, but its owned plan
     /// could not be validated. This must not be converted into the retained
     /// ExprLegacy compatibility payload: doing so would hide a native-route
@@ -1468,6 +1475,12 @@ impl fmt::Display for BvpBackendIntegrationError {
             }
             Self::PreparedRuntimeInvalidated { reason } => {
                 write!(f, "prepared BVP runtime invalidated: {reason}")
+            }
+            Self::PreparedCallbackPreparationFailed { runtime, message } => {
+                write!(
+                    f,
+                    "{runtime} callback runtime preparation failed: {message}"
+                )
             }
             Self::AtomAotPlanPreparationFailed { message } => {
                 write!(f, "AtomView AOT plan preparation failed: {message}")
@@ -5753,6 +5766,7 @@ impl Jacobian {
     ///   merely registered, or missing,
     /// - the caller can then route into lambdify/numeric/AOT execution paths
     ///   without rebuilding prepared-problem metadata by hand.
+    #[allow(deprecated)] // Keep the historical Sparse_1 resolver route callable.
     pub fn try_select_sparse_backend(
         &self,
         residual_fn_name: &str,
@@ -5845,6 +5859,7 @@ impl Jacobian {
         .unwrap_or_else(|error| panic!("BVP AOT backend preparation failed: {error:?}"))
     }
 
+    #[allow(deprecated)] // Keep the historical Sparse_1 resolver route callable.
     fn prepare_sparse_backend_execution_timed(
         &mut self,
         arg: &str,
@@ -6518,6 +6533,7 @@ impl Jacobian {
         }
     }
 
+    #[allow(deprecated)] // Explicit compatibility dispatch for historical Sparse_1.
     fn compile_jacobian_for_matrix_backend(
         &mut self,
         arg: &str,
@@ -6534,6 +6550,7 @@ impl Jacobian {
         }
     }
 
+    #[allow(deprecated)] // Explicit compatibility dispatch for historical Sparse_1.
     fn compile_residual_for_matrix_backend(
         &mut self,
         arg: &str,
@@ -6589,6 +6606,7 @@ impl Jacobian {
         }
     }
 
+    #[allow(deprecated)] // Keep validation exhaustive for the legacy Sparse_1 route.
     fn validate_atom_lambdify_config(
         &self,
         config: BvpBackendConfig,
@@ -7107,6 +7125,7 @@ impl Jacobian {
     /// - Legacy code compatibility with sprs crate
     /// - When mutable closure semantics are required
     /// - Small systems where parallelization overhead isn't justified
+    #[deprecated(note = "legacy BVP sprs Jacobian generator; use Dense, Faer Sparse, or Banded")]
     pub fn jacobian_generate_CsMat(
         jac: Vec<Vec<Expr>>,
         vector_of_functions_len: usize,
@@ -7157,6 +7176,8 @@ impl Jacobian {
     /// - Legacy compatibility with sprs-based code
     /// - When CSR format is specifically required
     /// - Small to medium sparse systems
+    #[deprecated(note = "legacy BVP sprs callback; use Dense, Faer Sparse, or Banded")]
+    #[allow(deprecated)]
     pub fn lambdify_jacobian_CsMat(&mut self, arg: &str, variable_str: Vec<&str>) {
         let symbolic_jacobian = self.symbolic_jacobian.clone();
         let symbolic_jacobian_rc = symbolic_jacobian.clone();
@@ -7197,6 +7218,7 @@ impl Jacobian {
     /// - Sparse residual vectors (many zero elements)
     /// - Integration with sprs-based linear algebra
     /// - IVP problems where time-dependent evaluation is needed
+    #[deprecated(note = "legacy BVP sprs residual callback; use Dense, Faer Sparse, or Banded")]
     pub fn lambdify_residual_CsVec(&mut self, arg: &str, variable_str: Vec<&str>) {
         let vector_of_functions = &self.vector_of_functions;
         fn f(
@@ -7259,6 +7281,9 @@ impl Jacobian {
     /// - Integration with nalgebra's sparse matrix ecosystem
     /// - When CsMatrix format is specifically required
     /// - Small to medium systems where conversion overhead is acceptable
+    #[deprecated(
+        note = "removed nalgebra CsMatrix BVP generator; use Dense, Faer Sparse, or Banded"
+    )]
     pub fn jacobian_generate_CsMatrix(
         jac: Vec<Vec<Expr>>,
         vector_of_functions_len: usize,
@@ -7311,10 +7336,11 @@ impl Jacobian {
     /// - Historical reference only: this route is no longer wired into
     ///   `JacEnum` or solver backend selection.
     ///
-    /// # When to Use
-    /// - Integration with nalgebra's sparse linear algebra
-    /// - When nalgebra CsMatrix format is specifically required
-    /// - Medium-sized sparse systems
+    /// # Deprecated
+    /// This historical route is no longer wired into solver backend selection
+    /// and panics because its `MatrixType` implementation was incomplete. Use
+    /// the canonical Dense, faer Sparse, or Banded backend instead.
+    #[deprecated(note = "removed nalgebra CsMatrix BVP route; use Dense, Faer Sparse, or Banded")]
     pub fn lambdify_jacobian_CsMatrix(&mut self, arg: &str, variable_str: Vec<&str>) {
         let _ = (arg, variable_str);
         panic!(

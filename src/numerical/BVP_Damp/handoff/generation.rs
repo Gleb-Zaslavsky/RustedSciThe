@@ -34,7 +34,66 @@ pub fn generate_damped_solver_state(
     lambdify_telemetry_mode: BvpLambdifyTelemetryMode,
     aot_telemetry_mode: BvpAotTelemetryMode,
     lambdify_execution_policy: BvpLambdifyExecutionPolicy,
+    callback_runtime: crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedCallbackRuntime,
 ) -> Result<DampedGeneratedSolverState, BvpBackendIntegrationError> {
+    if callback_runtime
+        == crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedCallbackRuntime::PreparedAtom
+    {
+        let unsupported = if method != "Banded" {
+            Some((
+                "method",
+                method.clone(),
+                "PreparedAtom currently requires the Banded matrix backend",
+            ))
+        } else if symbolic_assembly_backend != BvpSymbolicAssemblyBackend::AtomView {
+            Some((
+                "symbolic_assembly_backend",
+                format!("{symbolic_assembly_backend:?}"),
+                "PreparedAtom requires AtomView assembly",
+            ))
+        } else if backend_policy != BackendSelectionPolicy::LambdifyOnly {
+            Some((
+                "backend_policy",
+                format!("{backend_policy:?}"),
+                "PreparedAtom currently requires LambdifyOnly",
+            ))
+        } else if lambdify_execution_policy != BvpLambdifyExecutionPolicy::Sequential {
+            Some((
+                "lambdify_execution_policy",
+                format!("{lambdify_execution_policy:?}"),
+                "PreparedAtom callback evaluation is sequential",
+            ))
+        } else if aot_build_policy != AotBuildPolicy::UseIfAvailable
+            || matches!(aot_execution_policy, AotExecutionPolicy::Parallel(_))
+        {
+            Some((
+                "aot_policy",
+                aot_execution_policy.as_str().to_string(),
+                "PreparedAtom does not use AOT execution or build policies",
+            ))
+        } else if matrix_backend_override.is_some_and(|backend| backend != MatrixBackend::Banded) {
+            Some((
+                "matrix_backend_override",
+                format!("{matrix_backend_override:?}"),
+                "PreparedAtom requires the Banded matrix backend",
+            ))
+        } else if param_names.as_ref().is_some_and(|names| !names.is_empty()) {
+            Some((
+                "param_names",
+                format!("{} parameter(s)", param_names.as_ref().map_or(0, Vec::len)),
+                "PreparedAtom currently accepts only discretized state variables, not external parameter bindings",
+            ))
+        } else {
+            None
+        };
+        if let Some((field, value, message)) = unsupported {
+            return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                field: field.to_string(),
+                value,
+                message: message.to_string(),
+            });
+        }
+    }
     let handoff_begin = Instant::now();
     let mut handoff_diagnostics = HashMap::new();
     let param_name_refs = parameter_name_refs(param_names.as_ref());
@@ -202,10 +261,7 @@ pub fn generate_damped_solver_state(
             handoff_begin,
         );
         bundle.runtime_diagnostics.extend(handoff_diagnostics);
-        Ok(damped_state_from_sparse_solver_bundle(
-            bundle,
-            updated_resolver,
-        ))
+        try_damped_state_from_sparse_solver_bundle(bundle, updated_resolver, callback_runtime)
     } else {
         let jacobian_instance = prepared_bvp_jacobian(
             symbolic_assembly_backend,

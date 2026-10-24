@@ -7,6 +7,15 @@
 //! symbolic variable projection. Controller-specific options remain explicit
 //! and unsupported shared options return a typed error.
 
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
+use crate::numerical::optimization::gavin_fitting::{GavinSymbolicFitResult, GavinSymbolicFitting};
+use crate::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
+use crate::numerical::optimization::sym_fitting::{
+    Fitting, FittingError, FittingObservationPolicy,
+};
+use crate::numerical::optimization::varpro::symbolic::{
+    SymbolicVarProBuilder, SymbolicVarProError, SymbolicVarProFit,
+};
 use crate::numerical::Nonlinear_systems::least_squares::{
     LeastSquaresError, LeastSquaresTelemetryMode, LevenbergMarquardt,
 };
@@ -14,13 +23,6 @@ use crate::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
 };
 use crate::numerical::SolverTelemetryMode;
-use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
-use crate::numerical::optimization::gavin_fitting::{GavinSymbolicFitResult, GavinSymbolicFitting};
-use crate::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
-use crate::numerical::optimization::sym_fitting::Fitting;
-use crate::numerical::optimization::varpro::symbolic::{
-    SymbolicVarProBuilder, SymbolicVarProError, SymbolicVarProFit,
-};
 use crate::symbolic::symbolic_engine::Expr;
 use log::Level;
 use nalgebra::DVector;
@@ -87,6 +89,9 @@ impl UniversalFittingResult {
 /// Errors returned by the universal fitting wrapper.
 #[derive(Debug, Error)]
 pub enum UniversalFittingError {
+    /// A classic LM validation, symbolic preparation, or solve failed.
+    #[error(transparent)]
+    Fitting(#[from] FittingError),
     /// The VarPro backend failed while building or solving the problem.
     #[error(transparent)]
     VarPro(#[from] SymbolicVarProError),
@@ -118,6 +123,7 @@ pub struct UniversalFitting {
     gavin: GavinSymbolicFitting,
     frontend: SymbolicLambdifyFrontend,
     execution_policy: LambdifyExecutionPolicy,
+    observation_policy: Option<FittingObservationPolicy>,
     telemetry_mode: LeastSquaresTelemetryMode,
     gavin_telemetry_mode: SolverTelemetryMode,
     logging_enabled: bool,
@@ -140,6 +146,7 @@ impl UniversalFitting {
             gavin: GavinSymbolicFitting::new(),
             frontend: SymbolicLambdifyFrontend::ExprLegacy,
             execution_policy: LambdifyExecutionPolicy::Sequential,
+            observation_policy: None,
             telemetry_mode: LeastSquaresTelemetryMode::Off,
             gavin_telemetry_mode: SolverTelemetryMode::Off,
             logging_enabled: false,
@@ -433,8 +440,24 @@ impl UniversalFitting {
         self
     }
 
+    /// Controls observation batching on the classic LM route.
+    ///
+    /// LM inherits `Fitting`'s `Auto` default. Select `Sequential` to avoid
+    /// additional staging memory. An explicit policy on Gavin or VarPro is
+    /// rejected, not silently ignored; those adapters have separate contracts.
+    pub fn with_observation_policy(mut self, policy: FittingObservationPolicy) -> Self {
+        self.observation_policy = Some(policy);
+        self
+    }
+
     /// Build and solve the selected backend.
     pub fn build(self) -> Result<UniversalFittingResult, UniversalFittingError> {
+        if self.observation_policy.is_some() && self.method != Method::LM {
+            return Err(UniversalFittingError::UnsupportedOption {
+                method: self.method,
+                option: "observation_policy",
+            });
+        }
         let log_level = if self.logging_enabled {
             SolverLogLevel::Info
         } else {
@@ -443,13 +466,16 @@ impl UniversalFitting {
         let _logging_scope = SolverLogGuard::enter(log_level);
         match self.method {
             Method::LM => {
-                let lm = self
+                let mut lm = self
                     .lm
                     .with_equations(self.equations)
                     .with_symbolic_frontend(self.frontend)
                     .with_lambdify_execution_policy(self.execution_policy)
                     .with_telemetry(self.telemetry_mode);
-                Ok(UniversalFittingResult::LM(lm.build()))
+                if let Some(policy) = self.observation_policy {
+                    lm = lm.with_observation_policy(policy);
+                }
+                Ok(UniversalFittingResult::LM(lm.try_build()?))
             }
             Method::VARPRO => {
                 if self.frontend != SymbolicLambdifyFrontend::ExprLegacy {
@@ -544,6 +570,52 @@ impl Default for UniversalFitting {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    #[test]
+    fn universal_observation_policy_is_lm_only_and_preserves_typed_failure() {
+        for method in [Method::GAVIN, Method::VARPRO] {
+            assert!(matches!(
+                UniversalFitting::new()
+                    .with_method(method)
+                    .with_observation_policy(FittingObservationPolicy::Sequential)
+                    .build(),
+                Err(UniversalFittingError::UnsupportedOption {
+                    option: "observation_policy",
+                    ..
+                })
+            ));
+        }
+        let make = || {
+            UniversalFitting::new()
+                .with_data(vec![0.0, 1.0, 2.0], vec![0.0, 2.0, 4.0])
+                .with_equation_str("a*x")
+                .with_arg("x")
+                .with_unknowns(["a"])
+                .with_initial_guess(vec![0.5])
+        };
+        let UniversalFittingResult::LM(fit) = make()
+            .with_observation_policy(FittingObservationPolicy::Sequential)
+            .build()
+            .unwrap()
+        else {
+            panic!("expected LM")
+        };
+        assert_eq!(
+            fit.observation_policy(),
+            FittingObservationPolicy::Sequential
+        );
+        assert!(matches!(
+            make()
+                .with_observation_policy(FittingObservationPolicy::Parallel {
+                    min_observations: 1
+                })
+                .with_lambdify_execution_policy(LambdifyExecutionPolicy::Parallel { min_work: 1 })
+                .build(),
+            Err(UniversalFittingError::Fitting(FittingError::InvalidInput {
+                field: "nested observation and callback parallelism"
+            }))
+        ));
+    }
 
     #[test]
     fn universal_lm_fits_linear_model() {

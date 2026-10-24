@@ -10,8 +10,9 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
 
-const DIMENSION: usize = 256;
-const HORIZON: f64 = 0.01;
+const DIMENSION: usize = 512;
+const HORIZON: f64 = 0.15;
+const MAX_STEP: f64 = 0.0025;
 
 fn artifact_root() -> Result<PathBuf, RunnerError> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -31,31 +32,15 @@ fn assemble_workload(
     telemetry: RadauTelemetryMode,
 ) -> Result<(RadauSolver, Vec<f64>, Vec<f64>), RunnerError> {
     let workload = build_workload(WorkloadKind::DiffusionChain, DIMENSION);
-    let variable_refs = workload
-        .variables
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let jacobian = (frontend == RadauFrontend::ExprLegacy).then(|| {
-        workload
-            .equations
-            .iter()
-            .flat_map(|equation| {
-                variable_refs
-                    .iter()
-                    .map(move |variable| equation.diff(variable))
-            })
-            .collect()
-    });
-    let mut problem = RadauProblem::new(
+    // Leave the Jacobian unspecified for both frontends. This exercises the
+    // same production preparation route selected by RadauSolver, including
+    // ExprLegacy coordinate-Jacobian construction and layout-aware sparsity.
+    let problem = RadauProblem::new(
         workload.equations,
         workload.variables,
         workload.time_variable,
     )
     .with_parameters(workload.parameter_names);
-    if let Some(jacobian) = jacobian {
-        problem = problem.with_jacobian(jacobian);
-    }
     let aot = if execution == RadauExecution::Aot {
         Some(RadauAotConfig::build_if_missing_release(artifact_root()?).with_c_compiler("tcc"))
     } else {
@@ -63,8 +48,8 @@ fn assemble_workload(
     };
     let config = RadauConfig {
         t_bound: HORIZON,
-        first_step: Some(HORIZON * 0.1),
-        max_step: HORIZON * 0.25,
+        first_step: Some(MAX_STEP * 0.2),
+        max_step: MAX_STEP,
         rtol: 1.0e-7,
         atol: 1.0e-10,
         max_steps: 2_000,
@@ -136,6 +121,7 @@ fn solve_workload(
                     "count".into(),
                     solution.rejected_steps as f64,
                 ),
+                ("final_time".into(), "time".into(), solution.t),
                 ("max_abs_state".into(), "state".into(), max_abs),
             ],
         });
@@ -477,8 +463,11 @@ declare_route!(
 
 #[cfg(test)]
 mod tests {
-    use super::execution_policy;
-    use RustedSciThe::numerical::Radau::RadauExecutionPolicy;
+    use super::{execution_policy, solve_workload};
+    use crate::registry::SCENARIOS;
+    use RustedSciThe::numerical::Radau::{
+        RadauExecution, RadauExecutionPolicy, RadauFrontend, RadauMatrixLayout,
+    };
 
     #[test]
     fn registry_parallel_label_resolves_to_the_route_threshold() {
@@ -495,5 +484,56 @@ mod tests {
             RadauExecutionPolicy::Sequential
         );
         assert!(execution_policy("Auto").is_err());
+    }
+
+    #[test]
+    fn expr_production_diagnostic_exports_symbolic_jacobian_stage() {
+        let scenario = SCENARIOS
+            .iter()
+            .find(|scenario| scenario.id == "radau_diff512_lambdify_expr_sparse_seq")
+            .expect("registered Radau Expr/Sparse gate");
+        let output = solve_workload(
+            RadauFrontend::ExprLegacy,
+            RadauMatrixLayout::Sparse,
+            RadauExecution::Lambdify,
+            RadauExecutionPolicy::Sequential,
+            true,
+        )
+        .expect("production Expr coordinate-Jacobian diagnostic");
+
+        assert!(
+            output.metrics.iter().any(|(id, _, value)| {
+                id == "stage_symbolic_jacobian_ms" && value.is_finite() && *value > 0.0
+            }),
+            "current Radau symbolic preparation stage must be exported"
+        );
+        assert_eq!(scenario.version, 7);
+    }
+
+    #[test]
+    fn extended_integration_gate_reaches_the_long_horizon_with_enough_steps() {
+        let output = solve_workload(
+            RadauFrontend::AtomViewNative,
+            RadauMatrixLayout::Sparse,
+            RadauExecution::Lambdify,
+            RadauExecutionPolicy::Sequential,
+            false,
+        )
+        .expect("extended Radau diffusion solve");
+        let accepted_steps = output
+            .diagnostics
+            .iter()
+            .find(|(id, _, _)| id == "accepted_steps")
+            .expect("accepted-step diagnostic")
+            .2;
+        let final_time = output
+            .diagnostics
+            .iter()
+            .find(|(id, _, _)| id == "final_time")
+            .expect("final-time diagnostic")
+            .2;
+
+        assert!(accepted_steps >= 50.0, "expected a large integration workload");
+        assert!((final_time - 0.15).abs() <= 1.5e-11);
     }
 }

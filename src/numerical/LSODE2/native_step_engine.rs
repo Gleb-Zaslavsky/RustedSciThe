@@ -32,7 +32,8 @@ use super::linear_backends::{
 };
 use super::native_executor::{Lsode2NativeCallbackExecutor, jacobian_abs_max};
 use super::native_jacobian::{
-    NativeJacobianStorage, compile_native_sparse_aot_jacobian_from_linked_backend_compat,
+    NativeJacobianStorage, compile_native_atomview_jacobian_from_shared_atoms,
+    compile_native_sparse_aot_jacobian_from_linked_backend_compat,
     compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
     compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry_and_policy,
     try_compile_native_atomview_jacobian_with_parameter_handle_and_telemetry_and_policy,
@@ -60,8 +61,39 @@ use crate::symbolic::symbolic_ivp_generated::{
     prepare_generated_symbolic_ivp_residual_problem,
 };
 use nalgebra::{DMatrix, DVector};
+#[cfg(test)]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
+
+#[cfg(test)]
+thread_local! {
+    static LSODE2_USE_SEPARATE_ATOM_GRAPH_FOR_TEST: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_separate_atom_graph_for_test<T>(
+    separate_for_operation: bool,
+    operation: impl FnOnce() -> T,
+) -> T {
+    LSODE2_USE_SEPARATE_ATOM_GRAPH_FOR_TEST.with(|separate| {
+        let previous = separate.replace(separate_for_operation);
+        struct Restore<'a> {
+            enabled: &'a Cell<bool>,
+            previous: bool,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.enabled.set(self.previous);
+            }
+        }
+        let _restore = Restore {
+            enabled: separate,
+            previous,
+        };
+        operation()
+    })
+}
 use std::time::Instant;
 
 type NativeResidualFn = dyn Fn(f64, &DVector<f64>) -> DVector<f64>;
@@ -455,6 +487,67 @@ where
         jacobian_storage: NativeJacobianStorage,
         sparse_fd_coloring: Option<SparseFiniteDifferenceColoring>,
     ) -> Result<Self, IvpBackendError> {
+        if matches!(
+            config.residual_jacobian_source,
+            Lsode2ResidualJacobianSource::Symbolic {
+                execution: Lsode2SymbolicExecutionMode::PreparedAtom,
+                ..
+            }
+        ) {
+            let assembly = match config.residual_jacobian_source {
+                Lsode2ResidualJacobianSource::Symbolic { assembly, .. } => assembly,
+                Lsode2ResidualJacobianSource::Analytical => unreachable!(),
+            };
+            if assembly != Lsode2SymbolicAssemblyBackend::AtomView {
+                return Err(IvpBackendError::GeneratedBackendFailure {
+                    message: "experimental PreparedAtom requires AtomView symbolic assembly"
+                        .to_string(),
+                });
+            }
+            if config.backend.linear_solver_backend != Lsode2LinearSolverBackend::BandedFaithful
+                || !matches!(jacobian_storage, NativeJacobianStorage::Banded { .. })
+            {
+                return Err(IvpBackendError::GeneratedBackendFailure {
+                    message:
+                        "experimental PreparedAtom currently requires the faithful Banded backend"
+                            .to_string(),
+                });
+            }
+            if config.lambdify_execution_policy
+                != crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy::Sequential
+            {
+                return Err(IvpBackendError::GeneratedBackendFailure {
+                    message:
+                        "experimental PreparedAtom currently supports sequential callbacks only"
+                            .to_string(),
+                });
+            }
+            if config.backend.jacobian_backend != Lsode2JacobianBackend::SymbolicGenerated {
+                return Err(IvpBackendError::GeneratedBackendFailure {
+                    message: "experimental PreparedAtom requires a symbolic Jacobian source"
+                        .to_string(),
+                });
+            }
+
+            let prepared = super::prepared_atom_runtime::prepare(config, jacobian_storage)?;
+            config
+                .telemetry
+                .set_route(IvpTelemetryRoute::AtomViewNative);
+            config
+                .telemetry
+                .set_execution(IvpTelemetryExecution::PreparedAtom);
+            return Self::from_callbacks(
+                config,
+                method,
+                linear_backend,
+                prepared.residual,
+                prepared.jacobian,
+                prepared.parameter_values_handle,
+                true,
+                true,
+            );
+        }
+
         match config.backend.jacobian_backend {
             Lsode2JacobianBackend::AnalyticClosure => {
                 config
@@ -683,16 +776,48 @@ where
                             )
                         }
                         Lsode2SymbolicAssemblyBackend::AtomView => {
-                            try_compile_native_atomview_jacobian_with_parameter_handle_and_telemetry_and_policy(
-                                &config.eq_system,
-                                &config.values,
-                                config.arg.as_str(),
-                                config.equation_parameters.as_deref(),
-                                parameter_values_handle,
-                                jacobian_storage,
-                                config.telemetry.clone(),
-                                config.lambdify_execution_policy,
-                            )?
+                            #[cfg(test)]
+                            let separate_atom_graph =
+                                LSODE2_USE_SEPARATE_ATOM_GRAPH_FOR_TEST.with(Cell::get);
+                            #[cfg(not(test))]
+                            let separate_atom_graph = false;
+
+                            if separate_atom_graph {
+                                try_compile_native_atomview_jacobian_with_parameter_handle_and_telemetry_and_policy(
+                                    &config.eq_system,
+                                    &config.values,
+                                    config.arg.as_str(),
+                                    config.equation_parameters.as_deref(),
+                                    parameter_values_handle,
+                                    jacobian_storage,
+                                    config.telemetry.clone(),
+                                    config.lambdify_execution_policy,
+                                )?
+                            } else if let Some(atoms) = residual_problem.shared_native_atoms() {
+                                compile_native_atomview_jacobian_from_shared_atoms(
+                                    atoms,
+                                    &config.values,
+                                    config.arg.as_str(),
+                                    config.equation_parameters.as_deref(),
+                                    parameter_values_handle,
+                                    jacobian_storage,
+                                    config.telemetry.clone(),
+                                    config.lambdify_execution_policy,
+                                )?
+                            } else {
+                                // Generated residual routes can discard the Atom graph; keep
+                                // their established conversion path as a compatibility fallback.
+                                try_compile_native_atomview_jacobian_with_parameter_handle_and_telemetry_and_policy(
+                                        &config.eq_system,
+                                        &config.values,
+                                        config.arg.as_str(),
+                                        config.equation_parameters.as_deref(),
+                                        parameter_values_handle,
+                                        jacobian_storage,
+                                        config.telemetry.clone(),
+                                        config.lambdify_execution_policy,
+                                    )?
+                            }
                         }
                     };
                     Rc::new(RefCell::new(callback))

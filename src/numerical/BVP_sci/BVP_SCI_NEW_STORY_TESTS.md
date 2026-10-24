@@ -4,6 +4,23 @@ This document is the planned evidence index for `BVP_sci::new`. It is not a
 release result yet. The old `BVP_SCI_STORY_TESTS.md` remains the historical
 reference for the legacy implementation.
 
+## 2026-10-22 Componentwise Symbolic Frontend Parity
+
+Debug test `numerical::BVP_sci::new::story_tests::combustion_bvp_componentwise_frontend_parity_pins_compiler_input`
+uses the existing six-state combustion-shaped equation fixture to compare the
+solver-facing `BvpSciLambdifyPlan` for `ExprLegacy` and `AtomViewNative` before
+the nonlinear solve can obscure a callback discrepancy. It checks RHS values
+against Expr Lambdify, equal fixed sparse Jacobian coordinates (12 entries),
+sparse values against dense output, frontend Jacobian parity, and AtomView
+state derivatives against central finite differences.
+
+The exact equation text, state/time ABI and evaluation point are guarded by
+FNV-1a fingerprint `fnv1a64-163ad2c0db7000c1`. This is an intentional fixture
+change gate, not a hash of compiled machine code. The targeted Debug test passed
+with all componentwise checks. This local callback result does not replace the
+existing end-to-end frontend/layout tests, nor does it close captured-trajectory
+or BVP_Damp fixture coverage. No performance claim is made.
+
 ## 2026-10-09 Matched AOT/Lambdify continuation dashboard
 
 The new `bvp_sci_matched` dashboard is the compact repeated measurement for

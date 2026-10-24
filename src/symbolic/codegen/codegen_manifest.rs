@@ -718,15 +718,92 @@ mod tests {
             .runtime_plan(DenseJacobianChunkingStrategy::Whole),
         );
         let legacy = PreparedProblemManifest::from(&prepared);
-        let mut atom = legacy.clone();
-        atom.symbolic_route = PreparedSymbolicRoute::AtomViewNative;
+        let atom_residual = crate::parse!("x+1").expect("Atom residual should parse");
+        let atom_jacobian = crate::parse!("1").expect("Atom derivative should parse");
+        let input_symbol = crate::symbolic::View::state::Symbol::new(crate::wrap_symbol!("x"));
+        let atom_plan = crate::symbolic::bvp::atom_aot::AtomAotPreparedPlan::from_parts(
+            vec![atom_residual],
+            vec![crate::symbolic::View::jacobian::SparseAtomJacobianEntry {
+                row: 0,
+                col: 0,
+                value: atom_jacobian,
+            }],
+            vec!["x".to_string()],
+            vec![input_symbol],
+            0,
+            crate::symbolic::bvp::atom_aot::AtomAotMatrixLayout::Dense { rows: 1, cols: 1 },
+            ResidualChunkingStrategy::Whole,
+            SparseChunkingStrategy::Whole,
+        )
+        .expect("Atom AOT plan should validate");
+        let atom = PreparedProblemManifest::from_atom_aot_plan(
+            BackendKind::Aot,
+            MatrixBackend::Dense,
+            &atom_plan,
+            GeneratedFunctionsManifest {
+                residual_fn_name: "eval_residual".to_string(),
+                residual_chunk_names: vec!["eval_residual".to_string()],
+                residual_chunks: vec![GeneratedChunkManifest {
+                    fn_name: "eval_residual".to_string(),
+                    offset: 0,
+                    len: 1,
+                }],
+                jacobian_fn_name: "eval_jacobian".to_string(),
+                jacobian_chunk_names: vec!["eval_jacobian".to_string()],
+                jacobian_chunks: vec![GeneratedChunkManifest {
+                    fn_name: "eval_jacobian".to_string(),
+                    offset: 0,
+                    len: 1,
+                }],
+            },
+        );
 
         assert_eq!(legacy.symbolic_route.as_str(), "ExprLegacy");
         assert_eq!(atom.symbolic_route.as_str(), "AtomViewNative");
+        assert_eq!(legacy.io, atom.io, "frontends publish the same dense ABI");
+        assert_eq!(legacy.functions, atom.functions);
         assert_ne!(
             legacy.problem_key(),
             atom.problem_key(),
             "frontend route must participate in artifact identity"
+        );
+    }
+
+    #[test]
+    fn manifest_key_tracks_ordered_input_abi() {
+        let residuals = vec![Expr::parse_expression("x + y")];
+        let jacobian = vec![vec![
+            Expr::parse_expression("1"),
+            Expr::parse_expression("1"),
+        ]];
+        let variables = vec!["x", "y"];
+        let prepared = PreparedDenseProblem::new(
+            BackendKind::Aot,
+            MatrixBackend::Dense,
+            ResidualTask {
+                fn_name: "eval_residual",
+                residuals: &residuals,
+                variables: &variables,
+                params: None,
+            }
+            .runtime_plan(ResidualChunkingStrategy::Whole),
+            JacobianTask {
+                fn_name: "eval_jacobian",
+                jacobian: &jacobian,
+                variables: &variables,
+                params: None,
+            }
+            .runtime_plan(DenseJacobianChunkingStrategy::Whole),
+        );
+        let manifest = PreparedProblemManifest::from(&prepared);
+        let mut reordered = manifest.clone();
+        reordered.io.input_names.reverse();
+
+        assert_eq!(manifest.io.input_names, ["x", "y"]);
+        assert_ne!(
+            manifest.problem_key(),
+            reordered.problem_key(),
+            "changing the declared argument order must invalidate the AOT identity"
         );
     }
 

@@ -3,8 +3,8 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
 };
 
 /// Attach machine-readable context without changing the exception class or
@@ -161,6 +161,7 @@ native_error_kinds!(rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError {
     rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AotLifecycleFailure { .. } => "AotLifecycleFailure",
     rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AotBuildOutputDirMissing => "AotBuildOutputDirMissing",
     rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AtomPreparationFailure { .. } => "AtomPreparationFailure",
+    rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AtomConversionFailure { .. } => "AtomConversionFailure",
     rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::AtomDifferentiationFailure { .. } => "AtomDifferentiationFailure",
     rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::InvalidStateShape { .. } => "InvalidStateShape",
     rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError::InvalidOutputShape { .. } => "InvalidOutputShape",
@@ -279,6 +280,7 @@ native_error_kinds!(rustedscithe_core::numerical::optimization::varpro::symbolic
 });
 
 native_error_kinds!(rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError {
+    rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::Fitting(_) => "Fitting",
     rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::VarPro(_) => "VarPro",
     rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::SolverConfiguration(_) => "SolverConfiguration",
     rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::Gavin(_) => "Gavin",
@@ -303,6 +305,7 @@ native_error_kinds!(rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrat
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::CallbackExecutionFailed { .. } => "CallbackExecutionFailed",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::NonFiniteCallbackValue { .. } => "NonFiniteCallbackValue",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::PreparedRuntimeInvalidated { .. } => "PreparedRuntimeInvalidated",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::PreparedCallbackPreparationFailed { .. } => "PreparedCallbackPreparationFailed",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AtomAotPlanPreparationFailed { .. } => "AtomAotPlanPreparationFailed",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AotLifecycleFailure { .. } => "AotLifecycleFailure",
 });
@@ -799,11 +802,11 @@ mod tests {
 
     #[test]
     fn native_kind_uses_explicit_enum_discriminants() {
-        use rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError;
-        use rustedscithe_core::numerical::BE::BeError;
-        use rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError;
         use rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError;
         use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
+        use rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError;
+        use rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError;
+        use rustedscithe_core::numerical::BE::BeError;
 
         assert_eq!(
             native_variant(&BdfSolveError::InvalidMaxSteps),

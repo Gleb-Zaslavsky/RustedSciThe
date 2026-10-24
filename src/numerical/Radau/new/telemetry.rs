@@ -622,6 +622,22 @@ impl RadauTelemetry {
         }
     }
 
+    /// Attribute shared Expr state-Jacobian derivation to Radau's symbolic
+    /// Jacobian child scope. The enclosing preparation timer already includes
+    /// this work and must not be added to its children.
+    pub(crate) fn absorb_expr_jacobian_preparation(
+        &mut self,
+        snapshot: &crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot,
+    ) {
+        if !self.mode.collects_timings() {
+            return;
+        }
+        use crate::symbolic::ivp_telemetry::IvpColdStage;
+        let elapsed_ms = |stage| snapshot.cold_stage(stage).elapsed.as_secs_f64() * 1_000.0;
+        self.timings.symbolic_jacobian_ms += elapsed_ms(IvpColdStage::SymbolicDifferentiation)
+            + elapsed_ms(IvpColdStage::Simplification);
+    }
+
     /// Merge numerical stages collected by the reusable solve workspace.
     ///
     /// Symbolic callback preparation owns callback telemetry, while the

@@ -292,6 +292,10 @@ fn symbolic_preparation_timings_retain_backend_cold_stages() {
     assert_eq!(backend.mode, IvpTelemetryMode::Detailed);
     assert!(backend.cold_stage(IvpColdStage::SymbolicJacobian).calls > 0);
     assert!(backend.cold_stage(IvpColdStage::SymbolicJacobian).elapsed > std::time::Duration::ZERO);
+    assert!(
+        backend.allocated_bytes >= std::mem::size_of::<f64>() as u64,
+        "the preparation snapshot should include the callback's one-value Jacobian scratch"
+    );
     assert!(solver.preparation_timings().symbolic_backend_ms > 0.0);
 }
 

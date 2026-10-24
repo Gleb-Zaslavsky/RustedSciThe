@@ -834,3 +834,255 @@ fn bdf_jacobian_max_diff(left: &BdfJacobian, right: &BdfJacobian) -> f64 {
         _ => f64::INFINITY,
     }
 }
+
+fn bdf_jacobian_entry(jacobian: &BdfJacobian, row: usize, col: usize) -> f64 {
+    match jacobian {
+        BdfJacobian::Dense(matrix) => matrix[(row, col)],
+        BdfJacobian::SparseTriplets { triplets, .. } => triplets
+            .iter()
+            .find(|entry| entry.row == row && entry.col == col)
+            .map_or(0.0, |entry| entry.val),
+        BdfJacobian::Banded(matrix) => matrix.get(row, col).copied().unwrap_or(0.0),
+    }
+}
+
+fn lsode2_symbolic_fixture_fingerprint(config: &Lsode2ProblemConfig) -> String {
+    let equations = config
+        .eq_system
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let variables = config.values.join(",");
+    let parameters = config
+        .equation_parameters
+        .as_deref()
+        .unwrap_or_default()
+        .join(",");
+    let initial_state_bits = config
+        .y0
+        .iter()
+        .map(|value| format!("{:016x}", value.to_bits()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let parameter_value_bits = config
+        .equation_parameter_values
+        .as_ref()
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| format!("{:016x}", value.to_bits()))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+    let canonical = format!(
+        "equations={equations}\nvariables={variables}\ntime_arg={}\nt0={:016x}\ny0={initial_state_bits}\nparameters={parameters}\nparameter_values={parameter_value_bits}\n",
+        config.arg,
+        config.t0.to_bits(),
+    );
+    let hash = canonical.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("fnv1a64-{hash:016x}")
+}
+
+#[test]
+fn lsode2_combustion_view_componentwise_parity_across_states_and_parameters() {
+    let base = combustion_like_story_base_config();
+    assert_eq!(
+        lsode2_symbolic_fixture_fingerprint(&base),
+        "fnv1a64-2b72ad61b128b0a2",
+        "update this pinned compiler-input fingerprint only with an intentional fixture review"
+    );
+    let names = story_jacobian_name_refs(&base);
+    let input_names = names
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    let state_column_start = names.len() - base.values.len();
+    let expr_jacobian = build_symbolic_jacobian(
+        &base.eq_system,
+        &base.values,
+        IvpSymbolicAssemblyBackend::ExprLegacy,
+        &IvpTelemetry::disabled(),
+    );
+    let expr_jacobian = compile_story_scalar_jacobian(&expr_jacobian, &names);
+    let atoms = base.eq_system.iter().map(expr_to_atom).collect::<Vec<_>>();
+    let prepared = crate::symbolic::View::PreparedAtomSystem::try_from_atoms(
+        &atoms,
+        &input_names,
+        None,
+        crate::symbolic::View::FunctionMap::default(),
+    )
+    .expect("the canonical combustion RHS should compile into a prepared Atom system");
+    let prepared_entries = prepared.jacobian_entries().collect::<Vec<_>>();
+
+    let base_parameters = base
+        .equation_parameter_values
+        .as_ref()
+        .expect("the canonical combustion fixture has parameter values")
+        .as_slice()
+        .to_vec();
+    let parameter_bindings = [
+        base_parameters.clone(),
+        vec![1.2e7, 5.2e4, 8.314, 298.0, 5.0e2, 0.05, 0.6],
+        vec![8.0e6, 4.8e4, 8.314, 305.0, 4.5e2, 0.02, 0.4],
+    ];
+    let states = [
+        base.y0.clone(),
+        DVector::from_vec(vec![0.7, 0.2, 500.0]),
+        DVector::from_vec(vec![0.3, 0.4, 800.0]),
+    ];
+
+    let mut scratch = crate::symbolic::View::PreparedAtomSystemScratch::default();
+    let mut residual = vec![0.0; prepared.residual_len()];
+    let mut atom_jacobian = vec![0.0; prepared.jacobian_len()];
+    let equation_parameters = base.equation_parameters.as_deref();
+
+    for (binding_index, (parameters, state)) in
+        parameter_bindings.iter().zip(states.iter()).enumerate()
+    {
+        let mut config = base.clone();
+        config.equation_parameter_values = Some(DVector::from_vec(parameters.clone()));
+        let mut args = story_jacobian_args(&config, state);
+
+        prepared
+            .residual_and_jacobian_into(&args, &mut residual, &mut atom_jacobian, &mut scratch)
+            .expect("prepared Atom residual/Jacobian evaluation should succeed");
+        let expr_residual = base
+            .eq_system
+            .iter()
+            .map(|expr| Expr::lambdify_borrowed_thread_safe(expr, &names)(&args))
+            .collect::<Vec<_>>();
+        for (row, (atom, expr)) in residual.iter().zip(expr_residual.iter()).enumerate() {
+            let scale = atom.abs().max(expr.abs()).max(1.0);
+            assert!(
+                (atom - expr).abs() <= 2.0e-12 * scale,
+                "binding {binding_index}, RHS row {row}: Atom={atom:e}, Expr={expr:e}"
+            );
+        }
+
+        let expr_jacobian_values = evaluate_story_scalar_jacobian(&expr_jacobian, &args);
+        let atom_state_jacobian = prepared_entries
+            .iter()
+            .zip(atom_jacobian.iter())
+            .filter_map(|(entry, value)| {
+                (entry.col >= state_column_start)
+                    .then(|| (entry.row, entry.col - state_column_start, *value))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            atom_state_jacobian.len(),
+            expr_jacobian_values.len(),
+            "binding {binding_index}: state Jacobian sparsity differs"
+        );
+        for (atom, expr) in atom_state_jacobian.iter().zip(expr_jacobian_values.iter()) {
+            assert_eq!((atom.0, atom.1), (expr.0, expr.1));
+            let scale = atom.2.abs().max(expr.2.abs()).max(1.0);
+            assert!(
+                (atom.2 - expr.2).abs() <= 2.0e-10 * scale,
+                "binding {binding_index}, Jacobian ({}, {}): Atom={:e}, Expr={:e}",
+                atom.0,
+                atom.1,
+                atom.2,
+                expr.2
+            );
+        }
+
+        // Check the solver-facing sparse order and compact band slots too.
+        let parameter_handle = std::sync::Arc::new(std::sync::RwLock::new(DVector::from_vec(
+            parameters.clone(),
+        )));
+        let mut sparse_callbacks = Vec::new();
+        let mut banded_callbacks = Vec::new();
+        for (storage, callbacks) in [
+            (NativeJacobianStorage::SparseTriplets, &mut sparse_callbacks),
+            (
+                NativeJacobianStorage::Banded { bandwidth: None },
+                &mut banded_callbacks,
+            ),
+        ] {
+            for frontend in [
+                IvpSymbolicAssemblyBackend::ExprLegacy,
+                IvpSymbolicAssemblyBackend::AtomView,
+            ] {
+                let mut callback =
+                    compile_native_symbolic_jacobian_with_parameter_handle_and_telemetry(
+                        &base.eq_system,
+                        &base.values,
+                        &base.arg,
+                        equation_parameters,
+                        Some(parameter_handle.clone()),
+                        storage,
+                        frontend,
+                        IvpTelemetry::disabled(),
+                    );
+                callbacks.push(callback(base.t0, state));
+            }
+        }
+        let sparse_expr = &sparse_callbacks[0];
+        let sparse_atom = &sparse_callbacks[1];
+        let banded_expr = &banded_callbacks[0];
+        let banded_atom = &banded_callbacks[1];
+        assert!(
+            bdf_jacobian_max_diff(sparse_expr, sparse_atom) <= 2.0e-10,
+            "binding {binding_index}: Sparse ExprLegacy/AtomView callback parity failed"
+        );
+        assert!(
+            bdf_jacobian_max_diff(banded_expr, banded_atom) <= 2.0e-10,
+            "binding {binding_index}: Banded ExprLegacy/AtomView callback parity failed"
+        );
+        for row in 0..base.eq_system.len() {
+            for col in 0..base.values.len() {
+                let sparse_value = bdf_jacobian_entry(sparse_atom, row, col);
+                assert!(
+                    (sparse_value - bdf_jacobian_entry(banded_atom, row, col)).abs() <= 2.0e-10,
+                    "binding {binding_index}: Sparse/Banded mismatch at ({row}, {col})"
+                );
+                let prepared_value = atom_state_jacobian
+                    .iter()
+                    .find(|entry| entry.0 == row && entry.1 == col)
+                    .map_or(0.0, |entry| entry.2);
+                assert!(
+                    (sparse_value - prepared_value).abs() <= 2.0e-10,
+                    "binding {binding_index}: callback/prepared Atom mismatch at ({row}, {col})"
+                );
+            }
+        }
+
+        for state_col in 0..state.len() {
+            let arg_index = state_column_start + state_col;
+            let step = 1.0e-6 * args[arg_index].abs().max(1.0);
+            args[arg_index] += step;
+            let plus = base
+                .eq_system
+                .iter()
+                .map(|expr| Expr::lambdify_borrowed_thread_safe(expr, &names)(&args))
+                .collect::<Vec<_>>();
+            args[arg_index] -= 2.0 * step;
+            let minus = base
+                .eq_system
+                .iter()
+                .map(|expr| Expr::lambdify_borrowed_thread_safe(expr, &names)(&args))
+                .collect::<Vec<_>>();
+            args[arg_index] += step;
+
+            for row in 0..base.eq_system.len() {
+                let finite_difference = (plus[row] - minus[row]) / (2.0 * step);
+                let atom_derivative = atom_state_jacobian
+                    .iter()
+                    .find(|entry| entry.0 == row && entry.1 == state_col)
+                    .map_or(0.0, |entry| entry.2);
+                let scale = atom_derivative
+                    .abs()
+                    .max(finite_difference.abs())
+                    .max(1.0e-8);
+                assert!(
+                    (atom_derivative - finite_difference).abs() <= 2.0e-5 * scale + 1.0e-10,
+                    "binding {binding_index}, Jacobian ({row}, {state_col}): Atom={atom_derivative:e}, FD={finite_difference:e}"
+                );
+            }
+        }
+    }
+}

@@ -144,3 +144,60 @@ Auto/Parallel correctness and dispatch accounting are green through dimension
 `1024` and worker counts `1/2/4`, but the release data still does not establish
 a portable Parallel break-even. Auto's safe sequential fallback remains the
 current production policy.
+
+## 2026-10-22 Experimental PreparedAtom LSODE2 A/B
+
+The opt-in `PreparedAtom` callback route was compared with the current
+AtomViewNative callbacks and ExprLegacy on the same parameterized diffusion
+chain, faithful Banded LU, sequential policy, and `n=256`. The release story
+interleaved seven full-solve samples per route and separately timed repeated
+warm callbacks. The report is
+[`prepared_atom_diffusion_chain_release_ab_story`](../../../test_reports/LSODE2_PreparedAtom/release/numerical__LSODE2__prepared_atom_runtime__tests__prepared_atom_diffusion_chain_release_ab_story.md).
+In that raw table, the `correctness` cell labels the scenario-level strict
+AtomViewNative/PreparedAtom gate; the ExprLegacy row is diagnostic-only, as
+stated by the separate ExprLegacy-versus-AtomViewNative drift line.
+
+| Route | Residual callback us | Jacobian callback us | Solver prepare ms | Full solve ms | Prepare + solve ms |
+|---|---:|---:|---:|---:|---:|
+| ExprLegacy | 8.434 | 4.232 | 12.168 | 9.206 | 21.374 |
+| AtomViewNative | 10.209 | 3.555 | 6.555 | 10.199 | 16.754 |
+| PreparedAtom (experimental) | 10.120 | 21.643 | 5.655 | 14.671 | 20.326 |
+
+Every route took `220` accepted and `0` rejected steps, with `402` residual
+evaluations, `237` Jacobian evaluations, and `393` linear solves. AtomViewNative
+and PreparedAtom also matched the accepted time grid and trajectory within the
+strict A/B gate. PreparedAtom's residual callback was effectively tied with
+AtomViewNative, but its Jacobian callback was `6.1x` slower. The modest solver
+preparation reduction did not amortize: full solve was `43.8%` slower and the
+measured prepare-plus-solve total was `21.3%` slower than AtomViewNative.
+
+ExprLegacy and AtomViewNative had identical discrete work; their maximum
+accepted-grid difference was `4.126e-10` and maximum state difference was
+`6.313e-13`. This small frontend numerical drift is recorded separately and
+does not affect the strict AtomViewNative-versus-PreparedAtom comparison.
+
+**Decision:** this workload does not justify migrating LSODE2 to
+PreparedAtom. Keep the adapter explicitly experimental and opt-in; do not
+change the default AtomViewNative route or expose this route through Python.
+The measured hotspot is the prepared Jacobian callback, so any future attempt
+should first establish why more work is performed per Jacobian evaluation and
+must repeat the same end-to-end gate before proposing a default change.
+
+## ExprLegacy Jacobian-Builder A/B (2026-10-23)
+
+The ignored Release story `lsode2_exprlegacy_scalar_reference_vs_optimized_full_solve_ab`
+compares the previous scalar dense symbolic-Jacobian builder directly with the
+optimized ExprLegacy builder on identical LSODE2 Sparse and Banded solves. At
+`n=256/512`, the final-source optimized route reduced full-solve medians by
+`28.5%/39.0%` for Sparse and `36.5%/48.4%` for Banded. Cold preparation was
+about `4.6-7.6x` faster; solve time was nearly unchanged, with the largest
+difference a `3.4%` Banded increase at `n=512`. Residual/Jacobian/linear work,
+accepted/rejected steps and final states matched exactly in the paired runs.
+
+This is direct end-to-end evidence for the tested large LSODE2 workloads, not a
+claim about small systems or every solver's ExprLegacy path. Full paired data,
+scope definitions and the corresponding BDF result are in
+[`IVP_SYMBOLIC_STORY_TESTS.md`](../../symbolic/IVP_SYMBOLIC_STORY_TESTS.md).
+Reproduce with
+`cargo test --release --lib numerical::LSODE2::large_performance_story_tests::lsode2_exprlegacy_scalar_reference_vs_optimized_full_solve_ab -- --ignored --nocapture`;
+the test defaults to dimensions `256,512` and 15 paired repetitions.

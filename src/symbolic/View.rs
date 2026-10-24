@@ -41,6 +41,9 @@ mod operation_corpus_tests;
 pub mod parser;
 mod pipeline_examples;
 pub mod prepared;
+#[cfg(test)]
+#[path = "View/prepared_bvp_diagnostics.rs"]
+mod prepared_bvp_diagnostics;
 pub mod printer;
 #[cfg(test)]
 mod scalar_jacobian_story_tests;

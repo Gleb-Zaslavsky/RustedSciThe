@@ -20,7 +20,8 @@ replacement for a general LM fit.
 
 The builder collects data, model, unknown names, and initial values, then
 `build()` solves the selected route. `ExprLegacy` and sequential evaluation
-are the defaults.
+inside one symbolic callback are the defaults. Classic LM uses `Auto`
+observation batching for large data sets as described below.
 
 ```rust,ignore
 use RustedSciThe::numerical::optimization::{
@@ -53,6 +54,38 @@ in the same order as the unknown names.
 
 The generic builder accepts `&str` and string iterators. Existing owned
 `String` and `Vec<String>` calls remain valid.
+
+## Observation batching and memory
+
+`FittingObservationPolicy` controls work across samples, independently of
+`LambdifyExecutionPolicy` inside one symbolic callback. Classic `Fitting` and
+`UniversalFitting` LM default to `Auto`: at least 20,001 samples, sequential
+inner callbacks, and more than one worker in the current Rayon pool select
+1,024-sample blocks. Other cases remain sequential. This threshold is the
+smallest measured winning scale, not a universal break-even guarantee.
+
+```rust,ignore
+use RustedSciThe::numerical::optimization::sym_fitting::FittingObservationPolicy;
+
+// Keep large fits sequential when memory is more important than throughput.
+let fitting = UniversalFitting::new()
+    .with_observation_policy(FittingObservationPolicy::Sequential);
+```
+
+Batching requires a temporary sample-major buffer before restoring the public
+equation-major residual/Jacobian layout. Its Jacobian payload is
+`8 * samples * equations * fitted_parameters` bytes, in addition to the output
+matrix (residual staging is separate). See `FITTING_STORY_TESTS.md` for measured
+peak heap and full-solve comparisons on both frontends. Sequential remains a
+supported low-memory route, not a deprecated reference implementation.
+
+Explicit `Parallel { min_observations }` requires sequential inner callbacks;
+requesting both parallel layers returns a typed configuration error, including
+on repeated solves. `Auto` respects an explicitly parallel inner policy and
+keeps observations sequential. `Fitting::resolved_observation_policy()` exposes
+the decision for the current data and Rayon pool. Universal Gavin/VarPro reject
+an explicit observation policy because their adapters have separate contracts.
+Universal LM propagates `FittingError` through `UniversalFittingError::Fitting`.
 
 ## Select the symbolic frontend
 

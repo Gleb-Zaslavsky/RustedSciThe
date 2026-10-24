@@ -185,6 +185,137 @@ fn combustion_like_equations() -> Vec<Expr> {
     ]
 }
 
+#[test]
+fn combustion_bvp_componentwise_frontend_parity_pins_compiler_input() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "BVP_sci_new",
+        "combustion_bvp_componentwise_frontend_parity",
+    );
+    let equations = combustion_like_equations();
+    let state_names = ["Teta", "q", "C0", "J0", "C1", "J1"].map(str::to_owned);
+    let parameter_names: [String; 0] = [];
+    let x = 0.37_f64;
+    let state: [f64; 6] = [0.15, -0.05, 0.8, 0.2, 0.1, -0.1];
+    let equations_text = equations
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let state_bits = state
+        .iter()
+        .map(|value| format!("{:016x}", value.to_bits()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let canonical_input = format!(
+        "equations={equations_text}\nstates={}\nparameters=\nindependent=x\nx={:016x}\nstate={state_bits}\n",
+        state_names.join(","),
+        x.to_bits(),
+    );
+    let fingerprint = canonical_input
+        .bytes()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+    assert_eq!(
+        fingerprint, 0x163ad2c0db7000c1,
+        "review the BVP_sci fixture/compiler-input change before updating its fingerprint"
+    );
+
+    let mut plans = [
+        BvpSciLambdifyPlan::prepare(
+            BvpSciAssembly::ExprLegacy,
+            &equations,
+            &state_names,
+            &parameter_names,
+            "x",
+            BvpSciTelemetry::disabled(),
+        )
+        .expect("ExprLegacy combustion fixture should prepare"),
+        BvpSciLambdifyPlan::prepare(
+            BvpSciAssembly::AtomViewNative,
+            &equations,
+            &state_names,
+            &parameter_names,
+            "x",
+            BvpSciTelemetry::disabled(),
+        )
+        .expect("AtomViewNative combustion fixture should prepare"),
+    ];
+    assert_eq!(
+        plans[0].jacobian_pattern(),
+        plans[1].jacobian_pattern(),
+        "ExprLegacy and AtomView must retain the same fixed sparse coordinate order"
+    );
+    assert_eq!(plans[0].jacobian_pattern().len(), 12);
+
+    let symbols = std::iter::once("x")
+        .chain(state_names.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    let rhs = equations
+        .iter()
+        .map(|equation| Expr::lambdify_borrowed_thread_safe(equation, &symbols))
+        .collect::<Vec<_>>();
+    let mut residuals: [Vec<f64>; 2] = std::array::from_fn(|_| vec![0.0; equations.len()]);
+    let mut dense_jacobians: [Vec<f64>; 2] =
+        std::array::from_fn(|_| vec![0.0; equations.len() * state_names.len()]);
+    let mut sparse_values: [Vec<f64>; 2] =
+        std::array::from_fn(|_| vec![0.0; plans[0].jacobian_pattern().len()]);
+    for (route, plan) in plans.iter_mut().enumerate() {
+        let mut arguments = vec![0.0; 1 + state.len()];
+        plan.evaluate_rhs(x, &state, &[], &mut arguments, &mut residuals[route])
+            .expect("combustion RHS should evaluate");
+        plan.evaluate_jacobian_dense(x, &state, &[], &mut arguments, &mut dense_jacobians[route])
+            .expect("combustion state Jacobian should evaluate");
+        plan.evaluate_jacobian_values(x, &state, &[], &mut arguments, &mut sparse_values[route])
+            .expect("combustion sparse Jacobian values should evaluate");
+    }
+
+    let mut arguments = vec![x];
+    arguments.extend(state);
+    for row in 0..equations.len() {
+        let reference = rhs[row](&arguments);
+        for route in 0..plans.len() {
+            assert!(
+                (residuals[route][row] - reference).abs() <= 2.0e-12,
+                "route {route}, residual row {row}: got {:e}, expected {reference:e}",
+                residuals[route][row]
+            );
+        }
+    }
+    for (entry_index, &(row, col)) in plans[0].jacobian_pattern().iter().enumerate() {
+        for route in 0..plans.len() {
+            let dense_value = dense_jacobians[route][row * state_names.len() + col];
+            assert!(
+                (sparse_values[route][entry_index] - dense_value).abs() <= 2.0e-12,
+                "route {route}, sparse entry {entry_index} ({row}, {col}) does not match dense output"
+            );
+        }
+        assert!(
+            (dense_jacobians[0][row * state_names.len() + col]
+                - dense_jacobians[1][row * state_names.len() + col])
+                .abs()
+                <= 2.0e-12,
+            "ExprLegacy/AtomView Jacobian mismatch at ({row}, {col})"
+        );
+    }
+
+    for col in 0..state.len() {
+        let step = 1.0e-6 * state[col].abs().max(1.0);
+        let mut plus_args = arguments.clone();
+        let mut minus_args = arguments.clone();
+        plus_args[col + 1] += step;
+        minus_args[col + 1] -= step;
+        for row in 0..equations.len() {
+            let finite_difference = (rhs[row](&plus_args) - rhs[row](&minus_args)) / (2.0 * step);
+            let atom_value = dense_jacobians[1][row * state_names.len() + col];
+            assert!(
+                (finite_difference - atom_value).abs() <= 2.0e-6 * atom_value.abs().max(1.0),
+                "AtomView Jacobian ({row}, {col})={atom_value:e}, finite difference={finite_difference:e}"
+            );
+        }
+    }
+}
+
 fn combustion_like_boundary_values() -> HashMap<String, Vec<(usize, f64)>> {
     HashMap::from([
         ("Teta".into(), vec![(0, 0.0)]),

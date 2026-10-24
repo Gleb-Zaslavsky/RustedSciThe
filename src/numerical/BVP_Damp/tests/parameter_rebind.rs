@@ -96,6 +96,10 @@ mod tests {
             .collect()
     }
 
+    fn callback_data_address<T: ?Sized>(callback: &T) -> usize {
+        callback as *const T as *const () as usize
+    }
+
     #[test]
     fn prepared_numeric_rebind_updates_dense_sparse_and_banded_callbacks() {
         for frontend in [
@@ -113,6 +117,13 @@ mod tests {
                 solver.try_eq_generate(None, None).unwrap_or_else(|error| {
                     panic!("{} preparation failed: {error:?}", route.name())
                 });
+                let prepared_fun_address = callback_data_address(&*solver.fun);
+                let prepared_jac_address = callback_data_address(
+                    &**solver
+                        .jac
+                        .as_ref()
+                        .expect("symbolic preparation should install a Jacobian"),
+                );
                 let state_len = solver.values.len() * solver.n_steps;
                 solver.y = match route {
                     Route::Sparse => {
@@ -133,6 +144,23 @@ mod tests {
                 solver
                     .try_set_param_values(Some(vec![5.0]))
                     .expect("numeric rebind should be accepted");
+                assert_eq!(
+                    prepared_fun_address,
+                    callback_data_address(&*solver.fun),
+                    "{frontend:?}/{} rebind must update the shared parameter binding, not rebuild the residual callback",
+                    route.name()
+                );
+                assert_eq!(
+                    prepared_jac_address,
+                    callback_data_address(
+                        &**solver
+                            .jac
+                            .as_ref()
+                            .expect("rebind must retain the prepared Jacobian callback"),
+                    ),
+                    "{frontend:?}/{} rebind must retain the prepared Jacobian callback",
+                    route.name()
+                );
                 let rebound_stats = solver.get_statistics();
                 assert!(
                     rebound_stats.telemetry.counters.factorization_invalidations

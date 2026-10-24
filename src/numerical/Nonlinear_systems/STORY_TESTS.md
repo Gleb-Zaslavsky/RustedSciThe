@@ -3831,3 +3831,51 @@ The allocation audit now writes the full counters/bytes/timing table to
 its own compact table. The local smoke run passed for both changed benchmark
 targets. Criterion interval aggregation and worker/chunk/dispatch telemetry
 remain open and were intentionally not addressed by this local change.
+
+## 73. Expr Dependency-Aware Jacobian Preparation A/B: 2026-10-24
+
+An opt-in ExprLegacy experiment skipped symbolic derivatives for variables
+structurally absent from each equation while retaining the public dense
+symbolic and numeric Jacobian shapes. It did not change callback thresholding
+or runtime evaluation semantics. The legacy all-pairs derivative builder
+remained the reference and default.
+
+Debug parity passed for a 128-variable sparse chain, a fully coupled dense
+system, an Atom frontend rejection contract, and a convergent 24-variable
+solver case. Residuals, numeric and symbolic Jacobians, final solution,
+iteration count, and discrete solver counters matched. At `n=128`, the chain
+reported 16,384 legacy derivative jobs and fewer than 820 candidate jobs.
+
+The release A/B used seven alternating-order repetitions at `n=512` on the
+existing quadratic-chain and band-five corpora. Each route prepared afresh,
+bound, and solved with the same Damped Newton method and detailed solver
+telemetry. The table reports medians in milliseconds; `cold-to-solution`
+includes preparation, binding, and numerical solve. Solver counters were
+`(residual, Jacobian, linear solves, iterations) = (7, 4, 3, 3)` for every row.
+
+| workload | route | differentiation | preparation | numerical solve | cold-to-solution | max solution diff |
+|---|---|---:|---:|---:|---:|---:|
+| quadratic-chain | legacy dense | 2.746 | 11.764 | 13.751 | 25.605 | 0 |
+| quadratic-chain | dependency-aware | 3.585 | 12.847 | 13.695 | 26.639 | 0 |
+| band-five | legacy dense | 8.554 | 34.850 | 14.218 | 49.206 | 0 |
+| band-five | dependency-aware | 8.032 | 34.774 | 14.258 | 49.019 | 0 |
+
+**Decision:** the candidate did not demonstrate a meaningful end-to-end win.
+It was slower by about 4.0% on quadratic-chain and effectively tied on
+band-five, while the differentiation-stage changes did not translate into
+reliable whole-operation improvement. Keep `LegacyDense` as the production
+default; do not deprecate it. The dependency-aware option remains explicitly
+experimental and is not recommended for production based on this evidence.
+Do not spend a solver-wide release/perf-gates cycle stabilizing this candidate
+unless a different workload first shows a material cold-preparation cost and
+a repeatable full-operation benefit.
+
+The focused command was:
+
+```text
+cargo test --release --lib numerical::Nonlinear_systems::nonlinear_lambdify_stage_story_tests::tests::dependency_aware_expr_jacobian_large_workload_ab -- --ignored --nocapture --test-threads=1
+```
+
+This was a local targeted release A/B on the then-dirty working tree, not a
+clean-source perf-gates baseline. The four-stage architecture stabilization
+gate was therefore not entered for this rejected optimization.

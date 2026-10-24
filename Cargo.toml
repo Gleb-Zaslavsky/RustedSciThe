@@ -108,6 +108,9 @@ superlu = []
 superlu-experimental = ["superlu"]
 # The standalone performance gate runner is opt-in and has no library impact.
 perf-gates = []
+# Adds a process-wide counting allocator only to the PreparedAtomSystem A/B
+# diagnostic target; omit it for uninstrumented callback timing.
+prepared-atom-allocation-audit = []
 
 [package.metadata.rust-analyzer]
 cargo = { features = ["arrayfire", "cuda"] }
@@ -180,6 +183,9 @@ harness = false
 name = "nonlinear_systems_allocation_audit"
 harness = false
 [[bench]]
+name = "fitting_observation_batch_memory_audit"
+harness = false
+[[bench]]
 name = "nonlinear_preparation_telemetry"
 harness = false
 [[bench]]
@@ -248,6 +254,19 @@ harness = false
 
 [[bench]]
 name = "gavin_fitting"
+harness = false
+
+[[bench]]
+name = "symbolic_prepared_runtime"
+harness = false
+
+[[bench]]
+name = "symbolic_prepared_memory_audit"
+harness = false
+
+[[bench]]
+name = "bvp_damp_prepared_atom_ab"
+path = "benches/bvp_damp_prepared_atom_ab.rs"
 harness = false
 
 [profile.bench]

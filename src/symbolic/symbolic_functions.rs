@@ -51,6 +51,7 @@ use std::sync::Mutex;
 ///     println!("function vector after evaluate_funvector_lambdified_DMatrix = {:?} \n", Jacobian_instance.evaluated_functions_DVector);
 /// ```
 
+#[allow(deprecated)]
 pub struct Jacobian {
     pub vector_of_functions: Vec<Expr>, // vector of symbolic functions/expressions
     pub lambdified_functions: Vec<Box<dyn Fn(Vec<f64>) -> f64>>, // vector of lambdified functions (symbolic functions converted to rust functions)
@@ -71,16 +72,32 @@ pub struct Jacobian {
     pub lambdified_functions_IVP: Vec<Box<dyn Fn(f64, Vec<f64>) -> f64>>,
     pub function_jacobian_IVP_DMatrix: Box<dyn Fn(f64, &DVector<f64>) -> DMatrix<f64>>,
     pub lambdified_functions_IVP_DVector: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>,
+    #[deprecated(
+        note = "abandoned IVP sprs callback; use the solver's supported dense or native Atom route"
+    )]
     pub function_jacobian_IVP_CsMat: Box<dyn Fn(f64, &CsVec<f64>) -> CsMat<f64>>,
+    #[deprecated(
+        note = "abandoned IVP sprs callback; use the solver's supported dense or native Atom route"
+    )]
     pub lambdified_functions_IVP_CsVec: Box<dyn Fn(f64, &CsVec<f64>) -> CsVec<f64>>,
+    #[deprecated(
+        note = "abandoned IVP nalgebra sparse callback; use the solver's supported dense or native Atom route"
+    )]
     pub function_jacobian_IVP_CsMatrix: Box<dyn Fn(f64, &DVector<f64>) -> CsMatrix<f64>>,
+    #[deprecated(
+        note = "abandoned IVP SparseColMat callback without solver call sites; use the solver-native Atom route"
+    )]
     pub function_jacobian_IVP_SparseColMat: Box<dyn Fn(f64, &Col<f64>) -> SparseColMat<usize, f64>>,
+    #[deprecated(
+        note = "abandoned IVP SparseColMat residual callback without solver call sites; use the solver-native Atom route"
+    )]
     pub lambdified_functions_IVP_Col: Box<dyn Fn(f64, &Col<f64>) -> Col<f64>>,
     pub bounds: Option<Vec<(f64, f64)>>,
     pub rel_tolerance_vec: Option<Vec<f64>>,
     pub bandwidth: Option<(usize, usize)>,
 }
 
+#[allow(deprecated)]
 impl Jacobian {
     pub fn new() -> Self {
         Self {
@@ -577,6 +594,9 @@ impl Jacobian {
     }
     //_________________________SPARSE_MATRICES SECTION____________________________
 
+    #[deprecated(
+        note = "abandoned IVP sprs callback; use the solver's supported dense or native Atom route"
+    )]
     pub fn calc_jacobian_fun_IVP_CsMat(
         jac: Vec<Vec<Expr>>,
         vector_of_functions_len: usize,
@@ -611,6 +631,10 @@ impl Jacobian {
         })
     } // end of function
 
+    #[deprecated(
+        note = "abandoned IVP sprs callback; use the solver's supported dense or native Atom route"
+    )]
+    #[allow(deprecated)]
     pub fn jacobian_generate_IVP_CsMat(&mut self, arg: &str, variable_str: Vec<&str>) {
         let symbolic_jacobian = self.symbolic_jacobian.clone();
         let symbolic_jacobian_rc = symbolic_jacobian.clone();
@@ -631,6 +655,9 @@ impl Jacobian {
         self.function_jacobian_IVP_CsMat = new_jac;
     }
 
+    #[deprecated(
+        note = "abandoned IVP sprs callback; use the solver's supported dense or native Atom route"
+    )]
     pub fn vector_funvector_IVP_CsVec(&mut self, arg: &str, variable_str: Vec<&str>) {
         let vector_of_functions = &self.vector_of_functions;
         fn f(
@@ -663,6 +690,9 @@ impl Jacobian {
         );
     }
 
+    #[deprecated(
+        note = "abandoned IVP nalgebra sparse callback; use the solver's supported dense or native Atom route"
+    )]
     pub fn calc_jacobian_fun_IVP_CsMatrix(
         jac: Vec<Vec<Expr>>,
         vector_of_functions_len: usize,
@@ -702,6 +732,10 @@ impl Jacobian {
         })
     } // end of function
 
+    #[deprecated(
+        note = "abandoned IVP nalgebra sparse callback; use the solver's supported dense or native Atom route"
+    )]
+    #[allow(deprecated)]
     pub fn jacobian_generate_IVP_CsMatrix(&mut self, arg: &str, variable_str: Vec<&str>) {
         let symbolic_jacobian = self.symbolic_jacobian.clone();
         let symbolic_jacobian_rc = symbolic_jacobian.clone();
@@ -721,6 +755,9 @@ impl Jacobian {
         self.function_jacobian_IVP_CsMatrix = new_jac;
     }
 
+    #[deprecated(
+        note = "abandoned IVP SparseColMat callback without solver call sites; use the solver-native Atom route"
+    )]
     pub fn calc_jacobian_fun_IVP_SparseColMat(
         jac: Vec<Vec<Expr>>,
         vector_of_functions_len: usize,
@@ -786,6 +823,10 @@ impl Jacobian {
         })
     } // end of function
 
+    #[deprecated(
+        note = "abandoned IVP SparseColMat callback without solver call sites; use the solver-native Atom route"
+    )]
+    #[allow(deprecated)]
     pub fn jacobian_generate_IVP_SparseColMat(&mut self, arg: &str, variable_str: Vec<&str>) {
         let symbolic_jacobian = self.symbolic_jacobian.clone();
         let symbolic_jacobian_rc = symbolic_jacobian.clone();
@@ -805,6 +846,9 @@ impl Jacobian {
         //    DMatrix::from_rows(&new_jac) }) ;
         self.function_jacobian_IVP_SparseColMat = new_jac;
     }
+    #[deprecated(
+        note = "abandoned IVP SparseColMat residual callback without solver call sites; use the solver-native Atom route"
+    )]
     pub fn vector_funvector_IVP_Col(&mut self, arg: &str, variable_str: Vec<&str>) {
         let vector_of_functions = &self.vector_of_functions;
         fn f(

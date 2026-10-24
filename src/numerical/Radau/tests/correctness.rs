@@ -621,6 +621,72 @@ fn lambdify_callbacks_reuse_arguments_and_write_residual_and_jacobian_in_place()
 }
 
 #[test]
+fn expr_jacobian_compiles_only_nonzeros_and_preserves_all_layout_values() {
+    let residual = vec![
+        Expr::Var("y1".to_string()),
+        Expr::Var("y2".to_string()),
+        Expr::Var("y3".to_string()),
+    ];
+    let jacobian = vec![
+        Expr::Const(2.0),
+        Expr::Const(3.0),
+        Expr::Const(0.0),
+        Expr::Const(4.0),
+        Expr::Const(5.0),
+        Expr::Const(6.0),
+        Expr::Const(0.0),
+        Expr::Const(7.0),
+        Expr::Const(8.0),
+    ];
+    let plan =
+        LambdifyPlan::from_expressions(residual, Some(jacobian), "t", &["y1", "y2", "y3"], &[])
+            .unwrap();
+
+    assert_eq!(
+        plan.jacobian_pattern(),
+        &[(0, 0), (0, 1), (1, 0), (1, 1), (1, 2), (2, 1), (2, 2)]
+    );
+    assert_eq!(plan.compiled_jacobian_entry_count(), 7);
+
+    let mut workspace = plan.workspace();
+    let mut dense = [f64::NAN; 9];
+    plan.evaluate_jacobian_layout(
+        0.0,
+        &[1.0, 2.0, 3.0],
+        &[],
+        RadauMatrixLayout::Dense,
+        &mut dense,
+        &mut workspace,
+    )
+    .unwrap();
+    assert_eq!(dense, [2.0, 3.0, 0.0, 4.0, 5.0, 6.0, 0.0, 7.0, 8.0]);
+
+    let mut sparse = [0.0; 7];
+    plan.evaluate_jacobian_layout(
+        0.0,
+        &[1.0, 2.0, 3.0],
+        &[],
+        RadauMatrixLayout::Sparse,
+        &mut sparse,
+        &mut workspace,
+    )
+    .unwrap();
+    assert_eq!(sparse, [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+
+    let mut banded = [f64::NAN; 9];
+    plan.evaluate_jacobian_layout(
+        0.0,
+        &[1.0, 2.0, 3.0],
+        &[],
+        RadauMatrixLayout::Banded { lower: 1, upper: 1 },
+        &mut banded,
+        &mut workspace,
+    )
+    .unwrap();
+    assert_eq!(banded, [0.0, 3.0, 6.0, 2.0, 5.0, 8.0, 4.0, 7.0, 0.0]);
+}
+
+#[test]
 fn lambdify_parameter_series_reuses_prepared_plan_and_workspace() {
     let y = Expr::Var("y1".to_string());
     let p = Expr::Var("p".to_string());

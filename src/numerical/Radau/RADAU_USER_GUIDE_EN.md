@@ -16,6 +16,12 @@ solvers and no Radau-specific policy is needed.
 For frontend, layout, continuation, output, telemetry, execution policy, or
 AOT control, use the direct API:
 
+If you deliberately use the universal facade, its production Radau route keeps
+telemetry `Off` by default. Opt in with
+`UniversalODESolver::with_radau_telemetry_mode(...)`, choosing one of
+`RadauTelemetryMode::Counters`, `Timings`, or `Detailed`. Use `Off` to disable
+collection explicitly.
+
 ```rust
 use RustedSciThe::numerical::Radau::{
     RadauConfig, RadauFrontend, RadauMatrixLayout, RadauProblem, RadauSolver,
@@ -113,6 +119,13 @@ or fallback policy, but it adds residual evaluations and should be compared
 against an analytic-Jacobian run. AOT and structured layouts should be tested
 with an explicit Jacobian first; this makes the generated contract and pattern
 validation unambiguous.
+
+For ExprLegacy Lambdify, an omitted Jacobian with the analytic source selected
+is derived from the residual during preparation. The derivative builder keeps
+only state-variable dependencies and publishes row-major coordinates, so
+Sparse and Banded routes do not construct an intermediate dense symbolic
+matrix. Supplying `.with_jacobian(...)` continues to use the caller's explicit
+row-major expressions. AOT still requires an explicit Jacobian.
 
 ### Native callback API
 

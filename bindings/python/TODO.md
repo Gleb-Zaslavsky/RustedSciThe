@@ -2423,6 +2423,19 @@ substitution, differentiation, integration, symbolic vectors/matrices,
 Lambdify and prepared systems. New work must fill measured gaps and preserve
 the native representation selected by the caller.
 
+**Decision (2026-10-23):** do not expose `PreparedAtomSystem` or build the
+large-system Python facade on top of it. The runtime remained experimental in
+Rust and failed its BVP_Damp and LSODE2 full-solve production gates. Python
+bindings expose proven Rust production capabilities; they must not promote a
+rejected research route merely because its buffer-oriented API is convenient.
+`PreparedSparseAtomSystem` is likewise not a standalone Python runtime/API
+candidate. Its metadata ideas may be reused only through a production
+AtomViewNative implementation already accepted by the Rust solvers.
+
+- [x] Cancel the former `PreparedAtomSystem`/`PreparedSparseAtomSystem` Python
+  facade proposal. Keep those Rust types out of `__init__.py`, `_native.pyi`,
+  capability descriptors, examples and public documentation.
+
 - [ ] Audit scalar `Expr` methods against the stable Rust symbolic API and
   classify missing operations: normalization/simplification controls,
   pretty-print options, argument extraction, recursive `where` substitution,
@@ -2430,17 +2443,18 @@ the native representation selected by the caller.
 - [ ] Add typed Python errors for unsupported symbolic operations, invalid
   variable names, cyclic substitutions, unknown targets and invalid numerical
   evaluation inputs.
-- [ ] Add a prepared symbolic-system route that prepares residuals and
-  Jacobians once and evaluates them repeatedly without reparsing or rebuilding
-  the derivative graph.
+- [ ] Add a reusable large-system route only when it can delegate to the
+  production ExprLegacy and AtomViewNative infrastructure used by first-tier
+  Rust solvers. Do not create a binding-only numerical runtime to satisfy this
+  item; keep it open if the native production contract is not yet reusable.
 - [ ] Ensure the AtomNative route differentiates and evaluates in the native
   packed representation where the Rust API supports it; do not label an
   Expr-derived Jacobian as AtomNative merely because the final callable uses
   Atom lowering.
-- [ ] Add sparse/structured Jacobian preparation using the stable
-  `PreparedSparseAtomSystem` contract where its ownership and error semantics
-  are suitable for public use. Preserve variable order, candidate columns and
-  bandwidth metadata.
+- [ ] Add sparse/structured Jacobian output only through an accepted production
+  native route. Preserve variable order, candidate columns and bandwidth
+  metadata, but do not expose `PreparedSparseAtomSystem` directly or imply that
+  its existence makes the rejected `PreparedAtomSystem` production-ready.
 - [ ] Define batch evaluation methods accepting NumPy arrays with explicit
   shape and variable-axis conventions. Keep scalar evaluation and batch
   evaluation semantically identical, including domain and non-finite checks.
@@ -2489,7 +2503,9 @@ the native representation selected by the caller.
 2. [ ] Implement and test compact faithful banded storage and reusable LU.
 3. [ ] Add banded documentation, examples and Tabled correctness/performance
    evidence.
-4. [ ] Close prepared SymbolicSystem and structured-Jacobian gaps.
+4. [ ] Revisit reusable SymbolicSystem and structured-Jacobian gaps only after
+   production ExprLegacy/AtomViewNative native contracts can support them;
+   never use the rejected PreparedAtom research route as a shortcut.
 5. [ ] Add symbolic parity, reuse, failure and Python-boundary tests.
 6. [x] Audit block-tridiagonal candidates one at a time; expose only
    candidates that pass the same gates. QR and separate SuperLU facades are
@@ -2606,6 +2622,14 @@ solver-internal.
 
 ### 22.3 Symbolic API expansion
 
+This is a release-driving workstream, not a request to expose every public
+item in the Rust module. Keep only stable native capabilities whose ownership,
+error and performance contracts are suitable for Python. Sections 21.4 and
+21.6 are the broad inventory; the contracts below are the authoritative
+`0.1.5` implementation checklist.
+
+#### 22.3.1 Scalar and structured symbolic surface
+
 - [ ] Extend the stable Python symbolic facade with the audited high-value
   operations: simplification/normalization, pretty printing, argument
   extraction, substitution and recursive `where` definitions, symbolic
@@ -2614,17 +2638,105 @@ solver-internal.
 - [ ] Preserve explicit `ExprLegacy` and `AtomNative` frontend identity and
   preparation provenance. Do not expose an AtomNative label for an Expr-built
   graph or hide a fallback route behind a successful result.
-- [ ] Complete prepared symbolic-system and structured-Jacobian routes so
-  residuals and derivatives are built once and reused without reparsing or
-  rebuilding graphs. Keep NumPy scalar/batch shape, dtype and non-finite
-  semantics explicit.
 - [ ] Map unknown symbols, cyclic recursive substitutions, unsupported
   operations and invalid numerical inputs to stable typed Python exceptions.
-  Add parity, reuse, failure and long-series workspace tests for both
-  supported frontends.
+
+#### 22.3.2 Large-workload `SymbolicSystem` contract
+
+The current `LambdifiedSystem` owns a dense table of scalar callbacks,
+evaluates one point at a time and materializes a dense Jacobian as nested
+Python lists. That remains a compatibility route, not the target architecture
+for large residual systems.
+
+This workstream is blocked on a reusable production-native system contract.
+Here, "prepared" describes lifecycle reuse in general; it does not refer to
+`View::prepared::PreparedAtomSystem`, which is explicitly excluded from the
+Python public surface after its negative solver-level Rust experiments.
+
+- [ ] Add prepared system-level NumPy evaluation without crossing the Python
+  boundary once per scalar expression. Define the canonical input shapes as
+  `(n_variables,)` for one point and `(n_samples, n_variables)` for a batch;
+  residual outputs are `(n_residuals,)` and `(n_samples, n_residuals)`.
+  Require `float64`, document C-contiguous conversion/borrowing behavior, and
+  reject ambiguous axes rather than guessing.
+- [ ] Add exact-size writable `out` buffers for residual and Jacobian values.
+  Return the supplied array after filling it, reject wrong dtype, shape,
+  writability or unsupported aliasing with typed errors, and prove that the
+  steady-state route does not allocate a new result array.
+- [ ] Keep dense Jacobian materialization explicit. Its shapes are
+  `(n_residuals, n_variables)` for one point and
+  `(n_samples, n_residuals, n_variables)` for a batch; it must not be the only
+  evaluation route.
+- [ ] Define a SciPy-independent structured Jacobian contract backed by NumPy:
+  immutable `shape`, deterministic row-major `(row, column)` structure and a
+  separate values array of shape `(nnz,)` or `(n_samples, nnz)`. Preserve
+  variable order, structural zeros, candidate columns and optional bandwidth
+  metadata. Provide explicit dense conversion as a convenience, never as an
+  implicit preparation/evaluation step.
+- [ ] Reuse production residual evaluators, derivative graphs, Jacobian
+  structure and native workspaces where their Rust APIs support it. Repeated
+  scalar, batch and `out` calls must not reparse expressions, redifferentiate,
+  rebuild the structure or grow retained workspace without bound. Do not
+  satisfy this requirement by routing through `PreparedAtomSystem`.
+- [ ] Replace the semantic fallback in `SymbolicSystem.lambdify(AtomNative)`:
+  it currently obtains derivatives through Expr `self.jacobian()` and only
+  then lowers them to Atom callbacks. A future true Atom route must reuse the
+  production AtomViewNative preparation used by accepted Rust solver paths,
+  not `PreparedAtomSystem`. ExprLegacy remains a separate first-class route.
+- [ ] Expose immutable preparation provenance and diagnostics: requested and
+  effective frontend, residual/Jacobian preparation route, dimensions, `nnz`,
+  bandwidth when known, build count and reuse count. A fallback must be an
+  explicit typed outcome or explicitly reported provenance, never a silently
+  successful AtomNative result.
+- [ ] Add Debug contract matrices for ExprLegacy versus AtomNative values and
+  exact derivatives, scalar versus batch, dense versus structured values,
+  allocated versus `out` output, variable reordering, parameters, zero/non-
+  finite inputs and typed shape/dtype failures. Add long-series tests for one-
+  time preparation and bounded workspace/capacity growth.
+- [ ] Measure only Python-boundary costs here: NumPy validation/conversion,
+  native call transition and dense/structured result materialization. Keep
+  Rust-core symbolic and solver performance evidence in native benches,
+  STORY_TESTS and perf-gates.
+
+#### 22.3.3 Named definition graph facade
+
+Recursive substitution is already available, but it discards the model as a
+named dependency graph. The new facade must preserve names and make a large
+physical model inspectable before any expansion or numerical execution.
+
+- [ ] Expose the stable `symexpr_graphs` functionality as a distinct Python
+  facade, provisionally `NamedSymbolicModel`, rather than overloading the
+  existing residual-oriented `SymbolicSystem` class.
+- [ ] Construct definitions from an ordered sequence of `(name, Expr)` pairs
+  so duplicate names can be diagnosed. A mapping may be accepted as a
+  convenience only if its order contract is explicit. Preserve deterministic
+  definition, dependency and topological evaluation order across runs.
+- [ ] Expose definition lookup/listing, direct and transitive dependencies,
+  free variables, `evaluation_order(target)`, full expansion and controlled
+  `expand_until(target, stop_names)`. These inspection calls must not execute,
+  lambdify or eagerly flatten the complete model.
+- [ ] Map duplicate definitions, unknown targets and cyclic dependencies from
+  native enum variants to the existing compact Python exception hierarchy.
+  Preserve the target/cycle context as structured fields instead of parsing a
+  Rust Debug string.
+- [ ] Add an explicit bridge that selects ordered targets from a named model
+  and creates a residual `SymbolicSystem` with a declared variable schema.
+  Partial expansion boundaries must remain observable so users can keep
+  meaningful thermodynamic, kinetic or constitutive intermediates.
+- [ ] Add contract tests for diamonds, disconnected definitions, shared
+  subexpressions, cycles, unknown targets, stop sets and deterministic order.
+  Include one realistic chemistry or thermodynamics model demonstrating that
+  dependency inspection and partial expansion remain usable at scale.
+
+#### 22.3.4 Documentation and release evidence
+
+- [ ] Add parity, reuse, failure and installed-wheel tests for both supported
+  symbolic frontends and the named-model facade. Update `__init__.py`,
+  `_native.pyi`, capability descriptors and API inventory together.
 - [ ] Add a standalone RU/EN symbolic guide and a representative Python
-  example suite covering construction, exact Jacobians, substitutions,
-  recursive definitions, integration, structured systems and evaluation.
+  example suite covering construction, exact and structured Jacobians, NumPy
+  batches and `out`, substitutions, named definitions, controlled expansion,
+  integration and repeated prepared evaluation.
 
 ### 22.4 0.1.5 completion gates
 

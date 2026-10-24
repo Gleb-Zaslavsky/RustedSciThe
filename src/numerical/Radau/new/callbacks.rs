@@ -13,6 +13,7 @@ use super::{
 };
 use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_ivp::SparseSymbolicJacobian;
 
 /// The symbolic frontend is selected once during preparation.
 ///
@@ -59,6 +60,26 @@ pub(crate) struct SymbolicCallbackSession<'a> {
 }
 
 impl PreparedSymbolicCallbacks {
+    /// Prepare ExprLegacy callbacks from the shared coordinate-form Jacobian.
+    pub(crate) fn prepare_expr_sparse(
+        residual: Vec<Expr>,
+        jacobian: SparseSymbolicJacobian,
+        independent_variable: &str,
+        variables: &[&str],
+        parameters: &[&str],
+        execution_policy: IvpLambdifyExecutionPolicy,
+    ) -> Result<Self, RadauError> {
+        LambdifyPlan::from_sparse_expressions_with_policy(
+            residual,
+            jacobian,
+            independent_variable,
+            variables,
+            parameters,
+            execution_policy,
+        )
+        .map(Self::ExprLegacy)
+    }
+
     /// Prepare one selected symbolic frontend and its immutable callback plan.
     pub(crate) fn prepare(
         assembly: RadauAssembly,

@@ -1,5 +1,109 @@
 # TODO: Parameterized Nonlinear Systems
 
+## Symbolic Frontend Optimization Campaign (2026-10-24)
+
+This campaign transfers only evidence-backed IVP symbolic techniques to the
+nonlinear and fitting workloads. Both Expr and Atom frontends, plus AOT where
+supported, remain first-class; this is not an Atom migration. Fitting batch
+dispatch has since been accepted for production; its four-stage stabilization
+remains open in `../optimization/TODO.md`.
+
+### Pilot A: Fitting observation-level batching
+
+- [x] Implement observation-batched residual/Jacobian evaluation for canonical
+  fitting. It was initially opt-in during the A/B study; production now uses
+  scale-aware `Auto`, and `Sequential` remains the supported reference and
+  low-memory route.
+- [x] Parallelize across 1,024-observation blocks, not inside each small
+  per-observation Jacobian callback. Preserve equation-major output layout,
+  sample ordering, typed callback failures, and callback semantics.
+- [x] Keep observation dispatch distinct from the symbolic callback's
+  `LambdifyExecutionPolicy`; nested Rayon policies are explicitly rejected.
+- [x] In debug tests, compare residuals, Jacobians, solver trajectory, final
+  fit, and discrete telemetry between reference and opt-in paths for Expr and
+  AtomView. Multi-equation sample ordering crosses block boundaries, and
+  invalid callback inputs preserve typed failure categories.
+- [x] Run five paired release repetitions on 20,001- and 100,001-observation
+  fits for Expr and Atom. Median full-solve improvement ranged from 50.6% to
+  71.6%, with matching per-frontend iteration and solver counters. Evidence
+  and the exact table are in `../optimization/FITTING_STORY_TESTS.md`.
+- [x] Account for the opt-in buffer shape: at 100,001 observations, one
+  equation, and four parameters, it adds 4.0 MB payload per residual/Jacobian
+  pair (3.2 MB Jacobian plus 0.8 MB residual) and two staging allocations.
+- [x] Measure allocator-observed peak memory and allocation overhead across
+  large sample counts and varied equation/parameter counts. The 256-to-1,024
+  block-size follow-up reduced parallel allocation counts by 68-70% without
+  measured peak-heap or full-solve regression; the additional staging peak
+  remains linear in observations, equations, and parameters.
+- [x] Extend A/B to a second fitting model family: two equations and six
+  parameters. Seven alternating-order release pairs preserved the solution
+  and discrete counters for Expr and AtomView, with 37-54% lower prepare+solve
+  medians. Gavin/Universal adapter parity remains a separate scope decision.
+- [x] Accept Fitting batching for production (2026-10-24): `Auto` selects the
+  measured large-observation route, with an explicit supported `Sequential`
+  low-memory option. Universal LM forwards it; Gavin and VarPro do not silently
+  inherit it. Release correctness/A-B tests and compatible FittingSolver
+  perf-gates passed; clean-revision baseline refresh and Python runtime linking
+  remain in `../optimization/TODO.md`. Historical pilot-default statements
+  above describe the A/B phase.
+
+### Follow-up stage-cost review (2026-10-24)
+
+- [x] Recheck both frontends against the IVP techniques. Native Atom already
+  converts once, filters dependencies, prepares only nonzero Jacobian entries,
+  and writes into caller-owned dense output. There is no duplicate conversion
+  to remove as in the former LSODE2 path. Historical stage costs and the
+  rejected Expr A/B do not justify another differentiation-only optimization;
+  see STORY_TESTS sections 70, 71 and 73.
+- [x] Keep coordinate/bandwidth output changes out of this campaign: nonlinear
+  solvers currently consume dense Jacobians. Importing IVP layout logic would
+  require a separate numerical backend contract, not just symbolic cleanup.
+- [ ] Reconsider Atom compiler/differentiation parallelism only with a large
+  workload demonstrating a material stage share and full-solve A/B benefit.
+  Do not promote the rejected PreparedAtom runtime or change AOT lifecycle to
+  manufacture a symbolic speedup.
+
+### Pilot B: Expr symbolic Jacobian preparation
+
+- [x] Profile cold Expr Jacobian preparation on the existing `n=512`
+  nonlinear telemetry corpus. Historical diagonal measurements showed total
+  preparation near `8.531 ms`, with differentiation around `2.450 ms`; this
+  justified a focused experiment, not an assumption that Atom's approach
+  would transfer.
+- [x] Prototype an opt-in dependency-aware Expr derivative plan. It retained
+  the public dense symbolic/numeric Jacobian contract and skipped derivatives
+  for structurally absent variables, but retained dense storage and callback
+  metadata scans.
+- [x] Keep `SYMBOLIC_ZERO_THRESHOLD` and callback evaluation semantics
+  unchanged; the experiment modified symbolic derivative construction only.
+- [x] In debug, verify dense Jacobian shape, residual/Jacobian values,
+  structural zeros, preparation stage counts, solver result, and discrete
+  counters. Sparse-chain, fully coupled dense, Atom-policy rejection, and a
+  convergent solver case all passed.
+- [x] Run seven paired release A/B repetitions at `n=512` for quadratic-chain
+  and band-five systems. Numerical results and counters matched, but there was
+  no material end-to-end gain: quadratic-chain cold-to-solution medians were
+  `25.605 ms` legacy vs `26.639 ms` candidate; band-five was `49.206 ms` vs
+  `49.019 ms`. Differentiation improved only on band-five (`8.554` to
+  `8.032 ms`) and regressed on quadratic-chain (`2.746` to `3.585 ms`).
+- [x] Reject this as a production optimization for the tested workloads. Keep
+  `LegacyDense` as the default and do not deprecate it. `DependencyAware`
+  remains explicitly experimental and is not accepted for production; any
+  future reconsideration requires a materially different workload hypothesis
+  and new evidence. Results are in `STORY_TESTS.md`, section 73.
+
+### Shared stabilization gates
+
+- [ ] Periodically run focused debug correctness tests for the touched
+  frontend, then complete the four-stage stabilization process from
+  `RST_ARCHITECTURAL_GUIDELINE.md`: release tests; performance-gate comparison;
+  solver benchmark/story matrix with historical comparison; then force-record
+  updated performance baselines after the result is accepted.
+- [ ] Record numerical results, stage timings, counter deltas, workload
+  definitions, and the rationale for production/deprecation decisions in the
+  relevant solver STORY_TESTS document and TODO. Keep exploratory reports
+  separate from the historical narrative until interpreted.
+
 ## Scope
 
 Build an explicit reusable lifecycle for systems of the form:

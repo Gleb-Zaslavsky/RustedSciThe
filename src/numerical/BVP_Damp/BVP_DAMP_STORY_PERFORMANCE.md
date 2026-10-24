@@ -4434,3 +4434,192 @@ The canonical non-fail-fast command is:
 Human-facing tables live under `reports/`; Cargo/compiler transcripts are
 kept under `technical/` and are consulted only for a failed or incomplete
 route.
+
+## PreparedAtomSystem callback candidate (2026-10-22)
+
+One addressed Release comparison used the same production combustion equations
+and AtomView-discretized system at `n_steps=3000` (18,000 unknowns), Banded
+`(8, 3)`, Sequential, telemetry Off. Residuals and every compact banded
+Jacobian slot matched exactly. With 21 interleaved samples of three warm
+callbacks each, the current AtomView/Banded callback measured
+`6.356 +/- 0.374 ms`; `PreparedAtomSystem` with caller-owned outputs and
+reusable band scatter measured `3.180 +/- 0.179 ms`. This is a roughly 50%
+callback-level improvement on this one workload, not a full-solver speedup.
+
+A separate Debug counting-allocator pass measured zero warmed allocations for
+the Prepared numeric callback with reused output buffers, versus 32 allocations
+and approximately 2.25 MB per production callback. Prepared runtime preparation
+retained approximately 49 MB on top of the already prepared Atom system. The
+allocator run's timings are not performance evidence. Because the benchmark
+uses different output ownership (new solver objects versus reused caller-owned
+buffers), a solver adapter and full Newton/continuation break-even remain open.
+Do not change solver defaults or claim a production speedup until those costs
+are measured in an end-to-end BVP_Damp solve.
+
+### PreparedAtomSystem combustion-3000: Expr and full-solve follow-up (2026-10-22)
+
+The follow-up Release callback matrix added the missing ExprLegacy closure and
+an experimental Prepared-callback full `NRBVP` gate. It used 21 interleaved
+samples with three callbacks per sample, the same 18,000-unknown combustion
+problem, Banded `(8, 3)`, Sequential execution and telemetry Off.
+
+| Callback route | Setup ms | Warm callback median/MAD ms |
+| --- | ---: | ---: |
+| AtomView/Banded Lambdify | 203.309 | 6.302 / 0.288 |
+| ExprLegacy/Banded Lambdify | 778.855 | 4.042 / 0.135 |
+| PreparedAtomSystem + band scatter | 74.240 | 3.173 / 0.051 |
+
+Prepared was about `1.99x` faster than AtomView and `1.27x` faster than Expr
+for this callback batch, but these are not whole-solver results and the
+Prepared route retains different output-buffer ownership.
+
+The original full-solve harness result was **invalid as an independent-solve
+parity result**. It reused each mutable `NRBVP` object across samples and read
+cumulative counters after each call. In particular, the Prepared row reported
+after its second same-object invocation combined the first successful solve
+with that later non-converged invocation; `10` iterations and `21` residual
+requests were cumulative, not work from one solve. It then aborted before the
+matching AtomNative second invocation. The reported `20.993 ms` and counters
+must not be interpreted as a matched independent full-solve comparison.
+
+The Debug correctness test now mirrors the official combustion stress
+lifecycle: three independent 3,000-step solver pairs, one solve per freshly
+prepared object. All six solves converged in 5 iterations, with identical
+per-solve counters (12 residual requests, 1 Jacobian request, 5 damping trials,
+10 linear solves); native/Prepared states, ordered callback traces, residuals
+and compact Jacobian slots matched exactly. This removes the earlier claim of a
+Prepared-only trajectory defect for independent solves. It does **not** settle
+same-object replay semantics: that is a separate lifecycle question, and the
+previous benchmark did not compare both routes' replay outcomes symmetrically.
+
+The full-solve speed comparison remains unmeasured. The A/B harness now creates
+fresh solvers for every timed sample, prepares callbacks before timing, checks
+each sample's result and per-solve counters, and does not reuse cumulative
+telemetry as a sample value. Keep PreparedAtomSystem opt-in until the corrected
+Release comparison has been reviewed. Detailed correctness evidence is in
+[`symbolic/View/STORY_TESTS.md`](../../symbolic/View/STORY_TESTS.md).
+
+### Same-instance replay contract (2026-10-22)
+
+A Debug combustion-3000 test compared raw replay and explicit initial-guess
+reset across AtomNative, PreparedAtom and ExprLegacy. After the first identical
+5-iteration solve, calling `try_solver_prepared()` again without resetting the
+mutable solver is not an independent replay: all routes start from the current
+modified iterate and return non-convergence after 5 iterations. Their per-call
+deltas are identical: 9 residual requests, 2 Jacobian requests, 3 damping
+trials and 8 linear solves. Cumulative telemetry after that call reads 10 total
+iterations; it must not be mistaken for one call's work.
+
+Calling `try_set_initial_guess` with the original guess resets the nonlinear
+state and Jacobian-age/factorization runtime while retaining the prepared
+callback route. All three routes then converge again in 5 iterations with
+identical original per-solve counters (12 residual requests, 1 Jacobian
+request, 5 damping trials and 10 linear solves). This establishes a supported
+way to repeat the same workload on one prepared solver object; a raw repeated
+call instead continues from mutated solver state and may fail to converge.
+The Release full-solve bench now reports AtomNative, PreparedAtom and ExprLegacy
+on independent samples, alongside the separately measured warm callback
+latencies. The comparison is workload-specific and does not by itself justify
+changing the production default.
+
+### Three-route Release comparison (2026-10-22)
+
+On the same Windows Release build and combustion-3000 workload (18,000
+unknowns, Banded `(8, 3)`, Sequential execution, solver telemetry Counters),
+the callback batch used 21 samples with 3 warm evaluations per sample. The
+independent full-solve series used 21 fresh solver samples per route. Callback
+and solve measurements are separate series; setup is excluded from both timed
+regions.
+
+| Route | Warm residual+Jacobian callback batch, median/MAD ms | Full solve, median/MAD ms |
+| --- | ---: | ---: |
+| AtomNative / AtomView | 6.576 / 0.273 | 27.677 / 0.863 |
+| PreparedAtom + band scatter | 3.294 / 0.086 | 19.635 / 0.627 |
+| ExprLegacy | 4.361 / 0.353 | 21.976 / 0.606 |
+
+All 63 independent solves converged in 5 iterations and had identical complete
+discrete telemetry: 12 residual requests, 1 Jacobian request/recalculation, 5
+damping trials, 0 damping rejections, 1 factorization, 10 RHS solves and 10
+linear solves. AtomNative and PreparedAtom final states matched exactly;
+AtomNative and ExprLegacy differed by at most `1.332e-15`. The callback batch
+also preserved parity: Prepared/Atom residual and Jacobian differences were
+zero; Expr/Atom maximum residual and Jacobian differences were `4.250e-17` and
+`8.674e-19` respectively. This is evidence for this one workload, not a
+universal frontend ranking or a reason to change the production default. The
+Prepared route remains opt-in pending broader workload and memory/break-even
+evidence.
+
+### Integrated PreparedAtom runtime: cold-vs-warm Release decision (2026-10-22)
+
+The solver now has an explicit opt-in `PreparedAtom` callback runtime that
+consumes the already-produced AtomView discretization, keeps the Newton matrix
+compact Banded, and preserves the native factor/solve delegate. The default
+remains `SolverNative`. Two independent Windows Release runs used 21 interleaved
+samples per route, telemetry Off for callback micro-timing and Counters for
+solver work. Each workload compared AtomView/AtomNative, AtomView/PreparedAtom
+and ExprLegacy under Banded/Lambdify/Sequential with identical nonlinear
+options.
+
+| Workload and measurement | AtomNative | PreparedAtom | ExprLegacy |
+| --- | ---: | ---: | ---: |
+| Combustion-3000 warm solve, run 1 median/MAD ms | 26.721 / 0.260 | 17.917 / 0.338 | 20.616 / 0.601 |
+| Combustion-3000 normal `try_solve`, run 1 median/MAD ms | 271.336 / 2.761 | 340.500 / 2.543 | 737.859 / 2.264 |
+| Combustion-3000 warm solve, run 2 median/MAD ms | 26.703 / 0.322 | 18.055 / 0.321 | 20.885 / 0.414 |
+| Combustion-3000 normal `try_solve`, run 2 median/MAD ms | 272.083 / 2.912 | 342.456 / 1.508 | 744.025 / 4.112 |
+| Bratu-1024 prepared solve, run 1 median/MAD ms | 1.011 / 0.015 | 0.657 / 0.012 | 0.671 / 0.011 |
+| Bratu-1024 normal `try_solve`, run 1 median/MAD ms | 58.372 / 0.481 | 63.301 / 0.927 | 65.071 / 0.725 |
+| Bratu-1024 prepared solve, run 2 median/MAD ms | 1.013 / 0.013 | 0.671 / 0.012 | 0.683 / 0.008 |
+| Bratu-1024 normal `try_solve`, run 2 median/MAD ms | 62.860 / 1.026 | 67.401 / 0.931 | 67.835 / 0.696 |
+
+Interpretation: when callback preparation is excluded, PreparedAtom is
+consistently about 32-33% faster than AtomNative on combustion-3000 and about
+34% faster on Bratu-1024. That warm numerical-stage improvement does **not**
+translate to the ordinary cold API: normal `try_solve()` is about 26% slower
+for PreparedAtom on combustion-3000 and 7-8% slower on Bratu-1024. ExprLegacy
+is substantially slower end-to-end on combustion, while AtomNative remains
+the fastest cold route on both tested workloads. The outcome is reproducible
+across two 21-sample runs with low within-run MAD; it is not a noisy speedup
+claim.
+
+The same-instance replay gate also ran on combustion-3000: two normal
+`try_solve()` calls on each of AtomNative, PreparedAtom and ExprLegacy produced
+the same trajectories and exactly matching cumulative counters. A separate
+solver-level Bratu test checks the same replay contract. BVP telemetry is
+cumulative across repeated calls, so tests explicitly distinguish one-solve
+counters from the doubled cumulative snapshot.
+
+The counting-allocator audit remains separate from all timing evidence. Its
+low-level caller-owned-buffer comparison at 18,000 unknowns measured zero
+allocations for `PreparedAtomSystem` evaluation versus 32 allocations and
+about 2.25 MB for the existing Atom callback evaluation. This is **not** the
+allocation behavior of the integrated solver callbacks. A second audit called
+the installed production `Fun` and `Jac` callbacks five times per route on
+Bratu-1024 and measured the following average per residual+Jacobian pair:
+
+| Integrated callback route | Allocations/pair | Allocated bytes/pair |
+| --- | ---: | ---: |
+| AtomNative | 20.0 | 98,920 |
+| PreparedAtom | 16.6 | 148,203 |
+| ExprLegacy | 20.0 | 98,920 |
+
+Thus the integrated PreparedAtom route reduces allocation count in this
+fixture, but allocates about 50% more bytes per callback pair. The main sources
+are the returned Banded matrix assembly and callback-owned output vectors; the
+low-level zero-allocation evaluator result must not be presented as zero
+allocation for the solver runtime. The earlier allocator-observed retained
+increment was about 49.4 MB for the Prepared adapter versus 79.4 MB for the
+production callback bridge; this is allocator-live accounting, not RSS, and
+the setup scopes are not identical to a process memory measurement.
+
+Decision: retain `PreparedAtom` as a documented, typed, opt-in experimental
+runtime for callers who explicitly prepare callbacks and can amortize setup.
+Its measured warm-stage speedup is real across the two tested workloads, but
+neither cold end-to-end solve time nor integrated callback bytes support making
+it the default today.
+Do not make it the BVP_Damp default and do not claim that ordinary BVP solves
+are faster. The test evidence covers linear/oscillator, nonlinear Bratu and
+large combustion; unsupported backend/frontend/execution combinations fail
+before generation rather than silently changing matrix layout. Further work
+is only justified if a real persistent prepared-plan/continuation lifecycle
+can amortize the measured preparation cost without changing the numerical
+scheme.

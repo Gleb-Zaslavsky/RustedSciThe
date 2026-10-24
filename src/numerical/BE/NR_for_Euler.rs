@@ -657,7 +657,7 @@ impl NRE {
         if let Some(handle) = self.parameter_values_handle.as_ref() {
             let mut slot = handle
                 .write()
-                .expect("shared IVP parameter state lock poisoned");
+                .map_err(|_| IvpBackendError::ParameterStatePoisoned)?;
             *slot = values.clone();
         }
         self.equation_parameter_values = Some(values);
@@ -788,9 +788,7 @@ impl NRE {
             options.with_aot_options(self.generated_backend_config.aot_options),
             self.generated_backend_config.clone(),
         )
-        .map_err(|err| IvpBackendError::GeneratedBackendFailure {
-            message: err.to_string(),
-        })?;
+        .map_err(IvpBackendError::from_generated_error)?;
         self.generated_backend_config.resolver = prepared.updated_resolver.clone();
         self.install_prepared_backend(prepared.into_problem());
         if self.telemetry_mode.collects_counters() || self.telemetry_mode.collects_timings() {
@@ -1477,6 +1475,32 @@ mod tests {
                 .set_parameter_values(DVector::from_vec(vec![f64::INFINITY]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn nre_parameter_update_reports_poisoned_shared_state_without_panicking() {
+        let mut solver = make_nre();
+        solver.try_set_equation_parameters(Some(&["rate"])).unwrap();
+        solver
+            .set_parameter_values(DVector::from_vec(vec![1.0]))
+            .unwrap();
+        solver.try_eq_generate().unwrap();
+
+        let shared = solver
+            .parameter_values_handle
+            .as_ref()
+            .expect("prepared parameterized problem must publish shared values")
+            .clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = shared.write().unwrap();
+            panic!("poison the test-only parameter lock");
+        })
+        .join();
+
+        assert!(matches!(
+            solver.set_parameter_values(DVector::from_vec(vec![2.0])),
+            Err(IvpBackendError::ParameterStatePoisoned)
+        ));
     }
 
     #[test]

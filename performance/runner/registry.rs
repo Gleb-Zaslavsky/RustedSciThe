@@ -50,15 +50,15 @@ macro_rules! radau_route {
             id: $id,
             solver: "radau",
             groups: &["ivp", "stiff", "radau-matrix"],
-            workload: "diffusion-chain, dimension=256, t=[0,0.01]",
+            workload: "diffusion-chain, dimension=512, t=[0,0.15], max_step=0.0025",
             frontend: $frontend,
             execution: $execution,
             linear_algebra: $layout,
             parallel_policy: $policy,
             telemetry: "off wall gate + Timings stage diagnostic",
-            version: 4,
+            version: 7,
             gate_metrics: &["scenario_wall_ms"],
-            description: "Matched Radau diffusion route; AOT requires tcc and uses the runner-owned warm cache",
+            description: "Matched Radau diffusion route with solver-default Jacobian preparation; AOT requires tcc and uses the runner-owned warm cache",
             run: $run,
             diagnose: Some(crate::scenarios::radau::diagnose),
         }
@@ -99,7 +99,7 @@ macro_rules! lsode2_route {
             linear_algebra: $layout,
             parallel_policy: $policy,
             telemetry: "off wall gate + Detailed stage diagnostic",
-            version: 2,
+            version: 3,
             gate_metrics: &["scenario_wall_ms"],
             description: "Matched extended LSODE2 diffusion route; AOT uses a runner-owned warm cache and TCC",
             run: $run,
@@ -422,7 +422,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::lsode2::diff_atom_banded_aot_parallel2
     ),
     radau_route!(
-        "radau_diff256_lambdify_expr_dense_seq",
+        "radau_diff512_lambdify_expr_dense_seq",
         "ExprLegacy",
         "Lambdify",
         "Dense",
@@ -430,7 +430,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_expr_dense_seq
     ),
     radau_route!(
-        "radau_diff256_lambdify_expr_sparse_seq",
+        "radau_diff512_lambdify_expr_sparse_seq",
         "ExprLegacy",
         "Lambdify",
         "Sparse",
@@ -438,7 +438,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_expr_sparse_seq
     ),
     radau_route!(
-        "radau_diff256_lambdify_expr_banded_seq",
+        "radau_diff512_lambdify_expr_banded_seq",
         "ExprLegacy",
         "Lambdify",
         "Banded(1,1)",
@@ -446,7 +446,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_expr_banded_seq
     ),
     radau_route!(
-        "radau_diff256_lambdify_atom_dense_seq",
+        "radau_diff512_lambdify_atom_dense_seq",
         "AtomView",
         "Lambdify",
         "Dense",
@@ -454,7 +454,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_atom_dense_seq
     ),
     radau_route!(
-        "radau_diff256_lambdify_atom_sparse_seq",
+        "radau_diff512_lambdify_atom_sparse_seq",
         "AtomView",
         "Lambdify",
         "Sparse",
@@ -462,7 +462,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_atom_sparse_seq
     ),
     radau_route!(
-        "radau_diff256_lambdify_atom_banded_seq",
+        "radau_diff512_lambdify_atom_banded_seq",
         "AtomView",
         "Lambdify",
         "Banded(1,1)",
@@ -470,7 +470,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_atom_banded_seq
     ),
     radau_route!(
-        "radau_diff256_lambdify_expr_dense_parallel",
+        "radau_diff512_lambdify_expr_dense_parallel",
         "ExprLegacy",
         "Lambdify",
         "Dense",
@@ -478,7 +478,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_expr_dense_par
     ),
     radau_route!(
-        "radau_diff256_lambdify_expr_sparse_parallel",
+        "radau_diff512_lambdify_expr_sparse_parallel",
         "ExprLegacy",
         "Lambdify",
         "Sparse",
@@ -486,7 +486,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_expr_sparse_par
     ),
     radau_route!(
-        "radau_diff256_lambdify_expr_banded_parallel",
+        "radau_diff512_lambdify_expr_banded_parallel",
         "ExprLegacy",
         "Lambdify",
         "Banded(1,1)",
@@ -494,7 +494,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_expr_banded_par
     ),
     radau_route!(
-        "radau_diff256_lambdify_atom_dense_parallel",
+        "radau_diff512_lambdify_atom_dense_parallel",
         "AtomView",
         "Lambdify",
         "Dense",
@@ -502,7 +502,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_atom_dense_par
     ),
     radau_route!(
-        "radau_diff256_lambdify_atom_sparse_parallel",
+        "radau_diff512_lambdify_atom_sparse_parallel",
         "AtomView",
         "Lambdify",
         "Sparse",
@@ -510,7 +510,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_atom_sparse_par
     ),
     radau_route!(
-        "radau_diff256_lambdify_atom_banded_parallel",
+        "radau_diff512_lambdify_atom_banded_parallel",
         "AtomView",
         "Lambdify",
         "Banded(1,1)",
@@ -518,7 +518,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::lambdify_atom_banded_par
     ),
     radau_route!(
-        "radau_diff256_aot_expr_dense_seq",
+        "radau_diff512_aot_expr_dense_seq",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Dense",
@@ -526,7 +526,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_expr_dense_seq
     ),
     radau_route!(
-        "radau_diff256_aot_expr_sparse_seq",
+        "radau_diff512_aot_expr_sparse_seq",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Sparse",
@@ -534,7 +534,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_expr_sparse_seq
     ),
     radau_route!(
-        "radau_diff256_aot_expr_banded_seq",
+        "radau_diff512_aot_expr_banded_seq",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Banded(1,1)",
@@ -542,7 +542,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_expr_banded_seq
     ),
     radau_route!(
-        "radau_diff256_aot_atom_dense_seq",
+        "radau_diff512_aot_atom_dense_seq",
         "AtomView",
         "AOT(warm-cache)",
         "Dense",
@@ -550,7 +550,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_atom_dense_seq
     ),
     radau_route!(
-        "radau_diff256_aot_atom_sparse_seq",
+        "radau_diff512_aot_atom_sparse_seq",
         "AtomView",
         "AOT(warm-cache)",
         "Sparse",
@@ -558,7 +558,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_atom_sparse_seq
     ),
     radau_route!(
-        "radau_diff256_aot_atom_banded_seq",
+        "radau_diff512_aot_atom_banded_seq",
         "AtomView",
         "AOT(warm-cache)",
         "Banded(1,1)",
@@ -566,7 +566,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_atom_banded_seq
     ),
     radau_route!(
-        "radau_diff256_aot_expr_dense_parallel",
+        "radau_diff512_aot_expr_dense_parallel",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Dense",
@@ -574,7 +574,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_expr_dense_par
     ),
     radau_route!(
-        "radau_diff256_aot_expr_sparse_parallel",
+        "radau_diff512_aot_expr_sparse_parallel",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Sparse",
@@ -582,7 +582,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_expr_sparse_par
     ),
     radau_route!(
-        "radau_diff256_aot_expr_banded_parallel",
+        "radau_diff512_aot_expr_banded_parallel",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Banded(1,1)",
@@ -590,7 +590,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_expr_banded_par
     ),
     radau_route!(
-        "radau_diff256_aot_atom_dense_parallel",
+        "radau_diff512_aot_atom_dense_parallel",
         "AtomView",
         "AOT(warm-cache)",
         "Dense",
@@ -598,7 +598,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_atom_dense_par
     ),
     radau_route!(
-        "radau_diff256_aot_atom_sparse_parallel",
+        "radau_diff512_aot_atom_sparse_parallel",
         "AtomView",
         "AOT(warm-cache)",
         "Sparse",
@@ -606,7 +606,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
         crate::scenarios::radau::aot_atom_sparse_par
     ),
     radau_route!(
-        "radau_diff256_aot_atom_banded_parallel",
+        "radau_diff512_aot_atom_banded_parallel",
         "AtomView",
         "AOT(warm-cache)",
         "Banded(1,1)",
@@ -807,11 +807,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(radau.len(), 24);
-        assert!(
-            radau
-                .iter()
-                .all(|scenario| scenario.workload == "diffusion-chain, dimension=256, t=[0,0.01]")
-        );
+        assert!(radau.iter().all(|scenario| {
+            scenario.workload == "diffusion-chain, dimension=512, t=[0,0.15], max_step=0.0025"
+        }));
         for frontend in ["ExprLegacy", "AtomView"] {
             for execution in ["Lambdify", "AOT(warm-cache)"] {
                 for layout in ["Dense", "Sparse", "Banded(1,1)"] {

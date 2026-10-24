@@ -1,6 +1,9 @@
 use crate::Utils::plots::plots;
+use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpTelemetrySnapshot};
 use crate::symbolic::symbolic_engine::Expr;
-use crate::symbolic::symbolic_functions::Jacobian;
+use crate::symbolic::symbolic_ivp::{
+    IvpBackendError, SymbolicIvpProblemOptions, prepare_symbolic_ivp_residual_problem,
+};
 use csv::Writer;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
@@ -22,6 +25,7 @@ pub struct nonstiffODE {
     y_result: DMatrix<f64>,
     stop_condition: Option<HashMap<String, f64>>,
     neighborhood_check: f64,
+    symbolic_telemetry: IvpTelemetry,
 }
 pub enum Solvers {
     RK45(RK45),
@@ -30,11 +34,17 @@ pub enum Solvers {
 }
 impl Solvers {
     pub fn new(name: &str) -> Solvers {
+        Self::try_new(name).expect("unknown non-stiff solver name")
+    }
+
+    pub fn try_new(name: &str) -> Result<Solvers, IvpBackendError> {
         match name {
-            "RK45" => Solvers::RK45(RK45::new()),
-            "DOPRI" => Solvers::DOPRI(DormandPrince::new()),
-            "AB4" => Solvers::AB4(AdamsBashforth4::new()),
-            _ => panic!("Unknown solver name"),
+            "RK45" => Ok(Solvers::RK45(RK45::new())),
+            "DOPRI" => Ok(Solvers::DOPRI(DormandPrince::new())),
+            "AB4" => Ok(Solvers::AB4(AdamsBashforth4::new())),
+            _ => Err(IvpBackendError::InvalidArgumentSchema {
+                message: format!("unsupported non-stiff solver method `{name}`"),
+            }),
         }
     }
 }
@@ -117,8 +127,36 @@ impl nonstiffODE {
         h_step: f64,
         stop_condition: Option<HashMap<String, f64>>,
     ) -> Self {
-        let solver_instance = Solvers::new(&method);
-        nonstiffODE {
+        Self::try_new(
+            eq_system,
+            values,
+            arg,
+            method,
+            t0,
+            y0,
+            t_bound,
+            h_step,
+            stop_condition,
+        )
+        .expect("unknown non-stiff solver name")
+    }
+
+    /// Fallible constructor for integrations that must preserve configuration
+    /// errors instead of panicking on an unsupported method name.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        method: String,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        h_step: f64,
+        stop_condition: Option<HashMap<String, f64>>,
+    ) -> Result<Self, IvpBackendError> {
+        let solver_instance = Solvers::try_new(&method)?;
+        Ok(nonstiffODE {
             eq_system,
             values,
             arg,
@@ -134,7 +172,8 @@ impl nonstiffODE {
             y_result: DMatrix::zeros(1, 1),
             stop_condition: stop_condition,
             neighborhood_check: 1e-3,
-        }
+            symbolic_telemetry: IvpTelemetry::disabled(),
+        })
     }
 
     fn check_stop_condition(&self, y: &DVector<f64>) -> bool {
@@ -157,14 +196,30 @@ impl nonstiffODE {
     pub fn set_neighborhood_check(&mut self, neighborhood_check: f64) {
         self.neighborhood_check = neighborhood_check;
     }
-    pub fn generate(&mut self) {
-        let mut jacobian_instance = Jacobian::new();
-        jacobian_instance.generate_IVP_ODEsolver(
+
+    /// Enables shared IVP telemetry for symbolic preparation and RHS callback
+    /// work. This legacy integrator does not expose step-level counters.
+    pub fn set_symbolic_telemetry(&mut self, telemetry: IvpTelemetry) {
+        self.symbolic_telemetry = telemetry;
+    }
+
+    /// Returns a snapshot of symbolic preparation and RHS callback telemetry.
+    pub fn symbolic_telemetry(&self) -> IvpTelemetrySnapshot {
+        self.symbolic_telemetry.snapshot()
+    }
+    /// Prepare the non-stiff RHS without constructing an unused Jacobian.
+    ///
+    /// RK45, Dormand-Prince and AB4 consume only `f(t, y)`. The historical
+    /// route built and lambdified a dense Jacobian before discarding it; this
+    /// typed residual-only route shares the production IVP frontend instead.
+    pub fn try_generate(&mut self) -> Result<(), IvpBackendError> {
+        let prepared = prepare_symbolic_ivp_residual_problem(
             self.eq_system.clone(),
             self.values.clone(),
             self.arg.clone(),
-        );
-        let fun = jacobian_instance.lambdified_functions_IVP_DVector;
+            SymbolicIvpProblemOptions::new().with_telemetry(self.symbolic_telemetry.clone()),
+        )?;
+        let fun = prepared.residual;
 
         if self.method == "RK45" {
             let mut solver_instance = RK45::new();
@@ -179,6 +234,14 @@ impl nonstiffODE {
             solver_instance.set_initial(fun, self.y0.clone(), self.t0, self.h_step);
             self.solver_instance = Solvers::AB4(solver_instance);
         }
+        Ok(())
+    }
+
+    /// Infallible compatibility wrapper. New integrations should use
+    /// [`Self::try_generate`] so symbolic setup errors retain their type.
+    pub fn generate(&mut self) {
+        self.try_generate()
+            .expect("non-stiff symbolic residual preparation should succeed");
     }
     pub fn main_loop(&mut self) {
         let mut integr_status: Option<i8> = None;
@@ -250,9 +313,16 @@ impl nonstiffODE {
         self.y_result = y_res;
     }
 
-    pub fn solve(&mut self) {
-        self.generate();
+    pub fn try_solve(&mut self) -> Result<(), IvpBackendError> {
+        self.try_generate()?;
         self.main_loop();
+        Ok(())
+    }
+
+    /// Infallible compatibility wrapper. Prefer [`Self::try_solve`].
+    pub fn solve(&mut self) {
+        self.try_solve()
+            .expect("non-stiff symbolic solve preparation should succeed");
     }
     pub fn plot_result(&self) {
         plots(
@@ -633,6 +703,89 @@ mod tests_nonstiff_api {
     use crate::symbolic::symbolic_engine::Expr;
     use approx::assert_relative_eq;
     use nalgebra::DVector;
+
+    #[test]
+    fn nonstiff_fallible_constructor_returns_typed_error_for_unknown_method() {
+        let result = nonstiffODE::try_new(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            "Radau".to_string(),
+            0.0,
+            DVector::from_element(1, 1.0),
+            1.0,
+            1e-3,
+            None,
+        );
+        let error = match result {
+            Ok(_) => panic!("unsupported method should fail during construction"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            IvpBackendError::InvalidArgumentSchema { .. }
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported non-stiff solver method")
+        );
+    }
+
+    #[test]
+    fn nonstiff_symbolic_setup_returns_typed_argument_schema_error() {
+        let mut solver = nonstiffODE::new(
+            vec![Expr::parse_expression("-y")],
+            vec!["t".to_string()],
+            "t".to_string(),
+            "RK45".to_string(),
+            0.0,
+            DVector::from_element(1, 1.0),
+            1.0,
+            1e-3,
+            None,
+        );
+
+        let error = solver.try_generate().unwrap_err();
+        assert!(matches!(
+            error,
+            IvpBackendError::InvalidArgumentSchema { .. }
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate IVP callback argument name")
+        );
+    }
+
+    #[test]
+    fn nonstiff_symbolic_telemetry_is_opt_in_and_reports_rhs_callbacks() {
+        let mut solver = nonstiffODE::new(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            "RK45".to_string(),
+            0.0,
+            DVector::from_element(1, 1.0),
+            0.1,
+            1e-3,
+            None,
+        );
+        let telemetry = IvpTelemetry::detailed();
+        solver.set_symbolic_telemetry(telemetry.clone());
+
+        solver.try_solve().unwrap();
+
+        let snapshot = solver.symbolic_telemetry();
+        assert_eq!(snapshot.residual_dimension, 1);
+        assert!(snapshot.residual_evaluations > 0);
+        assert_eq!(
+            snapshot.residual_evaluations,
+            telemetry.snapshot().residual_evaluations
+        );
+        assert!(snapshot.cold.iter().any(|stage| stage.calls > 0));
+    }
 
     #[test]
     fn test_dopri_step_preserves_constant_rhs_solution() {

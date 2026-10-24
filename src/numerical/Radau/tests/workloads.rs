@@ -8,10 +8,14 @@ use super::super::new::benchmark::{BenchmarkAssembly, BenchmarkLayout, PreparedB
 use super::super::new::callbacks::PreparedSymbolicCallbacks;
 use super::super::new::config::{RadauAssembly, RadauConfig, RadauExecution, RadauMatrixLayout};
 use super::super::new::solver::try_solve_symbolic_dense;
-use super::super::new::telemetry::{RadauTelemetry, RadauTelemetryMode};
+use super::super::new::telemetry::{RadauFrontendStage, RadauTelemetry, RadauTelemetryMode};
 use crate::numerical::LSODE2::{Lsode2ProblemConfig, Lsode2Solver};
 use crate::numerical::ivp_workloads::{
     WorkloadKind, build_workload, parameter_continuation_target,
+};
+use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetry};
+use crate::symbolic::symbolic_ivp::{
+    build_expr_legacy_banded_jacobian, build_expr_legacy_sparse_jacobian,
 };
 use tabled::{Table, Tabled};
 
@@ -42,34 +46,53 @@ fn case(
 ) -> Case {
     let workload = build_workload(kind, dimension);
     let variables: Vec<&str> = workload.variables.iter().map(String::as_str).collect();
-    let jacobian = match assembly {
-        RadauAssembly::ExprLegacy => Some(
-            workload
-                .equations
-                .iter()
-                .flat_map(|equation| {
-                    variables
-                        .iter()
-                        .map(move |variable| equation.diff(variable))
-                })
-                .collect(),
-        ),
-        RadauAssembly::AtomViewNative => None,
-    };
     let mut preparation = RadauTelemetry::new(RadauTelemetryMode::Counters);
-    let callbacks = PreparedSymbolicCallbacks::prepare_with_telemetry(
-        assembly,
-        workload.equations,
-        jacobian,
-        &workload.time_variable,
-        &variables,
-        &workload
-            .parameter_names
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        &mut preparation,
-    )
+    let parameter_names = workload
+        .parameter_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let callbacks = match assembly {
+        RadauAssembly::ExprLegacy => {
+            preparation.measure_frontend(RadauFrontendStage::ExprLegacyPrepare, || {
+                let symbolic_telemetry = IvpTelemetry::disabled();
+                let jacobian = match layout {
+                    RadauMatrixLayout::Banded { lower, upper } => {
+                        build_expr_legacy_banded_jacobian(
+                            &workload.equations,
+                            &workload.variables,
+                            (lower, upper),
+                            &symbolic_telemetry,
+                        )
+                    }
+                    RadauMatrixLayout::Dense | RadauMatrixLayout::Sparse => {
+                        build_expr_legacy_sparse_jacobian(
+                            &workload.equations,
+                            &workload.variables,
+                            &symbolic_telemetry,
+                        )
+                    }
+                };
+                PreparedSymbolicCallbacks::prepare_expr_sparse(
+                    workload.equations,
+                    jacobian,
+                    &workload.time_variable,
+                    &variables,
+                    &parameter_names,
+                    IvpLambdifyExecutionPolicy::Sequential,
+                )
+            })
+        }
+        RadauAssembly::AtomViewNative => PreparedSymbolicCallbacks::prepare_with_telemetry(
+            assembly,
+            workload.equations,
+            None,
+            &workload.time_variable,
+            &variables,
+            &parameter_names,
+            &mut preparation,
+        ),
+    }
     .unwrap();
     assert_eq!(preparation.counters.frontend_preparations, 1);
 
@@ -244,6 +267,38 @@ fn linear_kernel_harness_runs_each_native_layout_without_conversion_errors() {
             let checksum = prepared.linear_kernel(2).unwrap();
             assert!(checksum.is_finite(), "{assembly:?} {layout:?}");
         }
+    }
+}
+
+#[test]
+fn expr_default_and_atom_native_fixtures_share_structural_jacobian_pattern() {
+    for layout in [
+        RadauMatrixLayout::Dense,
+        RadauMatrixLayout::Sparse,
+        RadauMatrixLayout::Banded { lower: 1, upper: 1 },
+    ] {
+        let expr = case(
+            WorkloadKind::DiffusionChain,
+            16,
+            RadauAssembly::ExprLegacy,
+            layout,
+        );
+        let atom = case(
+            WorkloadKind::DiffusionChain,
+            16,
+            RadauAssembly::AtomViewNative,
+            layout,
+        );
+        assert_eq!(
+            expr.callbacks.jacobian_pattern(),
+            atom.callbacks.jacobian_pattern(),
+            "default frontend fixtures disagree on the Jacobian pattern for {layout:?}"
+        );
+        assert_eq!(
+            expr.callbacks.jacobian_pattern().len(),
+            46,
+            "unexpected structural nnz for a 16-state diffusion chain"
+        );
     }
 }
 

@@ -269,3 +269,115 @@ multi-size dashboard slice is available with comma-separated dimensions:
 ```powershell
 .\scripts\be_release_matrix.ps1 -Dimensions "8,32,64" -Continuation 4
 ```
+
+## Release Matrix (2026-10-24)
+
+The complete release matrix passed: core stories `53/53`, performance stories
+`8/8` (one additional story intentionally ignored in that step), cold-process
+stories `3/3`, ignored stories `3/3`, the compact workload dashboard, and all
+Criterion targets including the history-allocation audit. The run used
+`test_reports/BE_release_manual/20261024T035745Z/`; its `release_summary.md`
+is the step index and sibling `technical/` logs contain the full transcripts.
+
+This BE matrix covers the routes BE actually supports: native analytic and
+finite-difference diffusion, ExprLegacy/AtomViewNative Lambdify, dense AOT/tcc,
+four canonical workload families, and parameter continuation. BE has no
+Sparse/Banded or Parallel/Auto solver route; `error:native route is not defined
+for this workload` dashboard rows mark unsupported combinations, not failed
+tests. Dashboard times use Detailed telemetry and are diagnostic rather than
+un-instrumented performance baselines.
+
+### Symbolic frontend and execution
+
+The telemetry-Off Criterion diffusion-8 workload measured warm full solves at
+`28.177 us` ExprLegacy Lambdify, `20.198 us` AtomViewNative Lambdify, and
+`19.949 us` AtomViewNative AOT/tcc with the AOT artifact already built. On this
+small fixture AOT is effectively tied with AtomView Lambdify, not a meaningful
+warm-solve win. Four-target warm rebind series were also effectively tied:
+`234.45 us` AtomView Lambdify versus `233.29 us` AOT; one-target results were
+`58.26 us` and `58.68 us`, respectively. Fresh solver setup+solve with the
+process artifact cache warm measured `181.99 us` ExprLegacy, `329.75 us`
+AtomView Lambdify, and `332.47 us` AOT. These are separate scopes and do not
+include AOT cold compilation.
+
+The preparation Criterion target also records a measured reduction relative
+to the historical release values in `BE_PERFORMANCE_BASELINE.md`:
+
+| dimension | ExprLegacy preparation, historical -> 2026-10-24 | AtomViewNative preparation, historical -> 2026-10-24 |
+| ---: | ---: | ---: |
+| 3 | 60.818 -> 56.783 us | 95.683 -> 75.755 us |
+| 8 | 1.478 -> 1.425 ms | 286.76 -> 248.23 us |
+| 16 | 24.612 -> 23.266 ms | 931.05 -> 775.72 us |
+| 32 | 399.44 -> 40.349 ms | 4.889 -> 3.970 ms |
+
+The largest observed preparation decrease is ExprLegacy at dimension 32
+(about 90%); AtomViewNative is about 19% lower there. The current warm full
+solve at dimension 8 is also lower than the historical Criterion value:
+ExprLegacy `31.338 -> 28.177 us`, AtomViewNative `21.245 -> 20.198 us`, and AOT
+`22.782 -> 19.949 us`. These are historical release-to-release comparisons,
+not a randomized same-source A/B, so record them as observed reductions rather
+than attributing the entire change to one code modification.
+
+The detailed workload dashboard agrees on correctness and stable discrete
+work. For the diffusion chain at `n=512`, each symbolic route reported 150
+residual/Jacobian/factorization/linear-solve calls across the initial solve and
+four continuations, with 50 accepted steps. AtomView Lambdify was somewhat
+faster than ExprLegacy in this instrumented dashboard (`128.611` vs `138.574`
+ms solve and `481.026` vs `494.845` ms continuation); treat these as diagnostic
+values because telemetry was Detailed. The dedicated Criterion result is the
+better comparison for the small warm diffusion-8 case.
+
+### AOT cold lifecycle
+
+The one-shot lifecycle story passed exact trajectory parity and verified one
+cache miss/build/link and runtime readiness. It measured `1.390 ms` for
+Lambdify versus `27.814 ms` for AOT setup+binding+solve; the AOT build stage
+was `9.686 ms`, link `0.018 ms`. The process-isolated cold matrix also passed
+parity, but its four-sample AOT child E2E mean was `34.674 +/- 8.784 ms`
+(range `27.829..49.754`), versus `0.955 +/- 0.107 ms` Lambdify. The prior
+same-volume process matrix recorded AOT `21.308 +/- 0.382 ms`; this run is both
+slower and much noisier. Four samples do not establish a stable regression,
+but this is a real repeatability warning to retain for future cold-lifecycle
+measurement. Do not fold cold build cost into the warm Criterion comparison or
+claim that AOT breaks even for this short task.
+
+### Allocation, continuation, and correctness
+
+The history-assembly allocation audit reconfirmed exact output parity. The
+optimized row-slice and owned-transpose routes each used one allocation in all
+six tested shapes; the legacy route used `35..1027` allocations (`3.3 KiB` to
+`1.53 MiB`). This is a strong, directly measured allocation reduction.
+
+The six-target symbolic parameter-rebind story matched fresh-solver final
+states exactly while the reused solver prepared once; the repeated-rebind and
+accepted-state continuation stories also passed. Independent stiff references
+passed: Robertson used 10,001 steps with scaled endpoint error `0.0244` and
+mass-balance error `4.9e-15`; HIRES and combustion-like reference refinements
+were `8.2e-15` and `1.9e-12`, respectively. These are correctness checks, not
+claims of cross-method performance parity.
+
+The general IVP caller-owned Jacobian scratch Criterion cases at `n=128,256,512`
+reported small improvements over their local Criterion baselines (roughly
+`3..6%`); at `n=256/512` both compatibility-temporary and caller-owned routes
+show similar shifts. Several samples were classified as outliers, so these
+microsecond-scale changes should not be treated as a BE full-solve win.
+
+No benchmark or solver code was changed as part of reviewing this release
+matrix. Preserve the cold AOT variance and the strong allocation result as
+separate findings rather than conflating them into one performance verdict.
+
+### Cold-Process Repeat (2026-10-24)
+
+To check the noisy four-sample cold AOT result above, the process-isolated
+Release story was run again with four fresh child processes per route. Exact
+endpoint parity still held. Lambdify child E2E was `0.771 +/- 0.030 ms`
+(range `0.743..0.816 ms`); AOT was `25.018 +/- 5.355 ms` (range
+`21.329..34.240 ms`). AOT performed one build/link per child; build took
+`7.921..9.454 ms` and link `0.016..0.026 ms`.
+
+This is materially faster than the previous AOT mean (`34.674 ms`) and confirms
+that the earlier result was not a stable estimate. It remains a four-sample
+measurement with substantial spread, so neither a cold-AOT regression nor a
+reliable cold break-even point is established. Keep cold compilation separate
+from warm solve/preparation comparisons; a larger repeated sample is needed
+before making a stronger claim.

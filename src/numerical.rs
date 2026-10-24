@@ -1,57 +1,12 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
-//! solvers of BVPs and IVPs, optization, nonlinear algeraic systems and more
-/// #########################ODEs SECTION######################
-///
-/// SOLVER OF STIFF IVPs (initial value problems)
-/// direct rewrite to Rust python code from SciPy
-///
-/// Example#1
-/// ```
-///use RustedSciThe::symbolic::symbolic_engine::Expr;
-/// use RustedSciThe::symbolic::symbolic_functions::Jacobian;
-/// use RustedSciThe::numerical::ODE_api::ODEsolver;
-///             // set RHS of system as vector of strings
-///            let RHS = vec!["-z-exp(-y)", "y"];
-///            // parse RHS as symbolic expressions
-///            let Equations = Expr::parse_vector_expression(RHS.clone());
-///            let values = vec!["z".to_string(), "y".to_string()];
-///            println!("Equations = {:?}", Equations);
-///            // set argument
-///            let arg = "x".to_string();
-///            // set method
-///            let method = "BDF".to_string();
-///            // set initial conditions
-///            let t0 = 0.0;
-///            let y0 = vec![1.0, 1.0];
-///            let t_bound = 1.0;
-///            // set solver parameters (optional)
-///            let first_step = None;
-///            let atol = 1e-5;
-///            let rtol = 1e-5;
-///            let max_step = 1e-3;
-///            let jac_sparsity = None;
-///            let vectorized = false;
-///            // create instance of ODE solver and solve the system
-///            let mut ODE_instance = ODEsolver::new_complex(
-///                Equations,
-///                values,
-///                arg,
-///                method,
-///                t0,
-///                y0.into(),
-///                t_bound,
-///                max_step,
-///                rtol,
-///                atol,
-///                jac_sparsity,
-///                vectorized,
-///                first_step,
-///            );
-///
-///            ODE_instance.solve();
-///            ODE_instance.plot_result();
-/// ```
+//! Numerical solvers for BVPs, IVPs, nonlinear systems, optimization and
+//! related scientific-computing tasks.
+//!
+//! For new universal IVP code, use [`ODE_api2`] with its typed
+//! [`ODE_api2::SolverType`] selection, or use a dedicated solver module when solver-specific controls
+//! are needed. The retired `ODE_api` and `NR_for_ODE` modules are intentionally
+//! not kept as compatibility shims.
 pub mod BDF;
 /// Shared opt-in logging policy and timestamped file sink for numerical solvers.
 pub mod logging;
@@ -133,8 +88,6 @@ pub(crate) mod ivp_test_support;
 pub mod ivp_workloads;
 /// Backward-Euler Newton implementation, retained at its historical path.
 pub use BE::NR_for_Euler;
-pub mod NR_for_ODE;
-
 /// Boundary value problems solvers for stiff nonlinear ODEs
 ///
 /// solver NR_Damp_solver_frozen implements NR method with damping
@@ -347,150 +300,10 @@ pub mod LSODE2;
 pub mod NonStiff_api;
 /// solvers of nonlinear algebraic equations
 pub mod Nonlinear_systems;
-///  general api for ODE solvers  (BDF, RK4, etc.)
+/// Universal typed API for the supported IVP solver routes.
 ///
-/// Example#1
-/// ```
-///use RustedSciThe::symbolic::symbolic_engine::Expr;
-/// use RustedSciThe::symbolic::symbolic_functions::Jacobian;
-/// use RustedSciThe::numerical::ODE_api::ODEsolver;
-///
-///       //create instance of structure for symbolic equation system and Jacobian
-/// let mut Jacobian_instance = Jacobian::new();
-// define argument andunknown variables
-/// let x = Expr::Var("x".to_string()); // argument
-/// let y = Expr::Var("y".to_string());
-/// let z:Expr = Expr::Var("z".to_string());
-//define equation system
-///  let eq1:Expr = Expr::Const(-1.0 as f64)*z.clone() - (Expr::Const(-1.0 as f64)*y.clone() ).exp();
-/// let eq2:Expr = y;
-/// let eq_system = vec![eq1, eq2];
-// set unkown variables
-/// let values = vec![  "z".to_string(), "y".to_string()];
-// set argument
-/// let arg = "x".to_string();
-// set method
-/// let method = "BDF".to_string();
-// set initial conditions
-/// let t0 = 0.0;
-/// let y0 = vec![1.0, 1.0];
-/// let t_bound = 1.0;
-/// // set solver parameters (optional)
-/// let first_step = None;
-/// let atol = 1e-5;
-/// let rtol = 1e-5;
-/// let max_step = 1e-3;
-/// let jac_sparsity = None;
-/// let vectorized = false;
-// create instance of ODE solver and solve the system
-///let mut ODE_instance = ODEsolver::new_complex(
-///    eq_system,
-///    values,
-///    arg,
-///    method,
-///    t0,
-///    y0.into(),
-///    t_bound,
-///    max_step,
-///    rtol,
-///    atol,
-///    jac_sparsity,
-///    vectorized,
-///   first_step);
-/// ODE_instance.solve();
-/// // plot the solution
-/// ODE_instance.plot_result();
-/// ODE_instance.save_result();
-/// ```
-/// Non-stiff equations: use ODE general api ODEsolver
-/// RK45 and Dormand-Prince methods are available
-/// Example#2
-/// ```
-/// use RustedSciThe::symbolic::symbolic_engine::Expr;
-///  use RustedSciThe::numerical::ODE_api::ODEsolver;
-///          //Example 2 the laziest way to solve ODE
-///    // set RHS of system as vector of strings
-///    let RHS = vec!["-z-exp(-y)", "y"];
-///    // parse RHS as symbolic expressions
-///    let Equations = Expr::parse_vector_expression(RHS.clone());
-///    let values = vec![  "z".to_string(), "y".to_string()];
-///    println!("Equations = {:?}", Equations);   
-///    // set argument
-///    let arg = "x".to_string();
-///      // set method
-///      let method = "BDF".to_string();
-///      // set initial conditions
-///      let t0 = 0.0;
-///      let y0 = vec![1.0, 1.0];
-///      let t_bound = 1.0;
-///      // set solver parameters (optional)
-///      let first_step = None;
-///      let atol = 1e-5;
-///      let rtol = 1e-5;
-///      let max_step = 1e-3;
-///      let jac_sparsity = None;
-///      let vectorized = false;
-///      // create instance of ODE solver and solve the system
-///      let mut ODE_instance = ODEsolver::new_complex(
-///        Equations,
-///        values,
-///        arg,
-///        method,
-///        t0,
-///        y0.into(),
-///        t_bound,
-///        max_step,
-///        rtol,
-///        atol,   
-///        jac_sparsity,
-///        vectorized,
-///        first_step
-///    );
-///    ODE_instance.solve();
-///    ODE_instance.plot_result();
-///    ODE_instance.save_result();
-///  ```
-/// Example#3
-/// ```
-/// use RustedSciThe::symbolic::symbolic_engine::Expr;
-///  use RustedSciThe::numerical::ODE_api::ODEsolver;
-///   let RHS = vec!["-z-y", "y"];
-// parse RHS as symbolic expressions
-///   let Equations = Expr::parse_vector_expression(RHS.clone());
-///   let values = vec![  "z".to_string(), "y".to_string()];
-///   println!("Equations = {:?}", Equations);   
-///   // set argument
-///   let arg = "x".to_string();
-///     // set method
-///     let method = "DOPRI".to_string();
-///     // set initial conditions
-///     let t0 = 0.0;
-///     let y0 = vec![1.0, 1.0];
-///    let t_bound = 1.0;
-///    // set solver parameters (optional)
-///
-///     let max_step = 1e-3;
-///
-///     // create instance of ODE solver and solve the system
-///     let mut ODE_instance = ODEsolver::new_easy(
-///       Equations,
-///       values,
-///       arg,
-///       method,
-///       t0,
-///       y0.into(),
-///       t_bound,
-///       max_step,
-///  );
-///   ODE_instance.solve();
-///   ODE_instance.plot_result();
-///  ```
-pub mod ODE_api;
-/// Universal API for the legacy non-Radau IVP solvers.
-///
-/// The production Radau entry point is `numerical::Radau::RadauSolver`.
-/// The archived Radau selector is intentionally not constructed by this
-/// compatibility facade; use the dedicated Radau API and examples instead.
+/// Use this for a common interface across methods; use dedicated modules such
+/// as `BDF`, `BE`, `LSODE2`, or `Radau` for solver-specific configuration.
 pub mod ODE_api2;
 /// Radau solver for nonlinear and stiff ODEs.
 ///

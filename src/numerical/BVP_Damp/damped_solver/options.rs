@@ -35,6 +35,23 @@ pub enum BvpDerivativeScheme {
     Trapezoid,
 }
 
+/// Selects the implementation used to evaluate generated damped-solver callbacks.
+///
+/// `SolverNative` preserves the established callback route. `PreparedAtom` is
+/// an experimental opt-in for the measured AtomView/Banded/Lambdify/sequential
+/// combination. It is not recommended for production: release measurements
+/// found its cold full-solve path slower than `SolverNative`. Unsupported
+/// combinations are rejected during preparation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DampedCallbackRuntime {
+    /// Use the callback implementation selected by the generated BVP pipeline.
+    #[default]
+    SolverNative,
+    /// Experimental AtomView residual/Jacobian evaluation with reusable
+    /// prepared scratch. Not recommended for production workloads.
+    PreparedAtom,
+}
+
 impl BvpDerivativeScheme {
     pub(crate) fn as_legacy_str(self) -> &'static str {
         match self {

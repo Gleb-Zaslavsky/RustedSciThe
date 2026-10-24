@@ -17,6 +17,7 @@ mod tests {
     use crate::numerical::BVP_Damp::BVP_traits::{
         BandedMatrixType, MatrixType, VectorType, convert_to_fun, convert_to_jac,
     };
+    use crate::numerical::BVP_Damp::MatrixBackend;
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
         DampedSolverOptions, NRBVP, SolverParams,
     };
@@ -34,6 +35,7 @@ mod tests {
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum MatrixRoute {
+        Dense,
         Sparse,
         Banded,
     }
@@ -41,6 +43,7 @@ mod tests {
     impl MatrixRoute {
         const fn label(self) -> &'static str {
             match self {
+                Self::Dense => "Dense-control",
                 Self::Sparse => "Sparse-faer",
                 Self::Banded => "Banded",
             }
@@ -48,6 +51,7 @@ mod tests {
 
         fn options(self, frontend: BvpSymbolicAssemblyBackend) -> DampedSolverOptions {
             let base = match self {
+                Self::Dense => DampedSolverOptions::dense_damped(),
                 Self::Sparse => DampedSolverOptions::sparse_damped(),
                 Self::Banded => DampedSolverOptions::banded_damped().with_banded_lambdify(),
             };
@@ -192,6 +196,7 @@ mod tests {
         frontend: BvpSymbolicAssemblyBackend,
     ) -> FrozenNRBVP {
         let base = match route {
+            MatrixRoute::Dense => FrozenSolverOptions::dense_frozen(),
             MatrixRoute::Sparse => FrozenSolverOptions::sparse_frozen(),
             MatrixRoute::Banded => FrozenSolverOptions::banded_frozen().with_banded_lambdify(),
         };
@@ -255,7 +260,7 @@ mod tests {
             BvpSymbolicAssemblyBackend::ExprLegacy,
             BvpSymbolicAssemblyBackend::AtomView,
         ] {
-            for route in [MatrixRoute::Sparse, MatrixRoute::Banded] {
+            for route in [MatrixRoute::Dense, MatrixRoute::Sparse, MatrixRoute::Banded] {
                 let mut solver = build_solver(route, frontend);
                 prepare(&mut solver);
                 solver
@@ -278,6 +283,20 @@ mod tests {
                     "{frontend:?}/{} must invalidate numeric factors after rebind",
                     route.label()
                 );
+
+                solver
+                    .try_set_params(Some(&["beta"]))
+                    .expect("parameter-name mutation should be accepted");
+                expect_stale(&mut solver, "parameter names");
+                solver
+                    .try_set_params(Some(&["alpha"]))
+                    .expect("restoring the declared parameter should be accepted");
+                solver
+                    .try_eq_generate(None, None)
+                    .expect("parameter-name regeneration should restore the runtime");
+                solver
+                    .try_solver_prepared()
+                    .expect("restored parameter binding should be solvable");
 
                 solver
                     .try_set_mesh(0.0, 1.0, 6)
@@ -306,6 +325,40 @@ mod tests {
                     .try_eq_generate(None, None)
                     .expect("restoring Lambdify policy should rebuild callbacks");
 
+                let execution_config = solver
+                    .generated_backend_config()
+                    .clone()
+                    .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Parallel {
+                        min_work: 0,
+                    });
+                solver.set_generated_backend_config(execution_config);
+                expect_stale(&mut solver, "Lambdify execution policy");
+                let restored_execution_config = solver
+                    .generated_backend_config()
+                    .clone()
+                    .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Sequential);
+                solver.set_generated_backend_config(restored_execution_config);
+                solver
+                    .try_eq_generate(None, None)
+                    .expect("execution-policy regeneration should succeed");
+
+                let alternate_layout = match route {
+                    MatrixRoute::Dense => MatrixBackend::SparseCol,
+                    MatrixRoute::Sparse | MatrixRoute::Banded => MatrixBackend::Dense,
+                };
+                let layout_config = solver
+                    .generated_backend_config()
+                    .clone()
+                    .with_matrix_backend_override(alternate_layout);
+                solver.set_generated_backend_config(layout_config);
+                expect_stale(&mut solver, "matrix layout");
+                solver.set_generated_backend_config(
+                    route.options(frontend).generated_backend_config.clone(),
+                );
+                solver
+                    .try_eq_generate(None, None)
+                    .expect("matrix-layout regeneration should restore the runtime");
+
                 solver.values[0] = "renamed_y".to_string();
                 expect_stale(&mut solver, "public values mutation");
                 solver.values[0] = "y".to_string();
@@ -319,19 +372,25 @@ mod tests {
                 solver
                     .try_eq_generate(None, None)
                     .expect("restoring direct initial-guess mutation should succeed");
+                solver.eq_system[1] = Expr::parse_expression("-y^2");
+                expect_stale(&mut solver, "Jacobian pattern mutation");
+                solver.eq_system[1] = Expr::parse_expression("-z");
+                solver
+                    .try_eq_generate(None, None)
+                    .expect("restoring the original Jacobian pattern should regenerate");
                 solver
                     .try_solver_prepared()
                     .expect("final regenerated runtime should be usable");
 
                 rows.push(format!(
-                    "frontend={frontend:?}; route={}; numeric_rebind=accepted; stale_mesh=typed; stale_bc=typed; stale_policy=typed; stale_public_values=typed; stale_initial_guess=typed",
+                    "frontend={frontend:?}; route={}; numeric_rebind=accepted; stale_parameter_names=typed; stale_mesh=typed; stale_bc=typed; stale_backend_policy=typed; stale_evaluator_policy=typed; stale_matrix_layout=typed; stale_public_values=typed; stale_initial_guess=typed; stale_jacobian_pattern=typed",
                     route.label()
                 ));
             }
         }
 
         let report = format!(
-            "status: passed\n\nfixture: alpha*y-z, -z; initial n_steps=5; regenerated mesh n_steps=6\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, Banded\nchecks: numeric rebind keeps prepared callbacks; mesh, boundary conditions, backend policy, direct public values and direct initial-guess mutation reject stale prepared solves with PreparedRuntimeInvalidated; regeneration restores solve path\nrows:\n{}\ninterpretation: numeric parameter values are runtime bindings and invalidate factors but not symbolic callbacks; structural compatibility changes require explicit regeneration.\n",
+            "status: passed\n\nfixture: alpha*y-z, -z; initial n_steps=5; regenerated mesh n_steps=6\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Dense-control, Sparse-faer, Banded\nchecks: numeric rebind preserves callbacks; parameter-name, mesh, boundary, backend/evaluator policy, matrix-layout, public-input, initial-guess and Jacobian-pattern mutations reject stale prepared solves with PreparedRuntimeInvalidated; regeneration restores solve path\nrows:\n{}\ninterpretation: numeric parameter values update the existing symbolic binding and invalidate factors; structural compatibility changes require explicit regeneration.\n",
             rows.join("\n")
         );
         if let Err(error) = write_test_report(
@@ -431,7 +490,7 @@ mod tests {
             BvpSymbolicAssemblyBackend::ExprLegacy,
             BvpSymbolicAssemblyBackend::AtomView,
         ] {
-            for route in [MatrixRoute::Sparse, MatrixRoute::Banded] {
+            for route in [MatrixRoute::Dense, MatrixRoute::Sparse, MatrixRoute::Banded] {
                 let mut solver = build_solver(route, frontend);
                 prepare(&mut solver);
                 solver
@@ -517,6 +576,17 @@ mod tests {
                     .try_solver_prepared()
                     .expect("Frozen numeric rebind must preserve callbacks");
 
+                solver
+                    .try_set_params(Some(&["beta"]))
+                    .expect("Frozen parameter-name mutation should be accepted");
+                expect_frozen_stale(&mut solver, "parameter names");
+                solver
+                    .try_set_params(Some(&["alpha"]))
+                    .expect("restoring the Frozen parameter should be accepted");
+                solver
+                    .try_eq_generate()
+                    .expect("Frozen parameter-name regeneration should succeed");
+
                 solver.set_boundary_conditions(HashMap::from([
                     ("y".to_string(), vec![(0usize, 0.1f64)]),
                     ("z".to_string(), vec![(0usize, 1.0f64)]),
@@ -533,6 +603,41 @@ mod tests {
                     .try_eq_generate()
                     .expect("restoring Frozen Lambdify policy should succeed");
 
+                let execution_config = solver
+                    .generated_backend_config()
+                    .clone()
+                    .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Parallel {
+                        min_work: 0,
+                    });
+                solver.set_generated_backend_config(execution_config);
+                expect_frozen_stale(&mut solver, "Lambdify execution policy");
+                let restored_execution_config = solver
+                    .generated_backend_config()
+                    .clone()
+                    .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Sequential);
+                solver.set_generated_backend_config(restored_execution_config);
+                solver
+                    .try_eq_generate()
+                    .expect("Frozen execution-policy regeneration should succeed");
+
+                let alternate_layout = match route {
+                    MatrixRoute::Dense => MatrixBackend::SparseCol,
+                    MatrixRoute::Sparse | MatrixRoute::Banded => MatrixBackend::Dense,
+                };
+                let layout_config = solver
+                    .generated_backend_config()
+                    .clone()
+                    .with_matrix_backend_override(alternate_layout);
+                solver.set_generated_backend_config(layout_config);
+                expect_frozen_stale(&mut solver, "matrix layout");
+                let restored_layout_config = build_frozen_solver(route, frontend)
+                    .generated_backend_config()
+                    .clone();
+                solver.set_generated_backend_config(restored_layout_config);
+                solver
+                    .try_eq_generate()
+                    .expect("Frozen matrix-layout regeneration should succeed");
+
                 solver.values[0] = "renamed_y".to_string();
                 expect_frozen_stale(&mut solver, "public values mutation");
                 solver.values[0] = "y".to_string();
@@ -546,19 +651,25 @@ mod tests {
                 solver
                     .try_eq_generate()
                     .expect("restoring Frozen direct initial-guess mutation should succeed");
+                solver.eq_system[1] = Expr::parse_expression("-y^2");
+                expect_frozen_stale(&mut solver, "Jacobian pattern mutation");
+                solver.eq_system[1] = Expr::parse_expression("-z");
+                solver
+                    .try_eq_generate()
+                    .expect("restoring Frozen Jacobian pattern should regenerate");
                 solver
                     .try_solver_prepared()
                     .expect("final Frozen prepared runtime should be usable");
 
                 rows.push(format!(
-                    "frontend={frontend:?}; route={}; numeric_rebind=accepted; stale_bc=typed; stale_policy=typed; stale_public_values=typed; stale_initial_guess=typed",
+                    "frontend={frontend:?}; route={}; numeric_rebind=accepted; stale_parameter_names=typed; stale_bc=typed; stale_backend_policy=typed; stale_evaluator_policy=typed; stale_matrix_layout=typed; stale_public_values=typed; stale_initial_guess=typed; stale_jacobian_pattern=typed",
                     route.label()
                 ));
             }
         }
 
         let report = format!(
-            "status: passed\n\nfixture: alpha*y-z, -z; Frozen strategy; n_steps=5\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, Banded\nchecks: numeric rebind preserves prepared callbacks; BC, backend policy, direct public values and direct initial-guess mutation reject stale Frozen solves; regeneration restores the prepared path\nrows:\n{}\ninterpretation: Frozen shares the typed prepared invalidation boundary with Damped, including the fallible mesh and state-value boundaries.\n",
+            "status: passed\n\nfixture: alpha*y-z, -z; Frozen strategy; n_steps=5\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Dense-control, Sparse-faer, Banded\nchecks: numeric rebind preserves prepared callbacks; parameter names, BC, backend/evaluator policy, matrix layout, direct public values, initial guess and Jacobian pattern reject stale Frozen solves; regeneration restores the prepared path\nrows:\n{}\ninterpretation: Frozen shares the typed prepared invalidation boundary with Damped across Dense-control and production Sparse/Banded routes.\n",
             rows.join("\n")
         );
         if let Err(error) = write_test_report(
@@ -568,6 +679,142 @@ mod tests {
         ) {
             eprintln!("[BVP test report] unable to write Frozen lifecycle report: {error}");
         }
+    }
+
+    #[test]
+    fn frozen_jacobian_refresh_trace_matches_frontends_and_layouts() {
+        let root = 1.7692923542386314;
+        let mut cases = Vec::new();
+
+        for frontend in [
+            BvpSymbolicAssemblyBackend::ExprLegacy,
+            BvpSymbolicAssemblyBackend::AtomView,
+        ] {
+            for route in [MatrixRoute::Sparse, MatrixRoute::Banded] {
+                let base = match route {
+                    MatrixRoute::Dense => unreachable!("Dense is a lifecycle control only"),
+                    MatrixRoute::Sparse => FrozenSolverOptions::sparse_frozen(),
+                    MatrixRoute::Banded => {
+                        FrozenSolverOptions::banded_frozen().with_banded_lambdify()
+                    }
+                };
+                let matrix_backend = match route {
+                    MatrixRoute::Dense => MatrixBackend::Dense,
+                    MatrixRoute::Sparse => MatrixBackend::SparseCol,
+                    MatrixRoute::Banded => MatrixBackend::Banded,
+                };
+                let config = base
+                    .generated_backend_config
+                    .clone()
+                    .with_matrix_backend_override(matrix_backend)
+                    .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly))
+                    .with_symbolic_assembly_backend(frontend)
+                    .with_bvp_telemetry_mode(
+                        crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Detailed,
+                    )
+                    .with_bvp_logging_config(
+                        crate::numerical::BVP_Damp::telemetry::BvpLoggingConfig::new(
+                            crate::numerical::BVP_Damp::telemetry::BvpLoggingMode::Detailed,
+                        )
+                        .with_max_events(256),
+                    );
+                let options = base
+                    .with_generated_backend_config(config)
+                    .with_strategy_params(Some(HashMap::from([(
+                        "every_m".to_string(),
+                        Some(vec![1.0]),
+                    )])))
+                    .with_tolerance(1e-7)
+                    .with_max_iterations(80);
+                let mut solver = FrozenNRBVP::new_with_options(
+                    vec![
+                        Expr::parse_expression("z"),
+                        Expr::parse_expression("y^3-2*y-2"),
+                    ],
+                    DMatrix::zeros(2, 24),
+                    vec!["y".to_string(), "z".to_string()],
+                    "x".to_string(),
+                    HashMap::from([
+                        ("y".to_string(), vec![(0usize, root)]),
+                        ("z".to_string(), vec![(0usize, 0.0)]),
+                    ]),
+                    0.0,
+                    1.0,
+                    24,
+                    options,
+                );
+                solver.dont_save_log(true);
+                solver
+                    .try_eq_generate()
+                    .unwrap_or_else(|error| panic!("Frozen preparation failed: {error:?}"));
+                solver
+                    .try_solver_prepared()
+                    .unwrap_or_else(|error| panic!("Frozen solve failed: {error:?}"))
+                    .expect("Frozen cubic BVP should converge");
+
+                let trajectory = solver
+                    .get_result()
+                    .expect("converged Frozen solve should publish its trajectory");
+                let telemetry = solver.get_statistics().telemetry;
+                let refresh_trace = telemetry
+                    .log_events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            event.kind,
+                            crate::numerical::BVP_Damp::telemetry::BvpLogEventKind::JacobianRefresh
+                        )
+                    })
+                    .map(|event| (event.kind, event.iteration))
+                    .collect::<Vec<_>>();
+                assert!(
+                    !refresh_trace.is_empty(),
+                    "Frozen every_m run must publish Jacobian refresh events"
+                );
+                assert!(
+                    telemetry.counters.jacobian_recalculations > 1,
+                    "every_m policy must exercise a Jacobian refresh for {frontend:?}/{route:?}"
+                );
+                cases.push((frontend, route, trajectory, telemetry, refresh_trace));
+            }
+        }
+
+        let (_, _, reference_trajectory, reference_stats, reference_trace) = &cases[0];
+        for (frontend, route, trajectory, telemetry, trace) in cases.iter().skip(1) {
+            let max_diff = reference_trajectory
+                .iter()
+                .zip(trajectory.iter())
+                .map(|(lhs, rhs)| (lhs - rhs).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                max_diff < 1e-7,
+                "Frozen trajectory mismatch for {frontend:?}/{route:?}: {max_diff:.3e}"
+            );
+            assert_eq!(
+                reference_stats.counters.iterations, telemetry.counters.iterations,
+                "Frozen iteration mismatch for {frontend:?}/{route:?}"
+            );
+            assert_eq!(
+                reference_stats.counters.jacobian_recalculations,
+                telemetry.counters.jacobian_recalculations,
+                "Frozen Jacobian refresh count mismatch for {frontend:?}/{route:?}"
+            );
+            assert_eq!(
+                reference_trace, trace,
+                "Frozen refresh/termination event trace mismatch for {frontend:?}/{route:?}"
+            );
+        }
+        println!(
+            "[BVP Frozen refresh parity] iterations={} jacobian_refreshes={} max_state_diff={:.3e}",
+            reference_stats.counters.iterations,
+            reference_stats.counters.jacobian_recalculations,
+            cases
+                .iter()
+                .skip(1)
+                .flat_map(|case| reference_trajectory.iter().zip(case.2.iter()))
+                .map(|(lhs, rhs)| (lhs - rhs).abs())
+                .fold(0.0, f64::max),
+        );
     }
 
     #[test]

@@ -8,12 +8,38 @@ This checklist tracks the implementation and validation status of the opt-in
 runner. The registry currently contains 196 scenarios. The previous Windows
 calibration had baselines for 100 active IDs; the former BDF/LSODE2 route IDs
 have since been superseded by longer workloads, and Robertson micro-solves
-were removed from the registry. Fresh baselines for the new BDF/LSODE2 IDs are
-pending. Local baseline directories retain inactive IDs as history. Baselines
+were removed from the registry. Fresh baselines for the new BDF/LSODE2 IDs
+were recorded and their complete matrices passed Release comparison on
+2026-10-21. Local baseline directories retain inactive IDs as history. Baselines
 and machine profiles are Git-ignored local state. The
 runner is useful for controlled local comparisons but is not yet validated as
 a cross-platform regression gate. No historical Markdown timing is imported as
 a baseline.
+
+## Linux Validation Debt
+
+Linux is not yet a validated target. Windows Debug and selected Release
+baselines do not establish Linux correctness, filesystem behavior, or timing
+comparability. Keep Linux machine profiles and baselines independent from
+Windows; never compare their timing values across hosts or environments.
+
+- [ ] Build the opt-in runner with the Linux GNU toolchain in Debug and Release;
+  verify feature-gated target selection and documented CLI commands.
+- [ ] Run the runner unit/contract suite on Linux, including process spawning,
+  child timeout/reaping, path handling, machine-profile lookup, and atomic
+  baseline publication/replacement.
+- [ ] Exercise `list`, `dry-run`, and one correctness-only scenario on Linux
+  before collecting any timing data; confirm AOT prerequisites are reported
+  accurately and unavailable routes cannot silently fall back.
+- [ ] Register a native Linux machine profile and inspect its target, rustc,
+  CPU/build configuration, and worker identity. Store its baseline tree under
+  a distinct Linux environment ID.
+- [ ] Calibrate only substantial, stable workloads in Release, then record and
+  compare selected solver groups on the same Linux machine/source/toolchain.
+  Do not import Windows baselines or loosen stability thresholds to force a
+  pass.
+- [ ] Document Linux setup, compiler/AOT prerequisites, registration, and
+  record/compare commands in `performance/README.md` after native validation.
 
 ## Implementation Audit (2026-10-20)
 
@@ -553,8 +579,13 @@ therefore 196 scenarios: BDF now uses 256-state diffusion, LSODE2 uses
 micro-solves are removed from performance selection (numerical correctness
 remains covered by solver tests). New scenario IDs make the changed workload
 contract explicit; old baseline files are inactive history. Debug route smoke
-and registry contract tests pass; clean Release baselines remain to be
-collected after the source candidate is committed.
+and registry contract tests pass. Release baselines were recorded for all eight
+BDF and thirty LSODE2 routes, then both complete matrices passed comparison on
+the same clean source revision and Windows environment. During comparison, one
+BDF route was initially marked unstable due to a noisy first series; its
+isolated comparison and the subsequent full BDF matrix passed. LSODE2 likewise
+passed its 30-route comparison after isolated confirmation cleared transient
+whole-matrix timing drift. No solver changes or baseline overwrites were needed.
 
 The first release record attempt on the original 257-node BVP_sci fixture
 rejected its AtomView AOT sample at MAD/median 0.105; comparison also found the
@@ -631,7 +662,7 @@ sample batch.
 | P0 | `symbolic_atom_prepared_eval` | Existing production prepared evaluator | Batched residual/Jacobian, fixed inputs and output order |
 | P0 | `bdf_diff256_*` | Shared `DiffusionChain` IVP fixture and BDF API | 256 states; both frontends, Lambdify sequential/parallel, AOT Whole/Parallel2; telemetry-Off gate plus Detailed diagnostics |
 | P0 | `banded_faithful_tridiagonal` | `faer_sparse_vs_lapack_style_benches.rs` | Compact band storage, known solution, normalized residual |
-| P0 | `radau_diff256_*` | Shared IVP workload corpus and Radau story contract | 256-state diffusion, all 24 supported frontend/execution/layout/dispatch cells |
+| P0 | `radau_diff512_*` | Shared IVP workload corpus and Radau story contract | 512-state diffusion to `t=0.15`, `max_step=0.0025`; all 24 supported frontend/execution/layout/dispatch cells |
 | P0 | `lsode2_diff256_t050_*` | Shared `DiffusionChain` fixture and LSODE2 API | 256-state, `t=0.05`; matched frontend/layout/execution/dispatch matrix; telemetry-Off gate plus Detailed diagnostics |
 | P0 | `bvp_sci_exp_*` | Public BVP_sci builder and SciPy parity fixture | 30 matched frontend/layout/execution routes; exact profile, typed status, telemetry parity |
 | P0 | `be_diffusion_chain_32` | `benches/support/be_bench_support.rs` | Native analytic Jacobian, telemetry Off, trajectory bounds |

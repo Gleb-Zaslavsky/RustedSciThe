@@ -40,6 +40,9 @@ mod tests {
     use crate::numerical::BVP_Damp::generated_solver_handoff::{
         AotBuildPolicy, AotExecutionPolicy, GeneratedBackendConfig,
     };
+    use crate::numerical::BVP_Damp::telemetry::{
+        BvpLogEventKind, BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode,
+    };
     use crate::numerical::BVP_Damp::test_common::{
         AotStoryProtocol, SymbolicTestRoute, TEST_SUITE_ARCHITECTURE, sleep_ms, story_repetitions,
         uniform_initial_guess,
@@ -327,6 +330,50 @@ mod tests {
         let residual_avg = residual_samples.iter().sum::<f64>() / samples as f64;
         let jacobian_avg = jacobian_samples.iter().sum::<f64>() / samples as f64;
         (residual_avg, jacobian_avg)
+    }
+
+    fn measure_installed_callback_sample(solver: &mut NRBVP, iters: usize) -> (f64, f64) {
+        let args = DVector::from_element(solver.values.len() * solver.n_steps, 0.99);
+        let typed = Vectors_type_casting(&args, solver.method.clone());
+
+        let residual_begin = Instant::now();
+        for _ in 0..iters {
+            black_box(solver.fun.call(1.0, &*typed));
+        }
+        let residual_ms = residual_begin.elapsed().as_secs_f64() * 1_000.0;
+
+        let jacobian_begin = Instant::now();
+        for _ in 0..iters {
+            black_box(
+                solver
+                    .jac
+                    .as_mut()
+                    .expect("solver should expose Jacobian callback")
+                    .call(1.0, &*typed),
+            );
+        }
+        let jacobian_ms = jacobian_begin.elapsed().as_secs_f64() * 1_000.0;
+        (residual_ms, jacobian_ms)
+    }
+
+    fn median_and_mad(samples: &[f64]) -> (f64, f64) {
+        assert!(!samples.is_empty(), "paired A/B samples must not be empty");
+        let median = |values: &[f64]| {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            let middle = sorted.len() / 2;
+            if sorted.len() % 2 == 0 {
+                (sorted[middle - 1] + sorted[middle]) * 0.5
+            } else {
+                sorted[middle]
+            }
+        };
+        let center = median(samples);
+        let deviations = samples
+            .iter()
+            .map(|value| (value - center).abs())
+            .collect::<Vec<_>>();
+        (center, median(&deviations))
     }
 
     fn measure_jacobian_callback_samples(
@@ -664,6 +711,566 @@ mod tests {
         );
     }
 
+    #[test]
+    fn combustion_fixture_componentwise_callbacks_match_frontends_and_matrix_layouts() {
+        let routes = ["Sparse", "Banded"];
+        let frontends = [
+            BvpSymbolicAssemblyBackend::ExprLegacy,
+            BvpSymbolicAssemblyBackend::AtomView,
+        ];
+        let mut solvers = Vec::new();
+        for route in routes {
+            for frontend in frontends {
+                let mut options = combustion_lambdify_options_for_route(route, frontend);
+                options.generated_backend_config = options
+                    .generated_backend_config
+                    .clone()
+                    .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Sequential);
+                let mut solver = make_combustion_solver(8, options);
+                solver
+                    .try_eq_generate(None, None)
+                    .expect("real combustion callback fixture should prepare");
+                solvers.push((route, frontend, solver));
+            }
+        }
+
+        let reference_values = solvers[0].2.initial_guess.as_slice().to_vec();
+        let mut boundary_entries = solvers[0]
+            .2
+            .BorderConditions
+            .iter()
+            .flat_map(|(name, entries)| {
+                entries
+                    .iter()
+                    .map(move |(side, value)| format!("{name}:{side}:{:016x}", value.to_bits()))
+            })
+            .collect::<Vec<_>>();
+        boundary_entries.sort();
+        let equations = solvers[0]
+            .2
+            .eq_system
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let guess_bits = reference_values
+            .iter()
+            .map(|value| format!("{:016x}", value.to_bits()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let parameters = solvers[0]
+            .2
+            .param_values
+            .as_ref()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|value| format!("{:016x}", value.to_bits()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        let canonical_input = format!(
+            "equations={equations}\nstates={}\nindependent={}\nparameters={}:{}\ninterval={:016x}:{:016x}\nn_steps={}\nboundaries={}\ninitial_guess={guess_bits}\n",
+            solvers[0].2.values.join(","),
+            solvers[0].2.arg,
+            solvers[0].2.param_names.join(","),
+            parameters,
+            solvers[0].2.t0.to_bits(),
+            solvers[0].2.t_end.to_bits(),
+            solvers[0].2.n_steps,
+            boundary_entries.join(","),
+        );
+        let fingerprint = canonical_input
+            .bytes()
+            .fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
+        assert_eq!(
+            fingerprint, 0x07846b22e620f6fa,
+            "review combustion fixture/compiler-input changes before updating its fingerprint"
+        );
+
+        let callbacks = solvers
+            .iter_mut()
+            .map(|(route, frontend, solver)| {
+                let typed = Vectors_type_casting(
+                    &DVector::from_column_slice(&reference_values),
+                    solver.method.clone(),
+                );
+                let residual = solver.fun.call(1.0, &*typed).to_DVectorType();
+                let jacobian = solver
+                    .jac
+                    .as_mut()
+                    .expect("combustion fixture should expose Jacobian callback")
+                    .call(1.0, &*typed)
+                    .to_DMatrixType();
+                ((*route, *frontend), residual.as_slice().to_vec(), jacobian)
+            })
+            .collect::<Vec<_>>();
+        let ((reference_route, reference_frontend), reference_residual, reference_jacobian) =
+            &callbacks[0];
+        assert_eq!(*reference_route, "Sparse");
+        assert_eq!(*reference_frontend, BvpSymbolicAssemblyBackend::ExprLegacy);
+
+        for ((route, frontend), residual, jacobian) in callbacks.iter().skip(1) {
+            assert_eq!(residual.len(), reference_residual.len());
+            assert_eq!(jacobian.shape(), reference_jacobian.shape());
+            let residual_error = residual
+                .iter()
+                .zip(reference_residual)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0, f64::max);
+            let jacobian_error = jacobian
+                .iter()
+                .zip(reference_jacobian.iter())
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                residual_error <= 1.0e-9,
+                "combustion residual drift for {frontend:?}/{route}: {residual_error:e}"
+            );
+            assert!(
+                jacobian_error <= 1.0e-8,
+                "combustion Jacobian drift for {frontend:?}/{route}: {jacobian_error:e}"
+            );
+        }
+
+        let reference_solver = &mut solvers[0].2;
+        let step_scale = 1.0e-6;
+        for column in 0..reference_values.len() {
+            let step = step_scale * reference_values[column].abs().max(1.0);
+            let mut plus = reference_values.clone();
+            let mut minus = reference_values.clone();
+            plus[column] += step;
+            minus[column] -= step;
+            let eval_residual = |solver: &NRBVP, values: &[f64]| {
+                let typed = Vectors_type_casting(
+                    &DVector::from_column_slice(values),
+                    solver.method.clone(),
+                );
+                solver.fun.call(1.0, &*typed).to_DVectorType()
+            };
+            let plus_residual = eval_residual(reference_solver, &plus);
+            let minus_residual = eval_residual(reference_solver, &minus);
+            for row in 0..reference_jacobian.nrows() {
+                let finite_difference = (plus_residual[row] - minus_residual[row]) / (2.0 * step);
+                let analytic = reference_jacobian[(row, column)];
+                let tolerance = 5.0e-5 * finite_difference.abs().max(analytic.abs()).max(1.0);
+                assert!(
+                    (finite_difference - analytic).abs() <= tolerance,
+                    "combustion ExprLegacy/Sparse Jacobian ({row}, {column})={analytic:e}, FD={finite_difference:e}, tolerance={tolerance:e}"
+                );
+            }
+        }
+
+        let report = format!(
+            "status: passed\n\nfixture: production combustion RHS, n_steps=8, canonical initial guess\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, native Banded\nchecks: exact fixture fingerprint, componentwise residual/Jacobian parity, Sparse/Banded dense-materialization parity, ExprLegacy/Sparse Jacobian versus central finite differences\nfingerprint: fnv1a64-{fingerprint:016x}\ninterpretation: debug correctness only; no timing or performance claim.\n"
+        );
+        if let Err(error) = write_test_report(
+            "BVP_Damp",
+            "combustion_fixture_componentwise_callbacks_match_frontends_and_matrix_layouts",
+            &report,
+        ) {
+            eprintln!(
+                "[BVP test report] unable to write combustion callback parity report: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn combustion_1000_mesh_jacobian_actions_match_frontends_and_layouts() {
+        let routes = ["Sparse", "Banded"];
+        let frontends = [
+            BvpSymbolicAssemblyBackend::ExprLegacy,
+            BvpSymbolicAssemblyBackend::AtomView,
+        ];
+        let mut solvers = Vec::new();
+        for route in routes {
+            for frontend in frontends {
+                let mut options = combustion_lambdify_options_for_route(route, frontend);
+                options.generated_backend_config = options
+                    .generated_backend_config
+                    .clone()
+                    .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Sequential);
+                let mut solver = make_combustion_solver(1_000, options);
+                solver
+                    .try_eq_generate(None, None)
+                    .expect("large combustion callbacks should prepare");
+                solvers.push((route, frontend, solver));
+            }
+        }
+
+        let input = solvers[0].2.initial_guess.as_slice().to_vec();
+        assert!(
+            solvers
+                .iter()
+                .all(|(_, _, solver)| solver.initial_guess.as_slice() == input)
+        );
+        let mut canonical_input = format!(
+            "fixture=combustion-production\nn_steps=1000\nindependent={}\nstates={}\n",
+            solvers[0].2.arg,
+            solvers[0].2.values.join(",")
+        );
+        for (index, value) in input.iter().enumerate() {
+            use std::fmt::Write as _;
+            write!(&mut canonical_input, "{index}:{:016x};", value.to_bits())
+                .expect("writing to a String cannot fail");
+        }
+        let fingerprint = canonical_input
+            .bytes()
+            .fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
+        assert_eq!(
+            fingerprint, 0xefdb92ea2e1d64fb,
+            "review combustion-1000 compiler-input changes before updating its fingerprint"
+        );
+
+        let direction = input
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let sign = if index % 2 == 0 { 1.0 } else { -1.0 };
+                sign * (0.25 + (index % 17) as f64 / 17.0) * value.abs().max(1.0)
+            })
+            .collect::<Vec<_>>();
+        let snapshots = solvers
+            .iter_mut()
+            .map(|(route, frontend, solver)| {
+                let typed_input = Vectors_type_casting(
+                    &DVector::from_column_slice(&input),
+                    solver.method.clone(),
+                );
+                let residual = solver.fun.call(1.0, &*typed_input).to_DVectorType();
+                let jacobian = solver
+                    .jac
+                    .as_mut()
+                    .expect("large combustion route should publish Jacobian callback")
+                    .call(1.0, &*typed_input);
+                assert_eq!(jacobian.shape(), (residual.len(), input.len()));
+                let is_native_banded = jacobian
+                    .as_any()
+                    .downcast_ref::<crate::numerical::BVP_Damp::BVP_traits::BandedMatrixType>()
+                    .is_some();
+                assert_eq!(is_native_banded, *route == "Banded");
+
+                let typed_direction = Vectors_type_casting(
+                    &DVector::from_column_slice(&direction),
+                    solver.method.clone(),
+                );
+                let jacobian_action = jacobian.mul(&*typed_direction).to_DVectorType();
+                ((*route, *frontend), residual, jacobian_action)
+            })
+            .collect::<Vec<_>>();
+
+        let (reference_route, reference_frontend) = snapshots[0].0;
+        assert_eq!(reference_route, "Sparse");
+        assert_eq!(reference_frontend, BvpSymbolicAssemblyBackend::ExprLegacy);
+        for ((route, frontend), residual, jacobian_action) in snapshots.iter().skip(1) {
+            let residual_error = residual
+                .iter()
+                .zip(snapshots[0].1.iter())
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0, f64::max);
+            let action_error = jacobian_action
+                .iter()
+                .zip(snapshots[0].2.iter())
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                residual_error <= 1.0e-8,
+                "combustion-1000 residual drift for {frontend:?}/{route}: {residual_error:e}"
+            );
+            assert!(
+                action_error <= 1.0e-7,
+                "combustion-1000 Jacobian-action drift for {frontend:?}/{route}: {action_error:e}"
+            );
+        }
+
+        let step = 1.0e-6;
+        let plus = input
+            .iter()
+            .zip(&direction)
+            .map(|(value, delta)| value + step * delta)
+            .collect::<Vec<_>>();
+        let minus = input
+            .iter()
+            .zip(&direction)
+            .map(|(value, delta)| value - step * delta)
+            .collect::<Vec<_>>();
+        let evaluate_reference = |values: &[f64]| {
+            let typed = Vectors_type_casting(
+                &DVector::from_column_slice(values),
+                solvers[0].2.method.clone(),
+            );
+            solvers[0].2.fun.call(1.0, &*typed).to_DVectorType()
+        };
+        let plus_residual = evaluate_reference(&plus);
+        let minus_residual = evaluate_reference(&minus);
+        for row in 0..snapshots[0].2.len() {
+            let finite_difference = (plus_residual[row] - minus_residual[row]) / (2.0 * step);
+            let analytic = snapshots[0].2[row];
+            let tolerance = 2.0e-5 * finite_difference.abs().max(analytic.abs()).max(1.0);
+            assert!(
+                (finite_difference - analytic).abs() <= tolerance,
+                "combustion-1000 directional Jacobian row {row}: analytic={analytic:e}, FD={finite_difference:e}, tolerance={tolerance:e}"
+            );
+        }
+
+        let report = format!(
+            "status: passed\n\nfixture: production combustion system, n_steps=1000\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, native Banded\nchecks: deterministic compiler-input fingerprint, residual parity, Jacobian-vector parity without dense materialization, reference Jv versus central directional finite differences\nfingerprint: fnv1a64-{fingerprint:016x}\ninterpretation: large-mesh Debug correctness gate; no timing or performance claim.\n"
+        );
+        if let Err(error) = write_test_report(
+            "BVP_Damp",
+            "combustion_1000_mesh_jacobian_actions_match_frontends_and_layouts",
+            &report,
+        ) {
+            eprintln!("[BVP test report] unable to write large combustion parity report: {error}");
+        }
+    }
+
+    #[test]
+    fn combustion_1000_accepted_trajectory_matches_frontends_and_layouts() {
+        let routes = ["Sparse", "Banded"];
+        let frontends = [
+            BvpSymbolicAssemblyBackend::ExprLegacy,
+            BvpSymbolicAssemblyBackend::AtomView,
+        ];
+        let mut solutions = Vec::new();
+        for route in routes {
+            for frontend in frontends {
+                let mut options = combustion_lambdify_options_for_route(route, frontend);
+                options.generated_backend_config = options
+                    .generated_backend_config
+                    .clone()
+                    .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Sequential);
+                let mut solver = make_combustion_solver(1_000, options);
+                solver.set_bvp_telemetry_mode(BvpTelemetryMode::Detailed);
+                solver.set_bvp_logging_config(
+                    BvpLoggingConfig::new(BvpLoggingMode::Detailed).with_max_events(4_096),
+                );
+                solver.try_solve().unwrap_or_else(|error| {
+                    panic!("{frontend:?}/{route} combustion solve failed: {error:?}")
+                });
+                let trajectory = solver
+                    .get_result()
+                    .expect("converged combustion solve should publish its trajectory")
+                    .clone();
+                assert_eq!(trajectory.nrows(), 1_001);
+                assert_eq!(trajectory.ncols(), 6);
+                let telemetry = solver.get_statistics().telemetry;
+                assert_eq!(telemetry.logging_config.mode, BvpLoggingMode::Detailed);
+                solutions.push((route, frontend, trajectory, telemetry));
+            }
+        }
+
+        let reference = &solutions[0].2;
+        assert_eq!(solutions[0].0, "Sparse");
+        assert_eq!(solutions[0].1, BvpSymbolicAssemblyBackend::ExprLegacy);
+        let max_abs =
+            |matrix: &DMatrix<f64>| matrix.iter().copied().map(f64::abs).fold(0.0, f64::max);
+        let expected_checkpoints: [(usize, [f64; 6]); 7] = [
+            (
+                0,
+                [
+                    0.6666666666666666,
+                    0.15631348512307622,
+                    1.0,
+                    -0.0050452196643636605,
+                    0.001,
+                    0.005045419364588773,
+                ],
+            ),
+            (
+                1,
+                [
+                    0.6688997164541391,
+                    0.15373871955668417,
+                    0.982481876165404,
+                    -0.004962111877065445,
+                    0.018518817238155464,
+                    0.004962311577590107,
+                ],
+            ),
+            (
+                250,
+                [
+                    0.7928826715468196,
+                    0.0016223451694788687,
+                    0.009922798093707046,
+                    -5.226365664820363e-5,
+                    0.9912505851734408,
+                    5.246343177488727e-5,
+                ],
+            ),
+            (
+                500,
+                [
+                    0.7941289852840491,
+                    1.8075021232246632e-5,
+                    0.0002319831521567998,
+                    -4.837583363033626e-7,
+                    1.0011148484130077,
+                    6.836083926517846e-7,
+                ],
+            ),
+            (
+                750,
+                [
+                    0.7941514388154203,
+                    3.2039420908232643e-6,
+                    0.00014242227148715298,
+                    -3.5528898661165274e-9,
+                    1.0013779226469541,
+                    2.0347790398319438e-7,
+                ],
+            ),
+            (
+                999,
+                [
+                    0.7941602496776761,
+                    5.668368805771838e-8,
+                    0.00015972017380003526,
+                    9.817427187439306e-8,
+                    1.0015335087341755,
+                    1.0182542812605685e-7,
+                ],
+            ),
+            (
+                1_000,
+                [
+                    0.794160250487443,
+                    1.0e-10,
+                    0.00016006105668848786,
+                    1.0e-7,
+                    1.0015338622946897,
+                    1.0e-7,
+                ],
+            ),
+        ];
+        for (node, expected_state) in expected_checkpoints {
+            for (component, expected) in expected_state.iter().enumerate() {
+                let actual = reference[(node, component)];
+                assert!(
+                    (actual - expected).abs() <= 1.0e-8,
+                    "frozen combustion trajectory checkpoint ({node}, {component}): expected={expected:e}, actual={actual:e}"
+                );
+            }
+        }
+        println!(
+            "[BVP Damp accepted trajectory] fixture=combustion-1000; reference=ExprLegacy/Sparse; checkpoint_count={}; max_abs={:.9e}",
+            expected_checkpoints.len(),
+            max_abs(reference)
+        );
+
+        let mut max_route_diff = 0.0_f64;
+        let reference_counters = &solutions[0].3.counters;
+        let decision_trace =
+            |snapshot: &crate::numerical::BVP_Damp::telemetry::BvpTelemetrySnapshot| {
+                snapshot
+                    .log_events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            event.kind,
+                            BvpLogEventKind::DampingTrial
+                                | BvpLogEventKind::DampingRejected
+                                | BvpLogEventKind::BoundLimitedStep
+                                | BvpLogEventKind::MeshRevision
+                                | BvpLogEventKind::Termination
+                        )
+                    })
+                    .map(|event| {
+                        (
+                            event.kind,
+                            event.iteration,
+                            event.damping_trial,
+                            event.mesh_revision,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+        let reference_decisions = decision_trace(&solutions[0].3);
+        assert!(
+            reference_decisions
+                .iter()
+                .any(|(kind, _, _, _)| *kind == BvpLogEventKind::Termination),
+            "combustion reference should retain a typed termination event"
+        );
+
+        for (route, frontend, trajectory, telemetry) in solutions.iter().skip(1) {
+            let max_diff = reference
+                .iter()
+                .zip(trajectory.iter())
+                .map(|(expected, actual)| (expected - actual).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                max_diff <= 1.0e-6,
+                "accepted combustion trajectory drift for {frontend:?}/{route}: {max_diff:e}"
+            );
+            max_route_diff = max_route_diff.max(max_diff);
+
+            let counters = &telemetry.counters;
+            assert_eq!(reference_counters.iterations, counters.iterations);
+            assert_eq!(
+                reference_counters.residual_requests,
+                counters.residual_requests
+            );
+            assert_eq!(
+                reference_counters.jacobian_recalculations,
+                counters.jacobian_recalculations
+            );
+            assert_eq!(reference_counters.damping_trials, counters.damping_trials);
+            assert_eq!(
+                reference_counters.damping_rejections,
+                counters.damping_rejections
+            );
+            assert_eq!(reference_counters.linear_solves, counters.linear_solves);
+            assert_eq!(
+                reference_counters.grid_refinements,
+                counters.grid_refinements
+            );
+            assert_eq!(reference_decisions, decision_trace(telemetry));
+        }
+        println!(
+            "[BVP Damp accepted trajectory] max_route_trajectory_diff={max_route_diff:.9e}; limit=1.0e-6"
+        );
+        println!(
+            "[BVP Damp accepted trajectory] iterations={} residual_requests={} jacobian_recalculations={} damping_trials={} damping_rejections={} linear_solves={} refinements={} semantic_events={}",
+            reference_counters.iterations,
+            reference_counters.residual_requests,
+            reference_counters.jacobian_recalculations,
+            reference_counters.damping_trials,
+            reference_counters.damping_rejections,
+            reference_counters.linear_solves,
+            reference_counters.grid_refinements,
+            reference_decisions.len(),
+        );
+
+        let report = format!(
+            "status: passed\n\nfixture: production six-equation combustion BVP, n_steps=1000\nreference: ExprLegacy/Sparse Lambdify\ncompared_routes: ExprLegacy/AtomView x Sparse-faer/native Banded Lambdify\nchecks: all four solves converge; full postprocessed 1001x6 trajectories compared componentwise; seven reference nodes pinned across all six states; Newton/damping/linear-solve/refinement counters and semantic decision events matched\niterations: {}\nresidual_requests: {}\njacobian_recalculations: {}\ndamping_trials: {}\ndamping_rejections: {}\nlinear_solves: {}\nrefinements: {}\nsemantic_decision_events: {}\nmax_route_trajectory_diff: {max_route_diff:.9e}\nmax_reference_state: {:.9e}\nlimits: checkpoint component error <= 1e-8; route trajectory difference <= 1e-6\ninterpretation: Debug correctness gate; no timing or performance claim.\n",
+            reference_counters.iterations,
+            reference_counters.residual_requests,
+            reference_counters.jacobian_recalculations,
+            reference_counters.damping_trials,
+            reference_counters.damping_rejections,
+            reference_counters.linear_solves,
+            reference_counters.grid_refinements,
+            reference_decisions.len(),
+            max_abs(reference),
+        );
+        if let Err(error) = write_test_report(
+            "BVP_Damp",
+            "combustion_1000_accepted_trajectory_matches_frontends_and_layouts",
+            &report,
+        ) {
+            eprintln!(
+                "[BVP test report] unable to write accepted combustion trajectory report: {error}"
+            );
+        }
+    }
+
     /// Release story for the production Banded Lambdify route.
     ///
     /// This deliberately excludes AOT. It answers the narrower migration
@@ -678,7 +1285,7 @@ mod tests {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(1_000);
-        let runs = story_repetitions("BVP_LAMBDIFY_BANDED_RUNS", 3);
+        let runs = story_repetitions("BVP_LAMBDIFY_BANDED_RUNS", 9);
         let callback_iters = 3;
 
         let mut legacy = make_combustion_solver(
@@ -720,10 +1327,34 @@ mod tests {
             "Banded Lambdify callbacks diverged: residual_diff={residual_diff:.3e}, jacobian_diff={jacobian_diff:.3e}"
         );
 
-        let (legacy_residual_ms, legacy_jacobian_ms) =
-            measure_installed_callback_runtime(&mut legacy, callback_iters, runs);
-        let (atom_residual_ms, atom_jacobian_ms) =
-            measure_installed_callback_runtime(&mut atom, callback_iters, runs);
+        // Warm both routes, then alternate their order within each pair so
+        // thermal/load drift is less likely to masquerade as a frontend win.
+        black_box(measure_installed_callback_sample(&mut legacy, 1));
+        black_box(measure_installed_callback_sample(&mut atom, 1));
+        let mut legacy_residual_samples = Vec::with_capacity(runs);
+        let mut legacy_jacobian_samples = Vec::with_capacity(runs);
+        let mut atom_residual_samples = Vec::with_capacity(runs);
+        let mut atom_jacobian_samples = Vec::with_capacity(runs);
+        for pair in 0..runs {
+            let (legacy_sample, atom_sample) = if pair % 2 == 0 {
+                (
+                    measure_installed_callback_sample(&mut legacy, callback_iters),
+                    measure_installed_callback_sample(&mut atom, callback_iters),
+                )
+            } else {
+                let atom_sample = measure_installed_callback_sample(&mut atom, callback_iters);
+                let legacy_sample = measure_installed_callback_sample(&mut legacy, callback_iters);
+                (legacy_sample, atom_sample)
+            };
+            legacy_residual_samples.push(legacy_sample.0);
+            legacy_jacobian_samples.push(legacy_sample.1);
+            atom_residual_samples.push(atom_sample.0);
+            atom_jacobian_samples.push(atom_sample.1);
+        }
+        let (legacy_residual_ms, legacy_residual_mad_ms) = median_and_mad(&legacy_residual_samples);
+        let (legacy_jacobian_ms, legacy_jacobian_mad_ms) = median_and_mad(&legacy_jacobian_samples);
+        let (atom_residual_ms, atom_residual_mad_ms) = median_and_mad(&atom_residual_samples);
+        let (atom_jacobian_ms, atom_jacobian_mad_ms) = median_and_mad(&atom_jacobian_samples);
 
         let (legacy_solve_ms, _) = solve_prepared_and_collect_solution(&mut legacy);
         let (atom_solve_ms, _) = solve_prepared_and_collect_solution(&mut atom);
@@ -811,6 +1442,10 @@ mod tests {
             "telemetry   | ExprLegacy timers={:?} | AtomView timers={:?}",
             legacy_stats.timers, atom_stats.timers
         );
+        println!(
+            "paired callback MAD (ms/sample; {} callbacks/sample): ExprLegacy residual={legacy_residual_mad_ms:.3} jacobian={legacy_jacobian_mad_ms:.3}; AtomView residual={atom_residual_mad_ms:.3} jacobian={atom_jacobian_mad_ms:.3}",
+            callback_iters
+        );
 
         let mut report = format!(
             "status: passed\n\narchitecture: {TEST_SUITE_ARCHITECTURE}\nn_steps: {n_steps}\nruns: {runs}\ncallback_iters: {callback_iters}\n\n\
@@ -872,6 +1507,19 @@ mod tests {
             "\n- residual_max_diff: {residual_diff:.6e}\n- jacobian_max_diff: {jacobian_diff:.6e}\n- solution_max_diff: {solution_diff:.6e}\n\n\
              ExprLegacy timers: {:?}\n\nAtomView timers: {:?}\n",
             legacy_stats.timers, atom_stats.timers
+        )
+        .expect("writing an in-memory test report cannot fail");
+        writeln!(
+            report,
+            "\nPaired callback samples use alternating ExprLegacy/AtomView order; values are median/MAD ms per `{callback_iters}` callbacks.\n\n| route | residual median | residual MAD | Jacobian median | Jacobian MAD |\n|---|---:|---:|---:|---:|\n| ExprLegacy | {:.6} | {:.6} | {:.6} | {:.6} |\n| AtomView | {:.6} | {:.6} | {:.6} | {:.6} |\n",
+            legacy_residual_ms,
+            legacy_residual_mad_ms,
+            legacy_jacobian_ms,
+            legacy_jacobian_mad_ms,
+            atom_residual_ms,
+            atom_residual_mad_ms,
+            atom_jacobian_ms,
+            atom_jacobian_mad_ms,
         )
         .expect("writing an in-memory test report cannot fail");
         if let Err(error) = write_test_report(

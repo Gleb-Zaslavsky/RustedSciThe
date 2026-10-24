@@ -63,7 +63,7 @@ use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotChunkingPolicy, AotExecutionPolicy, ApplyDampedGeneratedSolverState,
     BandedGeneratedBackendMode, BuildDampedSolverRequest, DampedGeneratedSolverState,
     DampedSolverBuildRequest, GeneratedBackendConfig, SparseGeneratedBackendMode,
-    try_generate_and_apply_damped_solver_state,
+    try_generate_and_apply_damped_solver_state_with_runtime,
 };
 use crate::numerical::BVP_Damp::numeric_discretization::{
     NumericBvpJacobian, NumericBvpRhs, build_numeric_generated_solver_state,

@@ -6,6 +6,7 @@
 
 use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_ivp::SparseSymbolicJacobian;
 
 use super::{
     callbacks::validate_callback_output,
@@ -25,8 +26,10 @@ type ScalarLambdified = Box<dyn Fn(&[f64]) -> f64 + Send + Sync>;
 /// symbolic-construction path.
 pub(crate) struct LambdifyPlan {
     residual: Vec<ScalarLambdified>,
+    // Compact row-major nonzero closures, aligned with `jacobian_pattern`.
     jacobian: Option<Vec<ScalarLambdified>>,
     jacobian_pattern: Vec<(usize, usize)>,
+    jacobian_row_offsets: Vec<usize>,
     dimension: usize,
     parameter_count: usize,
     execution_policy: IvpLambdifyExecutionPolicy,
@@ -114,29 +117,133 @@ impl LambdifyPlan {
             .iter()
             .map(|expression| Expr::lambdify_borrowed_thread_safe(expression, &name_refs))
             .collect();
-        let jacobian_pattern = jacobian
+        let jacobian_expressions = jacobian;
+        // Compile only structurally nonzero entries. Large stiff systems often
+        // have sparse symbolic Jacobians even when Dense remains the selected
+        // linear algebra layout, so compiling closures for known zeros needlessly
+        // multiplies preparation time and retained allocations by n^2.
+        let nonzero_jacobian_entries = jacobian_expressions
             .as_ref()
-            .map(|expressions| {
-                expressions
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, expression)| {
-                        (!expression.is_zero()).then_some((index / dimension, index % dimension))
-                    })
-                    .collect::<Vec<_>>()
-            })
+            .map(|expressions| expressions.iter().filter(|entry| !entry.is_zero()).count())
             .unwrap_or_default();
-        let jacobian = jacobian.map(|expressions| {
-            expressions
-                .iter()
-                .map(|expression| Expr::lambdify_borrowed_thread_safe(expression, &name_refs))
-                .collect()
-        });
+        let mut jacobian_pattern = Vec::with_capacity(nonzero_jacobian_entries);
+        let mut jacobian: Option<Vec<ScalarLambdified>> = jacobian_expressions
+            .as_ref()
+            .map(|_| Vec::with_capacity(nonzero_jacobian_entries));
+        if let (Some(expressions), Some(compiled)) =
+            (jacobian_expressions.as_ref(), jacobian.as_mut())
+        {
+            for (index, expression) in expressions.iter().enumerate() {
+                if expression.is_zero() {
+                    continue;
+                }
+                jacobian_pattern.push((index / dimension, index % dimension));
+                compiled.push(Expr::lambdify_borrowed_thread_safe(expression, &name_refs));
+            }
+        }
+        let mut jacobian_row_offsets = if jacobian.is_some() {
+            vec![0; dimension + 1]
+        } else {
+            Vec::new()
+        };
+        for &(row, _) in &jacobian_pattern {
+            jacobian_row_offsets[row + 1] += 1;
+        }
+        if jacobian.is_some() {
+            for row in 0..dimension {
+                jacobian_row_offsets[row + 1] += jacobian_row_offsets[row];
+            }
+        }
 
         Ok(Self {
             residual,
             jacobian,
             jacobian_pattern,
+            jacobian_row_offsets,
+            dimension,
+            parameter_count: parameters.len(),
+            execution_policy,
+        })
+    }
+
+    /// Compile a coordinate-form Expr Jacobian without materializing `n*n`
+    /// symbolic entries. Coordinates must already be in deterministic row-major
+    /// order, as published by the shared IVP differentiation builder.
+    pub(crate) fn from_sparse_expressions_with_policy(
+        residual: Vec<Expr>,
+        jacobian: SparseSymbolicJacobian,
+        independent_variable: &str,
+        variables: &[&str],
+        parameters: &[&str],
+        execution_policy: IvpLambdifyExecutionPolicy,
+    ) -> Result<Self, RadauError> {
+        let dimension = residual.len();
+        if dimension == 0 {
+            return Err(RadauConfigError::ZeroDimension.into());
+        }
+        if jacobian.rows != dimension || jacobian.cols != dimension {
+            return Err(RadauError::ShapeMismatch {
+                stage: RadauStage::Preparation,
+                expected: dimension,
+                actual: if jacobian.rows != dimension {
+                    jacobian.rows
+                } else {
+                    jacobian.cols
+                },
+            });
+        }
+        if jacobian
+            .entries
+            .iter()
+            .any(|&(row, col, _)| row >= dimension || col >= dimension)
+        {
+            return Err(RadauConfigError::JacobianPatternOutOfBounds.into());
+        }
+
+        let mut names = Vec::with_capacity(1 + variables.len() + parameters.len());
+        names.push(independent_variable.to_owned());
+        names.extend(parameters.iter().map(|name| (*name).to_owned()));
+        names.extend(variables.iter().map(|name| (*name).to_owned()));
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for expression in residual
+            .iter()
+            .chain(jacobian.entries.iter().map(|(_, _, expression)| expression))
+        {
+            validate_expression_variables(expression, &name_refs)?;
+        }
+
+        let residual = residual
+            .iter()
+            .map(|expression| Expr::lambdify_borrowed_thread_safe(expression, &name_refs))
+            .collect();
+        let mut entries = jacobian.entries;
+        entries.sort_unstable_by_key(|(row, col, _)| (*row, *col));
+        if entries
+            .windows(2)
+            .any(|pair| (pair[0].0, pair[0].1) == (pair[1].0, pair[1].1))
+        {
+            return Err(RadauConfigError::DuplicateJacobianPatternEntry.into());
+        }
+        let mut jacobian_pattern = Vec::with_capacity(entries.len());
+        let mut compiled = Vec::with_capacity(entries.len());
+        let mut jacobian_row_offsets = vec![0; dimension + 1];
+        for (row, col, expression) in entries {
+            if expression.is_zero() {
+                continue;
+            }
+            jacobian_pattern.push((row, col));
+            compiled.push(Expr::lambdify_borrowed_thread_safe(&expression, &name_refs));
+            jacobian_row_offsets[row + 1] += 1;
+        }
+        for row in 0..dimension {
+            jacobian_row_offsets[row + 1] += jacobian_row_offsets[row];
+        }
+
+        Ok(Self {
+            residual,
+            jacobian: Some(compiled),
+            jacobian_pattern,
+            jacobian_row_offsets,
             dimension,
             parameter_count: parameters.len(),
             execution_policy,
@@ -155,6 +262,11 @@ impl LambdifyPlan {
 
     pub(crate) fn execution_policy(&self) -> IvpLambdifyExecutionPolicy {
         self.execution_policy
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compiled_jacobian_entry_count(&self) -> usize {
+        self.jacobian.as_ref().map_or(0, Vec::len)
     }
 
     /// Evaluate the residual using the default disabled telemetry mode.
@@ -266,7 +378,18 @@ impl LambdifyPlan {
             });
         }
         let result = telemetry.measure_callback(RadauCallbackStage::JacobianEvaluation, || {
-            evaluate_scalar_entries(jacobian, output, &workspace.args, self.execution_policy);
+            if jacobian.len() < output.len() {
+                output.fill(0.0);
+            }
+            evaluate_dense_compact_entries(
+                jacobian,
+                &self.jacobian_pattern,
+                &self.jacobian_row_offsets,
+                self.dimension,
+                output,
+                &workspace.args,
+                self.execution_policy,
+            );
             validate_callback_output(RadauStage::Jacobian, expected, output)
         });
         if result.is_ok() {
@@ -336,8 +459,6 @@ impl LambdifyPlan {
                 telemetry.measure_callback(RadauCallbackStage::JacobianEvaluation, || {
                     evaluate_sparse_entries(
                         jacobian,
-                        &self.jacobian_pattern,
-                        self.dimension,
                         output,
                         &workspace.args,
                         self.execution_policy,
@@ -373,11 +494,10 @@ impl LambdifyPlan {
                 // in the requested band and leave structural zeros explicit;
                 // no dense-to-banded conversion is performed afterward.
                 output.fill(0.0);
-                let entries = pattern.entries().to_vec();
                 telemetry.measure_callback(RadauCallbackStage::JacobianEvaluation, || {
                     evaluate_banded_entries(
                         jacobian,
-                        &entries,
+                        &self.jacobian_pattern,
                         self.dimension,
                         layout,
                         output,
@@ -450,21 +570,52 @@ fn evaluate_scalar_entries(
 
 fn evaluate_sparse_entries(
     jacobian: &[ScalarLambdified],
+    output: &mut [f64],
+    args: &[f64],
+    policy: IvpLambdifyExecutionPolicy,
+) {
+    if policy.should_parallel_with_tasks(jacobian.len(), jacobian.len()) {
+        use rayon::prelude::*;
+        jacobian
+            .par_iter()
+            .zip(output.par_iter_mut())
+            .for_each(|(evaluator, slot)| *slot = evaluator(args));
+    } else {
+        for (slot, evaluator) in output.iter_mut().zip(jacobian) {
+            *slot = evaluator(args);
+        }
+    }
+}
+
+fn evaluate_dense_compact_entries(
+    jacobian: &[ScalarLambdified],
     pattern: &[(usize, usize)],
+    row_offsets: &[usize],
     dimension: usize,
     output: &mut [f64],
     args: &[f64],
     policy: IvpLambdifyExecutionPolicy,
 ) {
-    if policy.should_parallel_with_tasks(pattern.len(), pattern.len()) {
+    if policy.should_parallel_with_tasks(dimension, jacobian.len()) {
         use rayon::prelude::*;
-        pattern
-            .par_iter()
-            .zip(output.par_iter_mut())
-            .for_each(|(&(row, col), slot)| *slot = jacobian[row * dimension + col](args));
+        output
+            .par_chunks_mut(dimension)
+            .zip(row_offsets.par_windows(2))
+            .enumerate()
+            .for_each(|(row, (values, bounds))| {
+                for index in bounds[0]..bounds[1] {
+                    values[pattern[index].1] = jacobian[index](args);
+                }
+                debug_assert!(
+                    pattern[bounds[0]..bounds[1]]
+                        .iter()
+                        .all(|&(entry_row, _)| entry_row == row)
+                );
+            });
     } else {
-        for (slot, &(row, col)) in output.iter_mut().zip(pattern) {
-            *slot = jacobian[row * dimension + col](args);
+        for (index, evaluator) in jacobian.iter().enumerate() {
+            let (row, col) = pattern[index];
+            output[row * dimension + col] = evaluator(args);
         }
     }
 }
@@ -478,24 +629,19 @@ fn evaluate_banded_entries(
     args: &[f64],
     policy: IvpLambdifyExecutionPolicy,
 ) -> Result<(), RadauError> {
-    let pattern = RadauJacobianPattern::banded(
-        dimension,
-        match layout {
-            RadauMatrixLayout::Banded { lower, .. } => lower,
-            _ => 0,
-        },
-        match layout {
-            RadauMatrixLayout::Banded { upper, .. } => upper,
-            _ => 0,
-        },
-    )?;
+    let (lower, upper) = match layout {
+        RadauMatrixLayout::Banded { lower, upper } => (lower, upper),
+        _ => return Err(RadauConfigError::InvalidBandedSlot.into()),
+    };
+    let pattern = RadauJacobianPattern::banded(dimension, lower, upper)?;
     if policy.should_parallel_with_tasks(entries.len(), entries.len()) {
-        // Evaluate into disjoint temporary slots, then place them in compact
-        // storage. The copy is explicit so parallel workers never alias output.
+        // Compute only nonzero values into disjoint temporary slots, then
+        // scatter them into compact band storage without aliasing output.
         use rayon::prelude::*;
         let values = entries
             .par_iter()
-            .map(|&(row, col)| jacobian[row * dimension + col](args))
+            .zip(jacobian.par_iter())
+            .map(|(_, evaluator)| evaluator(args))
             .collect::<Vec<_>>();
         for (entry, value) in entries.iter().zip(values) {
             let compact = pattern
@@ -504,12 +650,11 @@ fn evaluate_banded_entries(
             output[compact] = value;
         }
     } else {
-        for entry in entries {
+        for (entry, evaluator) in entries.iter().zip(jacobian) {
             let compact = pattern
                 .compact_slot(layout, entry.0, entry.1)
                 .ok_or(RadauConfigError::InvalidBandedSlot)?;
-            let value = jacobian[entry.0 * dimension + entry.1](args);
-            output[compact] = value;
+            output[compact] = evaluator(args);
         }
     }
     Ok(())

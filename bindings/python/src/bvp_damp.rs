@@ -86,6 +86,7 @@ fn map_native_error(error: BvpBackendIntegrationError) -> PyErr {
             | BvpBackendIntegrationError::AutomaticAotBuildFailed { .. }
             | BvpBackendIntegrationError::CompiledAotRuntimeUnavailable { .. }
             | BvpBackendIntegrationError::AtomAotPlanPreparationFailed { .. }
+            | BvpBackendIntegrationError::PreparedCallbackPreparationFailed { .. }
             | BvpBackendIntegrationError::AotLifecycleFailure { .. } => {
                 PreparationError::new_err(message)
             }

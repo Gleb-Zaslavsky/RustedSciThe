@@ -1044,6 +1044,25 @@ def test_universal_fitting_preserves_method_specific_options_and_rejects_unsuppo
     with pytest.raises(UnsupportedOptionError, match="f_tolerance"):
         unsupported_gavin.build()
 
+    unsupported_observation_policy = UniversalFitting("gavin")
+    unsupported_observation_policy.with_observation_policy("sequential")
+    with pytest.raises(UnsupportedOptionError, match="observation_policy"):
+        unsupported_observation_policy.build()
+
+    invalid_observation_policy = UniversalFitting("lm")
+    with pytest.raises(InvalidConfigurationError, match="min_observations"):
+        invalid_observation_policy.with_observation_policy("parallel", 0)
+
+    invalid_lm = UniversalFitting("lm")
+    invalid_lm.with_data(x, [2.0 * value + 1.0 for value in x])
+    invalid_lm.with_arg("x")
+    invalid_lm.with_unknowns(["a", "b"])
+    invalid_lm.with_initial_guess([1.0, 0.0])
+    with pytest.raises(InvalidConfigurationError) as fitting_error:
+        invalid_lm.build()
+    assert fitting_error.value.native_kind == "InvalidInput"
+    assert fitting_error.value.stage == "build"
+
     gavin_counters = UniversalFitting("gavin")
     gavin_counters.with_telemetry("counters")
     gavin_counters.with_data(x, [2.0 * value + 1.0 for value in x])

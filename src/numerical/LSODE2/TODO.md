@@ -3216,3 +3216,31 @@ Current sources of truth:
   by Criterion at Sparse `n=512` and Sparse/Banded `n=2048`. Compare stage
   reports and repeat on a clean release Criterion baseline before assigning a
   cause; do not conflate it with the AtomNative cold-preparation improvement.
+
+### Experimental PreparedAtom callback route
+
+- [x] Add an explicitly opt-in `Lsode2SymbolicExecutionMode::PreparedAtom`
+  adapter for AtomView + faithful Banded + sequential callbacks. Existing
+  defaults and ExprLegacy/AtomNative callback paths are unchanged; unsupported
+  assembly, layout, bandwidth and execution-policy combinations fail during
+  preparation instead of silently falling back.
+- [x] Preserve truthful telemetry provenance as `prepared_atom`, distinct
+  from the existing Lambdify and AOT execution labels. The implementation is
+  experimental and is not exposed through the Python wrapper.
+- [x] Add debug parity checks for ExprLegacy, AtomNative and PreparedAtom
+  residuals and compact Banded Jacobian values, plus a small full-solve check
+  of trajectory and discrete work.
+- [x] Run `prepared_atom_diffusion_chain_release_ab_story` in Release on the
+  `n=256` parameterized diffusion chain with seven interleaved full solves and
+  repeated callback timing. AtomNative and PreparedAtom matched all discrete
+  work (`220` accepted, `0` rejected, `402` residual, `237` Jacobian and `393`
+  linear-solve calls), the accepted grid, and the trajectory. PreparedAtom's
+  Jacobian callback was `6.1x` slower than AtomNative; full solve was `43.8%`
+  slower and preparation-plus-solve `21.3%` slower. The small preparation
+  reduction therefore did not amortize. Full results and the ExprLegacy
+  diagnostic are recorded in `LSODE2_STORY_PERFORMANCE.md`.
+- [x] Decision: do not migrate the default LSODE2 runtime and do not expose
+  PreparedAtom through Python. Retain only the narrowly scoped, explicitly
+  experimental opt-in adapter for reproducible follow-up; any optimization
+  must first explain the Jacobian callback cost and pass the same end-to-end
+  parity/performance gate before wider integration.

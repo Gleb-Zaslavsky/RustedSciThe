@@ -129,6 +129,8 @@ pub enum IvpTelemetryExecution {
     #[default]
     Lambdify,
     Aot,
+    /// Opt-in prepared Atom evaluator, distinct from Lambdify closures.
+    PreparedAtom,
 }
 
 /// Matrix storage selected by the numerical IVP runtime.
@@ -161,6 +163,7 @@ impl IvpTelemetryExecution {
         match self {
             Self::Lambdify => "lambdify",
             Self::Aot => "aot",
+            Self::PreparedAtom => "prepared_atom",
         }
     }
 }
@@ -510,6 +513,9 @@ pub struct IvpTelemetrySnapshot {
     pub conversions: u64,
     pub copies: u64,
     pub copied_bytes: u64,
+    /// Bytes in explicitly instrumented evaluator/workspace buffer growth.
+    /// This is a logical scratch-allocation counter, not a process-wide
+    /// allocator measurement; uninstrumented library allocations are absent.
     pub allocated_bytes: u64,
     pub errors: u64,
     pub parallel_dispatches: u64,
@@ -1306,6 +1312,8 @@ impl IvpTelemetry {
         self.add_counter(|inner| &inner.copied_bytes, bytes as u64);
     }
 
+    /// Adds bytes for a known scratch-buffer capacity growth. This deliberately
+    /// does not claim to observe allocations made by arbitrary library code.
     pub fn record_allocation(&self, bytes: usize) {
         self.add_counter(|inner| &inner.allocated_bytes, bytes as u64);
     }
@@ -1645,6 +1653,7 @@ fn decode_route(value: u8) -> IvpTelemetryRoute {
 fn decode_execution(value: u8) -> IvpTelemetryExecution {
     match value {
         1 => IvpTelemetryExecution::Aot,
+        2 => IvpTelemetryExecution::PreparedAtom,
         _ => IvpTelemetryExecution::Lambdify,
     }
 }
@@ -1955,6 +1964,36 @@ mod tests {
         assert!(!absent.recorded);
         assert_eq!(absent.calls, 0);
         assert_eq!(absent.elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn four_collection_modes_keep_counter_and_timing_semantics_disjoint() {
+        for (mode, expect_counters, expect_timings) in [
+            (IvpTelemetryMode::Off, false, false),
+            (IvpTelemetryMode::Counters, true, false),
+            (IvpTelemetryMode::Timings, false, true),
+            (IvpTelemetryMode::Detailed, true, true),
+        ] {
+            let telemetry = IvpTelemetry::with_mode(mode);
+            telemetry.record_allocation(24);
+            telemetry.record_residual_request();
+            let stage_started = telemetry.start_cold_stage(IvpColdStage::Validation);
+            telemetry.record_cold_stage(IvpColdStage::Validation, stage_started);
+            let snapshot = telemetry.snapshot();
+            let stage = snapshot.cold_stage(IvpColdStage::Validation);
+
+            assert_eq!(snapshot.mode, mode);
+            assert_eq!(snapshot.residual_requests, u64::from(expect_counters));
+            assert_eq!(
+                snapshot.allocated_bytes,
+                if expect_counters { 24 } else { 0 }
+            );
+            assert_eq!(stage.calls, u64::from(expect_counters));
+            assert_eq!(stage.recorded, expect_timings);
+            if !expect_timings {
+                assert_eq!(stage.elapsed, Duration::ZERO);
+            }
+        }
     }
 
     #[test]

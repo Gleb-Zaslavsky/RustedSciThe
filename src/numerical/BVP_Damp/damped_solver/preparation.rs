@@ -54,6 +54,7 @@ impl NRBVP {
         fingerprint_callback_ptr(&mut hash, Some(self.fun.as_ref()));
         fingerprint_callback_ptr(&mut hash, self.jac.as_deref());
         fingerprint_debug(&mut hash, &self.generated_backend_selected_backend);
+        fingerprint_debug(&mut hash, &self.callback_runtime);
         fingerprint_debug(&mut hash, &self.resolved_plan());
         fingerprint_bytes(&mut hash, b"bvp-damped-prepared-plan-v1");
         PreparedPlanFingerprint(hash)
@@ -79,7 +80,9 @@ impl NRBVP {
 
     fn effective_logging_level(&self) -> Result<SolverLogLevel, BvpBackendIntegrationError> {
         match self.loglevel.as_deref().map(str::trim) {
-            Some(level) if level.eq_ignore_ascii_case("off") || level.eq_ignore_ascii_case("none") => {
+            Some(level)
+                if level.eq_ignore_ascii_case("off") || level.eq_ignore_ascii_case("none") =>
+            {
                 return Ok(SolverLogLevel::Off);
             }
             Some(_) => return self.parse_log_level(),
@@ -194,6 +197,7 @@ impl NRBVP {
             number_of_refined_intervals: 0,
             bandwidth: (0, 0),
             generated_backend_config: GeneratedBackendConfig::default(),
+            callback_runtime: DampedCallbackRuntime::SolverNative,
             numeric_rhs: None,
             numeric_jacobian: None,
             generated_backend_selected_backend: None,
@@ -557,6 +561,34 @@ impl NRBVP {
             .set_telemetry_mode(config.bvp_telemetry_mode);
         self.generated_backend_config = config;
         self
+    }
+
+    /// Selects the runtime callback implementation for this Damped solver.
+    ///
+    /// `PreparedAtom` is an experimental opt-in, not recommended for
+    /// production: measured cold full solves were slower than the established
+    /// solver-native route. It is currently supported only with AtomView
+    /// assembly, Banded matrices, Lambdify-only backend selection, and
+    /// sequential callback execution. The default remains solver-native.
+    pub fn with_callback_runtime(mut self, runtime: DampedCallbackRuntime) -> Self {
+        self.set_callback_runtime(runtime);
+        self
+    }
+
+    /// Sets the callback implementation for a solver that is already configured.
+    pub fn set_callback_runtime(&mut self, runtime: DampedCallbackRuntime) {
+        if self.callback_runtime != runtime {
+            self.callback_runtime = runtime;
+            self.invalidate_linear_runtime();
+            self.prepared_runtime_revision.callbacks_changed();
+        }
+    }
+
+    /// Selects experimental reusable PreparedAtom callbacks for supported
+    /// Banded workloads. This route is not recommended for production; see the
+    /// BVP_Damp performance story for the measured cold-solve comparison.
+    pub fn with_prepared_atom_callbacks(self) -> Self {
+        self.with_callback_runtime(DampedCallbackRuntime::PreparedAtom)
     }
 
     /// Returns a solver configured with the selected residual discretization scheme.
@@ -1272,10 +1304,12 @@ impl NRBVP {
             ));
         }
 
-        try_generate_and_apply_damped_solver_state(
+        let callback_runtime = self.callback_runtime;
+        try_generate_and_apply_damped_solver_state_with_runtime(
             self,
             mesh_,
             bandwidth,
+            callback_runtime,
             "building damped BVP generated solver state",
         )
     }

@@ -273,18 +273,11 @@ fn solve_route(
             evaluation.linear_ms_total,
         ),
     ];
-    for stage in [
-        IvpColdStage::SolverPreparation,
-        IvpColdStage::SymbolicJacobian,
-        IvpColdStage::AtomJacobianPreparation,
-        IvpColdStage::AotLowering,
-        IvpColdStage::AotBuild,
-        IvpColdStage::AotLink,
-    ] {
+    for stage in ALL_COLD_STAGES {
         let timing = snapshot.cold_stage(stage);
         if timing.recorded {
             metrics.push((
-                format!("stage_cold_{stage:?}_ms"),
+                format!("stage_cold_{}_ms", stage.label()),
                 "ms/instrumented".into(),
                 timing.elapsed.as_secs_f64() * 1_000.0,
             ));
@@ -336,6 +329,47 @@ fn solve_route(
         ],
     })
 }
+
+// Export only recorded native stages, but inspect the full telemetry enum so
+// frontend-specific stages do not disappear when a solver adopts a new
+// preparation route. The stage labels are an explicit stable runner contract;
+// Rust Debug spelling is deliberately not persisted as a metric ID.
+const ALL_COLD_STAGES: [IvpColdStage; IvpColdStage::COUNT] = [
+    IvpColdStage::Validation,
+    IvpColdStage::ParameterBinding,
+    IvpColdStage::ExprToAtom,
+    IvpColdStage::SymbolicJacobian,
+    IvpColdStage::SymbolicDifferentiation,
+    IvpColdStage::Simplification,
+    IvpColdStage::AtomToExpr,
+    IvpColdStage::SparsePattern,
+    IvpColdStage::LayoutPlanning,
+    IvpColdStage::ResidualCompilation,
+    IvpColdStage::ResidualLambdification,
+    IvpColdStage::JacobianCompilation,
+    IvpColdStage::JacobianLambdification,
+    IvpColdStage::BackendBinding,
+    IvpColdStage::AotMaterialization,
+    IvpColdStage::AotBuild,
+    IvpColdStage::AotLink,
+    IvpColdStage::AtomPreparation,
+    IvpColdStage::AotCacheLookup,
+    IvpColdStage::AotLowering,
+    IvpColdStage::AotSourceGeneration,
+    IvpColdStage::AotPublication,
+    IvpColdStage::SolverPreparation,
+    IvpColdStage::BridgePreparation,
+    IvpColdStage::NativeCallbackPreparation,
+    IvpColdStage::AtomResidualPreparation,
+    IvpColdStage::AtomJacobianPreparation,
+    IvpColdStage::ParallelCalibration,
+    IvpColdStage::AtomDependencyAnalysis,
+    IvpColdStage::NativeJacobianEvaluatorPreparation,
+    IvpColdStage::AotInputAbiPreparation,
+    IvpColdStage::AotProblemKeyConstruction,
+    IvpColdStage::AotAtomPlanPreparation,
+    IvpColdStage::SharedSymbolicProblemPreparation,
+];
 
 fn validate_solution(
     summary: &RustedSciThe::numerical::LSODE2::Lsode2SolveSummary,
@@ -445,6 +479,67 @@ mod tests {
     fn unknown_lsode2_execution_policy_is_rejected() {
         assert!(execution_route("Lambdify", "Parallel").is_none());
         assert!(execution_route("AOT(warm-cache)", "Whole").is_none());
+    }
+
+    #[test]
+    fn cold_stage_export_covers_native_atom_shared_graph_stages_with_stable_ids() {
+        let telemetry = IvpTelemetry::detailed();
+        for stage in [
+            IvpColdStage::SymbolicJacobian,
+            IvpColdStage::AtomDependencyAnalysis,
+            IvpColdStage::SymbolicDifferentiation,
+            IvpColdStage::NativeJacobianEvaluatorPreparation,
+        ] {
+            telemetry.record_cold_stage_duration(stage, std::time::Duration::from_millis(1));
+        }
+        let snapshot = telemetry.snapshot();
+        let emitted = ALL_COLD_STAGES
+            .into_iter()
+            .filter(|stage| snapshot.cold_stage(*stage).recorded)
+            .map(|stage| format!("stage_cold_{}_ms", stage.label()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            emitted,
+            [
+                "stage_cold_symbolic_jacobian_ms",
+                "stage_cold_symbolic_differentiation_ms",
+                "stage_cold_atom_dependency_analysis_ms",
+                "stage_cold_native_jacobian_evaluator_preparation_ms",
+            ]
+        );
+        assert_eq!(ALL_COLD_STAGES.len(), IvpColdStage::COUNT);
+    }
+
+    #[test]
+    fn atom_diagnostic_exports_current_shared_graph_stages_without_fake_aggregate() {
+        let scenario = crate::registry::SCENARIOS
+            .iter()
+            .find(|scenario| scenario.id == "lsode2_diff256_t050_atom_dense_lambdify_seq")
+            .expect("registered LSODE2 Atom/Lambdify gate");
+        let output = diagnose(scenario).expect("LSODE2 Atom detailed diagnostic");
+        let metric_ids = output
+            .metrics
+            .iter()
+            .map(|(id, _, _)| id.as_str())
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "stage_cold_symbolic_jacobian_ms",
+            "stage_cold_symbolic_differentiation_ms",
+            "stage_cold_atom_dependency_analysis_ms",
+            "stage_cold_native_jacobian_evaluator_preparation_ms",
+        ] {
+            assert!(
+                metric_ids.contains(&expected),
+                "missing native stage {expected}"
+            );
+        }
+        assert!(
+            !metric_ids.contains(&"stage_cold_atom_jacobian_preparation_ms"),
+            "shared-graph route must not fabricate the obsolete aggregate stage"
+        );
+        assert_eq!(scenario.version, 3);
     }
 }
 

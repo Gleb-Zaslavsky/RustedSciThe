@@ -274,10 +274,10 @@ differences explicit rather than forcing all routes into identical semantics.
 
 ### P0: Fallible API and error preservation
 
-- [ ] Make the `UniversalFitting::build` LM route genuinely fallible. It
-  currently calls `Fitting::build`, whose compatibility implementation uses
-  `expect`; use `try_build` and preserve `FittingError` as a typed source in
-  `UniversalFittingError`.
+- [x] Make the `UniversalFitting::build` LM route genuinely fallible. It now
+  calls `Fitting::try_build` and carries the source in
+  `UniversalFittingError::Fitting`; the Python boundary maps each fitting
+  failure category into the existing typed exception hierarchy.
 - [ ] Add checked equation-string setters to `UniversalFitting` and route
   malformed input to typed parse errors instead of relying on infallible
   `Expr::parse_expression` behavior.
@@ -294,6 +294,105 @@ differences explicit rather than forcing all routes into identical semantics.
   symbolic objective. Preserve the existing scalar path as the reference,
   then run matched callback and full-fit correctness/performance A/B before
   selecting a default frontend.
+- [x] **Fitting observation batching:** add and stabilize evaluation across
+  observation blocks. The feature began opt-in during A/B and is now the
+  production `Auto` route at large scales; explicit `Sequential` remains a
+  supported low-memory option. Preserve equation-major output, typed callback
+  failures, and the native telemetry contract.
+- [x] Keep observation dispatch distinct from
+  `LambdifyExecutionPolicy` inside one symbolic callback. `Auto` respects an
+  explicitly parallel callback policy; explicitly combining two parallel
+  levels returns a typed error.
+- [x] Add debug parity tests for scalar versus batched residuals/Jacobians,
+  multi-equation fits, parameter/sample ordering across block boundaries, and
+  telemetry counters. Confirm both routes produce identical fitted parameters
+  and discrete solve counters for both Expr and AtomView frontends. Also
+  verify that callback failures retain their typed `LeastSquaresError` /
+  `SolveError` category in both policies.
+- [x] Run paired release A/B measurements on 20,001- and 100,001-point fitting
+  workloads. Five repetitions per row in
+  `FITTING_STORY_TESTS.md` show median full-solve reductions of 50.6-71.6% for
+  ExprLegacy and AtomViewNative, with matching iteration and callback/linear
+  solver counters. This evidence supported the later production default.
+- [x] Audit the staging-buffer payload and allocation sites. At 100,001
+  observations, one equation, and four parameters, the route adds 3.2 MB for
+  the Jacobian plus 0.8 MB for residual staging, with two staging allocations
+  per residual/Jacobian pair. These are source-derived payload values, not
+  allocator-observed peak memory.
+- [x] Measure allocator-observed peak live heap and cumulative allocations at
+  100,001 and 200,001 observations across one-/two-equation and four-/six-
+  parameter models. The 256-observation implementation used about 1.98x
+  cumulative allocated bytes and added 3.05, 9.16, and 18.31 MiB peak live
+  heap on the representative scales; parallel allocation counts were 8.7k-
+  16.5k versus 0.45k-0.88k sequential. Full table and interpretation are in
+  `FITTING_STORY_TESTS.md`. Follow-up A/B and allocator runs with 1,024-point
+  blocks reduced parallel allocation counts by 68-70%, kept peak heap
+  unchanged, and retained the large-workload solve-time gain.
+- [x] Extend the matched performance matrix to a second fitting model family:
+  a two-equation, six-parameter exponential/sinusoidal response, at 100,001
+  observations for Expr and Atom. Seven alternating-order release pairs
+  preserved fitted parameters and all discrete solver counters; prepare+solve
+  medians improved about 37% and 54%, respectively. Details are in
+  `FITTING_STORY_TESTS.md`.
+- [x] Accept the observation-batched route for production (2026-10-24 user
+  decision), for both ExprLegacy and AtomViewNative. The earlier opt-in/default
+  statements above describe the experiment, not the current default. `Auto`
+  batches at 20,001 observations with multiple Rayon workers and sequential
+  inner callbacks. Preserve explicit `Sequential` as a supported low-memory
+  route, not deprecated code. The threshold is evidence-based, not a portable
+  break-even claim. Evidence and staging-memory costs: `FITTING_STORY_TESTS.md`.
+- [x] Forward the policy through UniversalFitting LM, including an explicit
+  low-memory override; reject it on Gavin/VarPro. Preserve typed LM failures
+  instead of using the infallible compatibility builder inside `build()`.
+- [x] Revalidate dispatch configuration on repeated solves after policy changes;
+  cover Auto thresholds, worker count, nested policies, both frontends and all
+  four native telemetry levels without changing native counter semantics.
+- [x] Run the focused Release optimization suite and both ignored fitting A/B
+  stories after accepting the production dispatch: `170 passed, 0 failed,
+  5 ignored`; each ignored A/B story also passed when run explicitly.
+- [x] Compare all four existing `FittingSolver` perf-gates against compatible
+  baselines (31 samples each). All passed at -0.2%, +1.7%, -0.1%, and +6.7%;
+  fit correctness and discrete counters matched. Results and report path are
+  recorded in `FITTING_STORY_TESTS.md`.
+- [x] Interpret the A/B, allocation, stage-timing, and gate results in the
+  fitting story, including the performance/memory tradeoff and telemetry
+  contract.
+- [x] Run the 2026-10-24 Gavin release matrix and compare the broader
+  optimization perf-gates group against existing baselines. Gavin tests,
+  parity stories, benchmark, and Python reference passed; 13/14 optimization
+  gates passed with matching correctness/counters. Record the changed
+  AtomView-vs-Expr trend and unresolved short-workload VarPro signal in the
+  story documents.
+- [x] Investigate the `optimization_fit20001_varpro_expr` gate signal. The
+  direct VarPro builder, scalar `Expr::diff`, and VarPro implementation were
+  not changed; the new Fitting observation-batch policy is not selected on
+  this route. Rebuilt historical source `778be9a53755` with the same lockfile,
+  CPU target flags, compiler, machine profile, and worker count: old source
+  measured 13.2662 ms versus current 13.1103 ms, with matching native totals
+  (11.2178 vs 11.2409 ms). The historical 10.6039 ms baseline cannot be
+  reproduced on the current host, so the previous +20-24% gate delta is
+  environment/measurement drift, not a demonstrated VarPro regression from
+  the Fitting changes. Full evidence is in `FITTING_STORY_TESTS.md`.
+- [x] Replace the noisy short VarPro perf-gates with a larger deterministic
+  workload: direct and Universal VarPro now use 200,010 observations, while
+  other optimization scenarios retain 20,001. Their scenario version is
+  bumped independently so only the two obsolete VarPro baselines are
+  invalidated. This changes gate fixtures only, not solver behavior.
+- [ ] Force-record and compare optimization baselines after the accepted source
+  changes, including the enlarged/versioned VarPro gates, are captured in a
+  clean immutable revision. Current comparisons and the five-sample VarPro
+  sizing check are diagnostic, not baseline updates.
+- [ ] After committing the accepted source changes, force-record the four
+  `FittingSolver` baselines from that clean revision and compare them again.
+  The current comparison used a dirty shared worktree and must not be used as
+  a recorded reference.
+- [ ] Run Python binding runtime contract tests on Windows with the Python
+  development library installed. `cargo check --tests` passes, but test
+  executable linking currently fails because `python3.lib` is unavailable.
+- [ ] Investigate observation batching for Gavin only as a separate opt-in
+  experiment on two large workloads with controller-history parity. Existing
+  small-workload evidence identifies callback cost but does not prove a large
+  full-solve gain or justify changing FD/Broyden/controller behavior.
 - [ ] Add matched performance coverage for canonical symbolic LM, VarPro, and
   kinetic fitting, with preparation, callback/linearization, solve, and
   end-to-end scopes reported separately where the backend exposes them.

@@ -208,21 +208,14 @@ impl<'a> AtomView<'a> {
 
                             let mut inner = workspace.new_atom();
                             let add = inner.to_add();
-                            if s == Atom::ASIN {
-                                add.extend(one.as_view());
-                                let mut minus_one = workspace.new_atom();
-                                minus_one.to_num((-1).into());
-                                let mut neg_arg_sq = workspace.new_atom();
-                                let mul = neg_arg_sq.to_mul();
-                                mul.extend(minus_one.as_view());
-                                mul.extend(arg_sq.as_view());
-                                add.extend(neg_arg_sq.as_view());
-                            } else {
-                                add.extend(arg_sq.as_view());
-                                let mut minus_one = workspace.new_atom();
-                                minus_one.to_num((-1).into());
-                                add.extend(minus_one.as_view());
-                            }
+                            add.extend(one.as_view());
+                            let mut minus_one = workspace.new_atom();
+                            minus_one.to_num((-1).into());
+                            let mut neg_arg_sq = workspace.new_atom();
+                            let mul = neg_arg_sq.to_mul();
+                            mul.extend(minus_one.as_view());
+                            mul.extend(arg_sq.as_view());
+                            add.extend(neg_arg_sq.as_view());
 
                             let mut minus_half = workspace.new_atom();
                             minus_half.to_num((-1, 2).into());
@@ -537,7 +530,7 @@ mod test {
         );
         assert_eq!(
             parse!("arccos(x)").unwrap().derivative(x),
-            parse!("(-1)*(x^2-1)^(-1/2)").unwrap()
+            parse!("(x^2*(-1)+1)^(-1/2)*(-1)").unwrap()
         );
         assert_eq!(
             parse!("arctg(x)").unwrap().derivative(x),

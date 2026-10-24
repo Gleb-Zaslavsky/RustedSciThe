@@ -91,6 +91,7 @@ mod test_validation;
 /// compatibility surfaces; new code should prefer this enum-based API.
 pub use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
 pub use NR_Damp_solver_damped::BvpDerivativeScheme;
+pub use NR_Damp_solver_damped::DampedCallbackRuntime;
 /// module for basic adaptive grid for NR method
 pub mod adaptive_grid_basic;
 /// module for more advanced adaptive grid for NR method
@@ -101,6 +102,8 @@ pub mod generated_solver_handoff;
 pub mod grid_api;
 /// pure numeric BVP discretization helpers used by NumericOnly runtime path
 pub mod numeric_discretization;
+/// Opt-in reusable Atom callback adapter for the damped BVP solver.
+mod prepared_atom_callbacks;
 pub mod solver_common;
 /// shared helpers for BVP_Damp test modules
 #[cfg(test)]

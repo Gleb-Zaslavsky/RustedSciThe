@@ -251,11 +251,14 @@ pub struct PreparedEvaluationScratch {
 }
 
 impl PreparedEvaluationScratch {
-    /// Return the current capacity of the reusable scalar workspace.
+    /// Return a coarse capacity proxy for selected reusable workspace buffers.
     ///
-    /// This is intended for allocation-retention diagnostics. Callers should
-    /// not use it as a sizing requirement because evaluator plans may change
-    /// their internal operation shape.
+    /// The value is the maximum element/bucket capacity among the result
+    /// buffer, custom-function argument buffer, and evaluation-cache map. It
+    /// is not a byte count, total retained-memory estimate, or allocation
+    /// counter; in particular it does not include every map or allocations
+    /// performed by custom callbacks. Use it only for retention diagnostics,
+    /// not as an application sizing requirement.
     pub fn capacity(&self) -> usize {
         self.workspace
             .results
@@ -529,9 +532,11 @@ impl PreparedEvaluator {
 
     /// Evaluate with caller-owned reusable scratch and typed failures.
     ///
-    /// No workspace allocation is performed after the first sufficiently
-    /// large call. The fast constant/identity paths return before touching the
-    /// scratch value at all.
+    /// For plans that use only built-in numeric operations, the result buffer
+    /// is reused once it has reached the plan's required capacity. This is not
+    /// a general allocation-free guarantee: custom callbacks may allocate
+    /// internally, including when inserting owned cache keys. Fast
+    /// constant/identity paths return before touching the scratch value.
     #[inline]
     pub fn evaluate_with_scratch_typed(
         &self,
@@ -2224,7 +2229,7 @@ fn evaluate_builtin_function_typed(
         s if s == Atom::TAN => arg_eval.tan(),
         s if s == Atom::COT => {
             let tangent = arg_eval.tan();
-            if tangent == 0.0 {
+            if !arg_eval.is_finite() || tangent == 0.0 {
                 return Err(PreparedEvaluationError::Domain {
                     function: symbol,
                     input: arg_eval,
@@ -2304,10 +2309,14 @@ mod test {
     use ahash::HashMap;
 
     use super::{
-        ExactSymbolMap, FunctionMap, PreparedEvaluationError, PreparedEvaluationScratch,
-        evaluate_exact, evaluate_exact_with_symbols, prepare_evaluator, prepare_evaluator_typed,
+        EvaluationWorkspace, ExactSymbolMap, FunctionMap, PreparedEvaluationError,
+        PreparedEvaluationScratch, PreparedInput, evaluate_builtin_function_typed, evaluate_exact,
+        evaluate_exact_with_symbols, prepare_evaluator, prepare_evaluator_typed,
     };
-    use crate::symbolic::View::{atom::Atom, coefficient::Coefficient};
+    use crate::symbolic::View::{
+        atom::{Atom, FunctionBuilder},
+        coefficient::Coefficient,
+    };
     use crate::{parse, symbol};
 
     #[test]
@@ -2451,6 +2460,128 @@ mod test {
     }
 
     #[test]
+    fn builtin_domain_matrix_keeps_legacy_ieee_and_typed_strict_policies_distinct() {
+        struct DomainCase {
+            source: &'static str,
+            expr_source: Option<&'static str>,
+            input: f64,
+            function: crate::symbolic::View::state::Symbol,
+            legacy_is_nan: bool,
+            legacy_is_infinite: bool,
+        }
+
+        let cases = [
+            DomainCase {
+                source: "log(x)",
+                expr_source: Some("log(x)"),
+                input: -1.0,
+                function: Atom::LOG,
+                legacy_is_nan: true,
+                legacy_is_infinite: false,
+            },
+            DomainCase {
+                source: "log(x)",
+                expr_source: Some("log(x)"),
+                input: 0.0,
+                function: Atom::LOG,
+                legacy_is_nan: false,
+                legacy_is_infinite: true,
+            },
+            DomainCase {
+                source: "sqrt(x)",
+                expr_source: None,
+                input: -1.0,
+                function: Atom::SQRT,
+                legacy_is_nan: true,
+                legacy_is_infinite: false,
+            },
+            DomainCase {
+                source: "asin(x)",
+                expr_source: Some("asin(x)"),
+                input: 1.25,
+                function: Atom::ASIN,
+                legacy_is_nan: true,
+                legacy_is_infinite: false,
+            },
+            DomainCase {
+                source: "acos(x)",
+                expr_source: Some("acos(x)"),
+                input: -1.25,
+                function: Atom::ACOS,
+                legacy_is_nan: true,
+                legacy_is_infinite: false,
+            },
+            DomainCase {
+                source: "cot(x)",
+                expr_source: Some("cot(x)"),
+                input: 0.0,
+                function: Atom::COT,
+                legacy_is_nan: false,
+                legacy_is_infinite: true,
+            },
+            DomainCase {
+                source: "cot(x)",
+                expr_source: Some("cot(x)"),
+                input: f64::INFINITY,
+                function: Atom::COT,
+                legacy_is_nan: true,
+                legacy_is_infinite: false,
+            },
+        ];
+
+        for case in cases {
+            let atom = parse!(case.source).unwrap();
+            let names = ["x"];
+            let legacy = atom.lambdify_borrowed_thread_safe(&names)(&[case.input]);
+            if let Some(expr_source) = case.expr_source {
+                let expr = crate::symbolic::symbolic_engine::Expr::parse_expression(expr_source);
+                let expr_value = expr.lambdify_borrowed_thread_safe(&names)(&[case.input]);
+                assert_eq!(legacy.is_nan(), expr_value.is_nan(), "{}", case.source);
+                assert_eq!(
+                    legacy.is_infinite(),
+                    expr_value.is_infinite(),
+                    "{}",
+                    case.source
+                );
+            }
+            let evaluator = prepare_evaluator_typed(&atom, &[symbol!("x")], &FunctionMap::new())
+                .expect("well-formed builtin expression should prepare");
+
+            assert_eq!(legacy.is_nan(), case.legacy_is_nan, "{}", case.source);
+            assert_eq!(
+                legacy.is_infinite(),
+                case.legacy_is_infinite,
+                "{}",
+                case.source
+            );
+            assert!(
+                matches!(
+                    evaluator.evaluate_typed(&[case.input]),
+                    Err(PreparedEvaluationError::Domain { function, input })
+                        if function == case.function && input == case.input
+                ),
+                "{} at {} must return its typed domain context",
+                case.source,
+                case.input
+            );
+        }
+
+        // Strict domain checking does not reject ordinary IEEE overflow or
+        // trigonometric NaN propagation when the input is not out of domain.
+        for (source, input) in [("exp(x)", 1000.0), ("sin(x)", f64::INFINITY)] {
+            let atom = parse!(source).unwrap();
+            let evaluator = prepare_evaluator_typed(&atom, &[symbol!("x")], &FunctionMap::new())
+                .expect("well-formed builtin expression should prepare");
+            let typed = evaluator
+                .evaluate_typed(&[input])
+                .expect("unrestricted IEEE result is not a domain error");
+            let legacy = atom.lambdify_borrowed_thread_safe(&["x"])(&[input]);
+            assert_eq!(typed.is_nan(), legacy.is_nan(), "{source}");
+            assert_eq!(typed.is_infinite(), legacy.is_infinite(), "{source}");
+        }
+    }
+
+    #[test]
     fn legacy_atom_and_atom_view_typed_evaluators_preserve_context() {
         let x = symbol!("x");
         let atom = Atom::new_var(x);
@@ -2521,6 +2652,60 @@ mod test {
     }
 
     #[test]
+    fn typed_error_matrix_preserves_context_for_safe_public_constructs() {
+        let x = symbol!("x");
+
+        let imaginary = prepare_evaluator_typed(&parse!("i").unwrap(), &[x], &FunctionMap::new())
+            .err()
+            .expect("real evaluator must reject the imaginary unit");
+        assert!(matches!(
+            imaginary,
+            PreparedEvaluationError::UnsupportedImaginaryUnit
+        ));
+
+        let nonfinite =
+            prepare_evaluator_typed(&Atom::new_f64(f64::NAN), &[x], &FunctionMap::new())
+                .err()
+                .expect("prepared compilation must reject NaN constants");
+        assert!(matches!(
+            nonfinite,
+            PreparedEvaluationError::NonFiniteConstant { value } if value.is_nan()
+        ));
+
+        let malformed_builtin = FunctionBuilder::new(Atom::SIN).finish();
+        let invalid_arity = prepare_evaluator_typed(&malformed_builtin, &[x], &FunctionMap::new())
+            .err()
+            .expect("a zero-argument unary builtin must fail during preparation");
+        assert!(matches!(
+            invalid_arity,
+            PreparedEvaluationError::InvalidBuiltinArity { function, actual: 0 }
+                if function == Atom::SIN
+        ));
+
+        let unsupported_builtin =
+            evaluate_builtin_function_typed(symbol!("not_a_builtin"), 1.0).unwrap_err();
+        assert!(matches!(
+            unsupported_builtin,
+            PreparedEvaluationError::UnsupportedBuiltin { function }
+                if function.get_stripped_name() == "not_a_builtin"
+        ));
+
+        let custom = prepare_evaluator_typed(&parse!("f(x)").unwrap(), &[x], &FunctionMap::new())
+            .expect("custom function node is valid to prepare");
+        let general_only = custom
+            .evaluate_plain_numeric_typed(
+                PreparedInput::Flat(&[1.0]),
+                &mut EvaluationWorkspace::default(),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            general_only,
+            PreparedEvaluationError::CustomFunctionRequiresGeneralEvaluator { function }
+                if function.get_stripped_name() == "f"
+        ));
+    }
+
+    #[test]
     fn caller_owned_scratch_reuses_capacity_and_matches_thread_local_values() {
         let x = symbol!("x");
         let evaluator = prepare_evaluator_typed(
@@ -2547,6 +2732,28 @@ mod test {
 
         let thread_local = evaluator.evaluate_typed(&[2.5]).unwrap();
         assert_eq!(second, thread_local);
+    }
+
+    #[test]
+    fn caller_owned_scratch_keeps_typed_domain_policy_and_recovers_after_error() {
+        let atom = parse!("log(x)").unwrap();
+        let x = symbol!("x");
+        let evaluator = prepare_evaluator_typed(&atom, &[x], &FunctionMap::new()).unwrap();
+        let legacy_closure = atom.lambdify_borrowed_thread_safe(&["x"]);
+        let mut scratch = PreparedEvaluationScratch::default();
+
+        assert!(legacy_closure(&[-1.0]).is_nan());
+        assert!(matches!(
+            evaluator.evaluate_with_scratch_typed(&[-1.0], &mut scratch),
+            Err(PreparedEvaluationError::Domain { function, input })
+                if function == Atom::LOG && input == -1.0
+        ));
+
+        let recovered = evaluator
+            .evaluate_with_scratch_typed(&[4.0], &mut scratch)
+            .expect("a failed typed evaluation must not poison reusable scratch");
+        assert_eq!(recovered, 4.0_f64.ln());
+        assert_eq!(legacy_closure(&[4.0]), recovered);
     }
 
     #[test]

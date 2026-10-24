@@ -13,11 +13,14 @@ use super::super::api::{
 use super::super::new::aot::AotPlan;
 use super::super::new::callbacks::PreparedSymbolicCallbacks;
 use super::super::new::config::{RadauAssembly, RadauMatrixLayout as InternalMatrixLayout};
+use super::super::new::lambdify::LambdifyPlan;
 use super::super::new::telemetry::{RadauTelemetry, RadauTelemetryMode as InternalTelemetryMode};
 use super::story_support::rebuild_aot_config;
 use crate::numerical::ivp_workloads::{
     WorkloadKind, build_workload, parameter_continuation_target,
 };
+use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_ivp::build_expr_legacy_sparse_jacobian;
 use tabled::Tabled;
 
 #[derive(Tabled)]
@@ -150,6 +153,47 @@ struct DenseAotCallbackParityRow {
     status: &'static str,
 }
 
+#[derive(Tabled)]
+struct CompactExprPreparationRow {
+    dimension: usize,
+    repeats: usize,
+    dense_reference_median_mad_ms: String,
+    compact_median_mad_ms: String,
+    preparation_change_pct: String,
+    old_jacobian_closures: usize,
+    compact_jacobian_closures: usize,
+    closure_slots_reduced_pct: String,
+}
+
+#[derive(Tabled)]
+struct ExprJacobianPreparationAbRow {
+    dimension: usize,
+    layout: String,
+    repeats: usize,
+    dense_prepare_median_mad_ms: String,
+    derived_prepare_median_mad_ms: String,
+    preparation_change_pct: String,
+    derived_symbolic_jacobian_ms: String,
+    dense_full_median_mad_ms: String,
+    derived_full_median_mad_ms: String,
+    full_solve_change_pct: String,
+    symbolic_nnz: usize,
+    dense_symbolic_slots: usize,
+    max_state_diff: String,
+    counters_match: bool,
+}
+
+fn median_mad(samples: &mut [f64]) -> (f64, f64) {
+    samples.sort_by(f64::total_cmp);
+    let median = samples[samples.len() / 2];
+    let mut deviations = samples
+        .iter()
+        .map(|sample| (sample - median).abs())
+        .collect::<Vec<_>>();
+    deviations.sort_by(f64::total_cmp);
+    (median, deviations[deviations.len() / 2])
+}
+
 fn dimensions_from_env(name: &str, default: &[usize]) -> Vec<usize> {
     std::env::var(name)
         .ok()
@@ -162,6 +206,379 @@ fn dimensions_from_env(name: &str, default: &[usize]) -> Vec<usize> {
         })
         .filter(|dimensions| !dimensions.is_empty())
         .unwrap_or_else(|| default.to_vec())
+}
+
+#[test]
+#[ignore = "release-only A/B for compact Expr Jacobian callback preparation"]
+fn compact_expr_jacobian_preparation_avoids_structural_zero_closures_story() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "Radau_Compact_Expr_Jacobian",
+        "numerical::Radau::tests::large_performance::compact_expr_jacobian_preparation_avoids_structural_zero_closures_story",
+    );
+    let dimensions = dimensions_from_env("RADAU_EXPR_JACOBIAN_DIMENSIONS", &[128, 256, 512]);
+    let repeats = std::env::var("RADAU_EXPR_JACOBIAN_REPEATS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|repeats| *repeats >= 3)
+        .unwrap_or(11);
+    let mut rows = Vec::new();
+
+    for dimension in dimensions {
+        let workload = build_workload(WorkloadKind::DiffusionChain, dimension);
+        let variables = workload
+            .variables
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let parameters = workload
+            .parameter_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let mut callback_names = Vec::with_capacity(1 + parameters.len() + variables.len());
+        callback_names.push(workload.time_variable.clone());
+        callback_names.extend(workload.parameter_names.iter().cloned());
+        callback_names.extend(workload.variables.iter().cloned());
+        let callback_name_refs = callback_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let jacobian = workload
+            .equations
+            .iter()
+            .flat_map(|equation| {
+                variables
+                    .iter()
+                    .map(move |variable| equation.diff(variable))
+            })
+            .collect::<Vec<_>>();
+        let expected_nonzeros = jacobian.iter().filter(|entry| !entry.is_zero()).count();
+        let compile_dense_reference = |residual_input: Vec<Expr>, jacobian_input: Vec<Expr>| {
+            for expression in residual_input.iter().chain(jacobian_input.iter()) {
+                let variables = expression.all_arguments_are_variables();
+                assert!(
+                    variables
+                        .iter()
+                        .all(|variable| callback_name_refs.iter().any(|name| *name == variable))
+                );
+            }
+            let residual = residual_input
+                .iter()
+                .map(|expression| {
+                    Expr::lambdify_borrowed_thread_safe(expression, &callback_name_refs)
+                })
+                .collect::<Vec<_>>();
+            let pattern = jacobian_input
+                .iter()
+                .enumerate()
+                .filter_map(|(index, expression)| {
+                    (!expression.is_zero()).then_some((index / dimension, index % dimension))
+                })
+                .collect::<Vec<_>>();
+            let dense_jacobian = jacobian_input
+                .iter()
+                .map(|expression| {
+                    Expr::lambdify_borrowed_thread_safe(expression, &callback_name_refs)
+                })
+                .collect::<Vec<_>>();
+            (residual, pattern, dense_jacobian)
+        };
+        let mut dense_reference_ms = Vec::with_capacity(repeats);
+        let mut compact_ms = Vec::with_capacity(repeats);
+
+        for repeat in 0..repeats {
+            // Alternate order to reduce systematic thermal/frequency bias.
+            if repeat % 2 == 0 {
+                let residual_input = workload.equations.clone();
+                let jacobian_input = jacobian.clone();
+                let start = Instant::now();
+                let dense_reference = compile_dense_reference(residual_input, jacobian_input);
+                dense_reference_ms.push(start.elapsed().as_secs_f64() * 1_000.0);
+                std::hint::black_box(dense_reference);
+
+                let compact_residual_input = workload.equations.clone();
+                let compact_jacobian_input = jacobian.clone();
+                let start = Instant::now();
+                let compact = LambdifyPlan::from_expressions(
+                    compact_residual_input,
+                    Some(compact_jacobian_input),
+                    &workload.time_variable,
+                    &variables,
+                    &parameters,
+                )
+                .unwrap();
+                compact_ms.push(start.elapsed().as_secs_f64() * 1_000.0);
+                assert_eq!(compact.compiled_jacobian_entry_count(), expected_nonzeros);
+                std::hint::black_box(compact);
+            } else {
+                let compact_residual_input = workload.equations.clone();
+                let compact_jacobian_input = jacobian.clone();
+                let start = Instant::now();
+                let compact = LambdifyPlan::from_expressions(
+                    compact_residual_input,
+                    Some(compact_jacobian_input),
+                    &workload.time_variable,
+                    &variables,
+                    &parameters,
+                )
+                .unwrap();
+                compact_ms.push(start.elapsed().as_secs_f64() * 1_000.0);
+                assert_eq!(compact.compiled_jacobian_entry_count(), expected_nonzeros);
+                std::hint::black_box(compact);
+
+                let residual_input = workload.equations.clone();
+                let jacobian_input = jacobian.clone();
+                let start = Instant::now();
+                let dense_reference = compile_dense_reference(residual_input, jacobian_input);
+                dense_reference_ms.push(start.elapsed().as_secs_f64() * 1_000.0);
+                std::hint::black_box(dense_reference);
+            }
+        }
+
+        let (dense_median, dense_mad) = median_mad(&mut dense_reference_ms);
+        let (compact_median, compact_mad) = median_mad(&mut compact_ms);
+        let full_jacobian_entries = dimension.saturating_mul(dimension);
+        rows.push(CompactExprPreparationRow {
+            dimension,
+            repeats,
+            dense_reference_median_mad_ms: format!("{dense_median:.3}/{dense_mad:.3}"),
+            compact_median_mad_ms: format!("{compact_median:.3}/{compact_mad:.3}"),
+            preparation_change_pct: format!(
+                "{:+.1}",
+                100.0 * (compact_median / dense_median - 1.0)
+            ),
+            old_jacobian_closures: full_jacobian_entries,
+            compact_jacobian_closures: expected_nonzeros,
+            closure_slots_reduced_pct: format!(
+                "{:.1}",
+                100.0 * (1.0 - expected_nonzeros as f64 / full_jacobian_entries as f64)
+            ),
+        });
+    }
+
+    crate::Utils::test_reporting::capture_test_table(
+        "[Radau compact Expr Jacobian preparation A/B; Expr differentiation excluded]",
+        &rows,
+    );
+}
+
+#[test]
+#[ignore = "release-only A/B for coordinate Expr Jacobian derivation through the public solver"]
+fn expr_coordinate_jacobian_prepare_and_solve_ab_story() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "Radau_Expr_Coordinate_Jacobian",
+        "numerical::Radau::tests::large_performance::expr_coordinate_jacobian_prepare_and_solve_ab_story",
+    );
+    let dimensions = dimensions_from_env(
+        "RADAU_EXPR_COORDINATE_JACOBIAN_DIMENSIONS",
+        &[256, 512, 1024],
+    );
+    let repeats = std::env::var("RADAU_EXPR_COORDINATE_JACOBIAN_REPEATS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|repeats| *repeats >= 3)
+        .unwrap_or(7);
+    let layouts = [
+        RadauMatrixLayout::Sparse,
+        RadauMatrixLayout::Banded { lower: 1, upper: 1 },
+    ];
+    let mut rows = Vec::new();
+
+    for dimension in dimensions {
+        let workload = build_workload(WorkloadKind::DiffusionChain, dimension);
+        let variable_refs = workload
+            .variables
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let symbolic_nnz = build_expr_legacy_sparse_jacobian(
+            &workload.equations,
+            &workload.variables,
+            &crate::symbolic::ivp_telemetry::IvpTelemetry::disabled(),
+        )
+        .entries
+        .len();
+        let dense_symbolic_slots = dimension.saturating_mul(dimension);
+        let initial_state = workload.initial_state.as_slice().to_vec();
+        let parameters = workload.parameter_values.as_slice().to_vec();
+
+        for layout in layouts {
+            let mut dense_prepare_ms = Vec::with_capacity(repeats);
+            let mut derived_prepare_ms = Vec::with_capacity(repeats);
+            let mut dense_full_ms = Vec::with_capacity(repeats);
+            let mut derived_full_ms = Vec::with_capacity(repeats);
+            let mut maximum_state_diff: f64 = 0.0;
+
+            for repeat in 0..repeats {
+                let timed_config = RadauConfig {
+                    telemetry: RadauTelemetryMode::Off,
+                    ..config(
+                        RadauFrontend::ExprLegacy,
+                        layout,
+                        WorkloadKind::DiffusionChain,
+                    )
+                };
+                let run_dense = || {
+                    let started = Instant::now();
+                    let jacobian = workload
+                        .equations
+                        .iter()
+                        .flat_map(|equation| {
+                            variable_refs
+                                .iter()
+                                .map(move |variable| equation.diff(variable))
+                        })
+                        .collect::<Vec<_>>();
+                    let problem = RadauProblem::new(
+                        workload.equations.clone(),
+                        workload.variables.clone(),
+                        workload.time_variable.clone(),
+                    )
+                    .with_parameters(workload.parameter_names.clone())
+                    .with_jacobian(jacobian);
+                    let mut solver = RadauSolver::prepare(problem, timed_config.clone()).unwrap();
+                    let prepared = started.elapsed().as_secs_f64() * 1_000.0;
+                    let solution = solver
+                        .solve_with_parameters(&initial_state, &parameters)
+                        .unwrap();
+                    let full = started.elapsed().as_secs_f64() * 1_000.0;
+                    (prepared, full, solution.y)
+                };
+                let run_derived = || {
+                    let started = Instant::now();
+                    let problem = RadauProblem::new(
+                        workload.equations.clone(),
+                        workload.variables.clone(),
+                        workload.time_variable.clone(),
+                    )
+                    .with_parameters(workload.parameter_names.clone());
+                    let mut solver = RadauSolver::prepare(problem, timed_config.clone()).unwrap();
+                    let prepared = started.elapsed().as_secs_f64() * 1_000.0;
+                    let solution = solver
+                        .solve_with_parameters(&initial_state, &parameters)
+                        .unwrap();
+                    let full = started.elapsed().as_secs_f64() * 1_000.0;
+                    (prepared, full, solution.y)
+                };
+
+                let (dense, derived) = if repeat % 2 == 0 {
+                    (run_dense(), run_derived())
+                } else {
+                    let derived = run_derived();
+                    let dense = run_dense();
+                    (dense, derived)
+                };
+                maximum_state_diff = maximum_state_diff.max(max_diff(&dense.2, &derived.2));
+                dense_prepare_ms.push(dense.0);
+                derived_prepare_ms.push(derived.0);
+                dense_full_ms.push(dense.1);
+                derived_full_ms.push(derived.1);
+            }
+
+            assert!(
+                maximum_state_diff <= 2.0e-5,
+                "dimension={dimension}, layout={layout:?}, state drift={maximum_state_diff:.3e}"
+            );
+
+            // Capture telemetry outside the timed series so stage attribution
+            // does not perturb the uninstrumented wall-clock comparison.
+            let detailed_config = RadauConfig {
+                telemetry: RadauTelemetryMode::Detailed,
+                ..config(
+                    RadauFrontend::ExprLegacy,
+                    layout,
+                    WorkloadKind::DiffusionChain,
+                )
+            };
+            let diagnostic_jacobian = workload
+                .equations
+                .iter()
+                .flat_map(|equation| {
+                    variable_refs
+                        .iter()
+                        .map(move |variable| equation.diff(variable))
+                })
+                .collect::<Vec<_>>();
+            let dense_problem = RadauProblem::new(
+                workload.equations.clone(),
+                workload.variables.clone(),
+                workload.time_variable.clone(),
+            )
+            .with_parameters(workload.parameter_names.clone())
+            .with_jacobian(diagnostic_jacobian);
+            let mut dense_solver =
+                RadauSolver::prepare(dense_problem, detailed_config.clone()).unwrap();
+            let dense_diagnostic = dense_solver
+                .solve_with_parameters(&initial_state, &parameters)
+                .unwrap();
+            let derived_problem = RadauProblem::new(
+                workload.equations.clone(),
+                workload.variables.clone(),
+                workload.time_variable.clone(),
+            )
+            .with_parameters(workload.parameter_names.clone());
+            let mut derived_solver =
+                RadauSolver::prepare(derived_problem, detailed_config).unwrap();
+            let derived_diagnostic = derived_solver
+                .solve_with_parameters(&initial_state, &parameters)
+                .unwrap();
+            let dense_counters = &dense_diagnostic.telemetry().counters;
+            let derived_counters = &derived_diagnostic.telemetry().counters;
+            let counters_match = [
+                "accepted_steps",
+                "rejected_steps",
+                "residual_calls",
+                "jacobian_calls",
+                "factorizations",
+                "real_solves",
+                "complex_solves",
+            ]
+            .iter()
+            .all(|key| dense_counters[*key] == derived_counters[*key]);
+            assert!(counters_match, "dimension={dimension}, layout={layout:?}");
+
+            let (dense_prepare_median, dense_prepare_mad) = median_mad(&mut dense_prepare_ms);
+            let (derived_prepare_median, derived_prepare_mad) = median_mad(&mut derived_prepare_ms);
+            let (dense_full_median, dense_full_mad) = median_mad(&mut dense_full_ms);
+            let (derived_full_median, derived_full_mad) = median_mad(&mut derived_full_ms);
+            rows.push(ExprJacobianPreparationAbRow {
+                dimension,
+                layout: format!("{layout:?}"),
+                repeats,
+                dense_prepare_median_mad_ms: format!(
+                    "{dense_prepare_median:.3}/{dense_prepare_mad:.3}"
+                ),
+                derived_prepare_median_mad_ms: format!(
+                    "{derived_prepare_median:.3}/{derived_prepare_mad:.3}"
+                ),
+                preparation_change_pct: format!(
+                    "{:.1}",
+                    100.0 * (derived_prepare_median / dense_prepare_median - 1.0)
+                ),
+                derived_symbolic_jacobian_ms: format!(
+                    "{:.3}",
+                    derived_diagnostic.telemetry().timings_ms["symbolic_jacobian_ms"]
+                ),
+                dense_full_median_mad_ms: format!("{dense_full_median:.3}/{dense_full_mad:.3}"),
+                derived_full_median_mad_ms: format!(
+                    "{derived_full_median:.3}/{derived_full_mad:.3}"
+                ),
+                full_solve_change_pct: format!(
+                    "{:.1}",
+                    100.0 * (derived_full_median / dense_full_median - 1.0)
+                ),
+                symbolic_nnz,
+                dense_symbolic_slots,
+                max_state_diff: format!("{maximum_state_diff:.3e}"),
+                counters_match,
+            });
+        }
+    }
+
+    crate::Utils::test_reporting::capture_test_table(
+        "[Radau Expr coordinate-Jacobian preparation and full-solve A/B; paired and interleaved]",
+        &rows,
+    );
 }
 
 fn t_bound(kind: WorkloadKind) -> f64 {

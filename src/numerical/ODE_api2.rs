@@ -17,12 +17,14 @@ use crate::numerical::LSODE2::{Lsode2Error, Lsode2ProblemConfig, Lsode2Solver};
 use crate::numerical::NonStiff_api::nonstiffODE;
 #[cfg(test)]
 use crate::numerical::Radau::Radau_main::{Radau, RadauSolverOptions, RadauStatistics};
-#[cfg(not(test))]
 use crate::numerical::Radau::{
     RadauConfig, RadauExecution, RadauFrontend, RadauJacobianSource, RadauMatrixLayout,
-    RadauNativeSolver, RadauOutputPolicy, RadauProblem, RadauSolver, RadauTelemetryMode,
+    RadauOutputPolicy, RadauTelemetryMode,
 };
 use crate::numerical::Radau::{RadauError, RadauSolution};
+#[cfg(not(test))]
+use crate::numerical::Radau::{RadauNativeSolver, RadauProblem, RadauSolver};
+use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpTelemetrySnapshot};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
 use crate::symbolic::symbolic_ivp_generated::{
@@ -406,7 +408,9 @@ pub struct UniversalODESolver {
     rtol: Option<f64>,
     atol: Option<f64>,
     max_step: Option<f64>,
+    radau_telemetry_mode: RadauTelemetryMode,
     bdf_telemetry_mode: BdfTelemetryMode,
+    nonstiff_symbolic_telemetry: IvpTelemetry,
     first_step: Option<f64>,
     vectorized: bool,
     jac_sparsity: Option<DMatrix<f64>>,
@@ -449,7 +453,9 @@ impl UniversalODESolver {
             rtol: None,
             atol: None,
             max_step: None,
+            radau_telemetry_mode: RadauTelemetryMode::Off,
             bdf_telemetry_mode: BdfTelemetryMode::Off,
+            nonstiff_symbolic_telemetry: IvpTelemetry::disabled(),
             first_step: None,
             vectorized: false,
             jac_sparsity: None,
@@ -483,6 +489,23 @@ impl UniversalODESolver {
         } else {
             "Lambdify".to_string()
         }
+    }
+
+    fn production_radau_config(&self) -> RadauConfig {
+        let mut config = RadauConfig::default();
+        config.t0 = self.t0;
+        config.t_bound = self.t_bound;
+        config.rtol = self.tolerance.unwrap_or(1e-6);
+        config.atol = self.tolerance.unwrap_or(1e-6);
+        config.max_step = self.step_size.unwrap_or(f64::INFINITY);
+        config.max_newton_iterations = self.max_iterations.unwrap_or(50);
+        config.execution = RadauExecution::Lambdify;
+        config.frontend = RadauFrontend::ExprLegacy;
+        config.matrix_layout = RadauMatrixLayout::Dense;
+        config.jacobian_source = RadauJacobianSource::Analytic;
+        config.telemetry = self.radau_telemetry_mode;
+        config.output = RadauOutputPolicy::FinalOnly;
+        config
     }
 
     /// Legacy constructor kept for old call-sites that still think in terms of
@@ -676,6 +699,28 @@ impl UniversalODESolver {
         self
     }
 
+    /// Selects telemetry for the Radau route. Telemetry remains disabled by default.
+    pub fn with_radau_telemetry_mode(mut self, mode: RadauTelemetryMode) -> Self {
+        self.radau_telemetry_mode = mode;
+        self
+    }
+
+    /// Supplies opt-in symbolic telemetry for RK45, DOPRI and AB4. The
+    /// underlying legacy integrators do not expose step-level counters.
+    pub fn with_nonstiff_symbolic_telemetry(mut self, telemetry: IvpTelemetry) -> Self {
+        self.nonstiff_symbolic_telemetry = telemetry;
+        self
+    }
+
+    /// Returns symbolic telemetry for the selected non-stiff route after it
+    /// has been initialized. Other solver families expose their native API.
+    pub fn nonstiff_symbolic_telemetry(&self) -> Option<IvpTelemetrySnapshot> {
+        match self.solver_instance.as_ref()? {
+            SolverInstance::NonStiff(solver) => Some(solver.symbolic_telemetry()),
+            _ => None,
+        }
+    }
+
     pub fn with_generated_backend_mode(mut self, mode: DenseIvpGeneratedBackendMode) -> Self {
         self.set_generated_backend_mode(mode);
         self
@@ -758,7 +803,7 @@ impl UniversalODESolver {
                         method: method.as_str().to_string(),
                     });
                 }
-                let mut solver = nonstiffODE::new(
+                let mut solver = nonstiffODE::try_new(
                     self.eq_system.clone(),
                     self.values.clone(),
                     self.arg.clone(),
@@ -768,7 +813,8 @@ impl UniversalODESolver {
                     self.t_bound,
                     self.step_size.unwrap_or(1e-3),
                     self.stop_condition.clone(),
-                );
+                )?;
+                solver.set_symbolic_telemetry(self.nonstiff_symbolic_telemetry.clone());
                 if let Some(tol) = self.neighborhood_check {
                     solver.set_neighborhood_check(tol);
                 }
@@ -808,19 +854,7 @@ impl UniversalODESolver {
                 }
                 #[cfg(not(test))]
                 {
-                    let mut config = RadauConfig::default();
-                    config.t0 = self.t0;
-                    config.t_bound = self.t_bound;
-                    config.rtol = self.tolerance.unwrap_or(1e-6);
-                    config.atol = self.tolerance.unwrap_or(1e-6);
-                    config.max_step = self.step_size.unwrap_or(f64::INFINITY);
-                    config.max_newton_iterations = self.max_iterations.unwrap_or(50);
-                    config.execution = RadauExecution::Lambdify;
-                    config.frontend = RadauFrontend::ExprLegacy;
-                    config.matrix_layout = RadauMatrixLayout::Dense;
-                    config.jacobian_source = RadauJacobianSource::Analytic;
-                    config.telemetry = RadauTelemetryMode::Counters;
-                    config.output = RadauOutputPolicy::FinalOnly;
+                    let config = self.production_radau_config();
 
                     if let Some(rhs) = self.native_residual.clone() {
                         let jacobian = self.native_jacobian.clone();
@@ -954,7 +988,7 @@ impl UniversalODESolver {
             .expect("solver instance should be initialized")
         {
             SolverInstance::NonStiff(solver) => {
-                solver.solve();
+                solver.try_solve()?;
                 let (t_result, y_result) = solver.get_result();
                 self.t_result = Some(t_result);
                 self.y_result = Some(y_result);
@@ -1328,6 +1362,85 @@ mod tests {
         let arg = "t".to_string();
         let y0 = DVector::from_vec(vec![1.0]);
         (eq_system, values, arg, y0)
+    }
+
+    #[test]
+    fn universal_nonstiff_unknown_method_is_returned_as_typed_error() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::NonStiff(NonStiffMethod::Other("unknown-explicit".to_string())),
+            0.0,
+            y0,
+            0.1,
+        );
+
+        let error = solver.try_initialize().unwrap_err();
+        assert!(matches!(
+            error,
+            UniversalOdeError::Backend(IvpBackendError::InvalidArgumentSchema { .. })
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported non-stiff solver method")
+        );
+    }
+
+    #[test]
+    fn universal_nonstiff_forwards_symbolic_telemetry() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let telemetry = IvpTelemetry::detailed();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::NonStiff(NonStiffMethod::Rk45),
+            0.0,
+            y0,
+            0.1,
+        )
+        .with_nonstiff_symbolic_telemetry(telemetry.clone());
+        solver.set_step_size(1e-3);
+
+        solver.try_solve().unwrap();
+
+        let snapshot = solver
+            .nonstiff_symbolic_telemetry()
+            .expect("non-stiff route should expose its symbolic telemetry");
+        assert!(snapshot.residual_evaluations > 0);
+        assert_eq!(
+            snapshot.residual_evaluations,
+            telemetry.snapshot().residual_evaluations
+        );
+    }
+
+    #[test]
+    fn universal_radau_production_config_forwards_all_telemetry_modes() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let solver =
+            UniversalODESolver::new(eq_system, values, arg, SolverType::Radau, 0.0, y0, 0.1);
+        assert_eq!(
+            solver.production_radau_config().telemetry,
+            RadauTelemetryMode::Off,
+            "the facade must preserve Radau's opt-in telemetry default"
+        );
+
+        for mode in [
+            RadauTelemetryMode::Off,
+            RadauTelemetryMode::Counters,
+            RadauTelemetryMode::Timings,
+            RadauTelemetryMode::Detailed,
+        ] {
+            let (eq_system, values, arg, y0) = simple_decay_problem();
+            let solver =
+                UniversalODESolver::new(eq_system, values, arg, SolverType::Radau, 0.0, y0, 0.1)
+                    .with_radau_telemetry_mode(mode);
+
+            assert_eq!(solver.production_radau_config().telemetry, mode);
+        }
     }
 
     fn decay_rhs(_t: f64, y: &DVector<f64>) -> DVector<f64> {

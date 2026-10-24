@@ -7,6 +7,7 @@
 //! route.
 
 use super::native_jacobian::{NativeJacobianStorage, try_prepare_native_atomview_jacobian_runtime};
+use super::native_step_engine::with_separate_atom_graph_for_test;
 use super::story_support::{
     ChainMatrixRoute, chain_equations, chain_solver_config, chain_state, max_vector_diff,
     prepare_chain_residual,
@@ -18,6 +19,7 @@ use crate::symbolic::codegen::codegen_orchestrator::{
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     IvpSymbolicAssemblyBackend, PreparedNativeJacobianMetrics, build_symbolic_jacobian,
+    with_expr_legacy_scalar_reference_for_test, with_parallel_atom_evaluator_compilation_for_test,
 };
 use nalgebra::DVector;
 use std::hint::black_box;
@@ -168,6 +170,7 @@ struct FullSolveRun {
     layout_ms: f64,
     residual_lambdify_ms: f64,
     jacobian_lambdify_ms: f64,
+    expr_to_atom_calls: u64,
     residual_calls: usize,
     jacobian_calls: usize,
     linear_solves: usize,
@@ -226,11 +229,686 @@ fn run_full_case(
         layout_ms: cold_ms(&snapshot, IvpColdStage::LayoutPlanning),
         residual_lambdify_ms: cold_ms(&snapshot, IvpColdStage::ResidualLambdification),
         jacobian_lambdify_ms: cold_ms(&snapshot, IvpColdStage::JacobianLambdification),
+        expr_to_atom_calls: snapshot.cold_stage(IvpColdStage::ExprToAtom).calls,
         residual_calls: evaluations.residual_evaluations,
         jacobian_calls: evaluations.jacobian_evaluations,
         linear_solves: evaluations.linear_solves,
         accepted: evaluations.accepted_steps,
         rejected: evaluations.rejected_steps,
+    }
+}
+
+fn run_expr_builder_revision_case(
+    dimension: usize,
+    matrix: ChainMatrixRoute,
+    use_scalar_reference: bool,
+    detailed_telemetry: bool,
+) -> FullSolveRun {
+    let telemetry = if detailed_telemetry {
+        IvpTelemetry::detailed()
+    } else {
+        IvpTelemetry::disabled()
+    };
+    let total_started = Instant::now();
+    let mut solver = Lsode2Solver::new(chain_solver_config(
+        dimension,
+        IvpSymbolicAssemblyBackend::ExprLegacy,
+        matrix,
+        IvpLambdifyExecutionPolicy::Sequential,
+        telemetry.clone(),
+    ))
+    .expect("ExprLegacy A/B solver should construct");
+    let prepare_started = Instant::now();
+    let preparation =
+        with_expr_legacy_scalar_reference_for_test(use_scalar_reference, || solver.prepare());
+    preparation.expect("ExprLegacy A/B preparation should succeed");
+    let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1.0e3;
+    let solve_started = Instant::now();
+    let summary = solver
+        .solve_with_summary()
+        .expect("ExprLegacy A/B solve should succeed");
+    let solve_ms = solve_started.elapsed().as_secs_f64() * 1.0e3;
+    let snapshot = telemetry.snapshot();
+    let final_state = summary
+        .final_y
+        .expect("ExprLegacy A/B solve should return final state");
+    let evaluations = summary.evaluation_telemetry;
+    FullSolveRun {
+        prepare_ms,
+        solve_ms,
+        total_ms: total_started.elapsed().as_secs_f64() * 1.0e3,
+        solver_preparation_ms: cold_ms(&snapshot, IvpColdStage::SolverPreparation),
+        bridge_preparation_ms: cold_ms(&snapshot, IvpColdStage::BridgePreparation),
+        native_callback_preparation_ms: cold_ms(&snapshot, IvpColdStage::NativeCallbackPreparation),
+        solve_scope_ms: warm_ms(&snapshot, IvpWarmStage::Solve),
+        summary_scope_ms: warm_ms(&snapshot, IvpWarmStage::Summary),
+        final_state,
+        residual_ms: evaluations.residual_ms_total,
+        jacobian_ms: evaluations.jacobian_ms_total,
+        linear_ms: evaluations.linear_ms_total,
+        expr_to_atom_ms: cold_ms(&snapshot, IvpColdStage::ExprToAtom),
+        differentiation_ms: cold_ms(&snapshot, IvpColdStage::SymbolicDifferentiation),
+        simplify_ms: cold_ms(&snapshot, IvpColdStage::Simplification),
+        sparse_pattern_ms: cold_ms(&snapshot, IvpColdStage::SparsePattern),
+        layout_ms: cold_ms(&snapshot, IvpColdStage::LayoutPlanning),
+        residual_lambdify_ms: cold_ms(&snapshot, IvpColdStage::ResidualLambdification),
+        jacobian_lambdify_ms: cold_ms(&snapshot, IvpColdStage::JacobianLambdification),
+        expr_to_atom_calls: snapshot.cold_stage(IvpColdStage::ExprToAtom).calls,
+        residual_calls: evaluations.residual_evaluations,
+        jacobian_calls: evaluations.jacobian_evaluations,
+        linear_solves: evaluations.linear_solves,
+        accepted: evaluations.accepted_steps,
+        rejected: evaluations.rejected_steps,
+    }
+}
+
+fn run_atom_evaluator_compile_case(
+    dimension: usize,
+    matrix: ChainMatrixRoute,
+    parallel_compile: bool,
+    reuse_shared_atom_graph: bool,
+    detailed_telemetry: bool,
+) -> FullSolveRun {
+    let telemetry = if detailed_telemetry {
+        IvpTelemetry::detailed()
+    } else {
+        IvpTelemetry::disabled()
+    };
+    let total_started = Instant::now();
+    let mut solver = Lsode2Solver::new(chain_solver_config(
+        dimension,
+        IvpSymbolicAssemblyBackend::AtomView,
+        matrix,
+        IvpLambdifyExecutionPolicy::Sequential,
+        telemetry.clone(),
+    ))
+    .expect("AtomView evaluator-compilation A/B solver should construct");
+    let prepare_started = Instant::now();
+    with_separate_atom_graph_for_test(!reuse_shared_atom_graph, || {
+        with_parallel_atom_evaluator_compilation_for_test(parallel_compile, || solver.prepare())
+    })
+    .expect("AtomView preparation A/B should succeed");
+    let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1.0e3;
+    let solve_started = Instant::now();
+    let summary = solver
+        .solve_with_summary()
+        .expect("AtomView evaluator-compilation A/B solve should succeed");
+    let solve_ms = solve_started.elapsed().as_secs_f64() * 1.0e3;
+    let snapshot = telemetry.snapshot();
+    let final_state = summary
+        .final_y
+        .expect("AtomView evaluator-compilation A/B should expose final state");
+    let evaluations = summary.evaluation_telemetry;
+    FullSolveRun {
+        prepare_ms,
+        solve_ms,
+        total_ms: total_started.elapsed().as_secs_f64() * 1.0e3,
+        solver_preparation_ms: cold_ms(&snapshot, IvpColdStage::SolverPreparation),
+        bridge_preparation_ms: cold_ms(&snapshot, IvpColdStage::BridgePreparation),
+        native_callback_preparation_ms: cold_ms(&snapshot, IvpColdStage::NativeCallbackPreparation),
+        solve_scope_ms: warm_ms(&snapshot, IvpWarmStage::Solve),
+        summary_scope_ms: warm_ms(&snapshot, IvpWarmStage::Summary),
+        final_state,
+        residual_ms: evaluations.residual_ms_total,
+        jacobian_ms: evaluations.jacobian_ms_total,
+        linear_ms: evaluations.linear_ms_total,
+        expr_to_atom_ms: cold_ms(&snapshot, IvpColdStage::ExprToAtom),
+        differentiation_ms: cold_ms(&snapshot, IvpColdStage::SymbolicDifferentiation),
+        simplify_ms: cold_ms(&snapshot, IvpColdStage::Simplification),
+        sparse_pattern_ms: cold_ms(&snapshot, IvpColdStage::SparsePattern),
+        layout_ms: cold_ms(&snapshot, IvpColdStage::LayoutPlanning),
+        residual_lambdify_ms: cold_ms(&snapshot, IvpColdStage::ResidualLambdification),
+        jacobian_lambdify_ms: cold_ms(&snapshot, IvpColdStage::JacobianLambdification),
+        expr_to_atom_calls: snapshot.cold_stage(IvpColdStage::ExprToAtom).calls,
+        residual_calls: evaluations.residual_evaluations,
+        jacobian_calls: evaluations.jacobian_evaluations,
+        linear_solves: evaluations.linear_solves,
+        accepted: evaluations.accepted_steps,
+        rejected: evaluations.rejected_steps,
+    }
+}
+
+fn median_mad(values: &[f64]) -> (f64, f64) {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let median = sorted[sorted.len() / 2];
+    let mut deviations = sorted
+        .iter()
+        .map(|value| (value - median).abs())
+        .collect::<Vec<_>>();
+    deviations.sort_by(f64::total_cmp);
+    (median, deviations[deviations.len() / 2])
+}
+
+fn max_solution_matrix_diff(left: &nalgebra::DMatrix<f64>, right: &nalgebra::DMatrix<f64>) -> f64 {
+    assert_eq!(left.shape(), right.shape());
+    left.iter()
+        .zip(right.iter())
+        .map(|(lhs, rhs)| (lhs - rhs).abs())
+        .fold(0.0, f64::max)
+}
+
+#[test]
+#[ignore = "release old-vs-optimized ExprLegacy full-solve A/B"]
+fn lsode2_exprlegacy_scalar_reference_vs_optimized_full_solve_ab() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::large_performance_story_tests::lsode2_exprlegacy_scalar_reference_vs_optimized_full_solve_ab",
+    );
+    let dimensions = dimensions_from_env("LSODE2_EXPR_BUILDER_AB_DIMENSIONS", &[256, 512]);
+    let repetitions = usize_from_env("LSODE2_EXPR_BUILDER_AB_REPETITIONS", 15);
+    reportln!(
+        "[LSODE2 old-vs-optimized ExprLegacy A/B] dimensions={dimensions:?}, repetitions={repetitions}, paired alternating order; timed runs use telemetry Off"
+    );
+    reportln!(
+        "matrix | dimension | route | prepare median/MAD ms | solve median/MAD ms | total median/MAD ms | residual/Jacobian/linear | accepted/rejected | max state diff"
+    );
+
+    for dimension in dimensions {
+        for matrix in [ChainMatrixRoute::Sparse, ChainMatrixRoute::Banded] {
+            // Validate numerical work separately from uninstrumented timings.
+            let old_detailed = run_expr_builder_revision_case(dimension, matrix, true, true);
+            let optimized_detailed = run_expr_builder_revision_case(dimension, matrix, false, true);
+            let detailed_state_diff =
+                max_vector_diff(&old_detailed.final_state, &optimized_detailed.final_state);
+            assert!(detailed_state_diff <= 1.0e-9);
+            assert_eq!(
+                old_detailed.residual_calls,
+                optimized_detailed.residual_calls
+            );
+            assert_eq!(
+                old_detailed.jacobian_calls,
+                optimized_detailed.jacobian_calls
+            );
+            assert_eq!(old_detailed.linear_solves, optimized_detailed.linear_solves);
+            assert_eq!(old_detailed.accepted, optimized_detailed.accepted);
+            assert_eq!(old_detailed.rejected, optimized_detailed.rejected);
+
+            // Warm both routes before recording; alternate order to cancel host drift.
+            let _ = run_expr_builder_revision_case(dimension, matrix, true, false);
+            let _ = run_expr_builder_revision_case(dimension, matrix, false, false);
+            let mut old_prepare = Vec::with_capacity(repetitions);
+            let mut old_solve = Vec::with_capacity(repetitions);
+            let mut old_total = Vec::with_capacity(repetitions);
+            let mut optimized_prepare = Vec::with_capacity(repetitions);
+            let mut optimized_solve = Vec::with_capacity(repetitions);
+            let mut optimized_total = Vec::with_capacity(repetitions);
+            let mut max_pair_state_diff: f64 = 0.0;
+
+            for pair in 0..repetitions {
+                let (old, optimized) = if pair % 2 == 0 {
+                    (
+                        run_expr_builder_revision_case(dimension, matrix, true, false),
+                        run_expr_builder_revision_case(dimension, matrix, false, false),
+                    )
+                } else {
+                    let optimized = run_expr_builder_revision_case(dimension, matrix, false, false);
+                    let old = run_expr_builder_revision_case(dimension, matrix, true, false);
+                    (old, optimized)
+                };
+                max_pair_state_diff = max_pair_state_diff
+                    .max(max_vector_diff(&old.final_state, &optimized.final_state));
+                old_prepare.push(old.prepare_ms);
+                old_solve.push(old.solve_ms);
+                old_total.push(old.total_ms);
+                optimized_prepare.push(optimized.prepare_ms);
+                optimized_solve.push(optimized.solve_ms);
+                optimized_total.push(optimized.total_ms);
+            }
+            assert!(max_pair_state_diff <= 1.0e-9);
+
+            let old_prepare_stats = median_mad(&old_prepare);
+            let old_solve_stats = median_mad(&old_solve);
+            let old_total_stats = median_mad(&old_total);
+            let optimized_prepare_stats = median_mad(&optimized_prepare);
+            let optimized_solve_stats = median_mad(&optimized_solve);
+            let optimized_total_stats = median_mad(&optimized_total);
+            for (name, stats) in [
+                ("old prepare", old_prepare_stats),
+                ("old solve", old_solve_stats),
+                ("old total", old_total_stats),
+                ("optimized prepare", optimized_prepare_stats),
+                ("optimized solve", optimized_solve_stats),
+                ("optimized total", optimized_total_stats),
+            ] {
+                reportln!("{name}: median={:.3} ms, MAD={:.3} ms", stats.0, stats.1);
+            }
+            reportln!(
+                "{} | {} | old scalar reference | {:.3}/{:.3} | {:.3}/{:.3} | {:.3}/{:.3} | {}/{}/{} | {}/{} | {:.3e}",
+                matrix.label(),
+                dimension,
+                old_prepare_stats.0,
+                old_prepare_stats.1,
+                old_solve_stats.0,
+                old_solve_stats.1,
+                old_total_stats.0,
+                old_total_stats.1,
+                old_detailed.residual_calls,
+                old_detailed.jacobian_calls,
+                old_detailed.linear_solves,
+                old_detailed.accepted,
+                old_detailed.rejected,
+                detailed_state_diff,
+            );
+            reportln!(
+                "{} | {} | optimized ExprLegacy | {:.3}/{:.3} | {:.3}/{:.3} | {:.3}/{:.3} | {}/{}/{} | {}/{} | {:.3e}",
+                matrix.label(),
+                dimension,
+                optimized_prepare_stats.0,
+                optimized_prepare_stats.1,
+                optimized_solve_stats.0,
+                optimized_solve_stats.1,
+                optimized_total_stats.0,
+                optimized_total_stats.1,
+                optimized_detailed.residual_calls,
+                optimized_detailed.jacobian_calls,
+                optimized_detailed.linear_solves,
+                optimized_detailed.accepted,
+                optimized_detailed.rejected,
+                max_pair_state_diff,
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "release solver-level AtomView evaluator compilation A/B; test-only parallel route"]
+fn lsode2_atomview_evaluator_compile_full_solve_ab() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::large_performance_story_tests::lsode2_atomview_evaluator_compile_full_solve_ab",
+    );
+    let dimensions = dimensions_from_env("LSODE2_ATOM_COMPILE_AB_DIMENSIONS", &[256, 1024]);
+    let repetitions = usize_from_env("LSODE2_ATOM_COMPILE_AB_REPETITIONS", 7);
+    reportln!(
+        "[LSODE2 AtomView evaluator compile A/B] dimensions={dimensions:?}, repetitions={repetitions}, paired alternating order; only Jacobian evaluator compilation changes; callback policy Sequential; timed runs use telemetry Off"
+    );
+    reportln!(
+        "matrix | n | sequential prepare/solve/total median/MAD ms | parallel prepare/solve/total median/MAD ms | max state diff | counters (res/jac/linear/accepted/rejected)"
+    );
+
+    for dimension in dimensions {
+        for matrix in [ChainMatrixRoute::Sparse, ChainMatrixRoute::Banded] {
+            let sequential_check =
+                run_atom_evaluator_compile_case(dimension, matrix, false, false, true);
+            let parallel_check =
+                run_atom_evaluator_compile_case(dimension, matrix, true, false, true);
+            let correctness_diff =
+                max_vector_diff(&sequential_check.final_state, &parallel_check.final_state);
+            assert!(correctness_diff <= 1.0e-10, "trajectory mismatch");
+            assert_eq!(
+                sequential_check.residual_calls,
+                parallel_check.residual_calls
+            );
+            assert_eq!(
+                sequential_check.jacobian_calls,
+                parallel_check.jacobian_calls
+            );
+            assert_eq!(sequential_check.linear_solves, parallel_check.linear_solves);
+            assert_eq!(sequential_check.accepted, parallel_check.accepted);
+            assert_eq!(sequential_check.rejected, parallel_check.rejected);
+
+            // Warm both modes before interleaved, telemetry-off timing samples.
+            let _ = run_atom_evaluator_compile_case(dimension, matrix, false, false, false);
+            let _ = run_atom_evaluator_compile_case(dimension, matrix, true, false, false);
+            let mut seq_prepare = Vec::with_capacity(repetitions);
+            let mut seq_solve = Vec::with_capacity(repetitions);
+            let mut seq_total = Vec::with_capacity(repetitions);
+            let mut par_prepare = Vec::with_capacity(repetitions);
+            let mut par_solve = Vec::with_capacity(repetitions);
+            let mut par_total = Vec::with_capacity(repetitions);
+            let mut max_pair_diff: f64 = correctness_diff;
+            for pair in 0..repetitions {
+                let (seq, par) = if pair % 2 == 0 {
+                    (
+                        run_atom_evaluator_compile_case(dimension, matrix, false, false, false),
+                        run_atom_evaluator_compile_case(dimension, matrix, true, false, false),
+                    )
+                } else {
+                    let par =
+                        run_atom_evaluator_compile_case(dimension, matrix, true, false, false);
+                    let seq =
+                        run_atom_evaluator_compile_case(dimension, matrix, false, false, false);
+                    (seq, par)
+                };
+                max_pair_diff =
+                    max_pair_diff.max(max_vector_diff(&seq.final_state, &par.final_state));
+                seq_prepare.push(seq.prepare_ms);
+                seq_solve.push(seq.solve_ms);
+                seq_total.push(seq.total_ms);
+                par_prepare.push(par.prepare_ms);
+                par_solve.push(par.solve_ms);
+                par_total.push(par.total_ms);
+            }
+            assert!(max_pair_diff <= 1.0e-10, "timed trajectory mismatch");
+            let seq_prepare = median_mad(&seq_prepare);
+            let seq_solve = median_mad(&seq_solve);
+            let seq_total = median_mad(&seq_total);
+            let par_prepare = median_mad(&par_prepare);
+            let par_solve = median_mad(&par_solve);
+            let par_total = median_mad(&par_total);
+            reportln!(
+                "{} | {} | {:.3}/{:.3} ; {:.3}/{:.3} ; {:.3}/{:.3} | {:.3}/{:.3} ; {:.3}/{:.3} ; {:.3}/{:.3} | {:.3e} | {}/{}/{}/{}/{}",
+                matrix.label(),
+                dimension,
+                seq_prepare.0,
+                seq_prepare.1,
+                seq_solve.0,
+                seq_solve.1,
+                seq_total.0,
+                seq_total.1,
+                par_prepare.0,
+                par_prepare.1,
+                par_solve.0,
+                par_solve.1,
+                par_total.0,
+                par_total.1,
+                max_pair_diff,
+                sequential_check.residual_calls,
+                sequential_check.jacobian_calls,
+                sequential_check.linear_solves,
+                sequential_check.accepted,
+                sequential_check.rejected,
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "release solver-level A/B: production shared graph vs serial test reference"]
+fn lsode2_atomview_shared_residual_graph_full_solve_ab() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::large_performance_story_tests::lsode2_atomview_shared_residual_graph_full_solve_ab",
+    );
+    let dimensions = dimensions_from_env("LSODE2_ATOM_GRAPH_AB_DIMENSIONS", &[256, 1024, 2048]);
+    let repetitions = usize_from_env("LSODE2_ATOM_GRAPH_AB_REPETITIONS", 15);
+    reportln!(
+        "[LSODE2 AtomView shared graph A/B] dimensions={dimensions:?}, repetitions={repetitions}, alternating pairs; production route reuses residual-prepared Arc<[Atom]> for Jacobian, serial route is test-only; timed runs telemetry Off"
+    );
+    reportln!(
+        "matrix | n | serial prepare/total median/MAD ms | shared-graph prepare/total median/MAD ms | ExprToAtom stage calls serial/shared | max state diff | residual/Jacobian/linear/accepted/rejected"
+    );
+
+    for dimension in dimensions {
+        for matrix in [ChainMatrixRoute::Sparse, ChainMatrixRoute::Banded] {
+            let sequential_check =
+                run_atom_evaluator_compile_case(dimension, matrix, false, false, true);
+            let shared_check =
+                run_atom_evaluator_compile_case(dimension, matrix, false, true, true);
+            let correctness_diff =
+                max_vector_diff(&sequential_check.final_state, &shared_check.final_state);
+            assert!(
+                correctness_diff <= 1.0e-10,
+                "shared Atom graph changed trajectory"
+            );
+            assert!(
+                shared_check.expr_to_atom_calls < sequential_check.expr_to_atom_calls,
+                "expected sharing to remove a duplicate Expr-to-Atom conversion"
+            );
+            assert_eq!(sequential_check.residual_calls, shared_check.residual_calls);
+            assert_eq!(sequential_check.jacobian_calls, shared_check.jacobian_calls);
+            assert_eq!(sequential_check.linear_solves, shared_check.linear_solves);
+            assert_eq!(sequential_check.accepted, shared_check.accepted);
+            assert_eq!(sequential_check.rejected, shared_check.rejected);
+
+            let _ = run_atom_evaluator_compile_case(dimension, matrix, false, false, false);
+            let _ = run_atom_evaluator_compile_case(dimension, matrix, false, true, false);
+            let mut serial_prepare = Vec::with_capacity(repetitions);
+            let mut serial_total = Vec::with_capacity(repetitions);
+            let mut shared_prepare = Vec::with_capacity(repetitions);
+            let mut shared_total = Vec::with_capacity(repetitions);
+            let mut max_pair_diff = correctness_diff;
+            for pair in 0..repetitions {
+                let (serial, shared) = if pair % 2 == 0 {
+                    (
+                        run_atom_evaluator_compile_case(dimension, matrix, false, false, false),
+                        run_atom_evaluator_compile_case(dimension, matrix, false, true, false),
+                    )
+                } else {
+                    let shared =
+                        run_atom_evaluator_compile_case(dimension, matrix, false, true, false);
+                    let serial =
+                        run_atom_evaluator_compile_case(dimension, matrix, false, false, false);
+                    (serial, shared)
+                };
+                max_pair_diff =
+                    max_pair_diff.max(max_vector_diff(&serial.final_state, &shared.final_state));
+                serial_prepare.push(serial.prepare_ms);
+                serial_total.push(serial.total_ms);
+                shared_prepare.push(shared.prepare_ms);
+                shared_total.push(shared.total_ms);
+            }
+            assert!(
+                max_pair_diff <= 1.0e-10,
+                "timed shared-graph trajectory mismatch"
+            );
+            let serial_prepare = median_mad(&serial_prepare);
+            let serial_total = median_mad(&serial_total);
+            let shared_prepare = median_mad(&shared_prepare);
+            let shared_total = median_mad(&shared_total);
+            reportln!(
+                "{} | {} | {:.3}/{:.3} ; {:.3}/{:.3} | {:.3}/{:.3} ; {:.3}/{:.3} | {}/{} | {:.3e} | {}/{}/{}/{}/{}",
+                matrix.label(),
+                dimension,
+                serial_prepare.0,
+                serial_prepare.1,
+                serial_total.0,
+                serial_total.1,
+                shared_prepare.0,
+                shared_prepare.1,
+                shared_total.0,
+                shared_total.1,
+                sequential_check.expr_to_atom_calls,
+                shared_check.expr_to_atom_calls,
+                max_pair_diff,
+                sequential_check.residual_calls,
+                sequential_check.jacobian_calls,
+                sequential_check.linear_solves,
+                sequential_check.accepted,
+                sequential_check.rejected,
+            );
+        }
+    }
+}
+
+#[test]
+fn lsode2_atomview_shared_residual_graph_parameter_lifecycle_matches_fresh_solvers() {
+    let _report = crate::Utils::test_reporting::TestReportCapture::new(
+        "LSODE2_Lambdify",
+        "numerical::LSODE2::large_performance_story_tests::lsode2_atomview_shared_residual_graph_parameter_lifecycle_matches_fresh_solvers",
+    );
+    let targets = [
+        DVector::from_vec(vec![24.0, 3.5, 0.18, 0.012]),
+        DVector::from_vec(vec![17.0, 4.5, 0.24, 0.008]),
+    ];
+    reportln!(
+        "[LSODE2 shared Atom graph lifecycle] compare continuation rebind and structural reconfigure against fresh AtomView solvers"
+    );
+    reportln!(
+        "layout | lifecycle | trajectory diff | residual/Jacobian/linear counts | ExprToAtom calls | status"
+    );
+
+    for matrix in [ChainMatrixRoute::Sparse, ChainMatrixRoute::Banded] {
+        let telemetry = IvpTelemetry::detailed();
+        let mut continued = Lsode2Solver::new(chain_solver_config(
+            16,
+            IvpSymbolicAssemblyBackend::AtomView,
+            matrix,
+            IvpLambdifyExecutionPolicy::Sequential,
+            telemetry.clone(),
+        ))
+        .expect("shared-graph continuation solver should construct");
+        continued
+            .prepare()
+            .expect("shared-graph continuation preparation should succeed");
+        let initial_expr_to_atom = telemetry
+            .snapshot()
+            .cold_stage(IvpColdStage::ExprToAtom)
+            .calls;
+        assert_eq!(
+            initial_expr_to_atom, 1,
+            "production AtomView Lambdify preparation should share its residual Atom graph"
+        );
+        let mut previous_work = continued.summary().evaluation_telemetry;
+
+        for (index, target) in targets.iter().enumerate() {
+            continued
+                .set_parameter_values(target.clone())
+                .expect("shared-graph parameter rebind should succeed");
+            let continued_summary = continued
+                .solve_with_summary()
+                .expect("continued shared-graph solve should succeed");
+            let (continued_times, continued_values) = continued.get_result();
+
+            let mut fresh = Lsode2Solver::new({
+                let mut config = chain_solver_config(
+                    16,
+                    IvpSymbolicAssemblyBackend::AtomView,
+                    matrix,
+                    IvpLambdifyExecutionPolicy::Sequential,
+                    IvpTelemetry::detailed(),
+                );
+                config.equation_parameter_values = Some(target.clone());
+                config
+            })
+            .expect("fresh shared-graph oracle should construct");
+            fresh
+                .prepare()
+                .expect("fresh shared-graph oracle preparation should succeed");
+            let fresh_summary = fresh
+                .solve_with_summary()
+                .expect("fresh shared-graph oracle solve should succeed");
+            let (fresh_times, fresh_values) = fresh.get_result();
+            let trajectory_diff = max_solution_matrix_diff(&continued_values, &fresh_values)
+                .max(max_vector_diff(&continued_times, &fresh_times));
+            let continued_work = continued_summary.evaluation_telemetry;
+            let fresh_work = fresh_summary.evaluation_telemetry;
+            let continued_delta = (
+                continued_work
+                    .residual_evaluations
+                    .saturating_sub(previous_work.residual_evaluations),
+                continued_work
+                    .jacobian_evaluations
+                    .saturating_sub(previous_work.jacobian_evaluations),
+                continued_work
+                    .linear_solves
+                    .saturating_sub(previous_work.linear_solves),
+            );
+            previous_work = continued_work;
+
+            reportln!(
+                "{} | rebind-{} | {:.3e} | {}/{}/{} vs {}/{}/{} | {} | ok",
+                matrix.label(),
+                index + 1,
+                trajectory_diff,
+                continued_delta.0,
+                continued_delta.1,
+                continued_delta.2,
+                fresh_work.residual_evaluations,
+                fresh_work.jacobian_evaluations,
+                fresh_work.linear_solves,
+                telemetry
+                    .snapshot()
+                    .cold_stage(IvpColdStage::ExprToAtom)
+                    .calls,
+            );
+            assert!(
+                trajectory_diff <= 1.0e-9,
+                "{} rebind trajectory drift",
+                matrix.label()
+            );
+            assert_eq!(continued_delta.0, fresh_work.residual_evaluations);
+            assert_eq!(continued_delta.1, fresh_work.jacobian_evaluations);
+            assert_eq!(continued_delta.2, fresh_work.linear_solves);
+            assert_eq!(continued_summary.algorithm, fresh_summary.algorithm);
+            assert_eq!(
+                telemetry
+                    .snapshot()
+                    .cold_stage(IvpColdStage::ExprToAtom)
+                    .calls,
+                initial_expr_to_atom,
+                "numeric rebind must not rebuild the shared symbolic graph"
+            );
+        }
+
+        let mut replacement_config = chain_solver_config(
+            16,
+            IvpSymbolicAssemblyBackend::AtomView,
+            matrix,
+            IvpLambdifyExecutionPolicy::Sequential,
+            telemetry.clone(),
+        );
+        replacement_config.equation_parameter_values = Some(targets[0].clone());
+        continued
+            .reconfigure(replacement_config)
+            .expect("shared-graph structural reconfiguration should succeed");
+        continued
+            .prepare()
+            .expect("reconfigured shared-graph solver should prepare");
+        let regenerated_expr_to_atom = telemetry
+            .snapshot()
+            .cold_stage(IvpColdStage::ExprToAtom)
+            .calls;
+        assert!(
+            regenerated_expr_to_atom > initial_expr_to_atom,
+            "structural reconfiguration must build a graph for its replacement model"
+        );
+        let regenerated_summary = continued
+            .solve_with_summary()
+            .expect("reconfigured shared-graph solve should succeed");
+        let (regenerated_times, regenerated_values) = continued.get_result();
+
+        let mut fresh = Lsode2Solver::new({
+            let mut config = chain_solver_config(
+                16,
+                IvpSymbolicAssemblyBackend::AtomView,
+                matrix,
+                IvpLambdifyExecutionPolicy::Sequential,
+                IvpTelemetry::detailed(),
+            );
+            config.equation_parameter_values = Some(targets[0].clone());
+            config
+        })
+        .expect("fresh reconfiguration oracle should construct");
+        fresh
+            .prepare()
+            .expect("fresh reconfiguration oracle should prepare");
+        let fresh_summary = fresh
+            .solve_with_summary()
+            .expect("fresh reconfiguration oracle should solve");
+        let (fresh_times, fresh_values) = fresh.get_result();
+        let trajectory_diff = max_solution_matrix_diff(&regenerated_values, &fresh_values)
+            .max(max_vector_diff(&regenerated_times, &fresh_times));
+        let regenerated_work = regenerated_summary.evaluation_telemetry;
+        let fresh_work = fresh_summary.evaluation_telemetry;
+        reportln!(
+            "{} | reconfigure | {:.3e} | {}/{}/{} vs {}/{}/{} | {} | ok",
+            matrix.label(),
+            trajectory_diff,
+            regenerated_work.residual_evaluations,
+            regenerated_work.jacobian_evaluations,
+            regenerated_work.linear_solves,
+            fresh_work.residual_evaluations,
+            fresh_work.jacobian_evaluations,
+            fresh_work.linear_solves,
+            regenerated_expr_to_atom,
+        );
+        assert!(
+            trajectory_diff <= 1.0e-9,
+            "{} reconfigure trajectory drift",
+            matrix.label()
+        );
+        assert_eq!(
+            regenerated_work.residual_evaluations,
+            fresh_work.residual_evaluations
+        );
+        assert_eq!(
+            regenerated_work.jacobian_evaluations,
+            fresh_work.jacobian_evaluations
+        );
+        assert_eq!(regenerated_work.linear_solves, fresh_work.linear_solves);
+        assert_eq!(regenerated_summary.algorithm, fresh_summary.algorithm);
     }
 }
 

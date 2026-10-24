@@ -14,8 +14,7 @@ use RustedSciThe::numerical::LSODE2::{
     Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure, Lsode2ProblemConfig,
     Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
 };
-use RustedSciThe::numerical::NR_for_ODE::NRODE;
-use RustedSciThe::numerical::ODE_api::ODEsolver;
+use RustedSciThe::numerical::ODE_api2::{SolverType, UniversalODESolver};
 
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
@@ -47,7 +46,7 @@ fn case_1_single_variable_symbolics() {
 }
 
 fn case_2_ode_lazy_from_strings() {
-    // Legacy "lazy" IVP path: user provides RHS as plain strings.
+    // Keep the concise string-based setup while using the supported facade.
     case_8_ode_solver_from_strings();
 }
 
@@ -125,23 +124,23 @@ fn case_7_ode_solver_symbolic() {
     let eq2 = y;
     let equations = vec![eq1, eq2];
 
-    let mut solver = ODEsolver::new_complex(
+    let mut solver = UniversalODESolver::new(
         equations,
         vec!["z".to_string(), "y".to_string()],
         "x".to_string(),
-        "BDF".to_string(),
+        SolverType::Bdf,
         0.0,
         DVector::from_vec(vec![1.0, 1.0]),
         0.1,
-        1e-3,
-        1e-5,
-        1e-5,
-        None,
-        false,
-        None,
     );
-    solver.solve();
-    let (_t, y) = solver.get_result();
+    solver.set_max_step(1e-3);
+    solver.set_rtol(1e-5);
+    solver.set_atol(1e-5);
+    solver
+        .try_solve()
+        .expect("ODE_api2 BDF solve should succeed");
+    let (_, y) = solver.get_result();
+    let y = y.expect("ODE_api2 should return the BDF trajectory");
     println!("ODE solved, rows   = {}", y.nrows());
     println!("ODE solved, cols   = {}", y.ncols());
     let final_state: Vec<f64> = y.row(y.nrows() - 1).iter().copied().collect();
@@ -151,56 +150,27 @@ fn case_7_ode_solver_symbolic() {
 fn case_8_ode_solver_from_strings() {
     let rhs = vec!["-z-exp(-y)", "y"];
     let equations = Expr::parse_vector_expression(rhs);
-    let mut solver = ODEsolver::new_complex(
+    let mut solver = UniversalODESolver::new(
         equations,
         vec!["z".to_string(), "y".to_string()],
         "x".to_string(),
-        "BDF".to_string(),
+        SolverType::Bdf,
         0.0,
         DVector::from_vec(vec![1.0, 1.0]),
         0.1,
-        1e-3,
-        1e-5,
-        1e-5,
-        None,
-        false,
-        None,
     );
-    solver.solve();
-    let (_t, y) = solver.get_result();
+    solver.set_max_step(1e-3);
+    solver.set_rtol(1e-5);
+    solver.set_atol(1e-5);
+    solver
+        .try_solve()
+        .expect("ODE_api2 BDF solve should succeed");
+    let (_, y) = solver.get_result();
+    let y = y.expect("ODE_api2 should return the BDF trajectory");
     println!("ODE(string) rows   = {}", y.nrows());
     println!("ODE(string) cols   = {}", y.ncols());
     let final_state: Vec<f64> = y.row(y.nrows() - 1).iter().copied().collect();
     println!("ODE(string) final  = {:?}", final_state);
-}
-
-fn case_9_parametric_nonlinear_system() {
-    let eq1 = Expr::parse_expression("z^2+y^2-10.0*x");
-    let eq2 = Expr::parse_expression("z-y-4.0*x");
-    let eq_system = vec![eq1, eq2];
-    let initial_guess = DVector::from_vec(vec![1.0, 1.0]);
-    let values = vec!["z".to_string(), "y".to_string()];
-    let arg = "x".to_string();
-    let tolerance = 1e-6;
-    let max_iterations = 100;
-    let max_error = 0.0;
-
-    let mut solver = NRODE::new(
-        eq_system,
-        initial_guess,
-        values,
-        arg,
-        tolerance,
-        max_iterations,
-        max_error,
-    );
-    solver.eq_generate();
-    solver.set_t(1.0);
-    let solution = solver
-        .solve()
-        .expect("Legacy NRODE case 9 should converge for t=1.0");
-    println!("NRODE solved, dim   = {}", solution.len());
-    println!("NRODE solution      = {:?}", solution);
 }
 
 fn case_10_lsode2_minimal_numerical() {
@@ -375,14 +345,13 @@ fn print_help() {
     println!("Available numbered cases:");
     println!("  0  symbolic multivariable basics");
     println!("  1  symbolic single-variable basics");
-    println!("  2  ODE from strings, shortest legacy path");
+    println!("  2  ODE from strings through the typed universal API");
     println!("  3  direct symbolic construction");
     println!("  4  Backward Euler linear ODE (legacy path)");
     println!("  5  Backward Euler nonlinear ODE (legacy path)");
     println!("  6  indexed symbolic variables");
-    println!("  7  ODE symbolic system (legacy BDF path)");
-    println!("  8  ODE from string RHS list (legacy BDF path)");
-    println!("  9  parametric nonlinear solve (legacy NRODE path)");
+    println!("  7  ODE symbolic system through ODE_api2 (BDF)");
+    println!("  8  ODE from string RHS list through ODE_api2 (BDF)");
     println!("  10 LSODE2 minimal numerical solve (legacy-style entry)");
     println!("  11 LSODE2 minimal Lambdify solve (legacy-style entry)");
     println!("  15 BVP frozen sparse solve (legacy NRBVP path)");
@@ -413,7 +382,6 @@ fn main() {
         6 => case_6_indexed_variables(),
         7 => case_7_ode_solver_symbolic(),
         8 => case_8_ode_solver_from_strings(),
-        9 => case_9_parametric_nonlinear_system(),
         10 => case_10_lsode2_minimal_numerical(),
         11 => case_11_lsode2_minimal_lambdify(),
         15 => case_15_bvp_frozen_sparse(),

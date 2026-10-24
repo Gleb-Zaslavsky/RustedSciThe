@@ -72,13 +72,13 @@ pub use crate::numerical::Nonlinear_systems::scalar_root::{
 };
 pub use crate::numerical::Nonlinear_systems::solver::NonlinearSolver;
 pub use crate::numerical::Nonlinear_systems::symbolic::{
-    BoundSymbolicNonlinearProblem, LambdifyExecutionPolicy, NonlinearParameterSchema,
-    NonlinearParameterValues, PreparationExecutionMode, PreparationInputKind, PreparationStage,
-    PreparationStageTiming, PreparationTelemetry, PreparationTelemetryMode,
-    PreparedSymbolicNonlinearAotProblem, PreparedSymbolicNonlinearProblem, SymbolicArtifactAction,
-    SymbolicArtifactPolicy, SymbolicBackendConfig, SymbolicBackendKind, SymbolicDenseAotOptions,
-    SymbolicLambdifyFrontend, SymbolicNonlinearProblem, SymbolicPreparationFailure,
-    SymbolicPreparationReport, SymbolicProblemOptions,
+    BoundSymbolicNonlinearProblem, ExprJacobianPreparationPolicy, LambdifyExecutionPolicy,
+    NonlinearParameterSchema, NonlinearParameterValues, PreparationExecutionMode,
+    PreparationInputKind, PreparationStage, PreparationStageTiming, PreparationTelemetry,
+    PreparationTelemetryMode, PreparedSymbolicNonlinearAotProblem, PreparedSymbolicNonlinearProblem,
+    SymbolicArtifactAction, SymbolicArtifactPolicy, SymbolicBackendConfig, SymbolicBackendKind,
+    SymbolicDenseAotOptions, SymbolicLambdifyFrontend, SymbolicNonlinearProblem,
+    SymbolicPreparationFailure, SymbolicPreparationReport, SymbolicProblemOptions,
 };
 pub use crate::numerical::Nonlinear_systems::symbolic_aot::{
     generated_aot_crate_from_symbolic_nonlinear_problem, materialize_symbolic_nonlinear_aot_build,

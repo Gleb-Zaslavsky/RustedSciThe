@@ -281,7 +281,79 @@ measurement window are controlled by `RADAU_BENCH_SAMPLE_SIZE` and
 `RADAU_BENCH_MEASUREMENT_SECONDS`. Its compact release counterpart is
 `scripts/radau_release_matrix.ps1`.
 
-### 9. Review Checklist
+### 9. Three Complementary Measurement Records
+
+Optimization and solver-stabilization decisions use three complementary
+sources of evidence. They answer different questions and must not replace one
+another.
+
+1. **Solver matrix scripts and `test_reports/`.** Solver-specific scripts run
+   selected release story tests and benchmarks as reproducible matrices. They
+   write review-friendly, compact `tabled` reports under timestamped
+   `test_reports/` directories, keeping compiler/process transcripts separate
+   from numerical results. These reports capture the detailed measurements of
+   a particular run: workloads, routes, stage timings, counters, parity and
+   status. They are run artifacts, not a substitute for the solver's curated
+   engineering history.
+2. **Solver `STORY_TESTS*.md` documents.** These are the durable, human-curated
+   research and decision record. They explain why a change was made, which
+   correctness tests support it, and what measured results justify or reject
+   the hypothesis. Record meaningful numerical results, not only pass/fail:
+   comparisons of architectures, symbolic frontends, linear-algebra backends,
+   stage timings, counters, continuation behavior and full-solve wall time all
+   belong here when they informed a decision. Link to the detailed
+   `test_reports/` artifact where appropriate. Ordinary script runs must not
+   automatically rewrite STORY documents.
+3. **`perf-gates`.** This opt-in runner measures a curated set of stable,
+   addressable workloads against a machine/toolchain-specific baseline. Its
+   primary regression verdict uses telemetry-Off wall time; correctness,
+   counters and instrumented stage timings provide diagnostic context. It is
+   for repeatable regression control, not exploratory solver research, not a
+   replacement for story/benchmark matrices, and not a cross-machine
+   comparison service. Machine profiles and baselines are local; compare only
+   compatible workload and environment identities. `record --force` replaces
+   an existing baseline and therefore changes the future comparison reference.
+
+The three records form an evidence chain: scripts produce detailed run data;
+the solver STORY document interprets and preserves the engineering conclusion;
+perf-gates protects an accepted, fixed workload from later regressions. A
+single passing test, a single timing table, or a baseline update alone is not
+sufficient evidence for a performance claim.
+
+### 10. Stabilizing An Optimization On An Existing Solver
+
+An optimization is promoted to the stable solver path only after this sequence
+has completed for the affected solver and supported routes:
+
+1. **Release correctness matrix.** Run the solver's relevant Release tests,
+   including applicable ignored correctness/parity stories. Require numerical
+   parity, expected discrete work and lifecycle behavior; investigate failures
+   before interpreting any timing.
+2. **Compare existing performance gates.** Run `perf-gates compare` for the
+   affected solver/scenarios against the current compatible baseline. Require
+   no confirmed regression. An unstable measurement is inconclusive and must
+   be repeated or diagnosed, not treated as either a pass or a regression.
+3. **Run the solver's release story/benchmark matrix.** Use its script to
+   collect compact `tabled` reports in `test_reports/`. Compare the new
+   measurements with historical STORY entries and prior reports, including
+   full-solve wall time and the stage/counter evidence that explains the
+   result. Record the conclusion and relevant numerical measurements in the
+   solver's STORY document; do not promote an optimization based only on a
+   faster isolated callback when full-solve impact is immaterial or unknown.
+4. **Refresh accepted performance baselines.** Only after correctness and
+   historical-result review accepts the new behavior, run `perf-gates record
+   --force` for the affected scenarios and inspect the generated baseline/run
+   metadata. This intentionally makes the accepted result the reference for
+   subsequent comparisons; it must not be used to hide an unexplained
+   regression. Keep unrelated solver baselines unchanged.
+
+If a solver has no compatible baseline yet, baseline creation is a separate
+calibration decision; it does not count as a successful regression comparison.
+The source revision, machine, toolchain, workload and gate identity must be
+appropriate for the intended reference. Exploratory or unstable results stay
+in run reports and do not advance the stable baseline.
+
+### 11. Review Checklist
 
 Before declaring a solver production-ready, check that:
 

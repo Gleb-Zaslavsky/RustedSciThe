@@ -65,6 +65,7 @@ pub struct NRBVP {
     number_of_refined_intervals: usize, //number of refined intervals
     bandwidth: (usize, usize),          //bandwidth
     generated_backend_config: GeneratedBackendConfig, // generated backend selection config
+    callback_runtime: DampedCallbackRuntime,
     numeric_rhs: Option<NumericBvpRhs>, // pure numeric RHS source for NumericOnly route
     numeric_jacobian: Option<NumericBvpJacobian>, // optional continuous RHS Jacobian
     generated_backend_selected_backend: Option<SelectedBackendKind>,

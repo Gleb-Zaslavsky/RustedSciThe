@@ -1,6 +1,6 @@
 # Performance Metric Contracts
 
-Audit date: 2026-10-20.
+Audit date: 2026-10-24.
 
 This document maps metrics currently emitted by `performance/runner/scenarios`
 to their Rust sources and lifecycle. It is runner documentation, not a public
@@ -75,14 +75,18 @@ Off-mode trajectory, after the detailed trajectory is checked for parity.
 | `stage_residual_ms` | `evaluation_telemetry.residual_ms_total` | Accumulated callback evaluation time on the diagnostic solve. |
 | `stage_jacobian_ms` | `evaluation_telemetry.jacobian_ms_total` | Accumulated Jacobian callback time on the diagnostic solve. |
 | `stage_linear_ms` | `evaluation_telemetry.linear_ms_total` | Accumulated linear work on the diagnostic solve; it is not asserted to be disjoint from other native stage totals. |
-| `stage_cold_{Stage:?}_ms` | `IvpTelemetrySnapshot::cold_stage(stage).elapsed` | Emitted only when the stage's `recorded` flag is true. Covers the current prepared lifecycle snapshot, not a per-step value. IDs use Rust `Debug` names and are therefore coupled to enum spelling. |
+| `stage_cold_{stage.label()}_ms` | `IvpTelemetrySnapshot::cold_stage(stage).elapsed` | Emitted only when the stage's `recorded` flag is true. Covers the current prepared lifecycle snapshot, not a per-step value. IDs use the native stage's explicit stable label; absent stages remain absent rather than being written as zero. |
 
-The cold-stage selection is SolverPreparation, SymbolicJacobian,
-AtomJacobianPreparation, AotLowering, AotBuild and AotLink. Counts come from
-`Lsode2EvaluationTelemetry` and the IVP snapshot: state/trajectory dimensions,
-accepted/rejected steps, residual/Jacobian evaluations, linear solves and
-Lambdify/AOT parallel dispatches. They describe this diagnostic solver
-execution; do not interpret the AOT preparation counters as per-step counts.
+The adapter inspects every `IvpColdStage` and exports each recorded stage.
+This includes the current shared-Atom graph children
+`AtomDependencyAnalysis`, `SymbolicDifferentiation` and
+`NativeJacobianEvaluatorPreparation`; `AtomJacobianPreparation` remains
+optional for compatibility routes and is not fabricated when the shared graph
+route does not record it. Counts come from `Lsode2EvaluationTelemetry` and the
+IVP snapshot: state/trajectory dimensions, accepted/rejected steps,
+residual/Jacobian evaluations, linear solves and Lambdify/AOT parallel
+dispatches. They describe this diagnostic solver execution; do not interpret
+the AOT preparation counters as per-step counts.
 
 ## BVP_Damp
 

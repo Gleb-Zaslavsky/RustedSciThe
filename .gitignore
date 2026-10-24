@@ -97,6 +97,7 @@
 !src/numerical/Nonlinear_systems/NONLINEAR_SYSTEMS_USER_GUIDE_EN.md
 !src/numerical/Nonlinear_systems/NONLINEAR_SYSTEMS_USER_GUIDE_RU.md
 !src/symbolic/TODO.md
+!src/symbolic/View/TODO.md
 !src/numerical/BVP_Damp/TODO.md
 !src/numerical/LSODE2/TODO.md
 !src/numerical/BE/TODO.md

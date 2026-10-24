@@ -6,10 +6,11 @@ contains 196 scenarios, including full supported-route matrices for Radau (24
 cells), BDF (8 cells), LSODE2 (30 cells), BVP_Damp (66 cells), BVP_sci (30
 cells), BE (4 cells), Nonlinear_systems (6 cells), optimisation (14 cells),
 plus standalone and large-workload scenarios. The previous Windows calibration
-had local baseline files for 100 active scenario IDs. Those BDF/LSODE2 workload
-IDs have now been superseded by longer workload contracts and require new
-baselines; Robertson micro-solves are no longer registered. Earlier clean-source
-recording passed most other selected groups.
+had local baseline files for 100 active scenario IDs. The former BDF/LSODE2
+IDs were superseded by longer workload contracts; all 8 BDF and 30 LSODE2
+replacement baselines are now recorded, and both full matrices passed Release
+comparison on 2026-10-21. Robertson micro-solves are no longer registered.
+Earlier clean-source recording passed most other selected groups.
 All six nonlinear and fourteen optimisation workloads passed targeted Release
 comparisons; several other solver families and large BVP workloads also passed
 comparisons. Baselines are local and Git-ignored, not a portable shared
@@ -234,7 +235,7 @@ not the stability threshold:
 .\scripts\perf_gates_run.ps1 -Action Record -Group radau-matrix -Machine windows-dev -Runs 201
 .\scripts\perf_gates_run.ps1 -Action Compare -Group radau-matrix -Machine windows-dev -Runs 201
 .\scripts\perf_gates_run.ps1 -Action Record -Group bdf-matrix -Machine windows-dev -Runs 301
-.\scripts\perf_gates_run.ps1 -Action Record -Scenario radau_diff256_aot_atom_banded_seq -Machine windows-dev -Runs 201 -Force
+.\scripts\perf_gates_run.ps1 -Action Record -Scenario radau_diff512_aot_atom_banded_seq -Machine windows-dev -Runs 201 -Force
 ```
 
 `-Force` replaces an existing baseline only during `Record`; use it only when
@@ -249,9 +250,11 @@ micro-solves were below useful wall-clock resolution. The registry now uses
 BDF diffusion with 256 states and LSODE2 diffusion with 256 states over
 `t=[0,0.05]`, retaining all supported route cells. Old IDs remain only as
 inactive local baseline history. More samples improve the estimate of spread,
-but do not remove scheduler noise from a tiny solve. New BDF/LSODE2 baselines
-must be recorded from the new IDs after Debug correctness checks, and their
-per-sample durations reviewed before accepting them as gates.
+but do not remove scheduler noise from a tiny solve. Debug correctness passed;
+the new BDF/LSODE2 baselines were recorded and all 38 routes passed full Release
+comparison on 2026-10-21. A few initial whole-matrix instability reports
+cleared on isolated confirmation and subsequent full comparisons; baselines
+were not overwritten.
 
 The first-tier helper runs only curated performance group(s) for one solver.
 It intentionally does not use `--all` or include every short correctness-matrix
@@ -270,6 +273,62 @@ its large or matched performance group; `be` runs both `be-matrix` and
 `large-system`. Add `-Toolchain stable-x86_64-pc-windows-msvc` to select a
 Rustup toolchain. Use `-Force` only with `-Action Record` to intentionally
 replace existing baselines.
+
+### IVP Symbolic Stabilization Helpers
+
+The IVP campaign has three separate entry points so correctness, regression
+gates and long story/benchmark evidence remain independently runnable. If the
+local PowerShell policy blocks scripts, launch them through
+`powershell.exe -ExecutionPolicy Bypass` as shown below.
+
+Run the complete maintained IVP library-test matrix in Release, including
+ignored SciPy parity stories, shared symbolic/AOT/codegen tests, workload
+fixtures and solver/facade tests. This runs `cargo test --lib` filters only;
+it does not run examples or `cargo bench`. The helper resolves
+`.venv-gavin-win` by default, or accepts an explicit interpreter containing
+NumPy and SciPy:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\ivp_symbolic_release_tests.ps1 `
+  -PythonPath .\.venv-gavin-win\Scripts\python.exe
+```
+
+For a smaller tests-only Release pass over the four implicit solver families
+(LSODE2, Backward Euler, Radau and BDF), including ignored tests:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\release_implicit_ivp_tests.ps1
+```
+
+Compare only the curated first-tier IVP performance groups. This does not run
+all registered scenarios and does not modify baselines:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\ivp_perf_gates.ps1 `
+  -Action Compare -Machine windows-dev -Warmups 20 -Runs 301
+```
+
+The overnight command runs correctness, perf comparison, and the existing
+BDF/Radau/LSODE2/BE release matrices. It preserves terminal output and stores a
+campaign summary plus technical transcripts under
+`test_reports/IVP_symbolic_nightly/`. The solver matrix scripts continue to
+own their compact Tabled reports. No STORY_TESTS document is rewritten.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\ivp_symbolic_nightly.ps1 `
+  -Machine windows-dev -PythonPath .\.venv-gavin-win\Scripts\python.exe
+```
+
+Use `-RefreshBaselines` only on a clean, reviewed source revision after a green
+nightly comparison. The orchestrator blocks the force-record stage if any
+earlier step fails. After a successful force-record it immediately repeats the
+IVP comparison; a failed record blocks that verification stage:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\ivp_symbolic_nightly.ps1 `
+  -Machine windows-dev -PythonPath .\.venv-gavin-win\Scripts\python.exe `
+  -RefreshBaselines
+```
 
 The same runner CLI can be invoked directly on Linux after registering that
 host locally, for example:

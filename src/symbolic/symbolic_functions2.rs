@@ -1,8 +1,8 @@
-//! Parallel implementations for Jacobian and function vector compilation.
+//! Historical Mutex-based parallel Jacobian and function-vector builders.
 //!
-//! This module provides optimized parallel versions of Jacobian matrix and function vector
-//! compilation with support for parameterized systems. All functions use Rayon for parallel
-//! processing and pre-compile symbolic expressions for efficient evaluation.
+//! These public helpers are retained for source compatibility and reference
+//! tests, but are deprecated: production nonlinear solvers use their prepared
+//! Lambdify backend with solver-owned output workspaces.
 
 #![allow(non_camel_case_types)]
 
@@ -13,6 +13,7 @@ use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 use std::sync::Mutex;
 
+#[allow(deprecated)]
 impl Jacobian {
     /// Sets the parameter names for the Jacobian system.
     ///
@@ -22,6 +23,9 @@ impl Jacobian {
         self.parameters_string = params;
     }
 
+    #[deprecated(
+        note = "legacy Mutex-based callback builder; production nonlinear solvers use their prepared Lambdify backend"
+    )]
     /// Creates a parallel-compiled Jacobian matrix function with parameters.
     ///
     /// Pre-compiles all non-zero Jacobian elements in parallel and returns a closure
@@ -110,6 +114,9 @@ impl Jacobian {
     ///
     /// # Returns
     /// Boxed closure taking (parameters, variables) and returning DVector
+    #[deprecated(
+        note = "legacy Mutex-based callback builder; production nonlinear solvers use their prepared Lambdify backend"
+    )]
     pub fn vector_funvector_DVector_with_parameters_parallel_local(
         vector_of_functions: Vec<Expr>,
         variable_str: Vec<String>,
@@ -141,6 +148,9 @@ impl Jacobian {
     /// Compiles the Jacobian matrix with parameters and stores it in the instance.
     ///
     /// Uses parallel compilation and stores the result in `lambdified_jacobian_DMatrix_with_params`.
+    #[deprecated(
+        note = "legacy Mutex-based callback builder; production nonlinear solvers use their prepared Lambdify backend"
+    )]
     pub fn lambdify_jacobian_DMatrix_with_parameters_parallel(&mut self) {
         let jac = self.symbolic_jacobian.clone();
         let variable_str = self.variable_string.clone();
@@ -157,6 +167,9 @@ impl Jacobian {
     ///
     /// # Returns
     /// Boxed closure for Jacobian evaluation with parameters
+    #[deprecated(
+        note = "legacy Mutex-based callback builder; production nonlinear solvers use their prepared Lambdify backend"
+    )]
     pub fn lambdify_jacobian_DMatrix_with_parameters_parallel_unmut(
         &self,
     ) -> Box<dyn Fn(&DVector<f64>, &DVector<f64>) -> DMatrix<f64>> {
@@ -175,6 +188,9 @@ impl Jacobian {
     /// Compiles the function vector with parameters and stores it in the instance.
     ///
     /// Uses parallel compilation and stores the result in `lambdified_function_with_params`.
+    #[deprecated(
+        note = "legacy Mutex-based callback builder; production nonlinear solvers use their prepared Lambdify backend"
+    )]
     pub fn lambdify_vector_funvector_DVector_with_parameters_parallel(&mut self) {
         let vector_of_functions = self.vector_of_functions.clone();
         let variable_str = self.variable_string.clone();
@@ -191,6 +207,9 @@ impl Jacobian {
     /// Compiles the Jacobian matrix without parameters and stores it in the instance.
     ///
     /// Uses parallel compilation and stores the result in `lambdified_jacobian_DMatrix`.
+    #[deprecated(
+        note = "legacy Mutex-based callback builder; production nonlinear solvers use their prepared Lambdify backend"
+    )]
     pub fn lambdify_jacobian_DMatrix_parallel(&mut self) {
         let jac = self.symbolic_jacobian.clone();
         let variable_str = self.variable_string.clone();
@@ -208,6 +227,9 @@ impl Jacobian {
     /// Compiles the function vector without parameters and stores it in the instance.
     ///
     /// Uses parallel compilation and stores the result in `lambdified_function_DVector`.
+    #[deprecated(
+        note = "legacy Mutex-based callback builder; production nonlinear solvers use their prepared Lambdify backend"
+    )]
     pub fn lambdify_vector_funvector_DVector(&mut self) {
         let vector_of_functions = self.vector_of_functions.clone();
         let variable_str = self.variable_string.clone();

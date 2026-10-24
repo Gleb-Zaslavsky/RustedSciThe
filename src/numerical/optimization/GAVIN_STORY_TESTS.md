@@ -320,11 +320,11 @@ AtomViewNative, with ExprLegacy as the default on both builder APIs.
 
 ## Remaining First-Tier Gates
 
-- Investigate the matched 1001-sample AtomView callback/solve slowdown before
-  changing frontend defaults or claiming a frontend performance winner.
-- Run the focused release story/API matrix, including the new independent
-  covariance and active-bound tests. The three-run release benchmark is done;
-  the full release story runner has not yet completed after adding these tests.
+- Continue tracking the matched 1001-sample AtomView callback/solve tradeoff;
+  do not change frontend defaults or claim a general frontend winner from the
+  five-repeat Detailed-telemetry benchmark.
+- The focused release story/API matrix, including independent covariance and
+  active-bound parity, passed on 2026-10-24; evidence is recorded below.
 - Complete a focused regression pass across `sym_fitting`,
   `UniversalFitting`, `kinetic_fitting`, and VarPro after the shared-core
   migration, including typed failure and weighting paths.
@@ -334,3 +334,27 @@ oracles use the conventional `R^2` statistic; the legacy tuple maps unavailable
 fit statistics to `0.0` for compatibility. The Python source itself computes a
 correlation and then overwrites R-squared with zero, so the Rust result is an
 intentional postprocessing improvement rather than a copy of that placeholder.
+
+## Release Matrix Follow-up (2026-10-24)
+
+The complete Gavin release matrix passed on 2026-10-24. UniversalFitting API
+tests (14), Gavin controller tests (21), symbolic builder tests (7), and the
+three ignored parity stories (one each) all passed. The Criterion benchmark and
+Python reference also completed successfully. Full logs and compact reports:
+`test_reports/Optimization_Gavin_release_manual/20261024T175622Z/`.
+
+The five-repeat, detailed-telemetry benchmark preserved expected solver
+iteration/callback counts and parameter-error values. At 1,001 observations,
+the current ExprLegacy/AtomView full-solve medians were 0.763/0.953 ms for
+Marquardt, 2.656/2.806 ms for Quadratic, and 1.614/1.492 ms for Nielsen.
+AtomView was therefore 24.9% and 5.6% slower for the first two policies and
+7.6% faster for Nielsen. Earlier archived five-repeat results showed AtomView
+slower in all three rows. This is a changed workload tradeoff worth tracking,
+not a strict regression claim: five instrumented repetitions are not a
+performance gate, and timings include Detailed telemetry. Preparation remains
+faster with AtomView, while callback cost dominates these rows. The current
+table is in the run bundle above.
+
+The active-coefficient-bounds parity story also passed: 385 iterations, 199
+accepted and 186 rejected steps, 49 finite-difference refreshes, 175 Broyden
+updates, and maximum checkpoint parameter error `7.994e-13`.

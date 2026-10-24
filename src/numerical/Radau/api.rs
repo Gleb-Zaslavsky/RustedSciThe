@@ -16,8 +16,11 @@ use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
-use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
+use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetry, IvpTelemetryMode};
 use crate::symbolic::symbolic_engine::Expr;
+use crate::symbolic::symbolic_ivp::{
+    build_expr_legacy_banded_jacobian, build_expr_legacy_sparse_jacobian,
+};
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
@@ -281,7 +284,9 @@ impl RadauProblem {
     ///
     /// AOT includes this payload in symbolic preparation and artifact identity;
     /// it never silently replaces an explicit Jacobian with one derived from
-    /// the residual graph.
+    /// the residual graph. ExprLegacy Lambdify derives a compact analytic state
+    /// Jacobian from the residual when this method is not called and the
+    /// analytic Jacobian source is selected.
     pub fn with_jacobian(mut self, jacobian: Vec<Expr>) -> Self {
         self.jacobian = Some(jacobian);
         self
@@ -562,6 +567,7 @@ impl RadauTelemetryReport {
             ("output_ms", t.output_ms),
             ("step_control_ms", t.step_control_ms),
             ("expr_legacy_prepare_ms", t.expr_legacy_prepare_ms),
+            ("symbolic_jacobian_ms", t.symbolic_jacobian_ms),
             ("atom_conversion_ms", t.atom_conversion_ms),
             ("atom_pattern_ms", t.atom_pattern_ms),
             ("atom_differentiation_ms", t.atom_differentiation_ms),
@@ -872,16 +878,60 @@ impl RadauSolver {
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            PreparedSymbolicCallbacks::prepare_with_telemetry_and_policy(
-                assembly,
-                problem.residual,
-                problem.jacobian,
-                &problem.independent_variable,
-                &variables,
-                &parameters,
-                &mut preparation_telemetry,
-                internal.execution_policy,
-            )?
+            let derive_expr_jacobian = config.execution == RadauExecution::Lambdify
+                && config.frontend == RadauFrontend::ExprLegacy
+                && config.jacobian_source == RadauJacobianSource::Analytic
+                && problem.jacobian.is_none();
+            if derive_expr_jacobian {
+                let symbolic_telemetry = IvpTelemetry::with_mode(match config.telemetry {
+                    RadauTelemetryMode::Off => IvpTelemetryMode::Off,
+                    RadauTelemetryMode::Counters => IvpTelemetryMode::Counters,
+                    RadauTelemetryMode::Timings => IvpTelemetryMode::Timings,
+                    RadauTelemetryMode::Detailed => IvpTelemetryMode::Detailed,
+                });
+                let callbacks = preparation_telemetry.measure_frontend(
+                    super::new::telemetry::RadauFrontendStage::ExprLegacyPrepare,
+                    || {
+                        let jacobian = match internal.matrix_layout {
+                            super::new::config::RadauMatrixLayout::Banded { lower, upper } => {
+                                build_expr_legacy_banded_jacobian(
+                                    &problem.residual,
+                                    &problem.variables,
+                                    (lower, upper),
+                                    &symbolic_telemetry,
+                                )
+                            }
+                            _ => build_expr_legacy_sparse_jacobian(
+                                &problem.residual,
+                                &problem.variables,
+                                &symbolic_telemetry,
+                            ),
+                        };
+                        PreparedSymbolicCallbacks::prepare_expr_sparse(
+                            problem.residual,
+                            jacobian,
+                            &problem.independent_variable,
+                            &variables,
+                            &parameters,
+                            internal.execution_policy,
+                        )
+                    },
+                );
+                preparation_telemetry
+                    .absorb_expr_jacobian_preparation(&symbolic_telemetry.snapshot());
+                callbacks?
+            } else {
+                PreparedSymbolicCallbacks::prepare_with_telemetry_and_policy(
+                    assembly,
+                    problem.residual,
+                    problem.jacobian,
+                    &problem.independent_variable,
+                    &variables,
+                    &parameters,
+                    &mut preparation_telemetry,
+                    internal.execution_policy,
+                )?
+            }
         };
         Ok(Self {
             callbacks,

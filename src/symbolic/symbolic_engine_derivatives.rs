@@ -58,14 +58,13 @@
 //! 7. **IVP Specialization**: Special lambdification for Initial Value Problems where
 //!    one argument (time) is treated differently from state variables
 
-
-
 use crate::symbolic::parse_expr::parse_expression_func;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_metadata::TraversalCache;
 use crate::symbolic::utils::{
     linspace, norm, numerical_derivative, numerical_derivative_multi, transpose,
 };
+use smallvec::SmallVec;
 use std::f64::consts::PI;
 
 impl Expr {
@@ -367,6 +366,258 @@ impl Expr {
                     )
                 }
             }
+        }
+    }
+
+    /// Differentiate one expression against several targets while traversing
+    /// each input node once. The returned vector follows `variables` order.
+    fn differentiate_many_single_pass(&self, variables: &[&str]) -> SmallVec<[Expr; 4]> {
+        match self {
+            Expr::Var(name) => variables
+                .iter()
+                .map(|variable| Expr::Const(if name == variable { 1.0 } else { 0.0 }))
+                .collect(),
+            Expr::Const(_) => std::iter::repeat_with(|| Expr::Const(0.0))
+                .take(variables.len())
+                .collect(),
+            Expr::Add(lhs, rhs) => lhs
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .zip(rhs.differentiate_many_single_pass(variables))
+                .map(|(lhs, rhs)| Self::cheap_add(lhs, rhs))
+                .collect(),
+            Expr::Sub(lhs, rhs) => lhs
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .zip(rhs.differentiate_many_single_pass(variables))
+                .map(|(lhs, rhs)| Self::cheap_sub(lhs, rhs))
+                .collect(),
+            Expr::Mul(lhs, rhs) => {
+                let lhs_derivatives = lhs.differentiate_many_single_pass(variables);
+                let rhs_derivatives = rhs.differentiate_many_single_pass(variables);
+                lhs_derivatives
+                    .into_iter()
+                    .zip(rhs_derivatives)
+                    .map(|(lhs_diff, rhs_diff)| match (&lhs_diff, &rhs_diff) {
+                        (Expr::Const(0.0), Expr::Const(0.0)) => Expr::Const(0.0),
+                        (Expr::Const(0.0), _) => Self::cheap_mul(lhs.as_ref().clone(), rhs_diff),
+                        (_, Expr::Const(0.0)) => Self::cheap_mul(lhs_diff, rhs.as_ref().clone()),
+                        _ => Self::cheap_add(
+                            Self::cheap_mul(lhs_diff, rhs.as_ref().clone()),
+                            Self::cheap_mul(lhs.as_ref().clone(), rhs_diff),
+                        ),
+                    })
+                    .collect()
+            }
+            Expr::Div(lhs, rhs) => {
+                let lhs_derivatives = lhs.differentiate_many_single_pass(variables);
+                let rhs_derivatives = rhs.differentiate_many_single_pass(variables);
+                lhs_derivatives
+                    .into_iter()
+                    .zip(rhs_derivatives)
+                    .map(|(lhs_diff, rhs_diff)| match (&lhs_diff, &rhs_diff) {
+                        (Expr::Const(0.0), Expr::Const(0.0)) => Expr::Const(0.0),
+                        (Expr::Const(0.0), _) => Self::cheap_div(
+                            Self::cheap_mul(
+                                Self::cheap_mul(Expr::Const(-1.0), lhs.as_ref().clone()),
+                                rhs_diff,
+                            ),
+                            Self::cheap_mul(rhs.as_ref().clone(), rhs.as_ref().clone()),
+                        ),
+                        (_, Expr::Const(0.0)) => Self::cheap_div(lhs_diff, rhs.as_ref().clone()),
+                        _ => Self::cheap_div(
+                            Self::cheap_sub(
+                                Self::cheap_mul(lhs_diff, rhs.as_ref().clone()),
+                                Self::cheap_mul(rhs_diff, lhs.as_ref().clone()),
+                            ),
+                            Self::cheap_mul(rhs.as_ref().clone(), rhs.as_ref().clone()),
+                        ),
+                    })
+                    .collect()
+            }
+            Expr::Pow(base, exp) => {
+                let base_derivatives = base.differentiate_many_single_pass(variables);
+                let exp_derivatives = exp.differentiate_many_single_pass(variables);
+                base_derivatives
+                    .into_iter()
+                    .zip(exp_derivatives)
+                    .map(|(base_diff, exp_diff)| {
+                        if let Expr::Const(n) = **exp {
+                            if n == 0.0 {
+                                return Expr::Const(0.0);
+                            }
+                            if n == 1.0 {
+                                return base_diff;
+                            }
+                            if let Expr::Const(0.0) = base_diff {
+                                return Expr::Const(0.0);
+                            }
+                            let power_term = if n - 1.0 == 1.0 {
+                                base.as_ref().clone()
+                            } else {
+                                Self::cheap_pow(base.as_ref().clone(), Expr::Const(n - 1.0))
+                            };
+                            return Self::cheap_mul(
+                                Expr::Const(n),
+                                Self::cheap_mul(power_term, base_diff),
+                            );
+                        }
+
+                        match (&base_diff, &exp_diff) {
+                            (Expr::Const(0.0), Expr::Const(0.0)) => Expr::Const(0.0),
+                            (Expr::Const(0.0), _) => Self::cheap_mul(
+                                Self::cheap_pow(base.as_ref().clone(), exp.as_ref().clone()),
+                                Self::cheap_mul(exp_diff, Expr::Ln(base.clone())),
+                            ),
+                            (_, Expr::Const(0.0)) => Self::cheap_mul(
+                                Self::cheap_mul(
+                                    exp.as_ref().clone(),
+                                    Self::cheap_pow(
+                                        base.as_ref().clone(),
+                                        Self::cheap_sub(exp.as_ref().clone(), Expr::Const(1.0)),
+                                    ),
+                                ),
+                                base_diff,
+                            ),
+                            _ => Self::cheap_mul(
+                                Self::cheap_pow(base.as_ref().clone(), exp.as_ref().clone()),
+                                Self::cheap_add(
+                                    Self::cheap_mul(exp_diff, Expr::Ln(base.clone())),
+                                    Self::cheap_mul(
+                                        exp.as_ref().clone(),
+                                        Self::cheap_div(base_diff, base.as_ref().clone()),
+                                    ),
+                                ),
+                            ),
+                        }
+                    })
+                    .collect()
+            }
+            Expr::Exp(expr) => expr
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .map(|inner| match inner {
+                    Expr::Const(0.0) => Expr::Const(0.0),
+                    inner => Self::cheap_mul(Expr::Exp(expr.clone()), inner),
+                })
+                .collect(),
+            Expr::Ln(expr) => expr
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .map(|inner| match inner {
+                    Expr::Const(0.0) => Expr::Const(0.0),
+                    inner => Self::cheap_div(inner, expr.as_ref().clone()),
+                })
+                .collect(),
+            Expr::sin(expr) => expr
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .map(|inner| match inner {
+                    Expr::Const(0.0) => Expr::Const(0.0),
+                    inner => Self::cheap_mul(Expr::cos(expr.clone()), inner),
+                })
+                .collect(),
+            Expr::cos(expr) => expr
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .map(|inner| match inner {
+                    Expr::Const(0.0) => Expr::Const(0.0),
+                    inner => Self::cheap_mul(
+                        Self::cheap_mul(Expr::Const(-1.0), Expr::sin(expr.clone())),
+                        inner,
+                    ),
+                })
+                .collect(),
+            Expr::tg(expr) => expr
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .map(|inner| match inner {
+                    Expr::Const(0.0) => Expr::Const(0.0),
+                    inner => Self::cheap_mul(
+                        Self::cheap_div(
+                            Expr::Const(1.0),
+                            Self::cheap_pow(Expr::cos(expr.clone()), Expr::Const(2.0)),
+                        ),
+                        inner,
+                    ),
+                })
+                .collect(),
+            Expr::ctg(expr) => expr
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .map(|inner| match inner {
+                    Expr::Const(0.0) => Expr::Const(0.0),
+                    inner => Self::cheap_mul(
+                        Self::cheap_div(
+                            Expr::Const(-1.0),
+                            Self::cheap_pow(Expr::sin(expr.clone()), Expr::Const(2.0)),
+                        ),
+                        inner,
+                    ),
+                })
+                .collect(),
+            Expr::arcsin(expr) => expr
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .map(|inner| match inner {
+                    Expr::Const(0.0) => Expr::Const(0.0),
+                    inner => Self::cheap_div(
+                        inner,
+                        Self::cheap_pow(
+                            Self::cheap_sub(
+                                Expr::Const(1.0),
+                                Self::cheap_pow(expr.as_ref().clone(), Expr::Const(2.0)),
+                            ),
+                            Expr::Const(0.5),
+                        ),
+                    ),
+                })
+                .collect(),
+            Expr::arccos(expr) => expr
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .map(|inner| match inner {
+                    Expr::Const(0.0) => Expr::Const(0.0),
+                    inner => Self::cheap_div(
+                        Self::cheap_mul(Expr::Const(-1.0), inner),
+                        Self::cheap_pow(
+                            Self::cheap_sub(
+                                Expr::Const(1.0),
+                                Self::cheap_pow(expr.as_ref().clone(), Expr::Const(2.0)),
+                            ),
+                            Expr::Const(0.5),
+                        ),
+                    ),
+                })
+                .collect(),
+            Expr::arctg(expr) => expr
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .map(|inner| match inner {
+                    Expr::Const(0.0) => Expr::Const(0.0),
+                    inner => Self::cheap_div(
+                        inner,
+                        Self::cheap_add(
+                            Expr::Const(1.0),
+                            Self::cheap_pow(expr.as_ref().clone(), Expr::Const(2.0)),
+                        ),
+                    ),
+                })
+                .collect(),
+            Expr::arcctg(expr) => expr
+                .differentiate_many_single_pass(variables)
+                .into_iter()
+                .map(|inner| match inner {
+                    Expr::Const(0.0) => Expr::Const(0.0),
+                    inner => Self::cheap_div(
+                        Self::cheap_mul(Expr::Const(-1.0), inner),
+                        Self::cheap_add(
+                            Expr::Const(1.0),
+                            Self::cheap_pow(expr.as_ref().clone(), Expr::Const(2.0)),
+                        ),
+                    ),
+                })
+                .collect(),
         }
     }
 
@@ -1215,7 +1466,8 @@ impl Expr {
         }
         self.evaluate_vector_lambdified(&vec_of_linspaces)
     }
-    /// Computes partial derivatives with respect to specified variables.
+    /// Computes partial derivatives with respect to specified variables in a
+    /// shared recursive traversal of the expression tree.
     ///
     /// More controlled than diff_multi() as it allows specifying exactly which
     /// variables to differentiate with respect to and in what order.
@@ -1226,8 +1478,20 @@ impl Expr {
     /// # Returns
     /// Vector of symbolic partial derivative expressions
     pub fn diff_multi_args(&self, all_vars: &Vec<&str>) -> Vec<Expr> {
-        let vec_of_exprs = all_vars.iter().map(|var| self.diff(var)).collect();
-        vec_of_exprs
+        self.diff_many_args(all_vars)
+    }
+
+    /// Computes multiple partial derivatives in caller-provided order.
+    ///
+    /// Unlike repeatedly calling [`Expr::diff`], this traverses shared
+    /// subexpressions once and propagates a derivative vector through the
+    /// expression tree. It is intended for Jacobian/gradient construction;
+    /// callers with only one target should use `diff1`.
+    pub fn diff_many_args(&self, all_vars: &[&str]) -> Vec<Expr> {
+        self.differentiate_many_single_pass(all_vars)
+            .into_iter()
+            .map(Self::normalize_derivative)
+            .collect()
     }
 
     /// Computes all partial derivatives automatically.
@@ -1329,7 +1593,7 @@ impl Expr {
             self.evaluate_multi_diff_from_linspace(start.clone(), end.clone(), num_values);
         //println!("vector_of_vectors_of_dy_dx_analytical  {:?}", vector_of_vectors_of_dy_dx_analytical);
         let analitical_function = &self.lambdify_wrapped(); // get the analtical function
-                                                            // let's define step
+        // let's define step
         let max_end = end.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
         let min_start = start.iter().min_by(|a, b| a.total_cmp(b)).unwrap();
         let step = (1.0 / 1e4) * (max_end - min_start) / (num_values as f64 - 1.0); //
@@ -1383,7 +1647,7 @@ mod tests {
     use std::time::{Duration, Instant};
     #[allow(dead_code)]
     const PERF_REPEATS: usize = 11;
-#[allow(dead_code)]
+    #[allow(dead_code)]
     fn median_duration<F>(mut f: F) -> Duration
     where
         F: FnMut(),
@@ -1396,6 +1660,31 @@ mod tests {
         }
         samples.sort_unstable();
         samples[samples.len() / 2]
+    }
+
+    #[test]
+    fn multi_target_derivatives_match_independent_derivatives_in_requested_order() {
+        let expressions = [
+            "x^y + y^x",
+            "(x^2 + y*z)/(z + 3)",
+            "exp(x + y) + ln(z + 2)",
+            "sin(x*y) + cos(y + z)",
+            "tg(x) + ctg(y) + arcsin(z/2) + arccos(x/3) + arctg(y) + arcctg(z)",
+        ];
+        let variables = ["z", "x", "missing", "y"];
+
+        for source in expressions {
+            let expression = crate::symbolic::symbolic_engine::Expr::parse_expression(source);
+            let batched = expression.diff_many_args(&variables);
+            assert_eq!(batched.len(), variables.len(), "source={source}");
+            for (actual, variable) in batched.iter().zip(variables) {
+                assert_eq!(
+                    actual,
+                    &expression.diff(variable),
+                    "source={source}, var={variable}"
+                );
+            }
+        }
     }
 
     #[test]

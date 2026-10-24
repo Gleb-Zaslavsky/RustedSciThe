@@ -38,12 +38,11 @@ analytic-Jacobian and residual-only finite-difference paths. `RADAU_USER_GUIDE_E
 universal performance claim: the best frontend and layout depend on the
 matched workload.
 
-The archived `Radau_main` route is no longer selected by production
-`ODE_api` or `ODE_api2`. Their `Radau` selector routes to the new fixed-order
-production implementation, and `with_native_ode_callbacks` selects its
-native residual boundary. New code can use `RadauSolver` directly when it
-needs symbolic/AOT configuration, or `UniversalODESolver` for the compact
-universal facade.
+The archived `Radau_main` route is no longer selected by the production
+`ODE_api2` facade. Its `Radau` selector routes to the fixed-order production
+implementation, and `with_native_ode_callbacks` selects its native residual
+boundary. New code can use `RadauSolver` directly when it needs symbolic/AOT
+configuration, or `UniversalODESolver` for the compact universal facade.
 
 The AOT process handoff has an explicit lifecycle contract. A cold producer
 using `RebuildAlways` is expected to report one build and one link attempt. An
@@ -638,3 +637,276 @@ the local comparison state and must not be read as independent release
 regression evidence. A hard gate still requires a second matched capture with
 the same workload, layout, frontend, policy, worker and toolchain dimensions,
 plus an absolute materiality floor.
+
+### Universal Facade Telemetry Forwarding: 2026-10-23
+
+The production `UniversalODESolver` Radau route had been overriding
+`RadauConfig::default()` with `RadauTelemetryMode::Counters`. This contradicted
+the native Radau contract, where telemetry is opt-in and defaults to `Off`.
+The facade now defaults to `Off` and provides
+`with_radau_telemetry_mode(Off | Counters | Timings | Detailed)`; the selected
+mode is copied into the production `RadauConfig` without altering numerical
+settings or solver behavior.
+
+The Debug contract test
+`universal_radau_production_config_forwards_all_telemetry_modes` verifies the
+default and all four configuration mappings. `cargo check --lib` verifies the
+non-test production route compiles against the new Radau API. The universal
+facade's `cfg(test)` compatibility route still instantiates the archived Radau
+solver, so it is deliberately not treated as runtime evidence for production
+telemetry. No numerical result or performance claim follows from this
+configuration-only correction.
+
+The public API mode matrix is also exercised end-to-end by
+`tests::api::public_solver_telemetry_modes_obey_four_mode_contract`: all four
+modes solve the same analytic scalar problem; `Off` retains no measurements,
+`Counters` and `Timings` remain disjoint, and `Detailed` exposes both. The
+focused Debug test passed on 2026-10-23. This closes the public mode-semantics
+contract for `RadauSolver`; it does not close the separate report-scope metadata
+consumer and applicability debts listed in the Radau TODO.
+
+### IVP Symbolic Optimization Triage
+
+The previous IVP allocation change is not directly portable to Radau's hot
+callback workspace: Radau already writes Jacobian values into layout-sized
+caller-owned buffers, and its solver workspace is allocated once per session.
+The closest high-value Radau target is earlier in the lifecycle. The current
+ExprLegacy `LambdifyPlan` compiles a dense `n*n` closure vector, including
+structural zero expressions, even though Sparse and Banded callbacks later
+evaluate only the nonzero pattern. The matched `n=2048` Lambdify stage report
+shows ExprLegacy preparation around `725-959 ms`, versus about `30.8 ms` for
+AtomView.
+
+The compact preparation is now implemented in `new/lambdify.rs`. `LambdifyPlan`
+keeps only nonzero Jacobian closures in row-major order and stores row offsets
+for Dense output; Dense still writes the same `n*n` buffer with structural
+zeros, while Sparse and Banded preserve their existing compact layouts. A
+Debug contract test compares all three layouts and asserts that a tridiagonal
+3x3 Jacobian compiles 7 rather than 9 Jacobian callbacks. The full Radau Debug
+namespace passed after the final implementation (`157 passed, 0 failed,
+27 ignored`, including the new release-only story).
+
+Release A/B evidence comes from
+`test_reports/Radau_Compact_Expr_Jacobian/release/numerical__Radau__tests__large_performance__compact_expr_jacobian_preparation_avoids_structural_zero_closures_story.md`.
+It uses the same DiffusionChain expressions and schema validation for the
+previous dense-closure plan and the compact plan, alternates measurement order,
+and excludes symbolic differentiation from both timed regions. At `n=1024`
+(`11` pairs), callback preparation fell from `92.419/0.692 ms` to
+`63.349/0.445 ms` median/MAD (`-31.5%`), with `1,048,576` to `3,070`
+Jacobian closures (`-99.7%`). At `n=2048` (`11` pairs), it fell from
+`363.307/5.503 ms` to `238.837/2.537 ms` (`-34.3%`), with `4,194,304` to
+`6,142` closures (`-99.9%`). These measurements establish a substantial
+large-system preparation and retained-closure reduction. They do not isolate
+full `RadauSolver::prepare` (which also includes differentiation upstream),
+allocator bytes, or end-to-end solve wall time, so no full-solve speedup is
+claimed.
+
+The `n=512` AOT attribution assigns `96.8-97.0%` of full-solve wall time to
+linear work and under `1%` to callbacks. This Expr-Lambdify preparation change
+does not affect AOT and cannot materially move that measured AOT result. The
+Banded callback's per-call band-pattern construction and parallel
+temporary-value vector are secondary candidates only; the copied full-band
+entry list was removed by this change. Current story reports do not show the
+remaining costs' full-solve contribution, so they remain measurement-gated
+rather than accepted changes.
+
+### Expr Coordinate Jacobian Preparation and Full-Solve A/B: 2026-10-23
+
+The callback-only result above was followed by an end-to-end comparison of the
+old and new ExprLegacy Lambdify preparation routes. The reference explicitly
+forms all `n*n` derivatives before passing the dense row-major vector through
+`RadauProblem::with_jacobian`. The production route omits that vector;
+`RadauSolver::prepare` differentiates only state variables used by each
+residual and sends the resulting coordinate-form Jacobian directly to the
+compact Lambdify plan. Sparse uses the shared dependency-aware builder; Banded
+uses the shared bandwidth-aware builder, which retains and detects nonzero
+out-of-band entries rather than silently dropping them.
+
+Release measurements used DiffusionChain, Sparse and Banded `1-1`, seven
+interleaved pairs per row, and telemetry Off for timed samples. Preparation
+time includes symbolic differentiation, callback compilation and the public
+solver preparation boundary. Full time includes the same work plus the solve.
+The separately timed diagnostic solve checked work counters and attributed the
+new symbolic derivative stage through `symbolic_jacobian_ms`. Results are in
+`test_reports/Radau_Expr_Coordinate_Jacobian/release/numerical__Radau__tests__large_performance__expr_coordinate_jacobian_prepare_and_solve_ab_story.md`.
+
+| n | layout | dense prepare median/MAD ms | coordinate prepare median/MAD ms | prepare change | dense prepare+solve median/MAD ms | coordinate prepare+solve median/MAD ms | full change | symbolic nnz / dense slots | max state diff | counters |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 256 | Sparse | 13.759/0.321 | 4.267/0.264 | -69.0% | 15.075/0.287 | 5.505/0.267 | -63.5% | 766 / 65,536 | 0 | equal |
+| 256 | Banded 1-1 | 13.395/0.136 | 3.647/0.158 | -72.8% | 14.211/0.169 | 4.482/0.169 | -68.5% | 766 / 65,536 | 0 | equal |
+| 512 | Sparse | 46.784/0.388 | 8.463/0.149 | -81.9% | 49.271/0.407 | 11.065/0.136 | -77.5% | 1,534 / 262,144 | 0 | equal |
+| 512 | Banded 1-1 | 46.083/0.291 | 7.653/0.082 | -83.4% | 47.569/0.229 | 9.192/0.089 | -80.7% | 1,534 / 262,144 | 0 | equal |
+| 1,024 | Sparse | 172.274/1.924 | 20.491/0.270 | -88.1% | 177.488/2.048 | 25.510/0.292 | -85.6% | 3,070 / 1,048,576 | 0 | equal |
+| 1,024 | Banded 1-1 | 185.072/0.524 | 23.138/1.523 | -87.5% | 188.516/0.312 | 26.903/2.361 | -85.7% | 3,070 / 1,048,576 | 0 | equal |
+
+All six rows passed exact final-state parity and the compared counters
+(`accepted_steps`, `rejected_steps`, residual/Jacobian calls, factorizations,
+and real/complex solves). At `n=1024`, the derivative stage itself was
+`3.551 ms` for Sparse and `2.489 ms` for Banded. The debug namespace passed
+with `159 passed, 0 failed, 28 ignored`; a separate debug smoke of the A/B
+story validated its report and parity path at `n=16` and is not performance
+evidence.
+
+This is strong release evidence for large structured DiffusionChain workloads:
+the preparation reduction also survives through a complete solve. It does not
+establish a small-system crossover or claim an equal gain for dense, nonlinear,
+or differently structured problems. ExprLegacy Lambdify now derives this
+coordinate-form analytic Jacobian by default when no explicit Jacobian is
+provided. An explicit `.with_jacobian(...)` remains authoritative; requested
+FiniteDifference and AOT behavior are preserved.
+
+### Overnight Release Review: Expr Coordinate Jacobian and Matrix Scope (2026-10-24)
+
+The Radau overnight release run completed all seven stages: fast stories,
+ignored stories, Lambdify matrices at worker counts `1/4/12`, the combined
+AOT/Lambdify matrix, and process-isolated AOT handoff. No stage failed. The
+reports are under
+[`Radau_release_manual/20261023T232551Z`](../../../test_reports/Radau_release_manual/20261023T232551Z/);
+the combined matrix contains 192 rows, and each worker-specific Lambdify
+matrix contains 96 rows.
+
+The strongest correctness/performance evidence is the paired
+Expr-coordinate-Jacobian A/B, not the unpaired full matrix. In the overnight
+release report, it compares the previous explicit dense derivative route with
+the production coordinate-form derivative route, including symbolic
+preparation and full solve. Seven interleaved pairs per row retained exact
+final-state equality and matching work counters:
+
+| n | layout | dense prepare ms | coordinate prepare ms | prepare change | dense prepare+solve ms | coordinate prepare+solve ms | full change |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | Sparse | 14.181 | 4.625 | -67.4% | 15.687 | 5.982 | -61.9% |
+| 256 | Banded 1-1 | 20.587 | 4.332 | -79.0% | 21.407 | 5.200 | -75.7% |
+| 512 | Sparse | 55.553 | 11.962 | -78.5% | 58.028 | 14.994 | -74.2% |
+| 512 | Banded 1-1 | 64.706 | 12.173 | -81.2% | 66.399 | 14.722 | -77.8% |
+| 1,024 | Sparse | 215.086 | 20.787 | -90.3% | 223.212 | 26.216 | -88.3% |
+| 1,024 | Banded 1-1 | 187.059 | 20.027 | -89.3% | 190.449 | 23.296 | -87.8% |
+
+This is strong evidence for the production Expr Lambdify path on the tested
+large structured diffusion-chain workloads. It does not establish the same
+gain for Dense, AOT, small systems, or unrelated equation structure. The
+separate compact-closure A/B also passed: at `n=128/256/512`, closure slots
+fell by `97.7/98.8/99.4%` and callback preparation by `13.4/22.8/20.2%`,
+respectively; that benchmark excludes symbolic differentiation.
+
+**Important scope limitation in the broad benchmark matrices:** the Lambdify
+ExprLegacy fixture in `new/benchmark.rs` computes every derivative
+`equation.diff(variable)` and passes the resulting dense `n*n` Jacobian as an
+explicit Jacobian to callback preparation. The shared workload fixture uses
+the same explicit-Jacobian setup. An explicit Jacobian is authoritative, so
+these rows bypass the production coordinate-Jacobian builder. In contrast,
+the AtomView fixture supplies no Expr Jacobian. Consequently, the wide
+matrix's Expr-vs-Atom preparation numbers are not a matched comparison of the
+two default production routes, and the large Expr preparation times there do
+not show a regression in the new coordinate route. Use the paired A/B above
+for that claim. The AOT workload constructor also supplies no explicit
+Jacobian; its rows are a separate execution route and must not be conflated
+with the Lambdify fixture limitation.
+
+The broad matrix remains useful for layout, execution-policy and workload
+shape observations. At `n=2048`, the worker-12 combined matrix reported
+Lambdify Sparse full solves around `7.75-7.84 ms` and Banded-1-1 around
+`4.40-4.61 ms`, versus roughly `4.4 s` for Dense. The sequential AOT rows
+reported Banded-1-1 at `3.56-3.60 ms` and Sparse at `9.0-9.1 ms`. These are
+compact matrix measurements, not a paired statistical gate. Structured
+layouts are the meaningful large-system routes; Dense is a reference/control
+route here.
+
+Continuation results are frontend/layout dependent rather than a universal
+AOT win. At `n=2048`, the 64-target Expr Banded series was `266.196 ms` for
+Lambdify versus `160.053 ms` for AOT, with preparation `629.081` versus
+`136.344 ms`; Atom Banded was `279.301` versus `166.820 ms`, with preparation
+`30.265` versus `77.737 ms`. Thus AOT's Atom Banded total crosses over by the
+64-target series, while Atom Sparse does not show a crossover within 64
+targets. These one-capture totals are workload evidence, not a general
+break-even guarantee. The independent 64-target retention story passed and
+kept exactly one artifact, build and link per route.
+
+Parallel-policy stories and the large matrix agree that explicit Parallel is
+not a safe default for small systems: for the 3-state and 16-state Lambdify
+cases it dispatched 36 times and took roughly `0.8-1.1 ms`, while Sequential
+and Auto avoided parallel dispatch and generally completed in tens of
+microseconds. At large dimensions, worker-count/layout rows vary enough that
+this single compact capture does not establish a universal worker-count
+break-even. Auto's no-dispatch behavior on small workloads is the useful
+policy result.
+
+Telemetry contracts passed: residual/Jacobian callback and evaluation counts
+were populated consistently; forced Parallel reported the expected dispatches;
+Auto/Sequential reported none on the small-policy cases. AOT lifecycle
+telemetry kept build, link, publication and callback scopes distinct. SciPy
+1.18.1 parity passed. Stiff-scalar and combustion-like endpoint errors were
+near machine precision; Robertson retained the documented Newton/retry path
+difference (`scaled_final_error=6.061e-3`, trajectory error `2.749e-3`), while
+accepted/rejected steps and LU-equivalent counts matched. This is consistent
+with the existing SciPy parity analysis, not a new counter regression.
+
+### Expr Fixture Correction and Repeat Measurements (2026-10-24)
+
+The stale Expr fixture has now been corrected in both the Criterion workload
+and the shared correctness/story fixture. ExprLegacy preparation uses the
+same production coordinate-Jacobian builders as `RadauSolver::prepare`: sparse
+structural coordinates for Dense/Sparse layouts and bandwidth-limited
+coordinates for Banded. It no longer differentiates all `n*n` pairs and passes
+an explicit dense Jacobian. AtomViewNative remains on its native route. A new
+Debug/Release fixture contract test verifies that Expr and Atom produce the
+same structural pattern (46 nonzeros for the 16-state tridiagonal chain) for
+Dense, Sparse and Banded layouts. The targeted Release workload suite passed
+8/8, including that contract test.
+
+The ignored production-path full-solve A/B was repeated in Release with 21
+interleaved pairs at `n=256/512/1024`. It compares the prior all-pairs dense
+Expr preparation to the corrected coordinate Expr preparation, with identical
+Radau solve configuration. Final states were exactly equal and discrete
+solver counters matched on all rows:
+
+| n | layout | dense prepare ms | coordinate prepare ms | prepare change | dense prepare+solve ms | coordinate prepare+solve ms | full change |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | Sparse | 13.509 | 4.428 | -67.2% | 14.788 | 5.782 | -60.9% |
+| 256 | Banded 1-1 | 13.452 | 3.859 | -71.3% | 14.325 | 4.724 | -67.0% |
+| 512 | Sparse | 46.276 | 8.564 | -81.5% | 48.548 | 11.025 | -77.3% |
+| 512 | Banded 1-1 | 46.131 | 7.786 | -83.1% | 47.828 | 9.325 | -80.5% |
+| 1,024 | Sparse | 176.622 | 20.447 | -88.4% | 181.558 | 25.415 | -86.0% |
+| 1,024 | Banded 1-1 | 174.515 | 19.223 | -89.0% | 177.813 | 22.419 | -87.4% |
+
+The captured repeated A/B report is
+`test_reports/Radau_Expr_Coordinate_Jacobian/release/numerical__Radau__tests__large_performance__expr_coordinate_jacobian_prepare_and_solve_ab_story.md`.
+It can be reproduced with:
+
+```powershell
+$env:RADAU_EXPR_COORDINATE_JACOBIAN_DIMENSIONS = "256,512,1024"
+$env:RADAU_EXPR_COORDINATE_JACOBIAN_REPEATS = "21"
+cargo test --release --lib numerical::Radau::tests::large_performance::expr_coordinate_jacobian_prepare_and_solve_ab_story -- --ignored --nocapture
+```
+
+These are strong same-workload results for the Expr coordinate-preparation
+change, not an Expr-vs-Atom speed comparison. The former 192-row release matrix
+remains useful for its other axes, but its Expr Lambdify preparation rows were
+produced by the now-corrected explicit-dense fixture and must not be used as
+production coordinate-route timing evidence. Its AOT rows were not changed by
+this correction.
+
+A separate Release Criterion slice used the corrected harness on the
+512-state diffusion chain (15 samples, 2-second measurement window). Estimated
+warm full-solve times were:
+
+| layout | ExprLegacy ms | AtomViewNative ms | observation |
+| --- | ---: | ---: | --- |
+| Dense | 57.121 | 57.057 | effectively tied |
+| Sparse | 1.715 | 1.828 | Expr about 6% faster |
+| Banded 1-1 | 0.989 | 1.138 | Expr about 13% faster |
+| Banded 2-1 | 1.048 | 1.199 | Expr about 13% faster |
+
+The focused Criterion command was
+`cargo bench --no-default-features --bench radau_workloads -- 'diffusion-chain/512' --noplot`
+with `RADAU_BENCH_DIFFUSION_DIMENSIONS=512`, `RADAU_BENCH_SAMPLE_SIZE=15`,
+and `RADAU_BENCH_MEASUREMENT_SECONDS=2`.
+
+The matched Criterion slice does not support a universal Atom warm-solve win;
+Expr is faster on these structured sparse/banded rows while Dense is tied.
+Cold preparation estimates favored Atom by roughly 18-24% in this fixture,
+which does not offset its slower structured-layout full solve here. Several
+Criterion samples were classified as outliers, so these values are a
+diagnostic cross-check rather than a portable performance gate. The paired
+21-run full-solve A/B above is the stronger evidence for the coordinate
+Jacobian correction. No AOT/cold-build or continuation break-even conclusion
+is drawn from this Lambdify-only repeat.

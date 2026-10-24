@@ -1292,6 +1292,10 @@ pub(super) fn telemetry_execution_for_config(
             execution: Lsode2SymbolicExecutionMode::Aot { .. },
             ..
         } => IvpTelemetryExecution::Aot,
+        Lsode2ResidualJacobianSource::Symbolic {
+            execution: Lsode2SymbolicExecutionMode::PreparedAtom,
+            ..
+        } => IvpTelemetryExecution::PreparedAtom,
         Lsode2ResidualJacobianSource::Symbolic { .. }
         | Lsode2ResidualJacobianSource::Analytical => IvpTelemetryExecution::Lambdify,
     }

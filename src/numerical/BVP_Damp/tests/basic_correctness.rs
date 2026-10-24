@@ -6,10 +6,12 @@
 mod tests {
 
     use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
-        AdaptiveGridConfig, DampedSolverOptions, NRBVP as NRBDVPd, SolverParams,
+        AdaptiveGridConfig, DampedCallbackRuntime, DampedSolverOptions, NRBVP as NRBDVPd,
+        SolverParams,
     };
     use crate::numerical::BVP_Damp::generated_solver_handoff::AotBuildPolicy;
     use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
+    use crate::numerical::BVP_Damp::telemetry::BvpTelemetryCounters;
     use crate::numerical::Examples_and_utils::NonlinEquation;
     use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
     use crate::symbolic::symbolic_engine::Expr;
@@ -594,6 +596,294 @@ mod tests {
             .try_solve()
             .expect("banded AtomView lambdify BVP should solve end-to-end");
         assert_linear_bvp_solution_quality(&solver, t0, t_end, n_steps, 1e-5, 5e-5);
+    }
+
+    fn prepared_atom_test_options() -> DampedSolverOptions {
+        let options = base_linear_bvp_options()
+            .with_banded_lambdify()
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+        let config = options
+            .generated_backend_config
+            .clone()
+            .with_lambdify_execution_policy(
+                crate::symbolic::bvp::telemetry::BvpLambdifyExecutionPolicy::Sequential,
+            );
+        options.with_generated_backend_config(config)
+    }
+
+    fn assert_prepared_atom_matches_native(
+        mut native: NRBDVPd,
+        mut prepared: NRBDVPd,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+        solution_tolerance: f64,
+    ) {
+        prepared = prepared.with_callback_runtime(DampedCallbackRuntime::PreparedAtom);
+        native.dont_save_log(true);
+        prepared.dont_save_log(true);
+        native
+            .try_solve()
+            .expect("solver-native AtomView Banded route should solve");
+        prepared
+            .try_solve()
+            .expect("PreparedAtom AtomView Banded route should solve");
+
+        let native_solution = native.get_result().expect("native solution is present");
+        let prepared_solution = prepared
+            .get_result()
+            .expect("PreparedAtom solution is present");
+        assert_eq!(native_solution.shape(), prepared_solution.shape());
+        let max_diff = native_solution
+            .iter()
+            .zip(prepared_solution.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_diff <= solution_tolerance,
+            "solution mismatch: max_abs_diff={max_diff:e}"
+        );
+        assert_eq!(
+            native.get_statistics().telemetry.counters,
+            prepared.get_statistics().telemetry.counters,
+            "PreparedAtom changed discrete solver work"
+        );
+
+        assert_linear_bvp_solution_quality(&native, t0, t_end, n_steps, 1e-5, 5e-5);
+        assert_linear_bvp_solution_quality(&prepared, t0, t_end, n_steps, 1e-5, 5e-5);
+    }
+
+    #[test]
+    fn prepared_atom_runtime_matches_native_on_linear_and_oscillator_bvps() {
+        let n_steps = 40;
+        let options = prepared_atom_test_options();
+        let (native, t0, t_end, _) = linear_bvp_fixture(n_steps, options.clone());
+        let (prepared, _, _, _) = linear_bvp_fixture(n_steps, options.clone());
+        assert_prepared_atom_matches_native(native, prepared, t0, t_end, n_steps, 1e-12);
+
+        let (mut native, _, _, _) = oscillator_bvp_symbolic_fixture(n_steps, options.clone());
+        let (mut prepared, _, _, _) = oscillator_bvp_symbolic_fixture(n_steps, options);
+        native.dont_save_log(true);
+        prepared.dont_save_log(true);
+        prepared = prepared.with_callback_runtime(DampedCallbackRuntime::PreparedAtom);
+        native
+            .try_solve()
+            .expect("native oscillator BVP should solve");
+        prepared
+            .try_solve()
+            .expect("PreparedAtom oscillator BVP should solve");
+        let native_solution = native.get_result().expect("native solution is present");
+        let prepared_solution = prepared
+            .get_result()
+            .expect("PreparedAtom solution is present");
+        let max_diff = native_solution
+            .iter()
+            .zip(prepared_solution.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(max_diff <= 1e-12, "oscillator solution diff={max_diff:e}");
+        assert_eq!(
+            native.get_statistics().telemetry.counters,
+            prepared.get_statistics().telemetry.counters,
+            "PreparedAtom changed oscillator solver work"
+        );
+        assert_eq!(prepared_solution.nrows(), n_steps + 1);
+        assert!(prepared_solution.iter().all(|value| value.is_finite()));
+    }
+
+    fn bratu_prepared_runtime_fixture(n_steps: usize, prepared: bool) -> NRBDVPd {
+        let options = DampedSolverOptions::sparse_damped()
+            .with_banded_lambdify()
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView)
+            .with_abs_tolerance(1e-8)
+            .with_max_iterations(60)
+            .with_rel_tolerance(HashMap::from([
+                ("y".to_string(), 1e-5),
+                ("z".to_string(), 1e-5),
+            ]))
+            .with_bounds(HashMap::from([
+                ("y".to_string(), (-1.0, 5.0)),
+                ("z".to_string(), (-20.0, 20.0)),
+            ]));
+        let config = options
+            .generated_backend_config
+            .clone()
+            .with_lambdify_execution_policy(
+                crate::symbolic::bvp::telemetry::BvpLambdifyExecutionPolicy::Sequential,
+            );
+        let options = options.with_generated_backend_config(config);
+        let equations = vec![
+            Expr::parse_expression("z"),
+            Expr::parse_expression("-2*exp(y)"),
+        ];
+        let guess = DMatrix::from_fn(2, n_steps, |row, _| if row == 0 { 4.0 } else { 0.0 });
+        let mut solver = NRBDVPd::new_with_options(
+            equations,
+            guess,
+            vec!["y".to_string(), "z".to_string()],
+            "x".to_string(),
+            HashMap::from([("y".to_string(), vec![(0, 0.0), (1, 0.0)])]),
+            0.0,
+            1.0,
+            n_steps,
+            options,
+        );
+        solver.dont_save_log(true);
+        if prepared {
+            solver.set_callback_runtime(DampedCallbackRuntime::PreparedAtom);
+        }
+        solver
+    }
+
+    #[test]
+    fn prepared_atom_runtime_matches_native_on_nonlinear_bratu_bvp() {
+        let mut native = bratu_prepared_runtime_fixture(48, false);
+        let mut prepared = bratu_prepared_runtime_fixture(48, true);
+        native.try_solve().expect("native Bratu BVP should solve");
+        prepared
+            .try_solve()
+            .expect("PreparedAtom Bratu BVP should solve");
+        let native_solution = native
+            .get_result()
+            .expect("native Bratu solution is present");
+        let prepared_solution = prepared
+            .get_result()
+            .expect("PreparedAtom Bratu solution is present");
+        let max_diff = native_solution
+            .iter()
+            .zip(prepared_solution.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(max_diff <= 1e-10, "Bratu solution diff={max_diff:e}");
+        assert_eq!(
+            native.get_statistics().telemetry.counters,
+            prepared.get_statistics().telemetry.counters,
+            "PreparedAtom changed Bratu Newton/damping/factorization work"
+        );
+        assert!(prepared_solution.iter().all(|value| value.is_finite()));
+    }
+
+    fn assert_counters_are_exactly_doubled(
+        once: &BvpTelemetryCounters,
+        twice: &BvpTelemetryCounters,
+        route: &str,
+    ) {
+        macro_rules! doubled {
+            ($field:ident) => {
+                assert_eq!(
+                    twice.$field,
+                    once.$field * 2,
+                    "{route} cumulative {} should equal two identical solves",
+                    stringify!($field)
+                )
+            };
+        }
+        doubled!(iterations);
+        doubled!(scalar_evaluations);
+        doubled!(residual_calls);
+        doubled!(residual_requests);
+        doubled!(jacobian_requests);
+        doubled!(jacobian_recalculations);
+        doubled!(residual_chunks);
+        doubled!(jacobian_chunks);
+        doubled!(conversions);
+        doubled!(copies);
+        doubled!(damping_trials);
+        doubled!(damping_rejections);
+        doubled!(linear_solves);
+        doubled!(factorizations);
+        doubled!(factorization_cache_hits);
+        doubled!(factorization_invalidations);
+        doubled!(rhs_solves);
+        doubled!(grid_refinements);
+    }
+
+    #[test]
+    fn prepared_atom_and_native_bratu_same_instance_replay_preserve_results_and_work() {
+        let mut native = bratu_prepared_runtime_fixture(48, false);
+        let mut prepared = bratu_prepared_runtime_fixture(48, true);
+
+        native
+            .try_solve()
+            .expect("first native Bratu solve should succeed");
+        prepared
+            .try_solve()
+            .expect("first PreparedAtom Bratu solve should succeed");
+        let first_native = native.get_result().expect("native first result").clone();
+        let first_prepared = prepared
+            .get_result()
+            .expect("PreparedAtom first result")
+            .clone();
+        let first_native_counters = native.get_statistics().telemetry.counters.clone();
+        let first_prepared_counters = prepared.get_statistics().telemetry.counters.clone();
+
+        native
+            .try_solve()
+            .expect("same-instance native Bratu replay should succeed");
+        prepared
+            .try_solve()
+            .expect("same-instance PreparedAtom Bratu replay should succeed");
+        let second_native = native.get_result().expect("native replay result");
+        let second_prepared = prepared.get_result().expect("PreparedAtom replay result");
+        let second_native_counters = &native.get_statistics().telemetry.counters;
+        let second_prepared_counters = &prepared.get_statistics().telemetry.counters;
+
+        let max_native_replay_diff = first_native
+            .iter()
+            .zip(second_native.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        let max_prepared_replay_diff = first_prepared
+            .iter()
+            .zip(second_prepared.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(max_native_replay_diff <= 1e-12);
+        assert!(max_prepared_replay_diff <= 1e-12);
+        assert_eq!(
+            first_native_counters, first_prepared_counters,
+            "first native and PreparedAtom solve work must match"
+        );
+        assert_counters_are_exactly_doubled(
+            &first_native_counters,
+            second_native_counters,
+            "native",
+        );
+        assert_counters_are_exactly_doubled(
+            &first_prepared_counters,
+            second_prepared_counters,
+            "PreparedAtom",
+        );
+        assert_eq!(
+            second_native_counters, second_prepared_counters,
+            "native and PreparedAtom replay work must remain identical"
+        );
+        assert!(
+            second_native
+                .iter()
+                .zip(second_prepared.iter())
+                .all(|(lhs, rhs)| (lhs - rhs).abs() <= 1e-10),
+            "native and PreparedAtom replay trajectories must match"
+        );
+    }
+
+    #[test]
+    fn prepared_atom_runtime_rejects_unsupported_sparse_route_before_generation() {
+        let options = base_linear_bvp_options()
+            .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
+        let (mut solver, _, _, _) = linear_bvp_fixture(12, options);
+        solver.dont_save_log(true);
+        solver = solver.with_callback_runtime(DampedCallbackRuntime::PreparedAtom);
+        let error = solver
+            .try_eq_generate(None, None)
+            .expect_err("PreparedAtom must not silently adapt the Sparse matrix backend");
+        assert!(
+            matches!(
+                error,
+                BvpBackendIntegrationError::InvalidSolverConfiguration { .. }
+            ),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[test]

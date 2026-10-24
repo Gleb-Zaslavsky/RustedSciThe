@@ -271,10 +271,12 @@ size of a speedup is known. Proposed changes require isolated measurements.
   implementing `DirectLinearSolver::solve_in_place`. Extend or compose this
   working infrastructure instead of introducing another banded LU algorithm.
 - The production backend set is deliberately closed to nalgebra `Dense`, faer
-  `Sparse`, and the local native `Banded` solver. Sparse storage also contains
-  the historical sprs `Sparse_1` experiment; keep it callable through an
-  explicit compatibility route, but do not spend production performance or
-  feature-parity budget on it unless a concrete downstream user requires it.
+  `Sparse`, and the local native `Banded` solver. The historical sprs
+  `Sparse_1` compatibility route remains callable but its symbolic Jacobian
+  and residual generators are deprecated. The removed nalgebra `CsMatrix`
+  route is also deprecated; neither legacy route receives production
+  performance or feature-parity investment without a concrete downstream
+  requirement.
 - Current matrices and vectors are public extension points (`pub fun`, `jac`,
   and `y`, plus public traits). Replacing their types directly would break users.
 
@@ -892,13 +894,59 @@ contract requires it. Preserve test discovery counts/paths when moving code.
   (2026-09-20, debug): solver-owned Sparse/Banded callbacks preserve their
   prepared coordinates and slot lengths across ExprLegacy/AtomView rebinding;
   numeric values change and cross-frontend values remain equivalent.
-- [ ] Add Damped accepted/rejected trial and Frozen refresh trace comparisons.
+- [x] Compare Damped accepted/rejected trial and Frozen refresh traces across
+  symbolic frontends and production layouts (2026-10-22, Debug). The Bratu-like
+  fixture matches accepted/refinement traces; a converged symbolic-origin
+  rejected trajectory matches at 6 iterations, 7 damping trials and 1 reject
+  across ExprLegacy/AtomView x Sparse/Banded. Frozen `every_m=1` refreshes
+  match across ExprLegacy/AtomView x Sparse/Banded (7 iterations, 3 refreshes).
+  See `BVP_DAMP_STORY_SYMBOLIC.md`; this records correctness, not speed.
 - [x] Add repeat-solve, rebind, refinement and interleaved-telemetry tests
-  (2026-09-20, debug): the lifecycle modules cover repeated prepared calls,
-  numeric/structural invalidation, adaptive refinement and stale-runtime
-  rejection. Cross-frontend rejected-trial trace parity remains open.
-- [ ] Compare callback values at identical states and tolerances before relying
-  on end-to-end convergence. Keep mandatory correctness free of timing limits.
+  (2026-09-20, Debug), then extend prepared lifecycle parity (2026-10-22,
+  Debug): Damped and Frozen cover ExprLegacy/AtomView x Dense-control/Sparse/
+  Banded through numeric rebind and structural invalidation/regeneration.
+  Callback closure identity is preserved across numeric rebind while values
+  update and factorization rebuilds. Symbolic-origin rejected-trajectory and
+  Frozen refresh traces are covered separately; see
+  `BVP_DAMP_STORY_SYMBOLIC.md`.
+- [x] Compare real combustion callback values at identical state inputs across
+  ExprLegacy/AtomView and Sparse/Banded, with an independent central-FD check
+  of the ExprLegacy/Sparse global Jacobian (2026-10-22, Debug). See
+  `combustion_fixture_componentwise_callbacks_match_frontends_and_matrix_layouts`
+  in `BVP_DAMP_STORY_SYMBOLIC.md`; the exact fixture/config is fingerprinted.
+  Accepted/rejected Newton decisions and refinement traces are tracked by the
+  dedicated trajectory gates below. Keep mandatory correctness free of timing
+  limits.
+- [x] Extend real combustion callback parity to the 1000-interval production
+  mesh (2026-10-22, Debug): compare ExprLegacy/AtomView and Sparse/Banded
+  residuals plus compact Jacobian actions at a fingerprinted common input;
+  verify reference `Jv` by directional finite differences without dense
+  materialization. See `combustion_1000_mesh_jacobian_actions_match_frontends_and_layouts`
+  in `BVP_DAMP_STORY_SYMBOLIC.md`. This is not accepted-trajectory or
+  refinement-trace parity.
+- [x] Compare accepted trajectories and refinement traces across symbolic
+  frontends and production matrix layouts. The 1000-interval combustion test
+  compares every element of all four `1001 x 6` trajectories and pins seven
+  six-state checkpoint rows; the Bratu-like symbolic fixture independently
+  exercises and matches one mesh refinement across ExprLegacy/AtomView x
+  Sparse/Banded (2026-10-22, Debug). The checkpoint policy is intentional:
+  compare complete route outputs at runtime while pinning a compact set of
+  reference values, rather than checking in a brittle 6006-value golden.
+- [x] Compare controlled accepted/rejected Newton decisions across both
+  frontends and both production layouts (2026-10-22, Debug): 13 iterations,
+  72 damping trials, 64 rejections, matching event trace and solution. This
+  fixture installs route-native numeric callbacks after symbolic preparation,
+  so it verifies decision and matrix-route parity, not symbolic callback
+  parity.
+- [x] Add the missing converged symbolic rejected-step trajectory
+  cross-product (2026-10-22, Debug): `y'=z`, `z'=y^3-2y-2`, constant root
+  boundary values, zero initial guess. ExprLegacy/AtomView x Sparse/Banded
+  all converge with 6 iterations, 7 damping trials and 1 rejection; the test
+  compares full trajectories, final residual vectors and semantic decision
+  events. Maximum state-route difference is recorded by the test output.
+- [x] Compare Lambdify and actually selected AtomView AOT on Sparse and
+  Banded oscillator routes; generated-backend selection and solution/counter
+  parity are asserted (2026-10-22, Debug).
 - [x] Add and run the focused numeric assembly allocation/stage benchmark
   `bvp_numeric_assembly` for Dense staging versus direct Sparse/Banded
   triplets at 64/256/512 steps. Record callback time, allocation count and
@@ -1439,10 +1487,13 @@ revision metadata and solver-local factor owners.
 
 ### P0 parity and typed failure boundary
 
-- [ ] Extend ExprLegacy/AtomView parity beyond final solutions: callback
-  values at identical states, accepted and rejected Newton traces, damping
-  decisions, refinement traces, fixed-CSC coordinates/zero crossings and
-  Banded row/column slot writes.
+- [x] Compare ExprLegacy/AtomView callbacks at identical states on real
+  combustion inputs and at a shared accepted 128-node trajectory state across
+  Sparse/Banded layouts, including independent finite-difference checks; see
+  `BVP_DAMP_STORY_SYMBOLIC.md` (2026-10-22, Debug).
+- [ ] Extend trajectory parity to frozen larger combustion states, accepted
+  and rejected Newton traces, damping/refinement decisions, fixed-CSC
+  zero-crossings and all Banded row/column slot writes.
 - [x] Add solver-level residual shape and non-finite callback gates
   (2026-09-20, debug), including the public `try_calc_residual` boundary and
   report-file evidence.
@@ -1620,10 +1671,11 @@ legacy implementations remain compatibility/non-production lanes.
 
 ## 25. Pure Lambdify Acceptance Matrix (2026-09-20)
 
-This section is deliberately limited to the Lambdify route. AOT preparation,
-external compilers and AOT-vs-Lambdify comparisons remain outside this matrix.
-Historical ExprLegacy story rows are evidence and must be preserved; new rows
-are dated control data for the AtomView migration.
+This section is centered on the Lambdify route; a small compiler-backed AOT
+correctness comparison is included separately below. Large AOT lifecycle and
+performance studies remain in their dedicated ledgers. Historical ExprLegacy
+story rows are evidence and must be preserved; new rows are dated control data
+for the AtomView migration.
 
 ### 25.1 Correctness and analytical solutions
 
@@ -1631,6 +1683,10 @@ are dated control data for the AtomView migration.
   `parity_corpus` as debug correctness gates.
 - [x] Keep the small `ExprLegacy`/`AtomView` callback cross-product gate across
   Dense-control, faer Sparse and native Banded.
+- [x] Compare AtomView AOT against ExprLegacy Lambdify on Sparse and Banded
+  oscillator routes in Debug, asserting actual `AotCompiled` selection and
+  trajectory/Newton-decision parity (2026-10-22). This is correctness-only;
+  compiler timing remains outside the test.
 - [x] Add a common exact-solution corpus for Linear, Oscillator, one nonlinear
   problem with a known analytical solution and one variable-coefficient BVP.
   The debug gate now includes the stronger Bratu-like adaptive fixture.
@@ -1655,16 +1711,25 @@ are dated control data for the AtomView migration.
   combustion-3000 in the stage baseline; keep Dense as a small control only.
 - [x] Repeat the current analytical-solution corpus as
   `ExprLegacy/AtomView x Sparse/Banded`; run Dense only for small control sizes.
-- [ ] Add solver-level equality checks for callback values, assembled matrix
-  values, accepted/rejected Newton decisions, refinement decisions and final
-  residuals for every production route.
+- [x] Add solver-level equality checks for symbolic callback values, matrix
+  actions/layout slots, accepted trajectories and refinement decisions across
+  the production ExprLegacy/AtomView x Sparse/Banded routes. Focused combustion
+  and Bratu-like Debug gates compare full trajectories or semantic decision
+  traces as appropriate.
+- [x] Compare symbolic callback parity and final residual vectors on a
+  converged rejected-step trajectory across ExprLegacy/AtomView x Sparse/Banded
+  (2026-10-22, Debug); the separate controlled numeric-callback fixture remains
+  useful for deterministic stress with many rejections.
 - [x] Add an adaptive nonlinear solver-level gate for both frontends and both
   production matrix routes: one DoublePoints refinement, finite published
   state, nonzero iteration trace and final-state parity.
 - [x] Add fixed-CSC coordinate/order parity for Sparse and fixed band-slot
-  parity for Banded at the solver boundary (2026-09-20, debug); both
-  ExprLegacy and AtomView are covered after numeric rebind. Full value,
-  decision-trace and all-policy cross-product parity remains open.
+  parity for Banded at the solver boundary (2026-09-20, Debug); both
+  ExprLegacy and AtomView are covered after numeric rebind. Follow-up Debug
+  cross-products now cover callback/trajectory values, adaptive refinement,
+  controlled rejected decisions, and Lambdify-vs-AOT on supported routes.
+  This does not claim exhaustive parity for every lifecycle/evaluator/policy
+  combination.
 
 ### 25.3 Prepared parameters and lifecycle
 
@@ -1672,15 +1737,22 @@ are dated control data for the AtomView migration.
   values and invalidates the old numeric factor.
 - [x] Extend parameter rebinding to both `ExprLegacy` and `AtomView` across
   Dense/Sparse/Banded; repeated prepared solves remain an additional gate.
-- [ ] Prove that rebinding does not repeat symbolic differentiation or
-  Lambdification, while factorization and RHS stages use the new values.
+- [x] Prove numeric rebinding preserves the prepared symbolic runtime across
+  ExprLegacy/AtomView x Dense/Sparse/Banded (2026-10-22, Debug): the regression
+  test pins residual/Jacobian closure data addresses across parameter changes,
+  verifies callback values change, and verifies factor invalidation/rebuild.
+  The setter implementation updates the shared parameter binding in place;
+  it does not call symbolic differentiation or Lambdification.
 - [x] Add the first lifecycle matrix for numeric rebind, mesh, boundary
   conditions, backend policy and direct compatibility-field mutation
   (2026-09-20, debug; Sparse/faer+Banded x ExprLegacy/AtomView).
-- [ ] Extend the matrix to parameter-name/layout/evaluator-policy/Jacobian
-  pattern changes and full Frozen/Dense-control coverage; the current tests
-  are focused slices, not a claim that common `PreparedPlan` ownership is
-  complete.
+- [x] Extend lifecycle invalidation to parameter-name, matrix-layout,
+  evaluator-policy and Jacobian-pattern changes, including Frozen and
+  Dense-control (2026-10-22, Debug). Damped and Frozen each cover both
+  frontends x Dense/Sparse/Banded; every stale runtime returns the typed
+  invalidation error, then regeneration restores the solve path. This remains
+  focused lifecycle coverage, not proof that all resources have migrated into
+  common `PreparedPlan` ownership.
 - [x] Add an interleaved prepare/rebind/policy-change/regenerate gate proving
   that stale prepared callbacks are rejected before consumption
   (2026-09-20, debug; the same focused production-route matrix).
@@ -2426,13 +2498,15 @@ the process-spawn failure without requiring gcc/tcc/zig; an actual compiler
 exit/link failure with a present toolchain remains a separate optional
 environment-dependent integration test.
 
-Progress (2026-09-22, P0 debug gate): the complete local debug slices are green:
-the AOT driver lifecycle/emitter module (8 tests), the shared PreparedPlan
-resource/invalidation module (11 tests), and the ExprLegacy/AtomView parity
-corpus (4 tests). The parity corpus checks final values, accepted/rejected
-damping decisions, Newton/refinement counters and event traces. This closes
-the debug correctness gate only; it does not replace the dated release
-apple-to-apple timing or external Rust/C/Zig numerical parity runs.
+Progress (2026-09-22, P0 debug gate; parity corpus refreshed 2026-10-22): the
+local debug slices include the AOT driver lifecycle/emitter module, shared
+PreparedPlan resource/invalidation module and six-test ExprLegacy/AtomView
+parity corpus. The latter checks Sparse/Banded real-symbolic refinement traces
+and compiler-backed AOT-vs-Lambdify correctness in addition to final values,
+accepted/rejected decisions, Newton/refinement counters and events. Rejected
+steps still use a controlled numeric callback fixture. This closes correctness
+gates only; it does not replace release timing or external Rust/C/Zig numerical
+parity runs.
 
 ### 27.6 Production exit gate and order
 
@@ -2940,3 +3014,39 @@ the comparison oracle.
 - [ ] Add matched large-workload rows after the first bounded release slice;
   do not infer production-sized break-even points from the default `n_steps=32`
   dashboard.
+
+## 29. PreparedAtom callback-runtime A/B (2026-10-22)
+
+- [x] Add `DampedCallbackRuntime::{SolverNative, PreparedAtom}` as an explicit
+  opt-in selection without changing the default or the numerical scheme.
+- [x] Restrict PreparedAtom to the validated AtomView + Banded + LambdifyOnly
+  + Sequential route; reject unsupported combinations before generation with
+  typed errors.
+- [x] Reuse the production AtomView discretization, compact Banded matrix
+  storage and existing Banded factor/solve delegate; do not materialize a
+  dense Jacobian.
+- [x] Add solver-level debug correctness for linear, oscillator and nonlinear
+  Bratu tasks, including full counter and solution parity.
+- [x] Add symmetric same-instance replay gates and explicitly verify
+  cumulative telemetry semantics rather than interpreting cumulative totals
+  as per-call work.
+- [x] Add a release A/B matrix for both combustion-3000 (18,000 unknowns) and
+  Bratu-1024, comparing AtomNative, PreparedAtom and ExprLegacy with matched
+  settings, 21 interleaved samples, warm prepared solves, normal public
+  `try_solve()` lifecycle and complete discrete work counters.
+- [x] Repeat the release matrix independently. PreparedAtom is consistently
+  about 32-34% faster only after callback preparation, but ordinary cold
+  `try_solve()` is about 26% slower on combustion and 7-8% slower on Bratu
+  than AtomNative. Preserve this distinction in performance claims.
+- [x] Separate the low-level evaluator allocation result from the installed
+  solver-callback result. Caller-owned-buffer `PreparedAtomSystem` evaluation
+  measured zero allocations, but integrated Bratu-1024 callbacks measured
+  16.6 allocations and 148,203 bytes per residual/Jacobian pair, versus 20
+  allocations and 98,920 bytes for AtomNative. Do not describe the integrated
+  route as allocation-free; retain allocator-live measurements as distinct
+  from RSS and never use allocator-instrumented timings as speed evidence.
+- [x] Keep PreparedAtom opt-in and SolverNative default; do not infer a general
+  cold-solve speedup from callback-only or warm-solve results.
+- [ ] Revisit only if a production-relevant persistent prepared-plan or
+  continuation lifecycle can amortize preparation cost; require a matched
+  release workload and memory bound before considering any default change.

@@ -125,11 +125,11 @@
 //! - Automatic step size reduction for difficult regions
 //! - Clear error messages for debugging
 
+use crate::numerical::logging::SolverLogLevel;
 use crate::numerical::BDF::BDF_solver::{
-    BDF, BdfConfigurationError, BdfJacobian, BdfLinearBackend, BdfOperationCounters, BdfStepError,
+    BdfConfigurationError, BdfJacobian, BdfLinearBackend, BdfOperationCounters, BdfStepError, BDF,
 };
 pub use crate::numerical::BDF::BDF_solver::{BdfJacobianCallbackError, BdfJacobianSource};
-use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::ivp_telemetry::{
     IvpLambdifyExecutionPolicy, IvpTelemetry, IvpTelemetrySnapshot,
@@ -140,20 +140,49 @@ use crate::symbolic::symbolic_ivp::{
     SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
+    prepare_generated_symbolic_ivp_problem, prepare_generated_symbolic_ivp_residual_problem,
     DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpAotBuildPolicy,
-    SymbolicIvpGeneratedBackendConfig, prepare_generated_symbolic_ivp_problem,
-    prepare_generated_symbolic_ivp_residual_problem,
+    SymbolicIvpGeneratedBackendConfig,
 };
 extern crate nalgebra as na;
-use crate::Utils::plots::plots_ref;
 use crate::numerical::BDF::common::NumberOrVec;
+use crate::Utils::plots::plots_ref;
 use na::{DMatrix, DVector};
 
 use csv::Writer;
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+#[cfg(test)]
+thread_local! {
+    static BDF_DENSE_JACOBIAN_SCRATCH_REFERENCE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_bdf_dense_jacobian_scratch_reference_for_test<T>(
+    enabled: bool,
+    operation: impl FnOnce() -> T,
+) -> T {
+    BDF_DENSE_JACOBIAN_SCRATCH_REFERENCE.with(|flag| {
+        let previous = flag.replace(enabled);
+        struct Restore<'a> {
+            flag: &'a Cell<bool>,
+            previous: bool,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.flag.set(self.previous);
+            }
+        }
+        let _restore = Restore { flag, previous };
+        let result = operation();
+        result
+    })
+}
 
 fn elapsed_ms(start: Option<Instant>) -> f64 {
     start.map_or(0.0, |start| start.elapsed().as_secs_f64() * 1_000.0)
@@ -1574,11 +1603,7 @@ impl ODEsolver {
             self.generated_backend_config.clone(),
         );
         self.preparation_timings.symbolic_backend_ms = elapsed_ms(symbolic_started);
-        let prepared = prepared_result.map_err(|err| IvpBackendError::GeneratedBackendFailure {
-            message: err.to_string(),
-        })?;
-        self.preparation_backend_telemetry =
-            backend_telemetry.map(|telemetry| telemetry.snapshot());
+        let prepared = prepared_result.map_err(IvpBackendError::from_generated_error)?;
 
         let callback_wiring_started = start.map(|_| Instant::now());
         self.generated_backend_config.resolver = prepared.updated_resolver.clone();
@@ -1598,9 +1623,27 @@ impl ODEsolver {
                 // AtomView keeps the native Jacobian plan outside the legacy
                 // symbolic matrix field. Use the validated IVP shape rather
                 // than inferring it from that compatibility-only field.
-                let rows = problem.equations.len();
-                let cols = problem.variables.len();
-                let mut values = vec![0.0; rows.saturating_mul(cols)];
+                #[cfg(test)]
+                let values = BDF_DENSE_JACOBIAN_SCRATCH_REFERENCE.with(|flag| {
+                    if flag.get() {
+                        vec![
+                            0.0;
+                            problem
+                                .equations
+                                .len()
+                                .saturating_mul(problem.variables.len())
+                        ]
+                    } else {
+                        Vec::with_capacity(problem.jacobian_value_workspace_len())
+                    }
+                });
+                #[cfg(not(test))]
+                let mut values = Vec::with_capacity(problem.jacobian_value_workspace_len());
+                #[cfg(test)]
+                let mut values = values;
+                problem
+                    .telemetry
+                    .record_allocation(values.capacity() * std::mem::size_of::<f64>());
                 Box::new(move |t, y, out: &mut DMatrix<f64>| {
                     problem
                         .try_evaluate_jacobian_into_dmatrix_with_workspace(
@@ -1634,6 +1677,12 @@ impl ODEsolver {
                 BdfJacobian::from_dense(instrumented(t, y))
             }))
         };
+        // Capture after callback workspace construction so logical scratch
+        // capacity allocations are included while setup failures still retain
+        // the completed symbolic/backend diagnostics.
+        self.preparation_backend_telemetry = backend_telemetry
+            .as_ref()
+            .map(|telemetry| telemetry.snapshot());
         self.parameter_values_handle = parameter_values_handle.clone();
         self.preparation_timings.callback_wiring_ms = elapsed_ms(callback_wiring_started);
 
@@ -1775,9 +1824,7 @@ impl ODEsolver {
                     options.with_aot_options(self.generated_backend_config.aot_options),
                     self.generated_backend_config.clone(),
                 )
-                .map_err(|err| IvpBackendError::GeneratedBackendFailure {
-                    message: err.to_string(),
-                })?;
+                .map_err(IvpBackendError::from_generated_error)?;
                 self.generated_backend_config.resolver = prepared.updated_resolver.clone();
                 let prepared_problem = prepared.into_problem();
                 let parameter_values_handle = prepared_problem.parameter_values_handle();
@@ -3171,7 +3218,7 @@ mod tests_generated_backend_heavy_dense_aot {
     use crate::symbolic::symbolic_ivp_generated::{
         DenseIvpGeneratedBackendMode, SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
     };
-    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

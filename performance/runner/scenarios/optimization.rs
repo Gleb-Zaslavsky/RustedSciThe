@@ -23,9 +23,11 @@ use nalgebra::DVector;
 use std::hint::black_box;
 use std::time::Instant;
 
-// 20k observations keep fitting gates above timer-noise scale while retaining
-// the same deterministic model and four-parameter optimization problem.
+// The nonlinear fitting routes use 20k observations. VarPro is substantially
+// cheaper per observation, so it needs a larger workload to stay above timer
+// noise and provide a useful regression gate.
 const SAMPLES: usize = 20_001;
+const VARPRO_SAMPLES: usize = 200_010;
 const EXPECTED: [f64; 4] = [2.0, 0.5, 1.0, 2.0];
 const FAMILY_GAVIN: u8 = 0;
 const FAMILY_FITTING: u8 = 1;
@@ -125,8 +127,16 @@ struct Data {
 
 impl Data {
     fn reference_fit() -> Self {
-        let x = (0..SAMPLES)
-            .map(|index| 20.0 * index as f64 / (SAMPLES - 1) as f64)
+        Self::reference_fit_with_samples(SAMPLES)
+    }
+
+    fn reference_varpro_fit() -> Self {
+        Self::reference_fit_with_samples(VARPRO_SAMPLES)
+    }
+
+    fn reference_fit_with_samples(samples: usize) -> Self {
+        let x = (0..samples)
+            .map(|index| 20.0 * index as f64 / (samples - 1) as f64)
             .collect::<Vec<_>>();
         let y = x
             .iter()
@@ -154,7 +164,11 @@ fn run_cell<
     let frontend = Frontend::from_id(FRONTEND_ID);
     let callback_policy = CallbackPolicy::from_id(POLICY_ID);
     let gavin_policy = GavinPolicy::from_id(GAVIN_POLICY_ID);
-    let data = Data::reference_fit();
+    let data = if matches!(FAMILY, FAMILY_VARPRO | FAMILY_UNIVERSAL_VARPRO) {
+        Data::reference_varpro_fit()
+    } else {
+        Data::reference_fit()
+    };
 
     let off_started = Instant::now();
     let off = run_once::<FAMILY>(&data, frontend, callback_policy, gavin_policy, false)?;
@@ -798,13 +812,23 @@ macro_rules! optimization_scenario {
                 "fitting",
                 "lambdify",
             ],
-            workload: "exponential-sinusoidal fit, 20001 samples, 4 fitted parameters",
+            workload: if matches!($family, FAMILY_VARPRO | FAMILY_UNIVERSAL_VARPRO) {
+                "exponential-sinusoidal VarPro fit, 200010 samples, 2 nonlinear parameters"
+            } else {
+                "exponential-sinusoidal fit, 20001 samples, 4 fitted parameters"
+            },
             frontend: $frontend,
             execution: "Lambdify",
             linear_algebra: "Dense (fixed fitting implementation)",
             parallel_policy: $policy,
             telemetry: "off wall gate + Detailed native stage diagnostics",
-            version: 2,
+            // The VarPro sample count is part of its workload contract and
+            // invalidates only those two old short-workload baselines.
+            version: if matches!($family, FAMILY_VARPRO | FAMILY_UNIVERSAL_VARPRO) {
+                3
+            } else {
+                2
+            },
             gate_metrics: &["scenario_wall_ms"],
             description: concat!(
                 "Matched ",
@@ -980,7 +1004,39 @@ pub static MATRIX_SCENARIOS: [Scenario; 14] = [
 
 #[cfg(test)]
 mod tests {
-    use super::MATRIX_SCENARIOS;
+    use super::{MATRIX_SCENARIOS, SAMPLES, VARPRO_SAMPLES};
+
+    #[test]
+    fn varpro_perf_gates_use_independently_versioned_large_workloads() {
+        assert!(VARPRO_SAMPLES >= SAMPLES * 10);
+
+        for suffix in ["varpro_expr", "universal_varpro_expr"] {
+            let scenario = MATRIX_SCENARIOS
+                .iter()
+                .find(|scenario| scenario.id.ends_with(suffix))
+                .unwrap_or_else(|| panic!("missing VarPro scenario: {suffix}"));
+            assert_eq!(
+                scenario.version, 3,
+                "{} must invalidate its old baseline",
+                scenario.id
+            );
+            assert!(scenario.workload.contains("200010 samples"));
+
+            let output =
+                (scenario.run)().unwrap_or_else(|error| panic!("{} failed: {error}", scenario.id));
+            let known_error = output
+                .diagnostics
+                .iter()
+                .find(|(name, _, _)| name == "known_parameter_max_error")
+                .map(|(_, _, value)| *value)
+                .expect("VarPro gate must report the known-parameter check");
+            assert!(
+                known_error <= 2.0e-2,
+                "{} error={known_error:e}",
+                scenario.id
+            );
+        }
+    }
 
     #[test]
     fn large_optimization_routes_pass_debug_correctness_and_telemetry_parity() {

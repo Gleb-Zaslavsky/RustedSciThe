@@ -860,6 +860,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fallible_atom_conversion_reports_unsupported_safe_shapes_without_panicking() {
+        let x = Atom::new_var(symbol!("x"));
+        let custom = FunctionBuilder::new(symbol!("custom"))
+            .add_arg(x.as_view())
+            .finish();
+        assert!(matches!(
+            try_atom_to_expr(&custom),
+            Err(AtomConversionError::UnsupportedFunction { name }) if name == "custom"
+        ));
+
+        let malformed_builtin = FunctionBuilder::new(Atom::SIN).finish();
+        assert!(matches!(
+            try_atom_to_expr(&malformed_builtin),
+            Err(AtomConversionError::InvalidFunctionArity { name, actual: 0 })
+                if name == "sin"
+        ));
+
+        let mut empty_sum = Atom::new();
+        empty_sum.to_add();
+        assert!(matches!(
+            try_atom_to_expr(&empty_sum),
+            Err(AtomConversionError::EmptyComposite { operator: "sum" })
+        ));
+
+        let mut empty_product = Atom::new();
+        empty_product.to_mul();
+        assert!(matches!(
+            try_atom_to_expr(&empty_product),
+            Err(AtomConversionError::EmptyComposite {
+                operator: "product"
+            })
+        ));
+
+        let nonfinite = Atom::new_f64(f64::NEG_INFINITY);
+        assert!(matches!(
+            try_atom_to_expr(&nonfinite),
+            Err(AtomConversionError::NonFiniteConstant {
+                kind: NonFiniteConstantKind::NegativeInfinity
+            })
+        ));
+    }
+
     /// Sub normalizes away: the round-trip produces Add(x, Mul(y, -1)).
     #[test]
     fn roundtrip_expr_sub_normalizes() {

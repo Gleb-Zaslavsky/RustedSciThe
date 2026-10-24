@@ -5,9 +5,7 @@
 use crate::symbolic::symbolic_engine::Expr;
 
 use crate::numerical::BE::BE;
-use crate::numerical::NR_for_ODE::NRODE;
-
-use crate::numerical::ODE_api::ODEsolver;
+use crate::numerical::ODE_api2::{SolverType, UniversalODESolver};
 use nalgebra::DVector;
 #[allow(dead_code)]
 pub fn ivp_examples(example: usize) {
@@ -70,39 +68,31 @@ pub fn ivp_examples(example: usize) {
             // set argument
             let arg = "x".to_string();
             // set method
-            let method = "BDF".to_string();
             // set initial conditions
             let t0 = 0.0;
             let y0 = vec![1.0, 1.0];
             let t_bound = 1.0;
             // set solver parameters (optional)
-            let first_step = None;
             let atol = 1e-5;
             let rtol = 1e-5;
             let max_step = 1e-3;
-            let jac_sparsity = None;
-            let vectorized = false;
-            // create instance of ODE solver and solve the system
-            let mut ODE_instance = ODEsolver::new_complex(
+            let mut solver = UniversalODESolver::new(
                 eq_system,
                 values,
                 arg,
-                method,
+                SolverType::Bdf,
                 t0,
-                y0.into(),
+                DVector::from_vec(y0),
                 t_bound,
-                max_step,
-                rtol,
-                atol,
-                jac_sparsity,
-                vectorized,
-                first_step,
             );
-
-            ODE_instance.solve();
-            // plot the solution
-            ODE_instance.plot_result();
-            let _ = ODE_instance.save_result();
+            solver.set_max_step(max_step);
+            solver.set_rtol(rtol);
+            solver.set_atol(atol);
+            solver
+                .try_solve()
+                .expect("ODE_api2 BDF solve should succeed");
+            solver.plot_result();
+            let _ = solver.save_result();
         }
         2 => {
             //Example 2 the laziest way to solve ODE
@@ -115,68 +105,56 @@ pub fn ivp_examples(example: usize) {
             // set argument
             let arg = "x".to_string();
             // set method
-            let method = "BDF".to_string();
             // set initial conditions
             let t0 = 0.0;
             let y0 = vec![1.0, 1.0];
             let t_bound = 1.0;
             // set solver parameters (optional)
-            let first_step = None;
             let atol = 1e-5;
             let rtol = 1e-5;
             let max_step = 1e-3;
-            let jac_sparsity = None;
-            let vectorized = false;
-            // create instance of ODE solver and solve the system
-            let mut ODE_instance = ODEsolver::new_complex(
+            let mut solver = UniversalODESolver::new(
                 Equations,
                 values,
                 arg,
-                method,
+                SolverType::Bdf,
                 t0,
-                y0.into(),
+                DVector::from_vec(y0),
                 t_bound,
-                max_step,
-                rtol,
-                atol,
-                jac_sparsity,
-                vectorized,
-                first_step,
             );
-
-            ODE_instance.solve();
-            ODE_instance.plot_result();
+            solver.set_max_step(max_step);
+            solver.set_rtol(rtol);
+            solver.set_atol(atol);
+            solver
+                .try_solve()
+                .expect("ODE_api2 BDF solve should succeed");
+            solver.plot_result();
         }
 
         3 => {
-            let eq1 = Expr::parse_expression("z^2+y^2-10.0*x");
-            let eq2 = Expr::parse_expression("z-y-4.0*x");
-            let eq_system = vec![eq1, eq2];
-            println!("eq_system = {:?}", eq_system);
-            let initial_guess = DVector::from_vec(vec![1.0, 1.0]);
-            let values = vec!["z".to_string(), "y".to_string()];
-            let arg = "x".to_string();
-            let tolerance = 1e-6;
-            let max_iterations = 100;
-            let max_error = 0.0;
-
-            assert_eq!(&eq_system.len(), &2);
-            let mut nr = NRODE::new(
-                eq_system,
-                initial_guess,
-                values,
-                arg,
-                tolerance,
-                max_iterations,
-                max_error,
+            println!(
+                "This numbered demo was retired with the algebraic NR_for_ODE module. Use Nonlinear_systems for nonlinear equations."
             );
-            nr.eq_generate();
-
-            assert_eq!(nr.eq_system.len(), 2);
-            nr.set_t(1.0);
-
-            let _ = nr.solve().unwrap();
         }
+
+        7 => {
+            let rhs = Expr::parse_vector_expression(vec!["-z-y", "y"]);
+            let mut solver = UniversalODESolver::new(
+                rhs,
+                vec!["z".to_string(), "y".to_string()],
+                "x".to_string(),
+                SolverType::NonStiff(crate::numerical::ODE_api2::NonStiffMethod::Dopri),
+                0.0,
+                DVector::from_vec(vec![1.0, 1.0]),
+                1.0,
+            );
+            solver.set_max_step(1e-3);
+            solver
+                .try_solve()
+                .expect("ODE_api2 DOPRI solve should succeed");
+            solver.plot_result();
+        }
+
         4 => {
             //  Backward Euler method: linear ODE
             let eq1 = Expr::parse_expression("z+y");
@@ -304,43 +282,6 @@ pub fn ivp_examples(example: usize) {
             // println!("\n result 1 = {:?}", result.1);
             // println!("result = {:?}", result.1.unwrap().shape());
             solver.plot_result();
-        }
-
-        7 => {
-            //Non-stiff equations: use ODE general api ODEsolver
-            // RK45 and Dormand-Prince methods are available
-
-            let RHS = vec!["-z-y", "y"];
-            // parse RHS as symbolic expressions
-            let Equations = Expr::parse_vector_expression(RHS.clone());
-            let values = vec!["z".to_string(), "y".to_string()];
-            println!("Equations = {:?}", Equations);
-            // set argument
-            let arg = "x".to_string();
-            // set method
-            let method = "DOPRI".to_string();
-            // set initial conditions
-            let t0 = 0.0;
-            let y0 = vec![1.0, 1.0];
-            let t_bound = 1.0;
-            // set solver parameters (optional)
-
-            let max_step = 1e-3;
-
-            // create instance of ODE solver and solve the system
-            let mut ODE_instance = ODEsolver::new_easy(
-                Equations,
-                values,
-                arg,
-                method,
-                t0,
-                y0.into(),
-                t_bound,
-                max_step,
-            );
-
-            ODE_instance.solve();
-            ODE_instance.plot_result();
         }
 
         _ => {

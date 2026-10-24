@@ -67,6 +67,16 @@ pub struct DampedSolverBuildRequest {
 impl DampedSolverBuildRequest {
     /// Builds a solver-ready callback and metadata state.
     pub fn generate(self) -> Result<DampedGeneratedSolverState, BvpBackendIntegrationError> {
+        self.generate_with_callback_runtime(
+            crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedCallbackRuntime::SolverNative,
+        )
+    }
+
+    /// Builds callbacks with an explicit damped-solver runtime adapter.
+    pub fn generate_with_callback_runtime(
+        self,
+        callback_runtime: crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedCallbackRuntime,
+    ) -> Result<DampedGeneratedSolverState, BvpBackendIntegrationError> {
         generate_damped_solver_state(
             self.eq_system,
             self.values,
@@ -98,6 +108,7 @@ impl DampedSolverBuildRequest {
             self.lambdify_telemetry_mode,
             self.aot_telemetry_mode,
             self.lambdify_execution_policy,
+            callback_runtime,
         )
     }
 }
@@ -143,6 +154,31 @@ pub fn try_generate_and_apply_damped_solver_state<
 ) -> Result<(), BvpBackendIntegrationError> {
     let request = target.build_solver_request(mesh, bandwidth);
     try_build_and_apply_damped_solver_state(target, request, context)
+}
+
+/// Generates and applies a damped solver state with a solver-local callback adapter.
+pub fn try_generate_and_apply_damped_solver_state_with_runtime<
+    T: BuildDampedSolverRequest + ApplyDampedGeneratedSolverState,
+>(
+    target: &mut T,
+    mesh: Option<Vec<f64>>,
+    bandwidth: Option<(usize, usize)>,
+    callback_runtime: crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedCallbackRuntime,
+    context: &str,
+) -> Result<(), BvpBackendIntegrationError> {
+    let request = target.build_solver_request(mesh, bandwidth);
+    info!("{context}: generating damped solver state");
+    match request.generate_with_callback_runtime(callback_runtime) {
+        Ok(state) => {
+            target.apply_generated_solver_state(state);
+            info!("{context}: damped solver state applied");
+            Ok(())
+        }
+        Err(err) => {
+            error!("{context}: {err:?}");
+            Err(err)
+        }
+    }
 }
 
 /// Asks a solver runtime object to build its damped request, then generates and applies the state.

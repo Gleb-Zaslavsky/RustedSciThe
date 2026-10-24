@@ -8,11 +8,69 @@ use crate::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, SymbolicLambdifyFrontend, SymbolicProblemOptions,
 };
 use crate::symbolic::symbolic_engine::Expr;
-use log::{Level, log};
+use log::{log, Level};
 use nalgebra::DVector;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+
+/// Controls how independent data observations are evaluated by [`Fitting`].
+///
+/// This is separate from [`LambdifyExecutionPolicy`], which controls work
+/// inside a single symbolic callback. The production default batches large
+/// data sets without nesting Rayon dispatch. See `FITTING_STORY_TESTS.md`
+/// (2026-10-24): two model families retain exact per-frontend solve counters
+/// and results, with lower full-fit time at the cost of staging memory. The
+/// existing solver telemetry schema is unchanged; callers can inspect the
+/// selected observation policy separately.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FittingObservationPolicy {
+    /// Batch at least 20,001 observations when the current Rayon pool has
+    /// multiple workers and symbolic callbacks are sequential. Otherwise use
+    /// the scalar path. The threshold is the smallest measured winning scale,
+    /// not a universal hardware-independent break-even estimate.
+    #[default]
+    Auto,
+    /// Evaluate observations serially, reusing one callback scratch per pass.
+    /// This remains supported for small jobs and memory-constrained fits.
+    Sequential,
+    /// Evaluate observation blocks in parallel once the sample count reaches
+    /// `min_observations`. A value of zero is treated as one. Work is split
+    /// into 1,024-observation blocks. This currently allocates a full
+    /// sample-major staging buffer before restoring the equation-major
+    /// least-squares layout; its payload grows with observations, equations,
+    /// and fitted parameters.
+    Parallel { min_observations: usize },
+}
+
+const FITTING_OBSERVATION_BATCH_SIZE: usize = 1024;
+const FITTING_OBSERVATION_AUTO_MIN: usize = 20_001;
+
+impl FittingObservationPolicy {
+    fn resolve(
+        self,
+        samples: usize,
+        workers: usize,
+        callback_policy: LambdifyExecutionPolicy,
+    ) -> Result<Self, FittingError> {
+        let callback_parallel = matches!(callback_policy, LambdifyExecutionPolicy::Parallel { .. });
+        match self {
+            Self::Parallel { .. } if callback_parallel => Err(FittingError::InvalidInput {
+                field: "nested observation and callback parallelism",
+            }),
+            Self::Auto
+                if !callback_parallel && workers > 1 && samples >= FITTING_OBSERVATION_AUTO_MIN =>
+            {
+                Ok(Self::Parallel {
+                    min_observations: FITTING_OBSERVATION_AUTO_MIN,
+                })
+            }
+            Self::Parallel { min_observations } if samples >= min_observations.max(1) => Ok(self),
+            _ => Ok(Self::Sequential),
+        }
+    }
+}
 
 /// Typed failures from input validation, symbolic preparation, and fitting.
 #[derive(Debug)]
@@ -104,6 +162,7 @@ pub struct Fitting {
     log_level: Option<Level>,
     symbolic_frontend: SymbolicLambdifyFrontend,
     lambdify_execution_policy: LambdifyExecutionPolicy,
+    observation_policy: FittingObservationPolicy,
     /// Prepared rectangular frontend retained between repeated solves.
     prepared_least_squares: Option<PreparedSymbolicLeastSquaresProblem>,
 }
@@ -147,6 +206,7 @@ impl Fitting {
             log_level: None,
             symbolic_frontend: SymbolicLambdifyFrontend::ExprLegacy,
             lambdify_execution_policy: LambdifyExecutionPolicy::Sequential,
+            observation_policy: FittingObservationPolicy::default(),
         }
     }
 
@@ -300,6 +360,42 @@ impl Fitting {
         self.invalidate_prepared();
         self.lambdify_execution_policy = policy;
         self
+    }
+
+    /// Selects production block-parallel evaluation across independent samples.
+    ///
+    /// This does not change the execution policy within a symbolic callback.
+    /// `Auto` (the default) preserves explicit inner callback parallelism by
+    /// keeping observations sequential. Explicit `Parallel` with parallel
+    /// callbacks is a typed configuration error. Choose `Sequential` to avoid
+    /// the extra sample-major staging buffer even for large data sets.
+    pub fn with_observation_policy(mut self, policy: FittingObservationPolicy) -> Self {
+        self.observation_policy = policy;
+        self.clear_last_solution();
+        self
+    }
+
+    /// Returns the requested observation policy, before automatic resolution.
+    pub fn observation_policy(&self) -> FittingObservationPolicy {
+        self.observation_policy
+    }
+
+    /// Resolves the policy for the current data and Rayon pool without solving.
+    /// Call inside the same `ThreadPool::install` scope as `try_solve` when
+    /// using a custom pool. This is configuration provenance, not telemetry.
+    pub fn resolved_observation_policy(&self) -> Result<FittingObservationPolicy, FittingError> {
+        // Small/sequential fits must not initialize a global Rayon pool merely
+        // to discover that no observation dispatch is needed.
+        let workers = if self.observation_policy == FittingObservationPolicy::Auto
+            && self.x_data.len() >= FITTING_OBSERVATION_AUTO_MIN
+            && self.lambdify_execution_policy == LambdifyExecutionPolicy::Sequential
+        {
+            rayon::current_num_threads()
+        } else {
+            1
+        };
+        self.observation_policy
+            .resolve(self.x_data.len(), workers, self.lambdify_execution_policy)
     }
 
     /// Returns the symbolic frontend selected for the current prepared model.
@@ -620,6 +716,7 @@ impl Fitting {
         );
     }
     fn try_prepare_least_squares(&mut self) -> Result<(), FittingError> {
+        self.resolved_observation_policy()?;
         let equations = self.active_equations();
         let options = SymbolicProblemOptions::new()
             .with_variables(self.unknown_coeffs.clone())
@@ -640,6 +737,9 @@ impl Fitting {
     pub fn try_solve(&mut self) -> Result<MinimizationReport, FittingError> {
         self.clear_last_solution();
         self.try_validate_and_infer()?;
+        // Validate every attempt, including reuse after a policy-only change.
+        // Such a change does not invalidate the prepared symbolic model.
+        let observation_policy = self.resolved_observation_policy()?;
         let mut solver = LevenbergMarquardt::new();
         if let Some(max_iterations) = self.max_iterations {
             solver = solver
@@ -685,6 +785,7 @@ impl Fitting {
             &self.x_data,
             &self.y_data,
             self.active_equations().len(),
+            observation_policy,
         );
 
         let (problem, report) = solver.minimize(problem);
@@ -814,6 +915,7 @@ struct FittingLeastSquaresProblem<'a> {
     x_data: &'a [f64],
     y_data: &'a [f64],
     equation_count: usize,
+    observation_policy: FittingObservationPolicy,
 }
 
 impl<'a> FittingLeastSquaresProblem<'a> {
@@ -824,6 +926,7 @@ impl<'a> FittingLeastSquaresProblem<'a> {
         x_data: &'a [f64],
         y_data: &'a [f64],
         equation_count: usize,
+        observation_policy: FittingObservationPolicy,
     ) -> Self {
         let params = model.params();
         Self {
@@ -832,10 +935,14 @@ impl<'a> FittingLeastSquaresProblem<'a> {
             x_data,
             y_data,
             equation_count,
+            observation_policy,
         }
     }
 
     fn evaluate_residuals(&self, params: &DVector<f64>) -> Result<DVector<f64>, LeastSquaresError> {
+        if self.should_parallelize_observations() {
+            return self.evaluate_residuals_parallel(params);
+        }
         let mut residuals = DVector::zeros(self.y_data.len());
         let mut point_parameter = DVector::zeros(1);
         let mut point_residual = DVector::zeros(self.equation_count);
@@ -853,10 +960,72 @@ impl<'a> FittingLeastSquaresProblem<'a> {
         Ok(residuals)
     }
 
+    fn should_parallelize_observations(&self) -> bool {
+        match self.observation_policy {
+            // Public Auto is resolved once before constructing this adapter.
+            FittingObservationPolicy::Auto => false,
+            FittingObservationPolicy::Sequential => false,
+            FittingObservationPolicy::Parallel { min_observations } => {
+                self.x_data.len() >= min_observations.max(1)
+            }
+        }
+    }
+
+    fn evaluate_residuals_parallel(
+        &self,
+        params: &DVector<f64>,
+    ) -> Result<DVector<f64>, LeastSquaresError> {
+        // Rayon workers need disjoint contiguous output chunks. Stage in
+        // sample-major order, then scatter once into the public equation-major
+        // layout; this trades an additional N * equation_count buffer for
+        // lock-free block writes.
+        let mut sample_major = vec![0.0; self.x_data.len() * self.equation_count];
+        self.x_data
+            .par_chunks(FITTING_OBSERVATION_BATCH_SIZE)
+            .enumerate()
+            .zip(sample_major.par_chunks_mut(FITTING_OBSERVATION_BATCH_SIZE * self.equation_count))
+            .try_for_each_init(
+                || (DVector::zeros(1), DVector::zeros(self.equation_count)),
+                |(point_parameter, point_residual), ((block_index, x_block), output_block)| {
+                    let block_start = block_index * FITTING_OBSERVATION_BATCH_SIZE;
+                    for (sample_index, &x) in x_block.iter().enumerate() {
+                        point_parameter[0] = x;
+                        self.model
+                            .residual_into_with_parameter_values(
+                                params,
+                                point_parameter,
+                                point_residual,
+                            )
+                            .map_err(|error| LeastSquaresError::Problem(error.into()))?;
+                        for equation_index in 0..self.equation_count {
+                            output_block[sample_index * self.equation_count + equation_index] =
+                                point_residual[equation_index]
+                                    - self.y_data[equation_index * self.x_data.len()
+                                        + block_start
+                                        + sample_index];
+                        }
+                    }
+                    Ok::<_, LeastSquaresError>(())
+                },
+            )?;
+
+        let mut residuals = DVector::zeros(self.y_data.len());
+        for sample_index in 0..self.x_data.len() {
+            for equation_index in 0..self.equation_count {
+                residuals[equation_index * self.x_data.len() + sample_index] =
+                    sample_major[sample_index * self.equation_count + equation_index];
+            }
+        }
+        Ok(residuals)
+    }
+
     fn evaluate_jacobian(
         &self,
         params: &DVector<f64>,
     ) -> Result<nalgebra::DMatrix<f64>, LeastSquaresError> {
+        if self.should_parallelize_observations() {
+            return self.evaluate_jacobian_parallel(params);
+        }
         let mut jacobian = nalgebra::DMatrix::zeros(self.y_data.len(), params.len());
         let mut point_parameter = DVector::zeros(1);
         let mut point_jacobian = nalgebra::DMatrix::zeros(self.equation_count, params.len());
@@ -870,6 +1039,64 @@ impl<'a> FittingLeastSquaresProblem<'a> {
                 for parameter_index in 0..params.len() {
                     jacobian[(output_index, parameter_index)] =
                         point_jacobian[(equation_index, parameter_index)];
+                }
+            }
+        }
+        Ok(jacobian)
+    }
+
+    fn evaluate_jacobian_parallel(
+        &self,
+        params: &DVector<f64>,
+    ) -> Result<nalgebra::DMatrix<f64>, LeastSquaresError> {
+        let row_width = self.equation_count * params.len();
+        // The contiguous staging layout lets workers write independent blocks;
+        // restoring the existing row order costs one extra buffer of
+        // observations * equations * parameters values.
+        let mut sample_major = vec![0.0; self.x_data.len() * row_width];
+        self.x_data
+            .par_chunks(FITTING_OBSERVATION_BATCH_SIZE)
+            .enumerate()
+            .zip(sample_major.par_chunks_mut(FITTING_OBSERVATION_BATCH_SIZE * row_width))
+            .try_for_each_init(
+                || {
+                    (
+                        DVector::zeros(1),
+                        nalgebra::DMatrix::zeros(self.equation_count, params.len()),
+                    )
+                },
+                |(point_parameter, point_jacobian), ((_, x_block), output_block)| {
+                    for (sample_index, &x) in x_block.iter().enumerate() {
+                        point_parameter[0] = x;
+                        self.model
+                            .jacobian_into_with_parameter_values(
+                                params,
+                                point_parameter,
+                                point_jacobian,
+                            )
+                            .map_err(|error| LeastSquaresError::Problem(error.into()))?;
+                        for equation_index in 0..self.equation_count {
+                            for parameter_index in 0..params.len() {
+                                let index = sample_index * row_width
+                                    + equation_index * params.len()
+                                    + parameter_index;
+                                output_block[index] =
+                                    point_jacobian[(equation_index, parameter_index)];
+                            }
+                        }
+                    }
+                    Ok::<_, LeastSquaresError>(())
+                },
+            )?;
+
+        let mut jacobian = nalgebra::DMatrix::zeros(self.y_data.len(), params.len());
+        for sample_index in 0..self.x_data.len() {
+            for equation_index in 0..self.equation_count {
+                let output_row = equation_index * self.x_data.len() + sample_index;
+                let sample_offset = sample_index * row_width + equation_index * params.len();
+                for parameter_index in 0..params.len() {
+                    jacobian[(output_row, parameter_index)] =
+                        sample_major[sample_offset + parameter_index];
                 }
             }
         }
@@ -932,6 +1159,140 @@ mod tests {
     use approx::assert_relative_eq;
 
     #[test]
+    fn observation_auto_respects_scale_workers_and_explicit_callback_policy() {
+        use FittingObservationPolicy::{Auto, Parallel, Sequential};
+        let callback_seq = LambdifyExecutionPolicy::Sequential;
+        let callback_par = LambdifyExecutionPolicy::Parallel { min_work: 1 };
+        assert_eq!(Fitting::new().observation_policy(), Auto);
+        for (samples, workers, callback, expected) in [
+            (20_000, 8, callback_seq, Sequential),
+            (20_001, 1, callback_seq, Sequential),
+            (20_001, 8, callback_par, Sequential),
+            (
+                20_001,
+                8,
+                callback_seq,
+                Parallel {
+                    min_observations: 20_001,
+                },
+            ),
+        ] {
+            assert_eq!(Auto.resolve(samples, workers, callback).unwrap(), expected);
+        }
+        assert_eq!(
+            Sequential.resolve(100_001, 8, callback_seq).unwrap(),
+            Sequential
+        );
+        assert_eq!(
+            Parallel {
+                min_observations: 20
+            }
+            .resolve(19, 8, callback_seq)
+            .unwrap(),
+            Sequential
+        );
+        // Explicit nested policies are rejected even below the threshold.
+        assert!(Parallel {
+            min_observations: 20
+        }
+        .resolve(1, 8, callback_par)
+        .is_err());
+    }
+
+    #[test]
+    fn default_large_fit_matches_scalar_results_and_all_telemetry_modes() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let x = (0..20_001).map(|i| i as f64 / 20_000.0).collect::<Vec<_>>();
+            for frontend in [
+                SymbolicLambdifyFrontend::ExprLegacy,
+                SymbolicLambdifyFrontend::AtomViewNative,
+            ] {
+                for mode in [
+                    LeastSquaresTelemetryMode::Off,
+                    LeastSquaresTelemetryMode::Counters,
+                    LeastSquaresTelemetryMode::Timings,
+                    LeastSquaresTelemetryMode::Detailed,
+                ] {
+                    let make = || {
+                        Fitting::new()
+                            .with_data(x.clone(), x.iter().map(|v| 2.0 * v + 1.0).collect())
+                            .with_equation(Expr::parse_expression("a*x+b"))
+                            .with_arg("x".into())
+                            .with_unknowns(vec!["a".into(), "b".into()])
+                            .with_initial_guess(vec![1.5, 0.7])
+                            .with_symbolic_frontend(frontend)
+                            .with_telemetry(mode)
+                    };
+                    let mut automatic = make();
+                    assert!(matches!(
+                        automatic.resolved_observation_policy().unwrap(),
+                        FittingObservationPolicy::Parallel { .. }
+                    ));
+                    let mut scalar =
+                        make().with_observation_policy(FittingObservationPolicy::Sequential);
+                    let actual = automatic.try_solve().unwrap();
+                    let expected = scalar.try_solve().unwrap();
+                    assert_eq!(automatic.result, scalar.result);
+                    assert_eq!(actual.termination, expected.termination);
+                    assert_eq!(actual.number_of_evaluations, expected.number_of_evaluations);
+                    let a = actual.statistics;
+                    let b = expected.statistics;
+                    assert_eq!(a.availability, b.availability);
+                    assert_eq!(a.timings_collected, b.timings_collected);
+                    assert_eq!(
+                        (
+                            a.iterations,
+                            a.residual_evaluations,
+                            a.jacobian_evaluations,
+                            a.linear_factorizations,
+                            a.linear_solves
+                        ),
+                        (
+                            b.iterations,
+                            b.residual_evaluations,
+                            b.jacobian_evaluations,
+                            b.linear_factorizations,
+                            b.linear_solves
+                        )
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn observation_policy_change_revalidates_a_prepared_fit() {
+        let mut fit = Fitting::new()
+            .with_data(vec![0.0, 1.0, 2.0], vec![0.0, 2.0, 4.0])
+            .with_equation(Expr::parse_expression("a*x"))
+            .with_arg("x".into())
+            .with_unknowns(vec!["a".into()])
+            .with_initial_guess(vec![0.5])
+            .with_lambdify_execution_policy(LambdifyExecutionPolicy::Parallel { min_work: 1 })
+            .try_build()
+            .unwrap();
+        assert!(fit.prepared_least_squares.is_some());
+        fit = fit.with_observation_policy(FittingObservationPolicy::Parallel {
+            min_observations: 1,
+        });
+        assert!(matches!(
+            fit.try_solve(),
+            Err(FittingError::InvalidInput {
+                field: "nested observation and callback parallelism"
+            })
+        ));
+        assert!(fit.result.is_none());
+        // Recover without rebuilding symbolic expressions after the invalid attempt.
+        fit = fit.with_observation_policy(FittingObservationPolicy::Auto);
+        fit.try_solve().unwrap();
+        assert!(fit.result.is_some());
+    }
+
+    #[test]
     fn fitting_prepares_equations_once_and_evaluates_observations_numerically() {
         let mut fitting = Fitting::new()
             .with_data(vec![0.0, 1.0, 2.0], vec![1.0, 3.0, 5.0, -2.0, -1.0, 0.0])
@@ -958,6 +1319,7 @@ mod tests {
             &fitting.x_data,
             &fitting.y_data,
             fitting.equations.len(),
+            FittingObservationPolicy::Sequential,
         );
         assert_eq!(
             problem.try_residuals().unwrap(),
@@ -986,6 +1348,353 @@ mod tests {
                 }
             )
         ));
+    }
+
+    #[test]
+    fn parallel_observation_blocks_match_scalar_residual_jacobian_and_fit() {
+        // Cross multiple internal 1,024-point chunks so this exercises actual
+        // worker-level parallelism, not only the staging/scatter path.
+        let x_data = (0..2049)
+            .map(|index| index as f64 / 100.0)
+            .collect::<Vec<_>>();
+        let y_data = x_data
+            .iter()
+            .map(|&x| 2.0 * x - 1.0)
+            .chain(x_data.iter().map(|&x| -0.5 * x + 3.0))
+            .collect::<Vec<_>>();
+        let equations = vec![
+            Expr::parse_expression("a*x+b"),
+            Expr::parse_expression("c*x+d"),
+        ];
+        let variables = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        for frontend in [
+            SymbolicLambdifyFrontend::ExprLegacy,
+            SymbolicLambdifyFrontend::AtomViewNative,
+        ] {
+            let initial = DVector::from_vec(vec![1.7, -0.7, -0.3, 2.7]);
+            let prepared = PreparedSymbolicLeastSquaresProblem::from_expressions(
+                equations.clone(),
+                SymbolicProblemOptions::new()
+                    .with_variables(variables.clone())
+                    .with_equation_parameters(vec!["x".to_string()])
+                    .with_lambdify_backend()
+                    .with_lambdify_frontend(frontend)
+                    .with_lambdify_execution_policy(LambdifyExecutionPolicy::Sequential),
+            )
+            .unwrap();
+            let sequential = FittingLeastSquaresProblem::new(
+                prepared
+                    .bind_values_with_guess(DVector::zeros(1), initial.clone())
+                    .unwrap(),
+                &x_data,
+                &y_data,
+                equations.len(),
+                FittingObservationPolicy::Sequential,
+            );
+            let parallel = FittingLeastSquaresProblem::new(
+                prepared
+                    .bind_values_with_guess(DVector::zeros(1), initial)
+                    .unwrap(),
+                &x_data,
+                &y_data,
+                equations.len(),
+                FittingObservationPolicy::Parallel {
+                    min_observations: 1,
+                },
+            );
+
+            assert_eq!(
+                sequential.try_residuals().unwrap(),
+                parallel.try_residuals().unwrap()
+            );
+            assert_eq!(
+                sequential.try_jacobian().unwrap(),
+                parallel.try_jacobian().unwrap()
+            );
+
+            let make_fit = |observation_policy| {
+                Fitting::new()
+                    .with_data(x_data.clone(), y_data.clone())
+                    .with_equations(equations.clone())
+                    .with_arg("x".to_string())
+                    .with_unknowns(variables.clone())
+                    .with_initial_guess(vec![1.7, -0.7, -0.3, 2.7])
+                    .with_symbolic_frontend(frontend)
+                    .with_observation_policy(observation_policy)
+                    .with_telemetry(LeastSquaresTelemetryMode::Counters)
+            };
+            let scalar_fit = make_fit(FittingObservationPolicy::Sequential)
+                .try_build()
+                .unwrap();
+            let parallel_fit = make_fit(FittingObservationPolicy::Parallel {
+                min_observations: 1,
+            })
+            .try_build()
+            .unwrap();
+            assert_eq!(scalar_fit.result, parallel_fit.result);
+            let scalar_stats = scalar_fit.last_statistics().unwrap();
+            let parallel_stats = parallel_fit.last_statistics().unwrap();
+            assert_eq!(scalar_stats.availability, parallel_stats.availability);
+            assert_eq!(
+                scalar_stats.timings_collected,
+                parallel_stats.timings_collected
+            );
+            assert_eq!(scalar_stats.iterations, parallel_stats.iterations);
+            assert_eq!(
+                scalar_stats.residual_evaluations,
+                parallel_stats.residual_evaluations
+            );
+            assert_eq!(
+                scalar_stats.jacobian_evaluations,
+                parallel_stats.jacobian_evaluations
+            );
+            assert_eq!(
+                scalar_stats.linear_factorizations,
+                parallel_stats.linear_factorizations
+            );
+            assert_eq!(scalar_stats.linear_solves, parallel_stats.linear_solves);
+            assert_relative_eq!(
+                scalar_fit.r_squared().unwrap(),
+                parallel_fit.r_squared().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn fitting_rejects_nested_observation_and_callback_parallelism() {
+        let result = Fitting::new()
+            .with_data(vec![0.0, 1.0], vec![0.0, 1.0])
+            .with_equation(Expr::parse_expression("a*x"))
+            .with_arg("x".to_string())
+            .with_unknowns(vec!["a".to_string()])
+            .with_initial_guess(vec![0.5])
+            .with_observation_policy(FittingObservationPolicy::Parallel {
+                min_observations: 1,
+            })
+            .with_lambdify_execution_policy(LambdifyExecutionPolicy::Parallel { min_work: 1 })
+            .try_build();
+
+        assert!(matches!(
+            result,
+            Err(FittingError::InvalidInput {
+                field: "nested observation and callback parallelism"
+            })
+        ));
+    }
+
+    #[test]
+    fn parallel_observation_blocks_preserve_typed_callback_failures() {
+        let mut x_data = vec![1.0; 2049];
+        x_data[1024] = -1.0;
+        let y_data = vec![0.0; x_data.len()];
+        let model = PreparedSymbolicLeastSquaresProblem::from_expressions(
+            vec![Expr::parse_expression("a*ln(x)")],
+            SymbolicProblemOptions::new()
+                .with_variables(vec!["a".to_string()])
+                .with_equation_parameters(vec!["x".to_string()])
+                .with_lambdify_frontend(SymbolicLambdifyFrontend::ExprLegacy)
+                .with_lambdify_execution_policy(LambdifyExecutionPolicy::Sequential),
+        )
+        .expect("log model should prepare");
+
+        let evaluate = |observation_policy| {
+            let bound = model
+                .bind_values_with_guess(DVector::zeros(1), DVector::from_vec(vec![1.0]))
+                .expect("model should bind");
+            FittingLeastSquaresProblem::new(bound, &x_data, &y_data, 1, observation_policy)
+                .try_residuals()
+        };
+
+        let sequential_error = evaluate(FittingObservationPolicy::Sequential)
+            .expect_err("negative logarithm input should fail");
+        let parallel_error = evaluate(FittingObservationPolicy::Parallel {
+            min_observations: 1,
+        })
+        .expect_err("negative logarithm input should fail in observation workers");
+        assert!(matches!(
+            sequential_error,
+            LeastSquaresError::Problem(
+                crate::numerical::Nonlinear_systems::error::SolveError::ResidualEvaluation(_)
+            )
+        ));
+        assert!(matches!(
+            parallel_error,
+            LeastSquaresError::Problem(
+                crate::numerical::Nonlinear_systems::error::SolveError::ResidualEvaluation(_)
+            )
+        ));
+    }
+
+    #[test]
+    #[ignore = "release A/B story: large fitting workloads, sequential versus observation batches"]
+    fn fitting_observation_batch_ab_large_workloads() {
+        use std::time::Instant;
+
+        for sample_count in [20_001, 100_001] {
+            let x_data = (0..sample_count)
+                .map(|index| 20.0 * index as f64 / (sample_count - 1) as f64)
+                .collect::<Vec<_>>();
+            let y_data = x_data
+                .iter()
+                .map(|&x| 2.0 * (-x / 0.5_f64).exp() + (x / 2.0_f64).sin())
+                .collect::<Vec<_>>();
+
+            for frontend in [
+                SymbolicLambdifyFrontend::ExprLegacy,
+                SymbolicLambdifyFrontend::AtomViewNative,
+            ] {
+                for observation_policy in [
+                    FittingObservationPolicy::Sequential,
+                    FittingObservationPolicy::Parallel {
+                        min_observations: 256,
+                    },
+                ] {
+                    let mut fit = Fitting::new()
+                        .try_with_equation_str("a*exp(-x/tau)+c*sin(x/omega)")
+                        .unwrap()
+                        .with_data(x_data.clone(), y_data.clone())
+                        .with_arg("x".into())
+                        .with_unknowns(["a", "tau", "c", "omega"].map(str::to_owned).to_vec())
+                        .with_initial_guess(vec![1.9, 0.55, 0.9, 1.9])
+                        .with_symbolic_frontend(frontend)
+                        .with_lambdify_execution_policy(LambdifyExecutionPolicy::Sequential)
+                        .with_observation_policy(observation_policy)
+                        .with_telemetry(LeastSquaresTelemetryMode::Detailed);
+                    fit.try_validate_and_infer().unwrap();
+                    let preparation_started = Instant::now();
+                    fit.try_prepare_least_squares().unwrap();
+                    let preparation_ms = preparation_started.elapsed().as_secs_f64() * 1_000.0;
+                    let solve_started = Instant::now();
+                    fit.try_solve().unwrap();
+                    let solve_wall_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
+                    let stats = fit.last_statistics().unwrap();
+                    println!(
+                        "FIT_BATCH_AB samples={sample_count} frontend={frontend:?} policy={observation_policy:?} preparation_ms={preparation_ms:.3} solve_wall_ms={solve_wall_ms:.3} residual_ms={:.3} jacobian_ms={:.3} iterations={} residual_evaluations={} jacobian_evaluations={} factorizations={} solves={}",
+                        stats.residual_duration.as_secs_f64() * 1_000.0,
+                        stats.jacobian_duration.as_secs_f64() * 1_000.0,
+                        stats.iterations,
+                        stats.residual_evaluations,
+                        stats.jacobian_evaluations,
+                        stats.linear_factorizations,
+                        stats.linear_solves,
+                    );
+                    assert!(fit.r_squared().is_some_and(|r2| r2 > 0.99));
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "release A/B story: second nonlinear, multi-equation fitting family"]
+    fn fitting_observation_batch_ab_two_response_model() {
+        use std::time::Instant;
+
+        let sample_count = 100_001;
+        let x_data = (0..sample_count)
+            .map(|index| 4.0 * index as f64 / (sample_count - 1) as f64)
+            .collect::<Vec<_>>();
+        let mut y_data = Vec::with_capacity(2 * sample_count);
+        y_data.extend(x_data.iter().map(|&x| 1.7 * (-0.35 * x).exp() + 0.2));
+        y_data.extend(x_data.iter().map(|&x| 0.8 * (1.2 * x).sin() - 0.1));
+        let equations = vec![
+            Expr::parse_expression("a*exp(b*x)+c"),
+            Expr::parse_expression("d*sin(e*x)+f"),
+        ];
+        let unknowns = ["a", "b", "c", "d", "e", "f"].map(str::to_owned).to_vec();
+        let initial_guess = vec![1.6, -0.32, 0.15, 0.75, 1.15, -0.08];
+
+        for frontend in [
+            SymbolicLambdifyFrontend::ExprLegacy,
+            SymbolicLambdifyFrontend::AtomViewNative,
+        ] {
+            let mut sequential_results = Vec::new();
+            let mut parallel_results = Vec::new();
+            // Alternate route order to reduce systematic drift from always
+            // measuring the same policy first in a long-running release test.
+            for repetition in 0..7 {
+                let policies = if repetition % 2 == 0 {
+                    [
+                        FittingObservationPolicy::Sequential,
+                        FittingObservationPolicy::Parallel {
+                            min_observations: 256,
+                        },
+                    ]
+                } else {
+                    [
+                        FittingObservationPolicy::Parallel {
+                            min_observations: 256,
+                        },
+                        FittingObservationPolicy::Sequential,
+                    ]
+                };
+
+                for policy in policies {
+                    let mut fit = Fitting::new()
+                        .with_data(x_data.clone(), y_data.clone())
+                        .with_equations(equations.clone())
+                        .with_arg("x".into())
+                        .with_unknowns(unknowns.clone())
+                        .with_initial_guess(initial_guess.clone())
+                        .with_symbolic_frontend(frontend)
+                        .with_lambdify_execution_policy(LambdifyExecutionPolicy::Sequential)
+                        .with_observation_policy(policy)
+                        .with_telemetry(LeastSquaresTelemetryMode::Detailed);
+                    fit.try_validate_and_infer().unwrap();
+
+                    let preparation_started = Instant::now();
+                    fit.try_prepare_least_squares().unwrap();
+                    let preparation_ms = preparation_started.elapsed().as_secs_f64() * 1_000.0;
+                    let solve_started = Instant::now();
+                    fit.try_solve().unwrap();
+                    let solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
+                    let stats = fit.last_statistics().unwrap();
+                    let solution = fit.result.as_ref().unwrap().as_slice().to_vec();
+                    assert!(fit.r_squared().is_some_and(|r_squared| r_squared > 0.999));
+
+                    println!(
+                        "FIT_BATCH_TWO_RESPONSE repetition={repetition} samples={sample_count} equations=2 parameters=6 frontend={frontend:?} policy={policy:?} preparation_ms={preparation_ms:.3} solve_ms={solve_ms:.3} residual_ms={:.3} jacobian_ms={:.3} iterations={} residual_evaluations={} jacobian_evaluations={} factorizations={} linear_solves={}",
+                        stats.residual_duration.as_secs_f64() * 1_000.0,
+                        stats.jacobian_duration.as_secs_f64() * 1_000.0,
+                        stats.iterations,
+                        stats.residual_evaluations,
+                        stats.jacobian_evaluations,
+                        stats.linear_factorizations,
+                        stats.linear_solves,
+                    );
+                    let row = (solution, stats.clone());
+                    match policy {
+                        FittingObservationPolicy::Auto => unreachable!("explicit A/B policies"),
+                        FittingObservationPolicy::Sequential => sequential_results.push(row),
+                        FittingObservationPolicy::Parallel { .. } => parallel_results.push(row),
+                    }
+                }
+            }
+
+            for ((sequential_solution, sequential_stats), (parallel_solution, parallel_stats)) in
+                sequential_results.iter().zip(&parallel_results)
+            {
+                assert_eq!(sequential_solution, parallel_solution);
+                assert_eq!(sequential_stats.iterations, parallel_stats.iterations);
+                assert_eq!(
+                    sequential_stats.residual_evaluations,
+                    parallel_stats.residual_evaluations
+                );
+                assert_eq!(
+                    sequential_stats.jacobian_evaluations,
+                    parallel_stats.jacobian_evaluations
+                );
+                assert_eq!(
+                    sequential_stats.linear_factorizations,
+                    parallel_stats.linear_factorizations
+                );
+                assert_eq!(sequential_stats.linear_solves, parallel_stats.linear_solves);
+            }
+        }
     }
 
     #[test]

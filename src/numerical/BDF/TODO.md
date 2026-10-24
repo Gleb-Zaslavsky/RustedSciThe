@@ -695,15 +695,14 @@ verification is deferred until the batch is exhausted.
   Linear-solve time is timed via an opt-in factorization wrapper; that wrapper is
   absent in `Off`. The unconditional solve timing stdout was removed. A bounded
   Criterion full-solve overhead group
-  now compares `Off`/`Counters`/`Timings` on dimensions `1,3,16,64`, with a
-  trajectory-equivalence preflight. Dense release diagnostics show the new step
-  subscopes are each only a few microseconds at n=100; no dedicated release
-  Off/Counters/Timings overhead result is included in the supplied logs.
-  Remaining work: characterize optional instrumentation overhead on release
-  hardware, split stop-condition/retry controller time if measurement justifies
-  it, and distinguish known workspace events from allocator-measured allocation
-  counts. The shared facade reports zero for scopes not yet instrumented by other
-  engines (currently Radau).
+  now compares all four modes on dimensions `1,16,64,256,512`, with a
+  trajectory-equivalence preflight and 30-sample release rows. The 2026-10-23
+  Windows capture shows timing overhead falling from ~131% at n=1 to ~1.4% at
+  n=512; see `BDF_STORY_TESTS.md`. Remaining work: characterize another
+  hardware profile, split stop-condition/retry controller time if measurement
+  justifies it, and distinguish known workspace events from allocator-measured
+  allocation counts. The shared facade reports zero for scopes not yet
+  instrumented by other engines (currently Radau).
 - [~] **BD-17: Normalize AOT cold/warm contracts at the solver boundary.** Track
   cache lookup/provenance, symbolic work, lowering/source, materialization,
   compile, library load/symbol binding and publication. Distinguish attempts from
@@ -1115,4 +1114,26 @@ This closes the first two optimization items as implemented architectural
 changes. The next release baseline must repeat callback-only, cold preparation,
 warm solve and fresh E2E slices separately; their scopes must not be merged into
 one frontend ranking.
+
+## Production Decision: Expr Jacobian Scratch Capacity (2026-10-23)
+
+- [x] Keep the nnz-sized reusable Expr Jacobian value scratch as the production
+  route. The previous dense `n*n` zero-filled scratch was compared against it
+  through a test-only selector in one release binary; no production callback
+  branch or solver setting was added.
+- [x] Full-solve parity and work counters were exact on diffusion chains at
+  `n=256` and `n=512`: same final state, `22` accepted / `3` rejected steps,
+  `56` RHS calls, `1` Jacobian evaluation and `7` LU factorizations.
+- [x] Detailed backend allocation telemetry measured `524,288 -> 6,128 B`
+  at `n=256`, and `2,097,152 -> 12,272 B` at `n=512` for persistent Jacobian
+  scratch (`n*n` versus `3*n-2` values).
+- [x] The 101-pair telemetry-Off full-solve medians were `8.656/8.570 ms`
+  (`n=256`, old/new) and `42.150/42.552 ms` (`n=512`). MAD ranges overlap;
+  this confirms no meaningful wall-clock claim, only a large reduction in
+  scratch allocation/initialization and retained capacity.
+- [x] Debug parity passed at `n=128/256`; the same work counters and zero state
+  difference were observed. Reproduce the Release story with environment
+  variables `BDF_SCRATCH_AB_DIMENSIONS=256,512` and
+  `BDF_SCRATCH_AB_REPETITIONS=101`, selecting
+  `numerical::BDF::performance_story_tests::bdf_diffusion_expr_jacobian_scratch_full_solve_ab`.
 

@@ -18,9 +18,10 @@ mod tests {
 
     use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
     use crate::numerical::Nonlinear_systems::prelude::{
-        BoundSymbolicNonlinearProblem, DampedNewtonMethod, JacobianProvider,
-        LambdifyExecutionPolicy, NonlinearProblem, PreparedSymbolicNonlinearProblem, SolveOptions,
-        SolverEngine, SymbolicProblemOptions,
+        BoundSymbolicNonlinearProblem, DampedNewtonMethod, ExprJacobianPreparationPolicy,
+        JacobianProvider, LambdifyExecutionPolicy, NonlinearProblem, PreparationStage,
+        PreparationTelemetryMode, PreparedSymbolicNonlinearProblem, SolveOptions, SolverEngine,
+        SymbolicLambdifyFrontend, SymbolicProblemOptions,
     };
     use crate::symbolic::symbolic_functions::Jacobian;
 
@@ -438,6 +439,189 @@ mod tests {
                         metrics.max_solution_diff,
                     );
                 }
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct ExprJacobianAbMetrics {
+        preparation_ms: Vec<f64>,
+        differentiation_ms: Vec<f64>,
+        solve_ms: Vec<f64>,
+        total_ms: Vec<f64>,
+    }
+
+    struct ExprJacobianAbSample {
+        solution: DVector<f64>,
+        counters: (usize, usize, usize, usize),
+        metrics: ExprJacobianAbMetrics,
+    }
+
+    fn measure_expr_jacobian_policy(
+        equations: &[String],
+        variables: &[String],
+        initial: &DVector<f64>,
+        solve_options: &SolveOptions,
+        policy: ExprJacobianPreparationPolicy,
+    ) -> ExprJacobianAbSample {
+        let total_started = std::time::Instant::now();
+        let prepared = PreparedSymbolicNonlinearProblem::from_strings(
+            equations.to_vec(),
+            SymbolicProblemOptions::new()
+                .with_variables(variables.to_vec())
+                .with_lambdify_frontend(SymbolicLambdifyFrontend::ExprLegacy)
+                .with_expr_jacobian_preparation_policy(policy)
+                .with_preparation_telemetry(PreparationTelemetryMode::Collect),
+        )
+        .expect("Expr Jacobian A/B preparation should succeed");
+        let preparation_ms = prepared
+            .preparation_report()
+            .preparation_duration
+            .as_secs_f64()
+            * 1e3;
+        let differentiation_ms = prepared
+            .preparation_report()
+            .detailed
+            .as_ref()
+            .and_then(|report| report.stage(PreparationStage::JacobianDifferentiation))
+            .and_then(|stage| stage.wall_time)
+            .expect("Jacobian differentiation timing")
+            .as_secs_f64()
+            * 1e3;
+        let bound = prepared
+            .bind_without_parameters()
+            .expect("Expr Jacobian A/B binding should succeed");
+        let solve_started = std::time::Instant::now();
+        let result = SolverEngine::new(DampedNewtonMethod::default(), solve_options.clone())
+            .solve(&bound, initial.clone())
+            .expect("Expr Jacobian A/B solve should succeed");
+        let solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
+        assert!(
+            matches!(result.termination, TerminationReason::Converged),
+            "Expr Jacobian A/B solve ended as {:?}, residual={:.3e}",
+            result.termination,
+            result.residual_norm
+        );
+        let statistics = result.statistics;
+        ExprJacobianAbSample {
+            solution: result.x,
+            counters: (
+                statistics.residual_evaluations,
+                statistics.jacobian_evaluations,
+                statistics.linear_solves,
+                statistics.iterations,
+            ),
+            metrics: ExprJacobianAbMetrics {
+                preparation_ms: vec![preparation_ms],
+                differentiation_ms: vec![differentiation_ms],
+                solve_ms: vec![solve_ms],
+                total_ms: vec![total_started.elapsed().as_secs_f64() * 1e3],
+            },
+        }
+    }
+
+    fn median(values: &mut [f64]) -> f64 {
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    }
+
+    fn merge_ab_metrics(target: &mut ExprJacobianAbMetrics, sample: ExprJacobianAbMetrics) {
+        target.preparation_ms.extend(sample.preparation_ms);
+        target.differentiation_ms.extend(sample.differentiation_ms);
+        target.solve_ms.extend(sample.solve_ms);
+        target.total_ms.extend(sample.total_ms);
+    }
+
+    #[test]
+    #[ignore = "release-oriented opt-in Expr Jacobian preparation A/B on large nonlinear systems"]
+    fn dependency_aware_expr_jacobian_large_workload_ab() {
+        let runs = std::env::var("NONLINEAR_EXPR_JACOBIAN_AB_RUNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|runs| *runs >= 5)
+            .unwrap_or(7);
+        let options = SolveOptions {
+            tolerance: 1e-10,
+            max_iterations: 80,
+            diagnostics: crate::numerical::Nonlinear_systems::engine::DiagnosticsOptions {
+                collect_history: false,
+                telemetry_mode: crate::numerical::SolverTelemetryMode::Detailed,
+                enable_logging: false,
+                ..Default::default()
+            },
+            ..SolveOptions::default()
+        };
+        println!(
+            "[Expr Jacobian preparation A/B] runs={runs}; dimension=512; medians in ms; source order alternates"
+        );
+        println!(
+            "case | route | diff_ms | prepare_ms | numerical_solve_ms | cold_to_solution_ms | R/J/L/I | max_solution_diff"
+        );
+
+        for corpus in [Corpus::QuadraticChain, Corpus::BandFive] {
+            let dimension = 512;
+            let (equations, variables, target) = corpus_data(corpus, dimension);
+            let initial = target.map(|value| value * 0.99);
+            let mut legacy_metrics = ExprJacobianAbMetrics::default();
+            let mut candidate_metrics = ExprJacobianAbMetrics::default();
+            let mut expected_counters = None;
+            let mut reference_solution: Option<DVector<f64>> = None;
+            let mut max_solution_diff: f64 = 0.0;
+
+            for run in 0..runs {
+                let order = if run % 2 == 0 {
+                    [
+                        ExprJacobianPreparationPolicy::LegacyDense,
+                        ExprJacobianPreparationPolicy::DependencyAware,
+                    ]
+                } else {
+                    [
+                        ExprJacobianPreparationPolicy::DependencyAware,
+                        ExprJacobianPreparationPolicy::LegacyDense,
+                    ]
+                };
+                for policy in order {
+                    let sample = measure_expr_jacobian_policy(
+                        &equations, &variables, &initial, &options, policy,
+                    );
+                    if let Some(expected) = expected_counters {
+                        assert_eq!(sample.counters, expected, "solver counters changed");
+                    } else {
+                        expected_counters = Some(sample.counters);
+                    }
+                    if let Some(reference) = &reference_solution {
+                        let difference = sample
+                            .solution
+                            .iter()
+                            .zip(reference.iter())
+                            .map(|(actual, expected)| (actual - expected).abs())
+                            .fold(0.0, f64::max);
+                        max_solution_diff = max_solution_diff.max(difference);
+                    } else {
+                        reference_solution = Some(sample.solution.clone());
+                    }
+                    if policy == ExprJacobianPreparationPolicy::LegacyDense {
+                        merge_ab_metrics(&mut legacy_metrics, sample.metrics);
+                    } else {
+                        merge_ab_metrics(&mut candidate_metrics, sample.metrics);
+                    }
+                }
+            }
+
+            for (route, metrics) in [
+                ("legacy-dense", legacy_metrics),
+                ("dependency-aware", candidate_metrics),
+            ] {
+                let diff_ms = median(&mut metrics.differentiation_ms.clone());
+                let preparation_ms = median(&mut metrics.preparation_ms.clone());
+                let solve_ms = median(&mut metrics.solve_ms.clone());
+                let total_ms = median(&mut metrics.total_ms.clone());
+                println!(
+                    "{} | {route} | {diff_ms:.3} | {preparation_ms:.3} | {solve_ms:.3} | {total_ms:.3} | {:?} | {:.3e}",
+                    corpus.name(),
+                    expected_counters.expect("at least one A/B sample"),
+                    max_solution_diff,
+                );
             }
         }
     }

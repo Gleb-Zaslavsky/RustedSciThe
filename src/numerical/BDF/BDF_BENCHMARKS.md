@@ -16,7 +16,7 @@ Sparse/Banded BDF performance belongs to the LSODE2 benchmark suite.
 
 | Bench | Coverage | Scope |
 | --- | --- | --- |
-| `bdf_telemetry_overhead` | Telemetry Off/Counters/Timings, dimensions 1/3/16/64 | Full native-callback solve; correctness preflight runs before measurement |
+| `bdf_telemetry_overhead` | Telemetry Off/Counters/Timings/Detailed, dimensions 1/16/64/256/512 | Full native-callback solve; 30-sample correctness preflight and release telemetry-overhead capture |
 | `bdf_symbolic_frontends` | ExprLegacy vs AtomView on stiff scalar, Robertson and combustion-like; optional three-body/diffusion | Separate Criterion prepare, prepared solve and fresh end-to-end; an untimed Timings-mode pass prints solver-stage scopes and counters per workload/backend |
 | `bdf_symbolic_frontends` / `bdf_parameterized_workload_continuation` | ExprLegacy vs AtomView on scalar, combustion-like, and diffusion workloads; continuation counts 1/4/16 | Warm callback reuse vs fresh solver/backend preparation at each segment boundary; preflight checks trajectory parity |
 | `bdf_aot_frontends` | ExprLegacy-AOT vs AtomView-AOT using C/tcc and isolated artifact directories | Cold preparation, prepared warm solve and cold end-to-end; analytic/Lambdify parity preflight |
@@ -1407,3 +1407,37 @@ is explicitly limited to dense millisecond-scale costs: factorization and
 linear-solve ownership, dense Jacobian output conversion, and a shared fixture
 for formally comparable warm Criterion groups. Microsecond callback changes
 and Criterion outliers remain diagnostic, not release thresholds.
+
+## Release Matrix After Expr Jacobian Scratch Refactor (2026-10-24)
+
+The final BDF Release filter passed `95/95` selected tests, with `13` ignored;
+the ignored release stories passed when selected separately. The run validates
+the current production Expr Jacobian scratch layout: structurally absent
+entries no longer require an `n*n` zero-filled value buffer. This is the
+memory/allocation refactor measured in the 2026-10-23 same-binary A/B above,
+not a change to BDF's integration algorithm. Full details and the transient
+zero-duration telemetry assertion are in
+[`BDF_STORY_TESTS.md`](BDF_STORY_TESTS.md#ivp-symbolic-refactor-full-release-matrix-confirmation-2026-10-24).
+
+On the 1024-state diffusion-chain workload, selected release medians were:
+
+| route | preparation ms | warm solve ms | 16 warm continuations ms |
+| --- | ---: | ---: | ---: |
+| Expr Lambdify Sequential | 36.824 | 228.540 | 3192.350 |
+| Atom Lambdify Sequential | 14.858 | 226.074 | 3171.951 |
+| Expr AOT Whole | 110.231 | 227.364 | 3232.510 |
+| Atom AOT Whole | 56.668 | 223.422 | 3206.880 |
+
+The AOT preparation cost did not break even within the measured 16-segment
+series. Parallel Lambdify was slower than Sequential on this workload; Auto
+was close to Sequential. Work counters stayed at `56` residuals, `1` Jacobian,
+`7` LU factorizations and `22` accepted steps across the displayed rows, with
+identical final states. The complete backend/frontend/policy matrix, including
+additional parallel rows and telemetry, is in
+[`bdf_workload_matrix.md`](../../../test_reports/BDF_release_manual/20261023T220315Z/reports/BDF_Bench/release/bdf_workload_matrix.md).
+
+The first broad nightly attempt reported a zero-duration Nordsieck-update
+timer as a failure; the targeted rerun and final full filter both passed. This
+was a timer-resolution assertion, not a numerical failure. The final repeated
+result is recorded rather than changing a baseline or editing test
+expectations based on the transient run.

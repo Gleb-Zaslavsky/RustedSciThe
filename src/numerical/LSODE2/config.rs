@@ -257,6 +257,10 @@ impl Lsode2SymbolicAssemblyBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lsode2SymbolicExecutionMode {
     LambdifyExpr,
+    /// Experimental reusable Atom evaluator. This route is opt-in, is not
+    /// recommended for production, and is currently restricted to AtomView
+    /// assembly with the faithful Banded backend and sequential execution.
+    PreparedAtom,
     Aot {
         toolchain: Lsode2AotToolchain,
         profile: Lsode2AotProfile,
@@ -273,6 +277,7 @@ impl Lsode2SymbolicExecutionMode {
     pub fn label(self) -> &'static str {
         match self {
             Self::LambdifyExpr => "lambdify_expr",
+            Self::PreparedAtom => "prepared_atom_experimental",
             Self::Aot { .. } => "aot",
         }
     }
@@ -1101,6 +1106,19 @@ impl Lsode2ProblemConfig {
         self
     }
 
+    /// Selects the experimental reusable Atom callback route for a Banded
+    /// system. It is not recommended for production: the LSODE2 release A/B
+    /// found the full solve slower than AtomViewNative. This opt-in currently
+    /// supports sequential AtomView/Lambdify evaluation only.
+    pub fn with_prepared_atom_banded_callbacks(mut self, kl: usize, ku: usize) -> Self {
+        self = self.with_native_banded_faithful_backend();
+        self = self.with_residual_jacobian_source(Lsode2ResidualJacobianSource::Symbolic {
+            assembly: Lsode2SymbolicAssemblyBackend::AtomView,
+            execution: Lsode2SymbolicExecutionMode::PreparedAtom,
+        });
+        self.with_linear_system_structure(Lsode2LinearSystemStructure::Banded { kl, ku })
+    }
+
     pub fn with_linear_system_structure(mut self, structure: Lsode2LinearSystemStructure) -> Self {
         self.linear_system_structure = structure;
         self.sync_legacy_backend_from_policy();
@@ -1162,7 +1180,8 @@ impl Lsode2ProblemConfig {
             self.residual_jacobian_source
         {
             match execution {
-                Lsode2SymbolicExecutionMode::LambdifyExpr => {
+                Lsode2SymbolicExecutionMode::LambdifyExpr
+                | Lsode2SymbolicExecutionMode::PreparedAtom => {
                     self.backend.generated_backend.build_policy =
                         SymbolicIvpAotBuildPolicy::UseIfAvailable;
                 }

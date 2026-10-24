@@ -1,15 +1,19 @@
-use crate::numerical::BDF::BDF_api::{BdfSolverOptions, BdfTelemetryMode, ODEsolver};
-use crate::numerical::ivp_workloads::{WorkloadKind, build_workload, dense_coupled};
+use crate::numerical::ivp_workloads::{build_workload, dense_coupled, WorkloadKind};
+use crate::numerical::BDF::BDF_api::{
+    with_bdf_dense_jacobian_scratch_reference_for_test, BdfSolverOptions, BdfTelemetryMode,
+    ODEsolver,
+};
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::ivp_telemetry::{
     IvpColdStage, IvpLambdifyExecutionPolicy, IvpTelemetry, IvpTelemetrySnapshot, IvpWarmStage,
 };
 use crate::symbolic::symbolic_ivp::{
-    IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions, prepare_symbolic_ivp_problem,
+    prepare_symbolic_ivp_problem, with_expr_legacy_scalar_reference_for_test,
+    IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
-    prepare_generated_symbolic_ivp_problem,
+    prepare_generated_symbolic_ivp_problem, SymbolicIvpAotBuildPolicy,
+    SymbolicIvpGeneratedBackendConfig,
 };
 use nalgebra::DVector;
 use std::hint::black_box;
@@ -696,6 +700,347 @@ fn bdf_dense_fresh_e2e_routes_alternate_to_control_host_order_bias() {
         eprintln!(
             "{} | atom-native | {:.3} | {:.3} | {:.3} | ratio={ratio:.3}x",
             dimension, atom_summary.0, atom_summary.1, atom_summary.2
+        );
+    }
+}
+
+fn run_dense_coupled_builder_revision(
+    dimension: usize,
+    use_scalar_reference: bool,
+    telemetry_mode: BdfTelemetryMode,
+) -> (
+    Duration,
+    DVector<f64>,
+    crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics,
+) {
+    let mut solver = dense_coupled_solver(
+        dimension,
+        IvpSymbolicAssemblyBackend::ExprLegacy,
+        telemetry_mode,
+    );
+    let started = Instant::now();
+    with_expr_legacy_scalar_reference_for_test(use_scalar_reference, || {
+        solver
+            .try_solve()
+            .unwrap_or_else(|error| panic!("BDF dense ExprLegacy n={dimension}: {error}"));
+    });
+    let elapsed = started.elapsed();
+    let state = final_state(&solver);
+    let statistics = solver.get_statistics();
+    assert_eq!(solver.get_status(), "finished");
+    (elapsed, state, statistics)
+}
+
+fn run_diffusion_scratch_route(
+    dimension: usize,
+    dense_reference: bool,
+    telemetry_mode: BdfTelemetryMode,
+) -> (
+    Duration,
+    DVector<f64>,
+    crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics,
+    u64,
+) {
+    let mut solver = measured_solver(
+        WorkloadKind::DiffusionChain,
+        dimension,
+        IvpSymbolicAssemblyBackend::ExprLegacy,
+    );
+    solver.set_telemetry_mode(telemetry_mode);
+    let started = Instant::now();
+    with_bdf_dense_jacobian_scratch_reference_for_test(dense_reference, || {
+        solver
+            .try_solve()
+            .unwrap_or_else(|error| panic!("BDF diffusion n={dimension}: {error}"));
+    });
+    let elapsed = started.elapsed();
+    let allocated_bytes = solver
+        .preparation_backend_telemetry()
+        .map_or(0, |snapshot| snapshot.allocated_bytes);
+    let state = final_state(&solver);
+    let statistics = solver.get_statistics();
+    assert_eq!(solver.get_status(), "finished");
+    (elapsed, state, statistics, allocated_bytes)
+}
+
+#[test]
+#[ignore = "release full-solve A/B for sparse Expr Jacobian scratch allocation"]
+fn bdf_diffusion_expr_jacobian_scratch_full_solve_ab() {
+    let dimensions = std::env::var("BDF_SCRATCH_AB_DIMENSIONS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|part| part.trim().parse::<usize>().ok())
+                .filter(|dimension| *dimension >= 16)
+                .collect::<Vec<_>>()
+        })
+        .filter(|dimensions| !dimensions.is_empty())
+        .unwrap_or_else(|| vec![128, 256, 512]);
+    let repetitions = std::env::var("BDF_SCRATCH_AB_REPETITIONS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|repetitions| *repetitions >= 3)
+        .unwrap_or(31);
+
+    eprintln!(
+        "[BDF Expr Jacobian scratch full-solve A/B] diffusion chain; ExprLegacy; old dense zero-filled n^2 scratch vs production nnz-sized reusable scratch; Off timings alternate order; {repetitions} paired solves"
+    );
+    eprintln!(
+        "n | route | full try_solve median/MAD ms | scratch allocation bytes | backend allocation bytes (Detailed) | accepted/rejected | RHS/Jacobian/LU | max state diff"
+    );
+
+    for dimension in dimensions {
+        let (old_detail, old_state, old_stats, old_allocated) =
+            run_diffusion_scratch_route(dimension, true, BdfTelemetryMode::Detailed);
+        let (new_detail, new_state, new_stats, new_allocated) =
+            run_diffusion_scratch_route(dimension, false, BdfTelemetryMode::Detailed);
+        let detail_diff = old_state
+            .iter()
+            .zip(new_state.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            detail_diff <= 1.0e-12,
+            "n={dimension} state drift={detail_diff:e}"
+        );
+        assert_eq!(old_stats.bdf_nfev_total, new_stats.bdf_nfev_total);
+        assert_eq!(old_stats.bdf_njev_total, new_stats.bdf_njev_total);
+        assert_eq!(old_stats.bdf_nlu_total, new_stats.bdf_nlu_total);
+        assert_eq!(
+            old_stats.accepted_steps_total,
+            new_stats.accepted_steps_total
+        );
+        assert_eq!(
+            old_stats.rejected_step_attempts_total,
+            new_stats.rejected_step_attempts_total
+        );
+
+        let expected_old_scratch = (dimension * dimension * std::mem::size_of::<f64>()) as u64;
+        let new_scratch = dimension
+            .saturating_mul(3)
+            .saturating_sub(2)
+            .saturating_mul(std::mem::size_of::<f64>()) as u64;
+        assert!(old_allocated >= expected_old_scratch);
+        assert!(
+            new_allocated < old_allocated,
+            "n={dimension}: {new_allocated} >= {old_allocated}"
+        );
+
+        let _ = (old_detail, new_detail);
+        let _ = run_diffusion_scratch_route(dimension, true, BdfTelemetryMode::Off);
+        let _ = run_diffusion_scratch_route(dimension, false, BdfTelemetryMode::Off);
+        let mut old_samples = Vec::with_capacity(repetitions);
+        let mut new_samples = Vec::with_capacity(repetitions);
+        let mut pair_diff: f64 = 0.0;
+        for pair in 0..repetitions {
+            let (old, new) = if pair % 2 == 0 {
+                (
+                    run_diffusion_scratch_route(dimension, true, BdfTelemetryMode::Off),
+                    run_diffusion_scratch_route(dimension, false, BdfTelemetryMode::Off),
+                )
+            } else {
+                let new = run_diffusion_scratch_route(dimension, false, BdfTelemetryMode::Off);
+                let old = run_diffusion_scratch_route(dimension, true, BdfTelemetryMode::Off);
+                (old, new)
+            };
+            pair_diff = pair_diff.max(
+                old.1
+                    .iter()
+                    .zip(new.1.iter())
+                    .map(|(left, right)| (left - right).abs())
+                    .fold(0.0_f64, f64::max),
+            );
+            old_samples.push(old.0);
+            new_samples.push(new.0);
+        }
+        assert!(
+            pair_diff <= 1.0e-12,
+            "n={dimension} paired drift={pair_diff:e}"
+        );
+        let old_summary = duration_median_mad_ms(&old_samples);
+        let new_summary = duration_median_mad_ms(&new_samples);
+        eprintln!(
+            "{dimension} | legacy dense scratch | {:.3}/{:.3} | {} | {} | {}/{} | {}/{}/{} | {:.3e}",
+            old_summary.0,
+            old_summary.1,
+            expected_old_scratch,
+            old_allocated,
+            old_stats.accepted_steps_total,
+            old_stats.rejected_step_attempts_total,
+            old_stats.bdf_nfev_total,
+            old_stats.bdf_njev_total,
+            old_stats.bdf_nlu_total,
+            detail_diff,
+        );
+        eprintln!(
+            "{dimension} | production nnz scratch | {:.3}/{:.3} | {} | {} | {}/{} | {}/{}/{} | {:.3e}",
+            new_summary.0,
+            new_summary.1,
+            new_scratch,
+            new_allocated,
+            new_stats.accepted_steps_total,
+            new_stats.rejected_step_attempts_total,
+            new_stats.bdf_nfev_total,
+            new_stats.bdf_njev_total,
+            new_stats.bdf_nlu_total,
+            pair_diff,
+        );
+    }
+}
+
+fn duration_median_mad_ms(samples: &[Duration]) -> (f64, f64) {
+    let mut values = samples
+        .iter()
+        .map(|duration| duration.as_secs_f64() * 1.0e3)
+        .collect::<Vec<_>>();
+    values.sort_by(f64::total_cmp);
+    let median = values[values.len() / 2];
+    let mut deviations = values
+        .iter()
+        .map(|value| (value - median).abs())
+        .collect::<Vec<_>>();
+    deviations.sort_by(f64::total_cmp);
+    (median, deviations[deviations.len() / 2])
+}
+
+#[test]
+#[ignore = "release old-vs-optimized ExprLegacy full-solve A/B for dense BDF"]
+fn bdf_dense_exprlegacy_scalar_reference_vs_optimized_full_solve_ab() {
+    let dimensions = std::env::var("BDF_EXPR_BUILDER_AB_DIMENSIONS")
+        .ok()
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|part| part.trim().parse::<usize>().ok())
+                .filter(|dimension| *dimension >= 2)
+                .collect::<Vec<_>>()
+        })
+        .filter(|dimensions| !dimensions.is_empty())
+        .unwrap_or_else(|| vec![32, 64, 100, 128, 256]);
+    let repetitions = std::env::var("BDF_EXPR_BUILDER_AB_REPETITIONS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|repetitions| *repetitions > 0)
+        .unwrap_or(15);
+    eprintln!(
+        "[BDF old-vs-optimized ExprLegacy A/B] dense coupled workloads={dimensions:?}, repetitions={repetitions}, paired alternating order; timed try_solve uses telemetry Off and excludes solver construction"
+    );
+    eprintln!(
+        "n | route | try_solve median/MAD ms | prepare telemetry ms | solve telemetry ms | residual/Jacobian/factor/linear | accepted/rejected | nonlinear solves/iterations | max state diff"
+    );
+
+    for dimension in dimensions {
+        let (old_detailed_wall, old_detailed_state, old_stats) =
+            run_dense_coupled_builder_revision(dimension, true, BdfTelemetryMode::Detailed);
+        let (optimized_detailed_wall, optimized_detailed_state, optimized_stats) =
+            run_dense_coupled_builder_revision(dimension, false, BdfTelemetryMode::Detailed);
+        let detailed_diff = old_detailed_state
+            .iter()
+            .zip(optimized_detailed_state.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            detailed_diff <= 2.0e-5,
+            "n={dimension} diff={detailed_diff:e}"
+        );
+        assert_eq!(
+            old_stats.backend_prepare_calls,
+            optimized_stats.backend_prepare_calls
+        );
+        assert_eq!(old_stats.residual_calls, optimized_stats.residual_calls);
+        assert_eq!(old_stats.jacobian_calls, optimized_stats.jacobian_calls);
+        assert_eq!(old_stats.bdf_nfev_total, optimized_stats.bdf_nfev_total);
+        assert_eq!(old_stats.bdf_njev_total, optimized_stats.bdf_njev_total);
+        assert_eq!(old_stats.bdf_nlu_total, optimized_stats.bdf_nlu_total);
+        assert_eq!(
+            old_stats.accepted_steps_total,
+            optimized_stats.accepted_steps_total
+        );
+        assert_eq!(
+            old_stats.rejected_step_attempts_total,
+            optimized_stats.rejected_step_attempts_total
+        );
+        assert_eq!(
+            old_stats.nonlinear_solve_calls,
+            optimized_stats.nonlinear_solve_calls
+        );
+        assert_eq!(
+            old_stats.nonlinear_iterations_total,
+            optimized_stats.nonlinear_iterations_total
+        );
+        assert_eq!(
+            old_stats.linear_solve_attempts_total,
+            optimized_stats.linear_solve_attempts_total
+        );
+
+        let _ = (old_detailed_wall, optimized_detailed_wall);
+        let _ = run_dense_coupled_builder_revision(dimension, true, BdfTelemetryMode::Off);
+        let _ = run_dense_coupled_builder_revision(dimension, false, BdfTelemetryMode::Off);
+        let mut old_samples = Vec::with_capacity(repetitions);
+        let mut optimized_samples = Vec::with_capacity(repetitions);
+        let mut max_pair_diff: f64 = 0.0;
+        for pair in 0..repetitions {
+            let (old, optimized) = if pair % 2 == 0 {
+                (
+                    run_dense_coupled_builder_revision(dimension, true, BdfTelemetryMode::Off),
+                    run_dense_coupled_builder_revision(dimension, false, BdfTelemetryMode::Off),
+                )
+            } else {
+                let optimized =
+                    run_dense_coupled_builder_revision(dimension, false, BdfTelemetryMode::Off);
+                let old =
+                    run_dense_coupled_builder_revision(dimension, true, BdfTelemetryMode::Off);
+                (old, optimized)
+            };
+            let pair_diff = old
+                .1
+                .iter()
+                .zip(optimized.1.iter())
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0_f64, f64::max);
+            max_pair_diff = max_pair_diff.max(pair_diff);
+            old_samples.push(old.0);
+            optimized_samples.push(optimized.0);
+        }
+        assert!(
+            max_pair_diff <= 2.0e-5,
+            "n={dimension} diff={max_pair_diff:e}"
+        );
+
+        let old_summary = duration_median_mad_ms(&old_samples);
+        let optimized_summary = duration_median_mad_ms(&optimized_samples);
+        eprintln!(
+            "{dimension} | old scalar reference | {:.3}/{:.3} | {:.3} | {:.3} | {}/{}/{}/{} | {}/{} | {}/{} | {:.3e}",
+            old_summary.0,
+            old_summary.1,
+            old_stats.backend_prepare_ms_total,
+            old_stats.solve_ms_total,
+            old_stats.residual_calls,
+            old_stats.jacobian_calls,
+            old_stats.bdf_nlu_total,
+            old_stats.linear_solve_attempts_total,
+            old_stats.accepted_steps_total,
+            old_stats.rejected_step_attempts_total,
+            old_stats.nonlinear_solve_calls,
+            old_stats.nonlinear_iterations_total,
+            detailed_diff,
+        );
+        eprintln!(
+            "{dimension} | optimized ExprLegacy | {:.3}/{:.3} | {:.3} | {:.3} | {}/{}/{}/{} | {}/{} | {}/{} | {:.3e}",
+            optimized_summary.0,
+            optimized_summary.1,
+            optimized_stats.backend_prepare_ms_total,
+            optimized_stats.solve_ms_total,
+            optimized_stats.residual_calls,
+            optimized_stats.jacobian_calls,
+            optimized_stats.bdf_nlu_total,
+            optimized_stats.linear_solve_attempts_total,
+            optimized_stats.accepted_steps_total,
+            optimized_stats.rejected_step_attempts_total,
+            optimized_stats.nonlinear_solve_calls,
+            optimized_stats.nonlinear_iterations_total,
+            max_pair_diff,
         );
     }
 }

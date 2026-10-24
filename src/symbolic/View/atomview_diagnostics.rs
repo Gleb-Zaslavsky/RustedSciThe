@@ -298,7 +298,10 @@ mod tests {
         for (source, variables, arguments) in [
             ("(-2)^3", &[][..], &[][..]),
             ("(-2)^4", &[][..], &[][..]),
+            ("(-2)^31", &[][..], &[][..]),
+            ("(-2)^32", &[][..], &[][..]),
             ("2^-3", &[][..], &[][..]),
+            ("2^-1024", &[][..], &[][..]),
             ("(1+x)^0.5", &["x"][..], &[3.0][..]),
             ("(1+x)^-0.5", &["x"][..], &[3.0][..]),
             ("(-2)^0.5", &[][..], &[][..]),
@@ -309,6 +312,68 @@ mod tests {
                 report.atom_value.is_nan(),
                 "power domain classification drift for {source:?}: {report:?}"
             );
+        }
+    }
+
+    #[test]
+    fn diagnostic_covers_zero_signed_zero_and_variable_exponent_edges() {
+        for base in [0.0, -0.0, 2.0, -2.0] {
+            for (exponent, expected) in [(0.0, 1.0), (1.0, base)] {
+                let report = assert_scalar_parity("x^y", &["x", "y"], &[base, exponent]);
+                assert_eq!(report.expr_value, expected);
+                assert_eq!(report.atom_value, expected);
+                if expected == 0.0 {
+                    assert_eq!(
+                        report.expr_value.is_sign_negative(),
+                        expected.is_sign_negative()
+                    );
+                    assert_eq!(
+                        report.atom_value.is_sign_negative(),
+                        expected.is_sign_negative()
+                    );
+                }
+            }
+
+            let reciprocal = assert_scalar_parity("x^-1", &["x"], &[base]);
+            if base == 0.0 {
+                assert!(reciprocal.expr_value.is_infinite());
+                assert!(reciprocal.atom_value.is_infinite());
+                assert_eq!(
+                    reciprocal.expr_value.is_sign_negative(),
+                    base.is_sign_negative()
+                );
+                assert_eq!(
+                    reciprocal.atom_value.is_sign_negative(),
+                    base.is_sign_negative()
+                );
+            }
+        }
+
+        for (base, exponent, expect_nan, expect_sign_negative) in [
+            (-2.0, 3.0, false, true),
+            (-2.0, 0.5, true, false),
+            (0.0, -3.0, false, false),
+            (-0.0, -3.0, false, true),
+            (-0.0, 3.0, false, true),
+        ] {
+            let report = assert_scalar_parity("x^y", &["x", "y"], &[base, exponent]);
+            assert_eq!(report.expr_value.is_nan(), expect_nan);
+            assert_eq!(report.atom_value.is_nan(), expect_nan);
+            if !expect_nan && (report.expr_value == 0.0 || report.expr_value.is_infinite()) {
+                assert_eq!(report.expr_value.is_sign_negative(), expect_sign_negative);
+                assert_eq!(report.atom_value.is_sign_negative(), expect_sign_negative);
+            }
+        }
+
+        for base in [f64::MIN_POSITIVE, -f64::MIN_POSITIVE, f64::MAX, -f64::MAX] {
+            let report = assert_scalar_parity("x^-1", &["x"], &[base]);
+            assert_eq!(report.expr_value.is_finite(), report.atom_value.is_finite());
+            assert_eq!(
+                report.expr_value.is_sign_negative(),
+                report.atom_value.is_sign_negative()
+            );
+            assert_ne!(report.expr_value, 0.0);
+            assert_ne!(report.atom_value, 0.0);
         }
     }
 

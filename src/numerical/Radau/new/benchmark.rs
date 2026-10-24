@@ -14,7 +14,10 @@ use super::telemetry::{RadauTelemetry, RadauTelemetryMode};
 use crate::numerical::ivp_workloads::{
     WorkloadKind, build_workload, parameter_continuation_target,
 };
-use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
+use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetry};
+use crate::symbolic::symbolic_ivp::{
+    build_expr_legacy_banded_jacobian, build_expr_legacy_sparse_jacobian,
+};
 use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
 use std::time::Instant;
 
@@ -246,35 +249,56 @@ impl PreparedBenchmark {
     ) -> Result<Self, String> {
         let workload_data = build_workload(workload, dimension);
         let variables: Vec<&str> = workload_data.variables.iter().map(String::as_str).collect();
-        let jacobian = match assembly {
-            BenchmarkAssembly::ExprLegacy => Some(
-                workload_data
-                    .equations
-                    .iter()
-                    .flat_map(|equation| {
-                        variables
-                            .iter()
-                            .map(move |variable| equation.diff(variable))
-                    })
-                    .collect(),
-            ),
-            BenchmarkAssembly::AtomViewNative => None,
-        };
         let mut preparation = RadauTelemetry::new(RadauTelemetryMode::Off);
-        let callbacks = PreparedSymbolicCallbacks::prepare_with_telemetry_and_policy(
-            assembly.internal(),
-            workload_data.equations,
-            jacobian,
-            &workload_data.time_variable,
-            &variables,
-            &workload_data
-                .parameter_names
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
-            &mut preparation,
-            policy.internal(),
-        )
+        let parameter_names = workload_data
+            .parameter_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let callbacks = match assembly {
+            BenchmarkAssembly::ExprLegacy => {
+                // Match RadauSolver::prepare: derive only structural
+                // coordinates, using bandwidth when the selected layout is
+                // Banded, rather than injecting an explicit dense n-by-n
+                // Jacobian into the lower-level callback constructor.
+                let symbolic_telemetry = IvpTelemetry::disabled();
+                let jacobian = match layout {
+                    BenchmarkLayout::Banded { lower, upper } => build_expr_legacy_banded_jacobian(
+                        &workload_data.equations,
+                        &workload_data.variables,
+                        (lower, upper),
+                        &symbolic_telemetry,
+                    ),
+                    BenchmarkLayout::Dense | BenchmarkLayout::Sparse => {
+                        build_expr_legacy_sparse_jacobian(
+                            &workload_data.equations,
+                            &workload_data.variables,
+                            &symbolic_telemetry,
+                        )
+                    }
+                };
+                PreparedSymbolicCallbacks::prepare_expr_sparse(
+                    workload_data.equations,
+                    jacobian,
+                    &workload_data.time_variable,
+                    &variables,
+                    &parameter_names,
+                    policy.internal(),
+                )
+            }
+            BenchmarkAssembly::AtomViewNative => {
+                PreparedSymbolicCallbacks::prepare_with_telemetry_and_policy(
+                    assembly.internal(),
+                    workload_data.equations,
+                    None,
+                    &workload_data.time_variable,
+                    &variables,
+                    &parameter_names,
+                    &mut preparation,
+                    policy.internal(),
+                )
+            }
+        }
         .map_err(|error| error.to_string())?;
         let config = RadauConfig {
             execution: RadauExecution::Lambdify,

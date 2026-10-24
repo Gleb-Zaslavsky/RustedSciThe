@@ -1,8 +1,8 @@
 use crate::symbolic::symbolic_engine::Expr;
 
+use petgraph::Direction::Incoming;
 use petgraph::algo::{kosaraju_scc, toposort};
 use petgraph::graph::{DiGraph, NodeIndex};
-use petgraph::Direction::Incoming;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
@@ -67,6 +67,18 @@ pub struct DependencyAnalysis {
     pub defined_dependencies: Vec<String>,
 
     /// Неопределённые переменные, остающиеся после полного раскрытия.
+    pub free_variables: Vec<String>,
+}
+
+/// Direct dependencies referenced by one named definition.
+///
+/// Unlike [`DependencyAnalysis`], this report does not traverse definitions
+/// recursively. Both lists are sorted so language bindings and diagnostics
+/// receive stable results independent of hash-map insertion order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectDependencyAnalysis {
+    pub target: String,
+    pub defined_dependencies: Vec<String>,
     pub free_variables: Vec<String>,
 }
 
@@ -153,13 +165,33 @@ impl SymbolicSystem {
         outputs
     }
 
+    /// Returns dependencies referenced directly by `target`'s expression.
+    pub fn direct_dependencies(
+        &self,
+        target: &str,
+    ) -> Result<DirectDependencyAnalysis, SymbolicSystemError> {
+        let expression = self.require_definition(target)?;
+        let mut defined_dependencies = BTreeSet::new();
+        let mut free_variables = BTreeSet::new();
+
+        for name in expression.all_arguments_are_variables() {
+            if self.definitions.contains_key(&name) {
+                defined_dependencies.insert(name);
+            } else {
+                free_variables.insert(name);
+            }
+        }
+
+        Ok(DirectDependencyAnalysis {
+            target: target.to_string(),
+            defined_dependencies: defined_dependencies.into_iter().collect(),
+            free_variables: free_variables.into_iter().collect(),
+        })
+    }
+
     /// Анализирует подсистему, необходимую для вычисления target.
     pub fn analyze_target(&self, target: &str) -> Result<DependencyAnalysis, SymbolicSystemError> {
-        let target_node = self
-            .node_by_name
-            .get(target)
-            .copied()
-            .ok_or_else(|| SymbolicSystemError::UnknownTarget(target.to_string()))?;
+        let target_node = self.require_target_node(target)?;
 
         let mut visited = HashSet::new();
         self.collect_reachable(target_node, &mut visited);
@@ -213,7 +245,12 @@ impl SymbolicSystem {
 
         for name in self.defined_variables() {
             let mut active = Vec::<String>::new();
-            let _ = self.expand_variable(&name, stop_variables, &mut memo, &mut active)?;
+            let expanded = self.expand_variable(&name, stop_variables, &mut memo, &mut active)?;
+
+            // A stopped variable is intentionally returned without entering
+            // the recursive memo cache. It must still be present in the bulk
+            // result because it is a named definition owned by this system.
+            memo.entry(name).or_insert(expanded);
         }
 
         Ok(memo.into_iter().collect())
@@ -228,9 +265,7 @@ impl SymbolicSystem {
         target: &str,
         stop_variables: &HashSet<String>,
     ) -> Result<Expr, SymbolicSystemError> {
-        if !self.node_by_name.contains_key(target) {
-            return Err(SymbolicSystemError::UnknownTarget(target.to_string()));
-        }
+        self.require_definition(target)?;
 
         let mut memo = HashMap::<String, Expr>::new();
         let mut active = Vec::<String>::new();
@@ -241,32 +276,45 @@ impl SymbolicSystem {
     /// Возвращает порядок вычисления зависимостей target:
     /// сначала независимые определения, затем зависящие от них.
     pub fn evaluation_order(&self, target: &str) -> Result<Vec<String>, SymbolicSystemError> {
-        let target_node = self
-            .node_by_name
-            .get(target)
-            .copied()
-            .ok_or_else(|| SymbolicSystemError::UnknownTarget(target.to_string()))?;
+        self.require_definition(target)?;
 
-        let mut reachable = HashSet::new();
-        self.collect_reachable(target_node, &mut reachable);
+        // Use an explicit post-order stack so deeply nested named models do
+        // not consume the Rust call stack. Dependencies are pushed in reverse
+        // lexical order and therefore visited in stable lexical order.
+        let mut scheduled = HashSet::new();
+        let mut order = Vec::new();
+        let mut stack = vec![(target.to_string(), false)];
 
-        // При направлении lhs -> dependency toposort выдаёт lhs раньше
-        // его зависимостей. Для порядка вычисления результат разворачиваем.
-        let mut order = toposort(&self.graph, None).map_err(|_| self.cycle_error())?;
+        while let Some((name, emit)) = stack.pop() {
+            if emit {
+                order.push(name);
+                continue;
+            }
+            if !scheduled.insert(name.clone()) {
+                continue;
+            }
 
-        order.reverse();
+            stack.push((name.clone(), true));
 
-        Ok(order
-            .into_iter()
-            .filter(|node| reachable.contains(node))
-            .map(|node| self.graph[node].clone())
-            .filter(|name| self.definitions.contains_key(name))
-            .collect())
+            let mut dependencies = self.definitions[&name]
+                .all_arguments_are_variables()
+                .into_iter()
+                .filter(|dependency| self.definitions.contains_key(dependency))
+                .collect::<Vec<_>>();
+            dependencies.sort();
+            dependencies.dedup();
+
+            for dependency in dependencies.into_iter().rev() {
+                stack.push((dependency, false));
+            }
+        }
+
+        Ok(order)
     }
 
     fn build_graph(&mut self) {
         // Сначала добавляем все определённые переменные.
-        let defined_names = self.definitions.keys().cloned().collect::<Vec<_>>();
+        let defined_names = self.defined_variables();
 
         for name in &defined_names {
             self.ensure_node(name);
@@ -276,7 +324,9 @@ impl SymbolicSystem {
         for lhs in defined_names {
             let lhs_node = self.node_by_name[&lhs];
 
-            let variables = self.definitions[&lhs].all_arguments_are_variables();
+            let mut variables = self.definitions[&lhs].all_arguments_are_variables();
+            variables.sort();
+            variables.dedup();
 
             for rhs_variable in variables {
                 let rhs_node = self.ensure_node(&rhs_variable);
@@ -307,35 +357,49 @@ impl SymbolicSystem {
     }
 
     fn cycle_error(&self) -> SymbolicSystemError {
-        let mut cycle = kosaraju_scc(&self.graph)
+        let mut cycles = kosaraju_scc(&self.graph)
             .into_iter()
-            .find(|component| {
-                if component.len() > 1 {
-                    return true;
-                }
+            .filter_map(|component| {
+                let is_cycle = component.len() > 1
+                    || component
+                        .first()
+                        .is_some_and(|node| self.graph.find_edge(*node, *node).is_some());
 
-                let node = component[0];
-
-                // Отдельная SCC также является циклом при наличии ребра v -> v.
-                self.graph.find_edge(node, node).is_some()
+                is_cycle.then(|| {
+                    let mut names = component
+                        .into_iter()
+                        .map(|node| self.graph[node].clone())
+                        .collect::<Vec<_>>();
+                    names.sort();
+                    names
+                })
             })
-            .unwrap_or_default()
-            .into_iter()
-            .map(|node| self.graph[node].clone())
             .collect::<Vec<_>>();
 
-        cycle.sort();
+        cycles.sort();
 
-        SymbolicSystemError::CyclicDependency(cycle)
+        SymbolicSystemError::CyclicDependency(cycles.into_iter().next().unwrap_or_default())
+    }
+
+    fn require_definition(&self, target: &str) -> Result<&Expr, SymbolicSystemError> {
+        self.definitions
+            .get(target)
+            .ok_or_else(|| SymbolicSystemError::UnknownTarget(target.to_string()))
+    }
+
+    fn require_target_node(&self, target: &str) -> Result<NodeIndex, SymbolicSystemError> {
+        self.require_definition(target)?;
+        Ok(self.node_by_name[target])
     }
 
     fn collect_reachable(&self, node: NodeIndex, visited: &mut HashSet<NodeIndex>) {
-        if !visited.insert(node) {
-            return;
-        }
+        let mut stack = vec![node];
 
-        for dependency in self.graph.neighbors(node) {
-            self.collect_reachable(dependency, visited);
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            stack.extend(self.graph.neighbors(current));
         }
     }
 
@@ -422,6 +486,20 @@ mod tests {
     }
 
     #[test]
+    fn reports_direct_dependencies_separately_from_transitive_dependencies() {
+        let system = quadratic_system();
+
+        let direct = system.direct_dependencies("D").unwrap();
+        assert_eq!(direct.target, "D");
+        assert_eq!(direct.defined_dependencies, vec!["a", "b"]);
+        assert_eq!(direct.free_variables, vec!["c"]);
+
+        let transitive = system.analyze_target("x1").unwrap();
+        assert_eq!(transitive.defined_dependencies, vec!["D", "a", "b", "x1"]);
+        assert_eq!(transitive.free_variables, vec!["c"]);
+    }
+
+    #[test]
     fn expands_all_defined_dependencies() {
         let system = quadratic_system();
         let expanded = system.expand("x1").unwrap();
@@ -452,11 +530,45 @@ mod tests {
         let system = quadratic_system();
         let order = system.evaluation_order("x1").unwrap();
 
-        let position = |name: &str| order.iter().position(|item| item == name).unwrap();
+        assert_eq!(order, vec!["a", "b", "D", "x1"]);
+    }
 
-        assert!(position("a") < position("D"));
-        assert!(position("b") < position("D"));
-        assert!(position("D") < position("x1"));
+    #[test]
+    fn evaluation_order_is_independent_of_definition_insertion_order() {
+        let definitions = vec![
+            Definition::new("a", Expr::Const(5.0)),
+            Definition::new("b", Expr::Const(2.0)),
+            Definition::new("D", Expr::parse_expression("b^2 - 4*a*c")),
+            Definition::new("x1", Expr::parse_expression("(-b + D^0.5)/(2*a)")),
+        ];
+        let forward = SymbolicSystem::new(definitions.clone()).unwrap();
+        let reverse = SymbolicSystem::new(definitions.into_iter().rev()).unwrap();
+
+        assert_eq!(
+            forward.evaluation_order("x1").unwrap(),
+            reverse.evaluation_order("x1").unwrap()
+        );
+    }
+
+    #[test]
+    fn evaluation_order_handles_a_deep_named_model_without_recursive_walk() {
+        const DEFINITION_COUNT: usize = 4096;
+        let mut definitions = Vec::with_capacity(DEFINITION_COUNT);
+        definitions.push(Definition::new("v0", Expr::Const(1.0)));
+        for index in 1..DEFINITION_COUNT {
+            definitions.push(Definition::new(
+                format!("v{index}"),
+                Expr::parse_expression(&format!("v{} + 1", index - 1)),
+            ));
+        }
+        let system = SymbolicSystem::new(definitions).unwrap();
+        let target = format!("v{}", DEFINITION_COUNT - 1);
+
+        let order = system.evaluation_order(&target).unwrap();
+
+        assert_eq!(order.len(), DEFINITION_COUNT);
+        assert_eq!(order.first().map(String::as_str), Some("v0"));
+        assert_eq!(order.last().map(String::as_str), Some(target.as_str()));
     }
 
     #[test]
@@ -473,6 +585,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_definition_with_typed_context() {
+        let result = SymbolicSystem::new(vec![
+            Definition::new("rate", Expr::Const(1.0)),
+            Definition::new("rate", Expr::Const(2.0)),
+        ]);
+
+        assert!(matches!(
+            result,
+            Err(SymbolicSystemError::DuplicateDefinition(name)) if name == "rate"
+        ));
+    }
+
+    #[test]
     fn rejects_self_reference() {
         let result =
             SymbolicSystem::new(vec![Definition::new("a", Expr::parse_expression("a + 1"))]);
@@ -481,6 +606,44 @@ mod tests {
             result,
             Err(SymbolicSystemError::CyclicDependency(_))
         ));
+    }
+
+    #[test]
+    fn reports_a_deterministic_cycle_when_multiple_cycles_exist() {
+        let result = SymbolicSystem::new(vec![
+            Definition::new("y", Expr::parse_expression("x + 1")),
+            Definition::new("b", Expr::parse_expression("a + 1")),
+            Definition::new("x", Expr::parse_expression("y + 1")),
+            Definition::new("a", Expr::parse_expression("b + 1")),
+        ]);
+
+        assert!(matches!(
+            result,
+            Err(SymbolicSystemError::CyclicDependency(names))
+                if names == vec!["a".to_string(), "b".to_string()]
+        ));
+    }
+
+    #[test]
+    fn rejects_free_graph_nodes_as_named_targets() {
+        let system = quadratic_system();
+
+        assert_eq!(
+            system.direct_dependencies("c"),
+            Err(SymbolicSystemError::UnknownTarget("c".to_string()))
+        );
+        assert_eq!(
+            system.analyze_target("c"),
+            Err(SymbolicSystemError::UnknownTarget("c".to_string()))
+        );
+        assert_eq!(
+            system.expand("c"),
+            Err(SymbolicSystemError::UnknownTarget("c".to_string()))
+        );
+        assert_eq!(
+            system.evaluation_order("c"),
+            Err(SymbolicSystemError::UnknownTarget("c".to_string()))
+        );
     }
 
     #[test]
@@ -509,6 +672,18 @@ mod tests {
         assert!(!expanded["x1"].contains_variable("D"));
         assert!(!expanded["x1"].contains_variable("a"));
         assert!(!expanded["x1"].contains_variable("b"));
+    }
+
+    #[test]
+    fn bulk_expansion_retains_stopped_named_definitions() {
+        let system = quadratic_system();
+        let stop = HashSet::from(["D".to_string()]);
+
+        let expanded = system.expand_all_until(&stop).unwrap();
+
+        assert_eq!(expanded.len(), system.defined_variables().len());
+        assert!(matches!(expanded.get("D"), Some(Expr::Var(name)) if name == "D"));
+        assert_eq!(expanded["x1"].all_arguments_are_variables(), vec!["D"]);
     }
 
     #[test]

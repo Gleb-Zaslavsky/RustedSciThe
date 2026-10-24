@@ -805,8 +805,11 @@ correctness results are:
 - `nonlinear_exprlegacy_and_atomview_preserve_newton_and_refinement_trace`:
   both frontends followed six iterations, six damping trials, one refinement
   and zero damping rejections.
-- `rejected_damping_fixture_is_reproducible_across_symbolic_frontends`:
-  the rejected-trial fixture remains reproducible for both frontends.
+- `rejected_damping_decisions_match_across_frontends_and_layout_configs`:
+  the controlled rejected-trial decision trace matches ExprLegacy/AtomView x
+  Sparse/Banded. Its numeric callbacks are installed after symbolic
+  preparation, and matrices are built through each active route's native
+  `VectorType::from_vector` implementation.
 - `prepared_lambdify_rebind_and_structural_invalidation_matrix` and
   `frozen_prepared_lambdify_rebind_and_structural_invalidation_matrix`:
   numeric rebinding is accepted, while stale mesh/BC/policy/public-state and
@@ -863,5 +866,34 @@ The correctness result is green across the complete set:
 These are release correctness gates, not a claim that every AOT route is
 faster. Integer solver trajectories and backend-selection assertions remain
 part of the gate so a fast but numerically divergent route cannot pass.
+
+## 2026-10-22: PreparedAtom solver-runtime correctness
+
+The explicit opt-in PreparedAtom callback runtime passed debug solver-level
+parity on linear, oscillator and nonlinear Bratu BVPs. The Release
+combustion-3000 and Bratu-1024 A/B matrices each ran 21 samples per route and
+checked full discrete telemetry, not just final status:
+
+- Combustion-3000: all routes used 5 Newton iterations, 12 residual requests,
+  1 Jacobian request/recalculation, 5 damping trials, 0 rejected trials, 1
+  factorization, 9 factor-cache hits and 10 RHS/linear solves. AtomNative and
+  PreparedAtom states were identical; ExprLegacy differed by at most
+  `1.332e-15`.
+- Bratu-1024: all routes used 3 iterations, 8 residual requests, 1 Jacobian
+  request/recalculation, 3 damping trials, 0 rejected trials, 1
+  factorization, 5 factor-cache hits and 6 RHS/linear solves. AtomNative and
+  PreparedAtom states were identical; ExprLegacy differed by at most
+  `3.886e-16`.
+- Same-instance replay: combustion-3000 Release and Bratu Debug both repeat
+  the public `try_solve()` lifecycle on one object. Results are reproducible
+  and cumulative telemetry doubles exactly; the counter snapshot is not
+  incorrectly treated as a per-call delta.
+- Contract rejection: requesting PreparedAtom with Sparse fails as a typed
+  configuration error before solver generation. Supported route remains
+  AtomView + Banded + LambdifyOnly + Sequential.
+
+The performance interpretation is intentionally separate: correctness parity
+is established, but this does not prove a cold `try_solve()` speedup. The
+release story documents the warm-vs-cold performance distinction.
 
 

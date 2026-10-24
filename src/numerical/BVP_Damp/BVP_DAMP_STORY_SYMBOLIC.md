@@ -2,6 +2,170 @@
 
 Symbolic frontend parity, preparation, IR, CSE, and generation diagnostics. These entries answer whether symbolic routes describe the same mathematics and where preparation time is spent.
 
+## 2026-10-22 Combustion Callback Componentwise Parity
+
+Recorded: 2026-10-22 | Debug | Windows development environment.
+
+Debug test `numerical::BVP_Damp::test_backend_compare::tests::combustion_fixture_componentwise_callbacks_match_frontends_and_matrix_layouts`
+uses the solver's six-equation production combustion fixture at its canonical
+eight-node initial guess. It exercises ExprLegacy and AtomView through both
+Sparse-faer and native Banded callback installations. Residuals and fully
+materialized Jacobians are compared against ExprLegacy/Sparse; that reference
+Jacobian is independently checked against central finite differences for every
+global state column.
+
+The canonical equations, state/time and parameter ABI, interval, mesh size,
+boundary conditions and exact initial-guess `f64` bits are guarded by
+`fnv1a64-07846b22e620f6fa`. This identifies the fixture/config input; it is not
+a performance measurement or a compiler-binary hash.
+
+```powershell
+cargo test --lib combustion_fixture_componentwise_callbacks_match_frontends_and_matrix_layouts -- --nocapture
+```
+
+Result: passed in Debug. This validates callback values and Jacobian assembly on
+the real combustion RHS; it does not compare accepted trajectory states or a
+large mesh. No Release timing conclusion is drawn.
+
+## 2026-10-22 Accepted-Trajectory Callback Parity
+
+Recorded: 2026-10-22 | Debug | Windows development environment.
+
+Test `numerical::BVP_Damp::test_lambdify_cross_product::tests::accepted_trajectory_callbacks_match_on_medium_sparse_and_banded_meshes`
+solves the oscillator BVP on a 128-interval mesh with ExprLegacy/AtomView and
+Sparse-faer/native Banded. It re-evaluates all four callback routes at the same
+accepted reduced Newton vector, compares residuals and fully materialized
+Jacobians, and checks every column of the ExprLegacy/Sparse Jacobian against
+central finite differences. The public full trajectory is also checked as
+`129 x 2`.
+
+```powershell
+cargo test --lib accepted_trajectory_callbacks_match_on_medium_sparse_and_banded_meshes -- --nocapture
+```
+
+Result: passed. `get_result()` reinserts boundary values and is not the callback
+ABI; the test intentionally uses the accepted reduced Newton vector. This is a
+medium-mesh correctness gate only. A frozen trajectory corpus and a large
+combustion-mesh callback gate remain open; no Release performance claim is made.
+
+## 2026-10-22 Combustion-1000 Compact Jacobian-Action Parity
+
+Recorded: 2026-10-22 | Debug | Windows development environment.
+
+Test `numerical::BVP_Damp::test_backend_compare::tests::combustion_1000_mesh_jacobian_actions_match_frontends_and_layouts`
+prepares the real six-equation combustion callbacks at 1000 intervals for
+ExprLegacy/AtomView and Sparse-faer/native Banded. At the same canonical
+initial guess it compares residuals and Jacobian-vector products. It also
+checks the reference `J·v` against a central directional finite difference.
+The Jacobian stays in each backend's native compact representation; no dense
+6000-by-6000 matrix is constructed.
+
+The canonical initial guess and problem ABI are guarded by
+`fnv1a64-efdb92ea2e1d64fb`.
+
+```powershell
+cargo test --lib combustion_1000_mesh_jacobian_actions_match_frontends_and_layouts -- --nocapture --test-threads=1
+```
+
+Result: passed in Debug (about 3.3 s on the recorded Windows run). This is a
+large-mesh callback/Jacobian-action parity gate, not a cross-route accepted
+trajectory solve and not a performance result. Frozen trajectory vectors and
+accepted/rejected/refinement trace parity remain open.
+
+## 2026-10-22 Combustion-1000 Accepted-Trajectory Parity
+
+Recorded: 2026-10-22 | Debug | Windows development environment.
+
+Test `numerical::BVP_Damp::test_backend_compare::tests::combustion_1000_accepted_trajectory_matches_frontends_and_layouts`
+solves the same production combustion BVP with ExprLegacy/AtomView and
+Sparse-faer/native Banded Lambdify routes. It compares every element of the
+four public `1001 x 6` postprocessed trajectories against the ExprLegacy/Sparse
+reference. Seven reference nodes (`0, 1, 250, 500, 750, 999, 1000`) are pinned
+componentwise to protect the accepted-trajectory fixture.
+
+```powershell
+cargo test --lib combustion_1000_accepted_trajectory_matches_frontends_and_layouts -- --nocapture --test-threads=1
+```
+
+Result: all four solves converged; maximum full-trajectory difference was
+`7.878246666e-15` (limit `1e-6`), and all pinned checkpoints passed with limit
+`1e-8`. All four routes also matched on iterations (`5`), residual requests
+(`12`), Jacobian recalculations (`1`), damping trials (`5`), damping rejections
+(`0`), linear solves (`10`), refinements (`0`), and the seven-event semantic
+decision trace. This closes trajectory and observed decision-counter parity
+for this fixed 1000-interval combustion workload. The fixture does not exercise
+a rejected step or refinement; those remain covered by separate focused trace
+fixtures. AOT routes are not covered. No Release timing conclusion is drawn.
+
+The existing trace corpus was rerun in Debug:
+`nonlinear_exprlegacy_and_atomview_preserve_newton_and_refinement_trace`
+matched at six iterations, six damping trials, zero rejections and one grid
+refinement with an identical event trace. The rejected-damping test was later
+expanded to `rejected_damping_decisions_match_across_frontends_and_layout_configs`;
+it matches 13 iterations, 72 trials and 64 rejections across all frontend and
+layout configurations using route-native numeric matrices. This validates
+solver decision and matrix-route parity for the controlled callback fixture,
+not a rejected trajectory produced by symbolic callbacks themselves.
+
+## 2026-10-22 Cross-Layout Refinement And AOT Parity
+
+Debug command:
+
+```powershell
+cargo test --lib --no-default-features numerical::BVP_Damp::test_parity_corpus -- --nocapture --test-threads=1
+```
+
+All seven focused tests passed. The Bratu-like real symbolic fixture now runs
+ExprLegacy and AtomView with both Sparse-faer and native Banded. All four
+routes match on the published solution, Newton iterations, damping trials,
+rejections, refinement count and ordered semantic decision events. Each route
+performed six iterations, six trials, zero rejections and one refinement; the
+selected event trace has 27 events. Backend-specific factorization events are
+not compared because their lifecycle differs by matrix implementation.
+
+The same run compares ExprLegacy Lambdify with AtomView AOT on an oscillator
+for Sparse and Banded. Both AOT runs report `generated.selected_backend =
+AotCompiled`; maximum trajectory differences were `4.718e-16` (Sparse) and
+`2.220e-16` (Banded), with matching Newton iteration and damping-trial counts.
+This is a Debug correctness result, not an AOT performance measurement.
+
+The controlled rejected-damping fixture remains a high-rejection solver-decision
+test using identical numeric callbacks installed after symbolic preparation.
+At the time of this earlier run, it matched 13 iterations, 72 trials and 64
+rejections across all four
+ExprLegacy/AtomView x Sparse/Banded configurations. The replacement Jacobian
+is constructed through each active `VectorType::from_vector`, so Sparse and
+Banded factorization routes are exercised.
+
+The former symbolic rejected-step gap is now covered by
+`symbolic_rejected_trajectory_matches_frontends_and_layouts`. It solves
+`y'=z`, `z'=y^3-2y-2` with the constant cubic root as both endpoint values and
+a zero initial guess. All four ExprLegacy/AtomView x Sparse/Banded routes
+converge with 6 iterations, 7 damping trials and 1 rejected trial. The maximum
+trajectory difference is `1.254e-15`; final residual vectors differ by at most
+`3.533e-16`, and the largest infinity norm is `3.866e-6` against a `1e-5`
+fixture bound. Ordered semantic decision events also match. This is Debug
+correctness evidence; no numerical algorithm or tolerance was changed.
+
+Prepared-lifecycle parity was expanded in
+`prepared_lambdify_rebind_and_structural_invalidation_matrix` and its Frozen
+counterpart. Both now cover ExprLegacy/AtomView x Dense-control/Sparse/Banded,
+including parameter-name, matrix-layout, evaluator-policy and Jacobian-pattern
+changes; each stale prepared runtime is rejected with the typed invalidation
+error and succeeds after regeneration. The numeric rebind test additionally
+pins residual/Jacobian callback closure identity across Dense/Sparse/Banded
+and both frontends while checking changed callback values and factor rebuild.
+These are lifecycle contracts, not performance claims.
+
+Frozen refresh policy now has a direct cross-frontend/layout trace test,
+`frozen_jacobian_refresh_trace_matches_frontends_and_layouts`. With the
+`every_m=1` strategy, ExprLegacy and AtomView each run on Sparse and native
+Banded, converge in seven iterations, and report three Jacobian refreshes.
+The full solution trajectories differ by at most `4.208e-15`, and the ordered
+`JacobianRefresh` event traces agree. This closes refresh-decision parity; it
+does not assert a Frozen termination event that the telemetry API does not
+currently publish.
+
 ## Symbolic Assembly Parity Stories
 
 
@@ -363,4 +527,29 @@ combustion solver stress tables and Rust compile presets, all with
 
 The symbolic stage is therefore refreshed after the refactor, while the larger
 compiler/lifecycle conclusions remain in the AOT and performance ledgers.
+
+## 2026-10-22: integrated PreparedAtom runtime parity decision
+
+The solver-level `PreparedAtom` route is built from the exact
+`atom_discretized_system` already emitted by AtomView assembly. It evaluates
+residuals and Jacobian slots through reusable PreparedAtom scratch, scatters
+Jacobian values directly into `BandedAssembly`, and delegates factorization
+and linear solves to the existing Banded callback. No dense Jacobian is
+materialized, and the numerical method or linear solver is not replaced.
+
+Debug solver-level checks cover a linear two-point BVP, an oscillator and a
+nonlinear Bratu BVP. On each, the Prepared trajectory and complete discrete
+solver counters match the existing AtomView/Lambdify route. The combustion-
+3000 Release matrix additionally matches residual and compact Jacobian values
+at the initial, converged and sampled states; ExprLegacy callback differences
+remain at floating-point roundoff. Same-instance replay is tested separately
+because BVP_Damp telemetry accumulates across calls and the mutable nonlinear
+iterate must not be mistaken for an independent fresh solve.
+
+The corresponding performance conclusion is recorded in
+[`BVP_DAMP_STORY_PERFORMANCE.md`](BVP_DAMP_STORY_PERFORMANCE.md): PreparedAtom
+is faster only in the already-prepared numerical phase for these workloads;
+including normal `try_solve()` preparation, AtomNative remains faster. The
+runtime therefore stays opt-in. This parity result does not authorize changing
+the frontend canon or replacing the existing Atom/Expr routes.
 

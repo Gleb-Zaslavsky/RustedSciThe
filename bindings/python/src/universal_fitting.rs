@@ -7,20 +7,21 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 
+use rustedscithe_core::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
+use rustedscithe_core::numerical::optimization::sym_fitting::FittingObservationPolicy;
+use rustedscithe_core::numerical::optimization::universal_fitting::{
+    Method, UniversalFitting, UniversalFittingError, UniversalFittingResult,
+};
+use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
 use rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresTelemetryMode;
 use rustedscithe_core::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
 };
 use rustedscithe_core::numerical::SolverTelemetryMode;
-use rustedscithe_core::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
-use rustedscithe_core::numerical::optimization::universal_fitting::{
-    Method, UniversalFitting, UniversalFittingError, UniversalFittingResult,
-};
-use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
 
 use crate::errors::{
-    ExhaustionError, InvalidConfigurationError, InvalidExpressionError, SolverError,
-    SolverPanicState, UnsupportedOptionError, annotate_native, native_variant,
+    annotate_native, native_variant, ExhaustionError, InvalidConfigurationError,
+    InvalidExpressionError, SolverError, SolverPanicState, UnsupportedOptionError,
 };
 use crate::expr::PyExpr;
 
@@ -74,6 +75,40 @@ fn parse_update_policy(value: &str) -> PyResult<GavinLmUpdatePolicy> {
 
 fn map_error(error: UniversalFittingError) -> PyErr {
     match &error {
+        UniversalFittingError::Fitting(source) => {
+            let (mapped, native_kind) = match source {
+                rustedscithe_core::numerical::optimization::sym_fitting::FittingError::Preparation(error)
+                | rustedscithe_core::numerical::optimization::sym_fitting::FittingError::Solver(error) => (
+                    crate::nonlinear::map_least_squares_error(error.clone()),
+                    native_variant(error),
+                ),
+                rustedscithe_core::numerical::optimization::sym_fitting::FittingError::DidNotConverge { .. } => (
+                    SolverError::new_err(source.to_string()),
+                    "DidNotConverge".to_owned(),
+                ),
+                rustedscithe_core::numerical::optimization::sym_fitting::FittingError::InvalidInput { .. } => (
+                    InvalidConfigurationError::new_err(source.to_string()),
+                    "InvalidInput".to_owned(),
+                ),
+                rustedscithe_core::numerical::optimization::sym_fitting::FittingError::EquationParse(_) => (
+                    InvalidExpressionError::new_err(source.to_string()),
+                    "EquationParse".to_owned(),
+                ),
+                rustedscithe_core::numerical::optimization::sym_fitting::FittingError::DimensionMismatch { .. } => (
+                    InvalidConfigurationError::new_err(source.to_string()),
+                    "DimensionMismatch".to_owned(),
+                ),
+                rustedscithe_core::numerical::optimization::sym_fitting::FittingError::NonFiniteInput { .. } => (
+                    InvalidConfigurationError::new_err(source.to_string()),
+                    "NonFiniteInput".to_owned(),
+                ),
+                rustedscithe_core::numerical::optimization::sym_fitting::FittingError::NoUnknowns => (
+                    InvalidConfigurationError::new_err(source.to_string()),
+                    "NoUnknowns".to_owned(),
+                ),
+            };
+            return annotate_native(mapped, "build", "universal_fitting", "native", &native_kind);
+        }
         UniversalFittingError::VarPro(SymbolicVarProError::SolverFailed {
             source: Some(source),
             ..
@@ -106,6 +141,7 @@ fn map_error(error: UniversalFittingError) -> PyErr {
     }
     let native_kind = native_variant(&error);
     let mapped = match error {
+        UniversalFittingError::Fitting(_) => unreachable!("handled before common mapping"),
         UniversalFittingError::UnsupportedOption { .. } => {
             UnsupportedOptionError::new_err(error.to_string())
         }
@@ -438,6 +474,39 @@ impl PyUniversalFitting {
             }
         };
         self.update(|builder| builder.with_lambdify_execution_policy(policy))
+    }
+
+    /// Select observation-level evaluation for classic LM.
+    ///
+    /// `auto` uses the measured large-data default. `sequential` avoids the
+    /// additional sample-major staging buffers. `parallel` enables explicit
+    /// blocks once `min_observations` is reached and requires sequential
+    /// callbacks. Gavin and VarPro reject this option through the native
+    /// typed unsupported-option error.
+    #[pyo3(signature=(policy, min_observations=1))]
+    pub fn with_observation_policy(
+        &mut self,
+        policy: &str,
+        min_observations: usize,
+    ) -> PyResult<()> {
+        let policy = match policy.trim().to_ascii_lowercase().as_str() {
+            "auto" => FittingObservationPolicy::Auto,
+            "sequential" | "seq" => FittingObservationPolicy::Sequential,
+            "parallel" if min_observations > 0 => {
+                FittingObservationPolicy::Parallel { min_observations }
+            }
+            "parallel" => {
+                return Err(InvalidConfigurationError::new_err(
+                    "min_observations must be positive",
+                ));
+            }
+            other => {
+                return Err(InvalidConfigurationError::new_err(format!(
+                    "unsupported observation policy '{other}'"
+                )));
+            }
+        };
+        self.update(|builder| builder.with_observation_policy(policy))
     }
 
     /// Configure the native least-squares telemetry level.

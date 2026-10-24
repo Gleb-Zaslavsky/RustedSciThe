@@ -41,6 +41,8 @@ pub(crate) enum RadauConfigError {
     ZeroDimension,
     #[error("Jacobian pattern entry is outside the state dimensions")]
     JacobianPatternOutOfBounds,
+    #[error("Jacobian pattern contains a duplicate coordinate")]
+    DuplicateJacobianPatternEntry,
     #[error("sparse Jacobian layout requires a prepared pattern")]
     SparsePatternMissing,
     #[error("sparse pattern entry is outside the state dimensions")]

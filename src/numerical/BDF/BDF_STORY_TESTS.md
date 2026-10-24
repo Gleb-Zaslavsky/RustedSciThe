@@ -500,3 +500,147 @@ capture therefore closes the QoL/provenance correctness gate, but not the
 performance-ranking question: small Robertson and combustion timings remain
 workload/noise-sensitive, and warm medians from different Criterion fixtures
 must not be merged.
+
+## ExprLegacy Jacobian-Builder A/B (2026-10-23)
+
+The ignored Release story `bdf_dense_exprlegacy_scalar_reference_vs_optimized_full_solve_ab`
+compares the exact previous scalar ExprLegacy Jacobian builder with the
+optimized builder through the same Dense BDF workload. Counters and final
+states matched exactly. The optimized route was about `20%/27%/45.6%` faster at
+`n=100/128/256`; the final-source 31-pair confirmation at `n=256` measured
+`188.900 ms` versus `102.860 ms`, with low relative MAD. At `n=32/64`, it instead cost about
+`0.27/1.14 ms` more per solve, so these results support the change for larger
+dense systems but do not imply a small-system win.
+
+The complete paired table, timing scopes and shared ExprLegacy implementation
+decision are recorded in
+[`IVP_SYMBOLIC_STORY_TESTS.md`](../../symbolic/IVP_SYMBOLIC_STORY_TESTS.md).
+Reproduce with
+`cargo test --release --lib numerical::BDF::performance_story_tests::bdf_dense_exprlegacy_scalar_reference_vs_optimized_full_solve_ab -- --ignored --nocapture`;
+the test defaults to dimensions `32,64,100,128,256` and 15 paired repetitions.
+
+## Telemetry Mode Overhead (2026-10-23)
+
+`cargo bench --bench bdf_telemetry_overhead -- --noplot` ran the same native
+diagonal-decay solve under `Off`, `Counters`, `Timings` and `Detailed`. Before
+timing, every mode's final state was checked against `Off` to `1e-12`. Criterion
+used 30 samples per row, 3-second warmup and 3-second measurement. Median/MAD
+full-solve wall times on Windows release (`rustc 1.98.1`, Ryzen 9 9900X):
+
+| n | Off (us) | Counters (us) | Timings (us) | Detailed (us) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 19.761/0.318 | 21.101/0.390 (+6.8%) | 45.646/0.368 (+131.0%) | 45.631/0.366 (+130.9%) |
+| 16 | 39.916/0.550 | 43.285/1.717 (+8.4%) | 68.227/1.338 (+71.0%) | 68.993/1.512 (+72.8%) |
+| 64 | 145.456/2.108 | 148.813/1.531 (+2.3%) | 171.883/1.599 (+18.2%) | 173.521/2.728 (+19.3%) |
+| 256 | 2938.680/19.279 | 2931.018/8.030 (-0.3%) | 2984.093/17.431 (+1.5%) | 3003.157/40.988 (+2.2%) |
+| 512 | 27945.725/319.741 | 28278.612/492.353 (+1.2%) | 28348.262/407.344 (+1.4%) | 28075.675/320.112 (+0.5%) |
+
+This is a single-machine diagnostic, not a portable threshold. Timing scopes
+are expensive relative to tiny solves, while at n=512 the measured overhead is
+within about 1.5% of the telemetry-Off solve. Keep `Off` as the performance
+default and enable detailed timing only when the diagnostic value justifies its
+cost. The benchmark measures BDF's native-callback route, not symbolic
+preparation or the separate Radau telemetry implementation.
+
+## Expr Jacobian Scratch Full-Solve A/B (2026-10-23)
+
+The ignored `bdf_diffusion_expr_jacobian_scratch_full_solve_ab` story isolates
+the only changed variable inside one binary: the historical dense zero-filled
+`n*n` Jacobian-value scratch versus the production reusable buffer sized to
+the structurally present derivatives. Both arms use ExprLegacy, the same
+diffusion-chain BDF equations/settings, telemetry-Off timed solves, and
+alternating paired order. Detailed runs separately verify allocation telemetry
+and counters; no timing collection is enabled in the primary A/B samples.
+
+Release run: Windows x86-64, `rustc 1.98.1`, 101 pairs per dimension.
+
+| n | old full solve median/MAD (ms) | production median/MAD (ms) | old/new persistent scratch | backend allocated bytes old/new | state diff | counters `accepted/rejected; nfev/njev/nlu` |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 256 | 8.656/0.411 | 8.570/0.364 | 524,288 / 6,128 B | 524,288 / 6,128 B | 0 | `22/3; 56/1/7` |
+| 512 | 42.150/0.952 | 42.552/0.893 | 2,097,152 / 12,272 B | 2,097,152 / 12,272 B | 0 | `22/3; 56/1/7` |
+
+The scratch reduction is approximately `98.8%` at n=256 and `99.4%` at n=512.
+The full-solve median shifts are smaller than the observed spread and change
+direction between sizes; therefore this is accepted as a memory/allocation
+improvement, not as a demonstrated wall-clock speedup. The implementation
+remains the production route because it avoids dense zero-initialization and
+retains only the Expr Jacobian's structural values without changing numerical
+work. Debug A/B at n=128/256 also passed with exact work counters and identical
+states.
+
+Reproduce in PowerShell:
+
+```powershell
+$env:BDF_SCRATCH_AB_DIMENSIONS = "256,512"
+$env:BDF_SCRATCH_AB_REPETITIONS = "101"
+cargo test --release --lib numerical::BDF::performance_story_tests::bdf_diffusion_expr_jacobian_scratch_full_solve_ab -- --ignored --nocapture
+```
+
+## IVP Symbolic Refactor: Full Release Matrix Confirmation (2026-10-24)
+
+This entry records the broad BDF validation after the shared IVP symbolic
+refactor, not a new isolated A/B. The concrete production change relevant to
+BDF is the ExprLegacy Jacobian-value scratch reduction described above:
+instead of zero-initializing an `n*n` value array, preparation sizes the
+reusable buffer to the structurally present Jacobian values. The integrator,
+equations, and numerical differentiation rules were not changed. ExprLegacy
+and AtomView remain distinct supported frontends; Lambdify and AOT remain
+separate execution routes. The route matrix is validation evidence, not a
+claim that every row was independently caused by the scratch change.
+
+The final BDF release filter completed with `95 passed; 0 failed; 13 ignored`.
+The 13 ignored release stories were run separately and passed. An earlier
+nightly attempt had one failure in
+`telemetry_tests::detailed_mode_collects_calls_and_durations`: a very short
+Nordsieck-update timer was exactly zero, violating a `> 0.0` assertion. The
+test passed on targeted Release rerun and on the final complete filter. No
+numerical assertion or solver result failed; this is recorded as a timer
+resolution flake, not hidden as a code change.
+
+The release workload matrix covered ExprLegacy/AtomView, Lambdify/AOT,
+Sequential/Parallel/Auto where supported, and a 1024-state diffusion chain.
+Selected matched rows from the compact report:
+
+| route | prepare ms | one solve ms | 16-segment cumulative ms |
+| --- | ---: | ---: | ---: |
+| Expr Lambdify Sequential | 36.824 | 228.540 | 3192.350 |
+| Atom Lambdify Sequential | 14.858 | 226.074 | 3171.951 |
+| Expr AOT Whole | 110.231 | 227.364 | 3232.510 |
+| Atom AOT Whole | 56.668 | 223.422 | 3206.880 |
+| Expr AOT Parallel-2 | 118.932 | 223.638 | 3210.887 |
+| Atom AOT Parallel-2 | 54.948 | 221.996 | 3228.549 |
+
+All these rows retained identical work (`56` residual evaluations, `1` Jacobian,
+`7` LU factorizations, `22` accepted steps) and identical final states. At this
+size Atom preparation was substantially cheaper than Expr preparation, while
+warm full-solve times were effectively tied. Cold AOT preparation did not
+amortize in the measured 16-segment series: cumulative AOT times remained
+slightly above the corresponding Lambdify routes. This does not establish an
+AOT break-even beyond 16 segments.
+
+Explicit Lambdify Parallel was not a general win on the large diffusion case:
+the solve was about 8.8% slower than Sequential for Expr and 2.7% slower for
+Atom. Auto stayed close to Sequential. This agrees with the established BDF
+policy that parallel dispatch is workload-dependent and should not be inferred
+from small systems or selected as a universal default.
+
+Counter review found no new telemetry anomaly. The diffusion-chain work counts
+match the earlier BDF release evidence (`56/1/7`, `22` accepted, `3` rejected).
+Robertson retains the known frontend-specific LU count (`24` Expr versus `27`
+Atom); the same distinction appears in the October 3 archived release capture.
+Combustion retains the previously documented `6` Expr versus `5` Atom LU
+count. These are known numerical-path differences, not newly stale counters;
+the corresponding state differences remain at roundoff scale.
+
+The release suite's SciPy matched-workload stories also passed. They confirmed
+mapped work-counter semantics and reported maximum final scaled drift of
+`1.109e-7` across the captured cases. The stale-Jacobian retry's endpoint LU
+delta remains the already documented SciPy/Rust lifecycle difference.
+
+The initial nightly log and all reports are retained under
+[`BDF release capture`](../../../test_reports/BDF_release_manual/20261023T220315Z/).
+The compact route table is
+[`bdf_workload_matrix.md`](../../../test_reports/BDF_release_manual/20261023T220315Z/reports/BDF_Bench/release/bdf_workload_matrix.md).
+The clean final test-filter output (`95/0/13`) was supplied after the initial
+nightly capture; it supersedes the initial `94 passed; 1 failed` summary for
+the final correctness status while preserving the timer-flake history above.

@@ -197,6 +197,134 @@ mod tests {
         }
     }
 
+    #[test]
+    fn accepted_trajectory_callbacks_match_on_medium_sparse_and_banded_meshes() {
+        let routes = [MatrixRoute::Sparse, MatrixRoute::Banded];
+        let frontends = [
+            BvpSymbolicAssemblyBackend::ExprLegacy,
+            BvpSymbolicAssemblyBackend::AtomView,
+        ];
+        let mut solvers = Vec::new();
+        let mut solutions = Vec::new();
+
+        for route in routes {
+            for frontend in frontends {
+                let mut solver = oscillator_solver(route, frontend, 128);
+                solver
+                    .try_solve()
+                    .expect("medium-mesh oscillator trajectory should solve");
+                let full_trajectory = solver
+                    .get_result()
+                    .expect("medium-mesh solve should publish its accepted trajectory");
+                assert_eq!(full_trajectory.nrows(), 129);
+                assert_eq!(full_trajectory.ncols(), 2);
+                // Callbacks consume the reduced Newton vector. get_result()
+                // is postprocessed and reinserts boundary values, so it has
+                // two additional entries and is not a valid callback input.
+                let solution = solver
+                    .result
+                    .as_ref()
+                    .expect("converged solve should retain its reduced Newton vector")
+                    .as_slice()
+                    .to_vec();
+                solutions.push((route, frontend, solution));
+                solvers.push((route, frontend, solver));
+            }
+        }
+
+        let accepted_trajectory = solutions[0].2.clone();
+        for (route, frontend, solution) in solutions.iter().skip(1) {
+            let max_diff = max_abs_diff(&solutions[0].2, solution);
+            assert!(
+                max_diff < 1.0e-7,
+                "accepted trajectory drift for {frontend:?}/{}: {max_diff:e}",
+                route.label()
+            );
+        }
+
+        let callback_snapshots = solvers
+            .iter_mut()
+            .map(|(route, frontend, solver)| {
+                let typed = Vectors_type_casting(
+                    &DVector::from_column_slice(&accepted_trajectory),
+                    solver.method.clone(),
+                );
+                let residual = solver.fun.call(1.0, &*typed).to_DVectorType();
+                let jacobian = solver
+                    .jac
+                    .as_mut()
+                    .expect("prepared solver should retain its Jacobian callback")
+                    .call(1.0, &*typed)
+                    .to_DMatrixType();
+                ((*route, *frontend), residual.as_slice().to_vec(), jacobian)
+            })
+            .collect::<Vec<_>>();
+        let ((_, reference_frontend), reference_residual, reference_jacobian) =
+            &callback_snapshots[0];
+        assert_eq!(*reference_frontend, BvpSymbolicAssemblyBackend::ExprLegacy);
+
+        for ((route, frontend), residual, jacobian) in callback_snapshots.iter().skip(1) {
+            let residual_error = max_abs_diff(reference_residual, residual);
+            let jacobian_error = reference_jacobian
+                .iter()
+                .zip(jacobian.iter())
+                .map(|(expected, actual)| (expected - actual).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                residual_error < 1.0e-9,
+                "accepted-state residual drift for {frontend:?}/{}: {residual_error:e}",
+                route.label()
+            );
+            assert_eq!(reference_jacobian.shape(), jacobian.shape());
+            assert!(
+                jacobian_error < 1.0e-8,
+                "accepted-state Jacobian drift for {frontend:?}/{}: {jacobian_error:e}",
+                route.label()
+            );
+        }
+
+        // The accepted solution is a shared, real solver trajectory rather
+        // than an arbitrary callback probe. Validate its reference Jacobian
+        // independently at every global state coordinate.
+        let reference_solver = &mut solvers[0].2;
+        for column in 0..accepted_trajectory.len() {
+            let step = 1.0e-6 * accepted_trajectory[column].abs().max(1.0);
+            let mut plus = accepted_trajectory.clone();
+            let mut minus = accepted_trajectory.clone();
+            plus[column] += step;
+            minus[column] -= step;
+            let evaluate = |solver: &NRBVP, values: &[f64]| {
+                let typed = Vectors_type_casting(
+                    &DVector::from_column_slice(values),
+                    solver.method.clone(),
+                );
+                solver.fun.call(1.0, &*typed).to_DVectorType()
+            };
+            let plus_residual = evaluate(reference_solver, &plus);
+            let minus_residual = evaluate(reference_solver, &minus);
+            for row in 0..reference_jacobian.nrows() {
+                let finite_difference = (plus_residual[row] - minus_residual[row]) / (2.0 * step);
+                let analytic = reference_jacobian[(row, column)];
+                let tolerance = 2.0e-6 * finite_difference.abs().max(analytic.abs()).max(1.0);
+                assert!(
+                    (finite_difference - analytic).abs() <= tolerance,
+                    "accepted-trajectory Jacobian ({row}, {column})={analytic:e}, FD={finite_difference:e}"
+                );
+            }
+        }
+
+        let report = "status: passed\n\nfixture: y'=z, z'=-y; accepted 128-node trajectory\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, native Banded\nchecks: common accepted trajectory vector, residual/Jacobian callback parity at that vector, every reference Jacobian column against central finite differences\ninterpretation: medium-mesh Debug correctness gate; no timing or performance claim.\n";
+        if let Err(error) = write_test_report(
+            "BVP_Damp",
+            "accepted_trajectory_callbacks_match_on_medium_sparse_and_banded_meshes",
+            report,
+        ) {
+            eprintln!(
+                "[BVP test report] unable to write accepted-trajectory parity report: {error}"
+            );
+        }
+    }
+
     fn nonlinear_direct_problem() -> DirectBandedProblem {
         let mut problem = DirectBandedProblem::default();
         problem.vector_of_functions = vec![

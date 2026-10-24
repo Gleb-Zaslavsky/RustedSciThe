@@ -32,6 +32,7 @@ pub mod native_preflight;
 pub mod native_step_engine;
 pub mod nonlinear_driver;
 pub mod order_selection;
+mod prepared_atom_runtime;
 pub mod solver;
 pub mod state;
 pub mod statistics;

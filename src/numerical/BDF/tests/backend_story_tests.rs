@@ -1,7 +1,7 @@
+use crate::numerical::ivp_workloads::{build_workload, WorkloadKind};
 use crate::numerical::BDF::BDF_api::{
     BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver,
 };
-use crate::numerical::ivp_workloads::{WorkloadKind, build_workload};
 use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 use nalgebra::DVector;
 
@@ -568,7 +568,7 @@ fn bdf_parameter_continuation_matches_fresh_segments_on_shared_workloads() {
 
 #[test]
 fn bdf_piecewise_parameter_continuation_matches_lsode2_and_backward_euler() {
-    use crate::numerical::BE::{BE, BeTelemetryMode};
+    use crate::numerical::BE::{BeTelemetryMode, BE};
     use crate::numerical::LSODE2::config::{
         Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend,
         Lsode2SymbolicExecutionMode,

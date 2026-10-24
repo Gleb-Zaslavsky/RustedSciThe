@@ -28,13 +28,13 @@ use crate::numerical::Nonlinear_systems::error::SolveError;
 use crate::numerical::Nonlinear_systems::problem::{JacobianProvider, NonlinearProblem};
 use crate::numerical::Nonlinear_systems::symbolic_atom::AtomNativeSymbolicBackend;
 use crate::numerical::Nonlinear_systems::symbolic_backend::{
-    SelectedSymbolicNonlinearBackendKind, SymbolicBackendSelectionPolicy,
-    select_symbolic_nonlinear_backend,
+    select_symbolic_nonlinear_backend, SelectedSymbolicNonlinearBackendKind,
+    SymbolicBackendSelectionPolicy,
 };
 use crate::numerical::Nonlinear_systems::symbolic_legacy::LegacyLambdifySymbolicBackend;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    LinkedDenseAotBackend, resolve_linked_dense_backend,
+    resolve_linked_dense_backend, LinkedDenseAotBackend,
 };
 use crate::symbolic::codegen::codegen_manifest::{
     GeneratedChunkManifest, GeneratedFunctionsManifest, PreparedJacobianLayout,
@@ -527,6 +527,24 @@ impl Default for LambdifyExecutionPolicy {
     }
 }
 
+/// Selects how the ExprLegacy frontend discovers symbolic Jacobian entries.
+///
+/// `LegacyDense` preserves the historical all-equation/all-variable
+/// differentiation path and remains the production default. `DependencyAware`
+/// is an experimental opt-in that skips derivatives for variables absent
+/// from each equation while retaining the same dense symbolic and numeric
+/// Jacobian contracts. A release A/B on two `n=512` nonlinear workloads did
+/// not show a material end-to-end benefit; it is not recommended for
+/// production. It is not used by AtomViewNative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExprJacobianPreparationPolicy {
+    /// Differentiate every equation with respect to every variable.
+    #[default]
+    LegacyDense,
+    /// Differentiate only variables structurally present in each equation.
+    DependencyAware,
+}
+
 impl SymbolicBackendConfig {
     /// Uses the existing lambdify-based symbolic backend.
     pub fn lambdify() -> Self {
@@ -693,6 +711,9 @@ pub struct SymbolicProblemOptions {
     pub lambdify_frontend: SymbolicLambdifyFrontend,
     /// Runtime execution policy for the prepared Lambdify backend.
     pub lambdify_execution_policy: LambdifyExecutionPolicy,
+    /// ExprLegacy cold Jacobian preparation strategy. The experimental
+    /// dependency-aware mode is rejected for AtomViewNative.
+    pub expr_jacobian_preparation: ExprJacobianPreparationPolicy,
     /// Optional detailed preparation-stage telemetry.
     pub preparation_telemetry: PreparationTelemetryMode,
 }
@@ -736,6 +757,18 @@ impl SymbolicProblemOptions {
     /// Selects the symbolic frontend used by the Lambdify backend.
     pub fn with_lambdify_frontend(mut self, frontend: SymbolicLambdifyFrontend) -> Self {
         self.lambdify_frontend = frontend;
+        self
+    }
+
+    /// Selects the experimental dependency-aware ExprLegacy Jacobian builder.
+    ///
+    /// This preserves the dense Jacobian shape and callback semantics, but
+    /// current large-workload A/B evidence did not justify production use.
+    pub fn with_expr_jacobian_preparation_policy(
+        mut self,
+        policy: ExprJacobianPreparationPolicy,
+    ) -> Self {
+        self.expr_jacobian_preparation = policy;
         self
     }
 
@@ -1316,6 +1349,7 @@ impl PreparedSymbolicBackend {
         equation_parameters: Option<&[String]>,
         execution_policy: LambdifyExecutionPolicy,
         frontend: SymbolicLambdifyFrontend,
+        expr_jacobian_preparation: ExprJacobianPreparationPolicy,
         config: &SymbolicBackendConfig,
         preparation_recorder: Option<&mut PreparationTelemetryRecorder>,
     ) -> Result<Self, SolveError> {
@@ -1328,18 +1362,27 @@ impl PreparedSymbolicBackend {
                             variables,
                             equation_parameters,
                             execution_policy,
+                            expr_jacobian_preparation,
                             preparation_recorder,
                         )?,
                     ),
-                    SymbolicLambdifyFrontend::AtomViewNative => Box::new(
-                        AtomNativeSymbolicBackend::from_expressions(
+                    SymbolicLambdifyFrontend::AtomViewNative => {
+                        if expr_jacobian_preparation
+                            != ExprJacobianPreparationPolicy::LegacyDense
+                        {
+                            return Err(SolveError::InvalidConfig(
+                                "Expr Jacobian preparation policy requires the ExprLegacy frontend"
+                                    .to_string(),
+                            ));
+                        }
+                        Box::new(AtomNativeSymbolicBackend::from_expressions(
                             equations,
                             variables,
                             equation_parameters,
                             execution_policy,
                             preparation_recorder,
-                        )?,
-                    ),
+                        )?)
+                    }
                 },
             }),
             SymbolicBackendKind::Aot => Err(SolveError::InvalidConfig(
@@ -1537,6 +1580,7 @@ impl PreparedSymbolicNonlinearProblem {
                     options.lambdify_frontend,
                     options.backend_config,
                     options.preparation_telemetry,
+                    options.expr_jacobian_preparation,
                 )?,
         })
     }
@@ -1848,6 +1892,7 @@ impl SymbolicNonlinearProblem {
             options.lambdify_frontend,
             options.backend_config,
             options.preparation_telemetry,
+            options.expr_jacobian_preparation,
         )
     }
 
@@ -1911,6 +1956,7 @@ impl SymbolicNonlinearProblem {
                 options.lambdify_frontend,
                 SymbolicBackendConfig::lambdify(),
                 options.preparation_telemetry,
+                options.expr_jacobian_preparation,
             )?
         } else {
             Self::from_expressions_with_backend_and_policy_rectangular(
@@ -1922,6 +1968,7 @@ impl SymbolicNonlinearProblem {
                 options.lambdify_frontend,
                 SymbolicBackendConfig::lambdify(),
                 options.preparation_telemetry,
+                options.expr_jacobian_preparation,
             )?
         };
 
@@ -2030,6 +2077,7 @@ impl SymbolicNonlinearProblem {
             SymbolicLambdifyFrontend::ExprLegacy,
             backend_config,
             PreparationTelemetryMode::Disabled,
+            ExprJacobianPreparationPolicy::LegacyDense,
         )
     }
 
@@ -2043,6 +2091,7 @@ impl SymbolicNonlinearProblem {
         lambdify_frontend: SymbolicLambdifyFrontend,
         backend_config: SymbolicBackendConfig,
         preparation_telemetry: PreparationTelemetryMode,
+        expr_jacobian_preparation: ExprJacobianPreparationPolicy,
     ) -> Result<Self, SolveError> {
         Self::from_expressions_with_backend_and_policy_shape(
             equations,
@@ -2053,6 +2102,7 @@ impl SymbolicNonlinearProblem {
             lambdify_frontend,
             backend_config,
             preparation_telemetry,
+            expr_jacobian_preparation,
             true,
         )
     }
@@ -2071,6 +2121,7 @@ impl SymbolicNonlinearProblem {
         lambdify_frontend: SymbolicLambdifyFrontend,
         backend_config: SymbolicBackendConfig,
         preparation_telemetry: PreparationTelemetryMode,
+        expr_jacobian_preparation: ExprJacobianPreparationPolicy,
     ) -> Result<Self, SolveError> {
         Self::from_expressions_with_backend_and_policy_shape(
             equations,
@@ -2081,6 +2132,7 @@ impl SymbolicNonlinearProblem {
             lambdify_frontend,
             backend_config,
             preparation_telemetry,
+            expr_jacobian_preparation,
             false,
         )
     }
@@ -2095,6 +2147,7 @@ impl SymbolicNonlinearProblem {
         lambdify_frontend: SymbolicLambdifyFrontend,
         backend_config: SymbolicBackendConfig,
         preparation_telemetry: PreparationTelemetryMode,
+        expr_jacobian_preparation: ExprJacobianPreparationPolicy,
         require_square: bool,
     ) -> Result<Self, SolveError> {
         let preparation_started = Instant::now();
@@ -2221,6 +2274,7 @@ impl SymbolicNonlinearProblem {
             parameter_names,
             lambdify_execution_policy,
             lambdify_frontend,
+            expr_jacobian_preparation,
             &backend_config,
             preparation_recorder.as_mut(),
         )?;
@@ -2764,12 +2818,12 @@ impl<'a> JacobianProvider for BoundSymbolicNonlinearProblem<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numerical::Nonlinear_systems::LM_Nielsen::NielsenLevenbergMarquardtMethod;
-    use crate::numerical::Nonlinear_systems::LM_vanilla::LevenbergMarquardtMethod;
-    use crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod;
     use crate::numerical::Nonlinear_systems::engine::{NewtonMethod, SolveOptions, SolverEngine};
     use crate::numerical::Nonlinear_systems::problem::Bounds;
     use crate::numerical::Nonlinear_systems::trust_region::*;
+    use crate::numerical::Nonlinear_systems::LM_Nielsen::NielsenLevenbergMarquardtMethod;
+    use crate::numerical::Nonlinear_systems::LM_vanilla::LevenbergMarquardtMethod;
+    use crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod;
     use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
     use approx::assert_relative_eq;
     use std::collections::HashMap;
@@ -4125,5 +4179,210 @@ mod tests {
             )
             .expect("solve should succeed");
         assert_chemistry_constraints(&result.x, &variables, 8e-3);
+    }
+
+    fn chain_equations(dimension: usize) -> (Vec<String>, Vec<String>) {
+        let variables = (0..dimension)
+            .map(|index| format!("x{index}"))
+            .collect::<Vec<_>>();
+        let equations = (0..dimension)
+            .map(|index| {
+                let mut equation = format!("x{index}^2-1.0");
+                if index > 0 {
+                    equation.push_str(&format!("+0.08*x{}", index - 1));
+                }
+                if index + 1 < dimension {
+                    equation.push_str(&format!("+0.08*x{}", index + 1));
+                }
+                let neighbor_count = usize::from(index > 0) + usize::from(index + 1 < dimension);
+                equation.replace("-1.0", &format!("-{}", 1.0 + 0.08 * neighbor_count as f64))
+            })
+            .collect();
+        (equations, variables)
+    }
+
+    fn problem_with_jacobian_policy(
+        equations: Vec<String>,
+        variables: Vec<String>,
+        policy: ExprJacobianPreparationPolicy,
+        frontend: SymbolicLambdifyFrontend,
+    ) -> SymbolicNonlinearProblem {
+        SymbolicNonlinearProblem::from_strings_with_options(
+            equations,
+            SymbolicProblemOptions::new()
+                .with_variables(variables)
+                .with_lambdify_frontend(frontend)
+                .with_expr_jacobian_preparation_policy(policy)
+                .with_preparation_telemetry(PreparationTelemetryMode::Collect),
+        )
+        .expect("symbolic problem should build")
+    }
+
+    #[test]
+    fn dependency_aware_expr_jacobian_matches_legacy_dense_and_skips_structural_zeros() {
+        let (equations, variables) = chain_equations(128);
+        let legacy = problem_with_jacobian_policy(
+            equations.clone(),
+            variables.clone(),
+            ExprJacobianPreparationPolicy::LegacyDense,
+            SymbolicLambdifyFrontend::ExprLegacy,
+        );
+        let dependency_aware = problem_with_jacobian_policy(
+            equations,
+            variables.clone(),
+            ExprJacobianPreparationPolicy::DependencyAware,
+            SymbolicLambdifyFrontend::ExprLegacy,
+        );
+        let x = DVector::from_iterator(
+            variables.len(),
+            (0..variables.len()).map(|i| 0.8 + i as f64 * 1e-4),
+        );
+
+        let legacy_residual = legacy.residual(&x).expect("legacy residual");
+        let candidate_residual = dependency_aware.residual(&x).expect("candidate residual");
+        let legacy_jacobian = legacy.jacobian(&x).expect("legacy Jacobian");
+        let candidate_jacobian = dependency_aware.jacobian(&x).expect("candidate Jacobian");
+        assert_eq!(legacy_residual, candidate_residual);
+        assert_eq!(legacy_jacobian, candidate_jacobian);
+        assert_eq!(
+            legacy.symbolic_jacobian(),
+            dependency_aware.symbolic_jacobian()
+        );
+        assert_eq!(legacy_jacobian.shape(), (128, 128));
+
+        let legacy_report = legacy
+            .preparation_report()
+            .detailed
+            .as_ref()
+            .expect("legacy detailed telemetry");
+        let candidate_report = dependency_aware
+            .preparation_report()
+            .detailed
+            .as_ref()
+            .expect("candidate detailed telemetry");
+        let legacy_jobs = legacy_report
+            .stage(PreparationStage::JacobianDifferentiation)
+            .and_then(|stage| stage.items)
+            .expect("legacy differentiation count");
+        let candidate_jobs = candidate_report
+            .stage(PreparationStage::JacobianDifferentiation)
+            .and_then(|stage| stage.items)
+            .expect("candidate differentiation count");
+        assert_eq!(legacy_jobs, 128 * 128);
+        assert!(candidate_jobs < legacy_jobs / 20);
+        assert_eq!(
+            legacy_report.equation_count,
+            candidate_report.equation_count
+        );
+        assert_eq!(
+            legacy_report.variable_count,
+            candidate_report.variable_count
+        );
+    }
+
+    #[test]
+    fn dependency_aware_expr_jacobian_preserves_dense_work_for_fully_coupled_system() {
+        let variables = (0..12).map(|i| format!("x{i}")).collect::<Vec<_>>();
+        let coupled_sum = variables.join("+");
+        let equations = (0..variables.len())
+            .map(|i| format!("({coupled_sum})^2+x{i}-1"))
+            .collect::<Vec<_>>();
+        let legacy = problem_with_jacobian_policy(
+            equations.clone(),
+            variables.clone(),
+            ExprJacobianPreparationPolicy::LegacyDense,
+            SymbolicLambdifyFrontend::ExprLegacy,
+        );
+        let candidate = problem_with_jacobian_policy(
+            equations,
+            variables.clone(),
+            ExprJacobianPreparationPolicy::DependencyAware,
+            SymbolicLambdifyFrontend::ExprLegacy,
+        );
+        let x = DVector::from_element(variables.len(), 0.25);
+
+        assert_eq!(
+            legacy.residual(&x).expect("legacy residual"),
+            candidate.residual(&x).expect("candidate residual")
+        );
+        assert_eq!(
+            legacy.jacobian(&x).expect("legacy Jacobian"),
+            candidate.jacobian(&x).expect("candidate Jacobian")
+        );
+        let report = candidate
+            .preparation_report()
+            .detailed
+            .as_ref()
+            .expect("candidate telemetry");
+        assert_eq!(
+            report
+                .stage(PreparationStage::JacobianDifferentiation)
+                .and_then(|stage| stage.items),
+            Some(variables.len() * variables.len())
+        );
+    }
+
+    #[test]
+    fn dependency_aware_expr_solver_matches_legacy_solution_and_counters() {
+        let (equations, variables) = chain_equations(24);
+        let legacy = problem_with_jacobian_policy(
+            equations.clone(),
+            variables.clone(),
+            ExprJacobianPreparationPolicy::LegacyDense,
+            SymbolicLambdifyFrontend::ExprLegacy,
+        );
+        let candidate = problem_with_jacobian_policy(
+            equations,
+            variables.clone(),
+            ExprJacobianPreparationPolicy::DependencyAware,
+            SymbolicLambdifyFrontend::ExprLegacy,
+        );
+        let initial = DVector::from_element(variables.len(), 0.7);
+        let solver = || SolverEngine::new(NewtonMethod, SolveOptions::default());
+        let legacy_result = solver()
+            .solve(&legacy, initial.clone())
+            .expect("legacy solve");
+        let candidate_result = solver()
+            .solve(&candidate, initial)
+            .expect("dependency-aware solve");
+
+        assert_eq!(legacy_result.x, candidate_result.x);
+        assert_eq!(legacy_result.residual, candidate_result.residual);
+        assert_eq!(legacy_result.iterations, candidate_result.iterations);
+        assert_eq!(
+            legacy_result.statistics.residual_evaluations,
+            candidate_result.statistics.residual_evaluations
+        );
+        assert_eq!(
+            legacy_result.statistics.jacobian_evaluations,
+            candidate_result.statistics.jacobian_evaluations
+        );
+        assert_eq!(
+            legacy_result.statistics.linear_factorizations,
+            candidate_result.statistics.linear_factorizations
+        );
+        assert_eq!(
+            legacy_result.statistics.linear_solves,
+            candidate_result.statistics.linear_solves
+        );
+    }
+
+    #[test]
+    fn dependency_aware_expr_jacobian_is_rejected_for_atom_frontend() {
+        let error = match SymbolicNonlinearProblem::from_strings_with_options(
+            vec!["x^2-1".to_string()],
+            SymbolicProblemOptions::new()
+                .with_variables(vec!["x".to_string()])
+                .with_atom_native_frontend()
+                .with_expr_jacobian_preparation_policy(
+                    ExprJacobianPreparationPolicy::DependencyAware,
+                ),
+        ) {
+            Ok(_) => panic!("Expr-only policy must not silently alter Atom preparation"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, SolveError::InvalidConfig(message) if message.contains("ExprLegacy frontend"))
+        );
     }
 }

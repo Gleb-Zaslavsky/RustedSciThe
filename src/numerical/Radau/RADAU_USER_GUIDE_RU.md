@@ -16,6 +16,12 @@ ExprLegacy и плотным хранением. Это удобный вари�
 Для выбора frontend, layout, continuation, output, telemetry, execution policy
 или AOT следует использовать прямой API:
 
+Если используется общий фасад, production-маршрут Radau оставляет telemetry
+выключенной (`Off`) по умолчанию. Включить её можно через
+`UniversalODESolver::with_radau_telemetry_mode(...)`, выбрав один из режимов
+`RadauTelemetryMode::Counters`, `Timings` или `Detailed`. Режим `Off` явно
+отключает сбор данных.
+
 ```rust
 use RustedSciThe::numerical::Radau::{
     RadauConfig, RadauFrontend, RadauMatrixLayout, RadauProblem, RadauSolver,
@@ -112,6 +118,13 @@ production-задач. `FiniteDifference` удобен для диагности
 добавляет вызовы residual. Для AOT и structured layout сначала проверяйте
 явный Jacobian: так контракт генерации и проверка pattern остаются
 однозначными.
+
+Если выбран ExprLegacy Lambdify, а аналитический Jacobian не передан, Radau
+получит его из residual во время подготовки. Построитель дифференцирует только
+state-переменные, от которых зависит каждое уравнение, и хранит результат в
+координатном row-major виде. Поэтому Sparse и Banded не создают промежуточную
+плотную символьную матрицу. Вызов `.with_jacobian(...)` по-прежнему использует
+переданные пользователем выражения. Для AOT явный Jacobian остаётся обязательным.
 
 ### Native callback API
 
