@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory)][ValidateSet("Record", "Compare")][string]$Action,
+    [Parameter(Mandatory)][ValidateSet("Record", "Compare", "RecordCompare")][string]$Action,
     [Parameter(Mandatory)][string]$Machine,
     [ValidateSet("bdf", "radau", "lsode2", "be")]
     [string[]]$Solvers = @("bdf", "radau", "lsode2", "be"),
@@ -10,68 +10,131 @@ param(
     [switch]$Force,
     [switch]$AllowDirtySource,
     [string]$Toolchain,
-    [switch]$PlanOnly
+    [string]$ReportRoot,
+    [switch]$PlanOnly,
+    # Dependency injection for orchestration tests; normally use the maintained runner.
+    [string]$RunnerScript
 )
 
-# Addressed first-tier IVP performance gate. It intentionally reuses the
-# calibrated per-solver groups and never expands to perf-gates --all.
 $ErrorActionPreference = "Stop"
-if ($Force -and $Action -ne "Record") { throw "-Force is valid only with -Action Record." }
-if ($AllowDirtySource -and $Action -ne "Record") {
-    throw "-AllowDirtySource is valid only with -Action Record."
+if ($Action -eq "Compare" -and ($Force -or $AllowDirtySource)) {
+    throw "-Force and -AllowDirtySource apply only to actions containing Record."
 }
-
-$runner = Join-Path $PSScriptRoot "perf_gates_first_tier.ps1"
+if ($Solvers.Count -eq 0) { throw "Select at least one IVP solver." }
+$Solvers = @($Solvers | Select-Object -Unique)
+$actions = if ($Action -eq "RecordCompare") { @("Record", "Compare") } else { @($Action) }
 if ($PlanOnly) {
-    Write-Host "IVP perf-gates plan: action=$Action machine=$Machine warmups=$Warmups runs=$Runs"
-    foreach ($solver in $Solvers) { Write-Host " - $solver" }
+    Write-Host "IVP perf-gates plan: machine=$Machine warmups=$Warmups runs=$Runs"
+    foreach ($solver in $Solvers) {
+        foreach ($step in $actions) { Write-Host " - $solver / $step" }
+    }
     exit 0
 }
 
-$results = [System.Collections.Generic.List[object]]::new()
+. (Join-Path $PSScriptRoot "ivp_perf_gates_reporting.ps1")
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if ([string]::IsNullOrWhiteSpace($RunnerScript)) {
+    $RunnerScript = Join-Path $PSScriptRoot "perf_gates_first_tier.ps1"
+}
+$RunnerScript = (Resolve-Path -LiteralPath $RunnerScript).Path
+if ([string]::IsNullOrWhiteSpace($ReportRoot)) {
+    $ReportRoot = Join-Path $repoRoot "test_reports/IVP_perf_gates"
+}
+$stamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssfffZ") + "-$PID"
+$root = Join-Path $ReportRoot $stamp
+New-Item -ItemType Directory -Path (Join-Path $root "technical") -Force | Out-Null
+$root = (Resolve-Path -LiteralPath $root).Path
+$powerShellHost = (Get-Process -Id $PID).Path
+$steps = [System.Collections.Generic.List[object]]::new()
+$scenarios = [System.Collections.Generic.List[object]]::new()
 foreach ($solver in $Solvers) {
-    Write-Host "`n=== IVP perf-gates: $solver / $Action ==="
-    $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    $status = "passed"
-    $message = ""
+    foreach ($step in $actions) {
+        $steps.Add([pscustomobject][ordered]@{
+            solver = $solver; action = $step.ToLowerInvariant(); status = "pending"
+            exit_code = $null; duration_s = 0; detail = ""; log = ""
+        })
+    }
+}
+$settings = [ordered]@{
+    machine = $Machine; action = $Action; warmups = $Warmups; runs = $Runs
+    max_relative_mad = $MaxRelativeMad; tolerance = $Tolerance
+    force = [bool]$Force; allow_dirty_source = [bool]$AllowDirtySource; toolchain = $Toolchain
+}
+Write-IvpGateSummary $root $settings $steps $scenarios "running"
+Write-Host "IVP matrix reports: $root"
+
+foreach ($step in $steps) {
+    if ($Action -eq "RecordCompare" -and $step.action -eq "compare") {
+        $record = $steps | Where-Object { $_.solver -eq $step.solver -and $_.action -eq "record" }
+        if ($record.status -ne "passed") {
+            $step.status = "blocked"
+            $step.detail = "Record did not complete successfully; comparison would mix old and new baselines."
+            Write-IvpGateSummary $root $settings $steps $scenarios "running"
+            continue
+        }
+    }
+    $step.status = "running"
+    $step.log = "technical/$($step.solver)_$($step.action).log"
+    $logPath = Join-Path $root $step.log
+    Write-IvpGateSummary $root $settings $steps $scenarios "running"
+    Write-Host "`n=== IVP perf-gates: $($step.solver) / $($step.action) ==="
+    $arguments = @(
+        "-Solver", $step.solver, "-Action", $step.action, "-Machine", $Machine,
+        "-Warmups", [string]$Warmups, "-Runs", [string]$Runs,
+        "-MaxRelativeMad", $MaxRelativeMad.ToString([Globalization.CultureInfo]::InvariantCulture),
+        "-Tolerance", $Tolerance.ToString([Globalization.CultureInfo]::InvariantCulture)
+    )
+    if ($step.action -eq "record") {
+        if ($Force) { $arguments += "-Force" }
+        if ($AllowDirtySource) { $arguments += "-AllowDirtySource" }
+    }
+    if ($Toolchain) { $arguments += @("-Toolchain", $Toolchain) }
+    $watch = [Diagnostics.Stopwatch]::StartNew()
     try {
-        $arguments = @{
-            Solver = $solver
-            Action = $Action
-            Machine = $Machine
-            Warmups = $Warmups
-            Runs = $Runs
-            MaxRelativeMad = $MaxRelativeMad
-            Tolerance = $Tolerance
+        # Child isolation preserves exit codes and lets the next solver run after failure.
+        # PowerShell 5 wraps native stderr in ErrorRecords; those are log data here.
+        $ErrorActionPreference = "Continue"
+        & $powerShellHost -NoProfile -ExecutionPolicy Bypass -File $RunnerScript @arguments 2>&1 |
+            Tee-Object -FilePath $logPath | ForEach-Object { Write-Host $_ }
+        $step.exit_code = $LASTEXITCODE
+        $ErrorActionPreference = "Stop"
+        $reportPaths = @(Get-Content -LiteralPath $logPath | ForEach-Object {
+            if ($_ -match '^run report:\s*(.+?)\s*$') { $Matches[1] }
+        } | Select-Object -Unique)
+        if ($reportPaths.Count -eq 0) { throw (Get-IvpGateLaunchFailure $logPath) }
+        foreach ($path in $reportPaths) {
+            $rows = @(Read-IvpGateReport $path $step.solver $step.action $root $step.log)
+            foreach ($row in $rows) { $scenarios.Add($row) }
         }
-        if ($Force) { $arguments.Force = $true }
-        if ($AllowDirtySource) { $arguments.AllowDirtySource = $true }
-        if (-not [string]::IsNullOrWhiteSpace($Toolchain)) {
-            $arguments.Toolchain = $Toolchain
+        $rows = @($scenarios | Where-Object { $_.solver -eq $step.solver -and $_.action -eq $step.action })
+        $step.status = if (@($rows | Where-Object status -eq "error").Count) { "error" }
+            elseif (@($rows | Where-Object status -eq "regression").Count) { "regression" }
+            elseif (@($rows | Where-Object status -eq "unstable").Count) { "unstable" }
+            else { "passed" }
+        if (($step.exit_code -eq 0) -ne ($step.status -eq "passed")) {
+            throw "Process exit and native report disagree (exit $($step.exit_code), report $($step.status))."
         }
-        & $runner @arguments
-        if ($LASTEXITCODE -ne 0) { throw "$solver exited with code $LASTEXITCODE" }
     }
     catch {
-        $status = "failed"
-        $message = $_.Exception.Message
+        $step.status = "error"
+        $step.detail = $_.Exception.Message
+        Add-Content -LiteralPath $logPath -Value "[matrix error] $($step.detail)"
     }
-    $watch.Stop()
-    $results.Add([pscustomobject][ordered]@{
-        solver = $solver
-        action = $Action.ToLowerInvariant()
-        status = $status
-        duration_s = [math]::Round($watch.Elapsed.TotalSeconds, 1)
-        detail = $message
-    })
+    finally {
+        $ErrorActionPreference = "Stop"
+        $watch.Stop()
+        $step.duration_s = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+    }
+    Write-IvpGateSummary $root $settings $steps $scenarios "running"
 }
-
+$failed = @($steps | Where-Object { $_.status -ne "passed" }).Count
+$outcome = if ($failed) { "completed_with_failures" } else { "completed" }
+Write-IvpGateSummary $root $settings $steps $scenarios $outcome
 Write-Host "`nIVP performance-gate summary"
-$results | Format-Table -AutoSize -Wrap
-$failed = @($results | Where-Object { $_.status -eq "failed" }).Count
-if ($failed -gt 0) {
-    Write-Error "$failed IVP performance-gate solver group(s) failed."
-    exit 1
+$steps | Format-Table solver, action, status, exit_code, duration_s -AutoSize
+foreach ($step in $steps | Where-Object { $_.status -eq 'error' -and $_.detail }) {
+    Write-Host "$($step.solver) / $($step.action): $($step.detail)"
 }
-Write-Host "IVP PERF-GATES COMPLETE: $($Action.ToUpperInvariant()) passed for $($Solvers.Count) solver(s)."
+Write-Host "summary=$(Join-Path $root 'summary.md')"
+if ($failed) { exit 1 }
 exit 0

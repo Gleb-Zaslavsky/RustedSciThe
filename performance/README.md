@@ -308,6 +308,56 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\ivp_perf_gates
   -Action Compare -Machine windows-dev -Warmups 20 -Runs 301
 ```
 
+Each invocation now writes a checkpointed matrix under
+`test_reports/IVP_perf_gates/<UTC-timestamp>-<pid>/`:
+
+- `summary.md`: solver/action outcomes and a table for every reported scenario,
+  including primary wall median/MAD, sample count, confirmation median/MAD,
+  error reason and links to evidence.
+- `summary.json` and `scenarios.csv`: machine-readable outcomes. `unstable`,
+  `regression`, and `error` remain distinct; an unstable run is never a pass.
+- `technical/*.log`: live console transcripts, including baseline/current
+  comparisons, percentage changes and compiler or preflight errors.
+- `reports/`: copies of the exact native run summaries and measurement
+  Markdown/TOML files announced by that invocation, with stage timings,
+  counters, raw samples, source revision and toolchain identity. Original
+  `performance/runs/` reports remain available.
+
+The matrix continues with the next solver after instability or failure and
+returns nonzero only after all selected steps have been attempted. Checkpoints
+are refreshed before and after each solver/action: `running`/`pending` means
+the campaign is incomplete, including after an interruption. The live log
+remains available while a long solver group is still executing. A launch
+failure without a native report is an explicit step error, not an empty pass.
+Reports use the runner's generated summary format; unrecognized or inconsistent
+formats are errors rather than guessed successes. No Python installation is
+required for this performance-only matrix.
+
+For the explicitly approved baseline refresh, run one solver's record and
+compare before proceeding to the next solver:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\ivp_perf_gates.ps1 `
+  -Action RecordCompare -Machine windows-dev -Warmups 20 -Runs 301 -Force
+```
+
+Commit reviewed changes first: `Record` still requires clean source unless
+`-AllowDirtySource` is explicitly supplied. If any scenario fails to record,
+the same solver's compare is marked `blocked` to avoid comparing a mixture of
+old and new baselines; other solvers continue. Stable records already written
+by that solver remain written, as in the native runner. There is no automatic
+retry or replacement of unstable measurements. `Compare` alone never replaces
+baselines. Use `-Solvers radau,lsode2` when invoking the script from PowerShell
+to restrict the matrix, `-ReportRoot` to choose its output parent, or `-PlanOnly`
+to print the execution plan without creating files or launching Cargo.
+
+The orchestration/reporting contracts can be checked in seconds with synthetic
+child processes, without numerical runs or baseline writes:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\tests\ivp_perf_gates_tests.ps1
+```
+
 The overnight command runs correctness, perf comparison, and the existing
 BDF/Radau/LSODE2/BE release matrices. It preserves terminal output and stores a
 campaign summary plus technical transcripts under

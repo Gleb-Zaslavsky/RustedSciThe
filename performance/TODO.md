@@ -750,6 +750,22 @@ sample batch.
 
 ## 12. Automated Verification
 
+- [x] Add a persistent IVP performance-only nightly matrix (2026-10-25):
+  `scripts/ivp_perf_gates.ps1` captures per-scenario pass/unstable/regression/error,
+  primary and confirmation timings, live logs and exact native report copies
+  under `test_reports/IVP_perf_gates/`. Save Markdown/JSON/CSV checkpoints;
+  continue other solvers after failure and retain nonzero campaign status.
+- [x] Add explicit `RecordCompare` sequencing per solver. Block that solver's
+  comparison after an incomplete record, preserve already written stable
+  baselines, and continue other solvers. No automatic retries or relaxed gates.
+- [x] Verify the Windows PowerShell matrix with synthetic process/report tests:
+  unstable primary plus confirmation, regression, missing/incompatible baseline,
+  missing tool, timeout, failure without a report, continuation after errors,
+  both BE groups, partial-record blocking and side-effect-free `PlanOnly`.
+- [ ] Run the updated IVP matrix overnight on reviewed source and inspect the
+  resulting scenario table. Synthetic orchestration checks are not numerical
+  or performance evidence; Linux orchestration validation remains deferred.
+
 - [ ] Test selection before computation using fake launch counters; prove BDF
   selection cannot execute another solver. Test list and dry-run do no work.
 - [x] Test machine registration identity mismatch, profile alias mismatch and
