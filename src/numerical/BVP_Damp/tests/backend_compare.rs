@@ -734,6 +734,24 @@ mod tests {
             }
         }
 
+        let mut candidate_options =
+            combustion_lambdify_options_for_route("Sparse", BvpSymbolicAssemblyBackend::ExprLegacy);
+        candidate_options.generated_backend_config = candidate_options
+            .generated_backend_config
+            .clone()
+            .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Sequential)
+            .with_expr_indexed_lambdify(true)
+            .with_expr_dependency_columns(true);
+        let mut candidate = make_combustion_solver(8, candidate_options);
+        candidate
+            .try_eq_generate(None, None)
+            .expect("optimized ExprLegacy route should prepare for finite-difference checks");
+        solvers.push((
+            "Sparse-candidate",
+            BvpSymbolicAssemblyBackend::ExprLegacy,
+            candidate,
+        ));
+
         let reference_values = solvers[0].2.initial_guess.as_slice().to_vec();
         let mut boundary_entries = solvers[0]
             .2
@@ -861,11 +879,20 @@ mod tests {
                     (finite_difference - analytic).abs() <= tolerance,
                     "combustion ExprLegacy/Sparse Jacobian ({row}, {column})={analytic:e}, FD={finite_difference:e}, tolerance={tolerance:e}"
                 );
+                for ((route, frontend), _, route_jacobian) in callbacks.iter().skip(1) {
+                    let route_analytic = route_jacobian[(row, column)];
+                    let route_tolerance =
+                        5.0e-5 * finite_difference.abs().max(route_analytic.abs()).max(1.0);
+                    assert!(
+                        (finite_difference - route_analytic).abs() <= route_tolerance,
+                        "combustion {frontend:?}/{route} Jacobian ({row}, {column})={route_analytic:e}, FD={finite_difference:e}, tolerance={route_tolerance:e}"
+                    );
+                }
             }
         }
 
         let report = format!(
-            "status: passed\n\nfixture: production combustion RHS, n_steps=8, canonical initial guess\nfrontends: ExprLegacy, AtomView\nmatrix_routes: Sparse-faer, native Banded\nchecks: exact fixture fingerprint, componentwise residual/Jacobian parity, Sparse/Banded dense-materialization parity, ExprLegacy/Sparse Jacobian versus central finite differences\nfingerprint: fnv1a64-{fingerprint:016x}\ninterpretation: debug correctness only; no timing or performance claim.\n"
+            "status: passed\n\nfixture: production combustion RHS, n_steps=8, canonical initial guess\nfrontends: ExprLegacy, AtomView, optimized ExprLegacy preparation\nmatrix_routes: Sparse-faer, native Banded\nchecks: exact fixture fingerprint, componentwise residual/Jacobian parity, Sparse/Banded dense-materialization parity, all frontend/optimization Jacobians versus central finite differences\nfingerprint: fnv1a64-{fingerprint:016x}\ninterpretation: debug correctness only; no timing or performance claim.\n"
         );
         if let Err(error) = write_test_report(
             "BVP_Damp",
@@ -1268,6 +1295,431 @@ mod tests {
             eprintln!(
                 "[BVP test report] unable to write accepted combustion trajectory report: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn combustion_1000_expr_sparse_preparation_matches_solver_trace() {
+        let mut baseline_options =
+            combustion_lambdify_options_for_route("Sparse", BvpSymbolicAssemblyBackend::ExprLegacy);
+        baseline_options.generated_backend_config = baseline_options
+            .generated_backend_config
+            .clone()
+            .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Sequential)
+            .with_expr_indexed_lambdify(false)
+            .with_expr_dependency_columns(false);
+
+        let mut optimized_options = baseline_options.clone();
+        optimized_options.generated_backend_config = optimized_options
+            .generated_backend_config
+            .clone()
+            .with_expr_indexed_lambdify(true)
+            .with_expr_dependency_columns(true);
+
+        let mut baseline = make_combustion_solver(1_000, baseline_options);
+        let mut optimized = make_combustion_solver(1_000, optimized_options);
+        for solver in [&mut baseline, &mut optimized] {
+            solver.set_bvp_telemetry_mode(BvpTelemetryMode::Detailed);
+            solver.try_solve().expect("combustion-1000 should solve");
+        }
+
+        let baseline_solution = baseline
+            .get_result()
+            .expect("baseline should publish a solution");
+        let optimized_solution = optimized
+            .get_result()
+            .expect("optimized route should publish a solution");
+        assert_eq!(baseline_solution.shape(), optimized_solution.shape());
+        let max_diff = baseline_solution
+            .iter()
+            .zip(optimized_solution.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_diff <= 1.0e-10,
+            "indexed/dependency preparation changed combustion trajectory: max_diff={max_diff:e}"
+        );
+
+        let baseline_trace = baseline.get_statistics().telemetry;
+        let optimized_trace = optimized.get_statistics().telemetry;
+        assert_eq!(
+            baseline_trace.counters.iterations,
+            optimized_trace.counters.iterations
+        );
+        assert_eq!(
+            baseline_trace.counters.residual_requests,
+            optimized_trace.counters.residual_requests
+        );
+        assert_eq!(
+            baseline_trace.counters.jacobian_requests,
+            optimized_trace.counters.jacobian_requests
+        );
+        assert_eq!(
+            baseline_trace.counters.linear_solves,
+            optimized_trace.counters.linear_solves
+        );
+        assert!(baseline_trace.generation.is_some());
+        assert!(optimized_trace.generation.is_some());
+        println!(
+            "[BVP Expr preparation correctness] fixture=combustion-1000; max_solution_diff={max_diff:.3e}; iterations={}; residual_requests={}; jacobian_requests={}",
+            baseline_trace.counters.iterations,
+            baseline_trace.counters.residual_requests,
+            baseline_trace.counters.jacobian_requests,
+        );
+    }
+
+    #[test]
+    fn combustion_1000_expr_banded_dependency_columns_match_solver_trace() {
+        let mut baseline_options =
+            combustion_lambdify_options_for_route("Banded", BvpSymbolicAssemblyBackend::ExprLegacy);
+        baseline_options.generated_backend_config = baseline_options
+            .generated_backend_config
+            .clone()
+            .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Sequential)
+            .with_expr_dependency_columns(false);
+        let mut optimized_options = baseline_options.clone();
+        optimized_options.generated_backend_config = optimized_options
+            .generated_backend_config
+            .clone()
+            .with_expr_dependency_columns(true);
+
+        let mut baseline = make_combustion_solver(1_000, baseline_options);
+        let mut optimized = make_combustion_solver(1_000, optimized_options);
+        for solver in [&mut baseline, &mut optimized] {
+            solver.set_bvp_telemetry_mode(BvpTelemetryMode::Detailed);
+            solver.try_solve().expect("combustion-1000 should solve");
+        }
+
+        let baseline_solution = baseline
+            .get_result()
+            .expect("baseline should publish a solution");
+        let optimized_solution = optimized
+            .get_result()
+            .expect("optimized route should publish a solution");
+        assert_eq!(baseline_solution.shape(), optimized_solution.shape());
+        let max_diff = baseline_solution
+            .iter()
+            .zip(optimized_solution.iter())
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            max_diff <= 1.0e-10,
+            "dependency-column preparation changed banded combustion trajectory: max_diff={max_diff:e}"
+        );
+
+        let baseline_trace = baseline.get_statistics().telemetry;
+        let optimized_trace = optimized.get_statistics().telemetry;
+        assert_eq!(
+            baseline_trace.counters.iterations,
+            optimized_trace.counters.iterations
+        );
+        assert_eq!(
+            baseline_trace.counters.residual_requests,
+            optimized_trace.counters.residual_requests
+        );
+        assert_eq!(
+            baseline_trace.counters.jacobian_requests,
+            optimized_trace.counters.jacobian_requests
+        );
+        assert_eq!(
+            baseline_trace.counters.linear_solves,
+            optimized_trace.counters.linear_solves
+        );
+        println!(
+            "[BVP Expr preparation correctness] fixture=combustion-1000/Banded; max_solution_diff={max_diff:.3e}; iterations={}; residual_requests={}; jacobian_requests={}",
+            baseline_trace.counters.iterations,
+            baseline_trace.counters.residual_requests,
+            baseline_trace.counters.jacobian_requests,
+        );
+    }
+
+    #[derive(Clone, Debug)]
+    struct ExprPreparationAbSample {
+        cold_prepare_ms: f64,
+        residual_callback_ms: f64,
+        jacobian_callback_ms: f64,
+        cold_solve_ms: f64,
+        iterations: u64,
+        residual_requests: u64,
+        jacobian_requests: u64,
+        solution: Vec<f64>,
+    }
+
+    fn bratu_expr_sparse_solver(n_steps: usize, options: DampedSolverOptions) -> NRBVP {
+        let guess = DMatrix::from_fn(2, n_steps, |row, _| if row == 0 { 4.0 } else { 0.0 });
+        let mut solver = NRBVP::new_with_options(
+            vec![
+                Expr::parse_expression("z"),
+                Expr::parse_expression("-2*exp(y)"),
+            ],
+            guess,
+            vec!["y".to_string(), "z".to_string()],
+            "x".to_string(),
+            HashMap::from([("y".to_string(), vec![(0, 0.0), (1, 0.0)])]),
+            0.0,
+            1.0,
+            n_steps,
+            options,
+        );
+        solver.dont_save_log(true);
+        solver
+    }
+
+    fn expr_prep_ab_options(
+        case: &str,
+        route: &'static str,
+        candidate: bool,
+    ) -> DampedSolverOptions {
+        let config = match route {
+            "Sparse" => GeneratedBackendConfig::sparse_defaults()
+                .with_matrix_backend_override(MatrixBackend::SparseCol),
+            "Banded" => GeneratedBackendConfig::banded_lambdify_defaults(),
+            other => panic!("unsupported Expr-preparation A/B route: {other}"),
+        }
+        .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly))
+        .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::ExprLegacy)
+        .with_lambdify_execution_policy(BvpLambdifyExecutionPolicy::Sequential)
+        .with_expr_indexed_lambdify(candidate && route == "Sparse")
+        .with_expr_dependency_columns(candidate);
+        let base = match route {
+            "Sparse" => DampedSolverOptions::sparse_damped(),
+            "Banded" => DampedSolverOptions::banded_damped().with_banded_lambdify(),
+            _ => unreachable!(),
+        };
+        let relative_tolerances = if case == "combustion" {
+            HashMap::from([
+                ("Teta".to_string(), 1e-5),
+                ("q".to_string(), 1e-5),
+                ("C0".to_string(), 1e-5),
+                ("J0".to_string(), 1e-5),
+                ("C1".to_string(), 1e-5),
+                ("J1".to_string(), 1e-5),
+            ])
+        } else {
+            HashMap::from([("y".to_string(), 1e-7), ("z".to_string(), 1e-7)])
+        };
+        let bounds = if case == "combustion" {
+            HashMap::from([
+                ("Teta".to_string(), (0.0, 10.0)),
+                ("q".to_string(), (-1e20, 1e20)),
+                ("C0".to_string(), (0.0, 1.5)),
+                ("J0".to_string(), (-1e2, 1e2)),
+                ("C1".to_string(), (0.0, 1.5)),
+                ("J1".to_string(), (-1e2, 1e2)),
+            ])
+        } else {
+            HashMap::from([
+                ("y".to_string(), (-10.0, 10.0)),
+                ("z".to_string(), (-20.0, 20.0)),
+            ])
+        };
+        base.with_generated_backend_config(config)
+            .with_strategy_params(Some(SolverParams::default()))
+            .with_abs_tolerance(1e-6)
+            .with_rel_tolerance(relative_tolerances)
+            .with_bounds(bounds)
+            .with_max_iterations(100)
+            .with_loglevel(Some("error".to_string()))
+    }
+
+    fn measure_expr_prep_ab_sample(
+        case: &str,
+        n_steps: usize,
+        route: &'static str,
+        candidate: bool,
+    ) -> ExprPreparationAbSample {
+        let options = expr_prep_ab_options(case, route, candidate);
+        let mut prepared = if case == "combustion" {
+            make_combustion_solver(n_steps, options.clone())
+        } else {
+            bratu_expr_sparse_solver(n_steps, options.clone())
+        };
+        prepared.set_bvp_telemetry_mode(BvpTelemetryMode::Detailed);
+        let prepare_started = Instant::now();
+        prepared
+            .try_eq_generate(None, None)
+            .expect("ExprLegacy A/B callback preparation should succeed");
+        let cold_prepare_ms = prepare_started.elapsed().as_secs_f64() * 1_000.0;
+        let (residual_ms, jacobian_ms) = measure_installed_callback_runtime(&mut prepared, 5, 1);
+
+        let mut solve = if case == "combustion" {
+            make_combustion_solver(n_steps, options)
+        } else {
+            bratu_expr_sparse_solver(n_steps, options)
+        };
+        solve.set_bvp_telemetry_mode(BvpTelemetryMode::Counters);
+        let solve_started = Instant::now();
+        solve
+            .try_solve()
+            .expect("ExprLegacy A/B cold solve should converge");
+        let cold_solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
+        let solution = solve
+            .get_result()
+            .expect("cold solve should publish a trajectory");
+        let stats = solve.get_statistics();
+        ExprPreparationAbSample {
+            cold_prepare_ms,
+            residual_callback_ms: residual_ms / 5.0,
+            jacobian_callback_ms: jacobian_ms / 5.0,
+            cold_solve_ms,
+            iterations: stats.telemetry.counters.iterations,
+            residual_requests: stats.telemetry.counters.residual_requests,
+            jacobian_requests: stats.telemetry.counters.jacobian_requests,
+            solution: solution.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    #[ignore = "release-only interleaved ExprLegacy preparation A/B on large BVP workloads"]
+    fn expr_legacy_sparse_preparation_large_workload_release_ab() {
+        let runs = std::env::var("BVP_EXPR_PREP_AB_RUNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value >= 3)
+            .unwrap_or(7);
+        let cases = [
+            ("combustion", 3_000, "Sparse"),
+            ("combustion", 3_000, "Banded"),
+            ("bratu", 1_024, "Sparse"),
+        ];
+        let mut report = format!(
+            "status: passed\n\nrecorded_on: 2026-10-25\nprofile: {}\nruns_per_variant: {runs}\nmethod: interleaved baseline/candidate order\nfront_end: ExprLegacy + Lambdify; sequential callbacks; no AOT\nroute: identical Sparse/Banded backend and options within each pair\nworkloads: combustion-3000 (18,000 unknowns) and Bratu-1024 (2,048 unknowns)\nmeasurement_scopes: cold_prepare_ms is try_eq_generate wall time; callback fields are warm direct callback averages over five pairs; cold_solve_ms is try_solve wall time including setup and solve\ntelemetry: Counters for cold solve; Detailed for separate preparation/callback sample\nlimitations: allocator-level allocation counts are not captured in this solver test; stage and callback measurements are diagnostic and not additive to cold solve\n\n| workload | route | variant | cold_prepare_ms median/MAD | residual_callback_ms median/MAD | jacobian_callback_ms median/MAD | cold_solve_ms median/MAD | iterations | residual_requests | jacobian_requests | max_abs_solution |\n|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+            if cfg!(debug_assertions) {
+                "debug correctness smoke (timings are not a performance claim)"
+            } else {
+                "optimized Release"
+            }
+        );
+        println!(
+            "[BVP Expr preparation A/B] {}; runs={runs}; interleaved; workloads=combustion-3000,Bratu-1024",
+            if cfg!(debug_assertions) {
+                "Debug correctness smoke (timings are not a performance claim)"
+            } else {
+                "Release"
+            }
+        );
+
+        for (case, n_steps, route) in cases {
+            let mut baseline_rows = Vec::with_capacity(runs);
+            let mut candidate_rows = Vec::with_capacity(runs);
+            for run in 0..runs {
+                let order = if run % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                };
+                for candidate in order {
+                    let row = measure_expr_prep_ab_sample(case, n_steps, route, candidate);
+                    if candidate {
+                        candidate_rows.push(row);
+                    } else {
+                        baseline_rows.push(row);
+                    }
+                }
+            }
+
+            assert_eq!(baseline_rows.len(), candidate_rows.len());
+            for (baseline, candidate) in baseline_rows.iter().zip(&candidate_rows) {
+                assert_eq!(baseline.solution.len(), candidate.solution.len());
+                let max_solution_diff = baseline
+                    .solution
+                    .iter()
+                    .zip(&candidate.solution)
+                    .map(|(left, right)| (left - right).abs())
+                    .fold(0.0, f64::max);
+                assert!(
+                    max_solution_diff <= 1.0e-8,
+                    "baseline/candidate trajectory diverged for {case}/{route}: {max_solution_diff:e}"
+                );
+                assert_eq!(baseline.iterations, candidate.iterations);
+                assert_eq!(baseline.residual_requests, candidate.residual_requests);
+                assert_eq!(baseline.jacobian_requests, candidate.jacobian_requests);
+            }
+
+            for (label, rows) in [("baseline", &baseline_rows), ("candidate", &candidate_rows)] {
+                let samples = |select: fn(&ExprPreparationAbSample) -> f64| {
+                    rows.iter().map(select).collect::<Vec<_>>()
+                };
+                let (prep_median, prep_mad) = median_and_mad(&samples(|row| row.cold_prepare_ms));
+                let (residual_median, residual_mad) =
+                    median_and_mad(&samples(|row| row.residual_callback_ms));
+                let (jacobian_median, jacobian_mad) =
+                    median_and_mad(&samples(|row| row.jacobian_callback_ms));
+                let (solve_median, solve_mad) = median_and_mad(&samples(|row| row.cold_solve_ms));
+                let reference = &baseline_rows[0];
+                let max_solution_drift = rows
+                    .iter()
+                    .map(|row| {
+                        assert_eq!(row.solution.len(), reference.solution.len());
+                        row.solution
+                            .iter()
+                            .zip(&reference.solution)
+                            .map(|(actual, expected)| (actual - expected).abs())
+                            .fold(0.0, f64::max)
+                    })
+                    .fold(0.0, f64::max);
+                assert!(
+                    max_solution_drift <= 1.0e-8,
+                    "full trajectory drift in {case}/{route}/{label}: {max_solution_drift:e}"
+                );
+                assert!(
+                    rows.iter().all(|row| {
+                        row.iterations == reference.iterations
+                            && row.residual_requests == reference.residual_requests
+                            && row.jacobian_requests == reference.jacobian_requests
+                    }),
+                    "solver work changed in {case}/{route}/{label}"
+                );
+                println!(
+                    "{case}-{n_steps} | {route} | {label} | {prep_median:.3}/{prep_mad:.3} | {residual_median:.4}/{residual_mad:.4} | {jacobian_median:.4}/{jacobian_mad:.4} | {solve_median:.3}/{solve_mad:.3} | iters={} residuals={} jacobians={} | drift={max_solution_drift:.3e}",
+                    reference.iterations, reference.residual_requests, reference.jacobian_requests,
+                );
+                writeln!(
+                    report,
+                    "| {case}-{n_steps} | {route} | {label} | {prep_median:.4}/{prep_mad:.4} | {residual_median:.5}/{residual_mad:.5} | {jacobian_median:.5}/{jacobian_mad:.5} | {solve_median:.4}/{solve_mad:.4} | {} | {} | {} | {:.9e} |",
+                    reference.iterations,
+                    reference.residual_requests,
+                    reference.jacobian_requests,
+                    reference
+                        .solution
+                        .iter()
+                        .copied()
+                        .map(f64::abs)
+                        .fold(0.0, f64::max),
+                )
+                .expect("writing to a String cannot fail");
+            }
+            let baseline_solve = median_and_mad(
+                &baseline_rows
+                    .iter()
+                    .map(|row| row.cold_solve_ms)
+                    .collect::<Vec<_>>(),
+            )
+            .0;
+            let candidate_solve = median_and_mad(
+                &candidate_rows
+                    .iter()
+                    .map(|row| row.cold_solve_ms)
+                    .collect::<Vec<_>>(),
+            )
+            .0;
+            let solve_change_pct = (candidate_solve / baseline_solve - 1.0) * 100.0;
+            println!(
+                "[BVP Expr preparation A/B result] {case}-{n_steps}/{route}: cold_solve_change={solve_change_pct:+.2}% (candidate vs baseline); no promotion decision from one workload"
+            );
+            writeln!(
+                report,
+                "\n{case}-{n_steps}/{route} cold_solve_change_percent: {solve_change_pct:.4}\n"
+            )
+            .expect("writing to a String cannot fail");
+        }
+
+        if let Err(error) = write_test_report(
+            "BVP_Damp",
+            "expr_legacy_sparse_preparation_large_workload_release_ab",
+            &report,
+        ) {
+            eprintln!("[BVP test report] unable to write Expr preparation A/B report: {error}");
         }
     }
 

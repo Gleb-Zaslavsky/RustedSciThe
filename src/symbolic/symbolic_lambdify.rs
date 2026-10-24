@@ -1,7 +1,124 @@
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ir::{CompiledBatch, compile_many};
+use std::collections::HashMap;
 use std::f64::consts::PI;
 const LAMBDIFY_METHOD: usize = 0;
+
+/// Reusable argument-name lookup for compiling many Expr callbacks that share
+/// the same ordered input vector. The compiled closures capture only indices,
+/// so this context is needed during preparation and can then be dropped.
+#[derive(Clone, Debug)]
+pub(crate) struct ExprLambdifyContext {
+    variable_indices: HashMap<String, usize>,
+}
+
+impl ExprLambdifyContext {
+    pub(crate) fn new(variable_names: &[&str]) -> Self {
+        let mut variable_indices = HashMap::with_capacity(variable_names.len());
+        for (index, name) in variable_names.iter().enumerate() {
+            // Match the existing `position()` behavior if a caller supplies a
+            // duplicate name: the first argument position wins.
+            variable_indices.entry((*name).to_owned()).or_insert(index);
+        }
+        Self { variable_indices }
+    }
+
+    pub(crate) fn compile(&self, expr: &Expr) -> Box<dyn Fn(&[f64]) -> f64 + Send + Sync> {
+        compile_expr_with_indices(expr, &self.variable_indices)
+    }
+}
+
+fn compile_expr_with_indices(
+    expr: &Expr,
+    variable_indices: &HashMap<String, usize>,
+) -> Box<dyn Fn(&[f64]) -> f64 + Send + Sync> {
+    match expr {
+        Expr::Var(name) => {
+            let index = *variable_indices.get(name).unwrap_or_else(|| {
+                panic!("Lambdify variable {name:?} is absent from its input order")
+            });
+            Box::new(move |args| args[index])
+        }
+        Expr::Const(value) => {
+            let value = *value;
+            Box::new(move |_| value)
+        }
+        Expr::Add(lhs, rhs) => {
+            let lhs = compile_expr_with_indices(lhs, variable_indices);
+            let rhs = compile_expr_with_indices(rhs, variable_indices);
+            Box::new(move |args| lhs(args) + rhs(args))
+        }
+        Expr::Sub(lhs, rhs) => {
+            let lhs = compile_expr_with_indices(lhs, variable_indices);
+            let rhs = compile_expr_with_indices(rhs, variable_indices);
+            Box::new(move |args| lhs(args) - rhs(args))
+        }
+        Expr::Mul(lhs, rhs) => {
+            let lhs = compile_expr_with_indices(lhs, variable_indices);
+            let rhs = compile_expr_with_indices(rhs, variable_indices);
+            Box::new(move |args| lhs(args) * rhs(args))
+        }
+        Expr::Div(lhs, rhs) => {
+            let lhs = compile_expr_with_indices(lhs, variable_indices);
+            let rhs = compile_expr_with_indices(rhs, variable_indices);
+            Box::new(move |args| lhs(args) / rhs(args))
+        }
+        Expr::Pow(base, exponent) => {
+            let base = compile_expr_with_indices(base, variable_indices);
+            if let Some(exponent) = constant_integer_exponent(exponent) {
+                Box::new(move |args| match exponent {
+                    0 => 1.0,
+                    1 => base(args),
+                    -1 => base(args).recip(),
+                    exponent => base(args).powi(exponent),
+                })
+            } else {
+                let exponent = compile_expr_with_indices(exponent, variable_indices);
+                Box::new(move |args| base(args).powf(exponent(args)))
+            }
+        }
+        Expr::Exp(value) => {
+            let value = compile_expr_with_indices(value, variable_indices);
+            Box::new(move |args| value(args).exp())
+        }
+        Expr::Ln(value) => {
+            let value = compile_expr_with_indices(value, variable_indices);
+            Box::new(move |args| value(args).ln())
+        }
+        Expr::sin(value) => {
+            let value = compile_expr_with_indices(value, variable_indices);
+            Box::new(move |args| value(args).sin())
+        }
+        Expr::cos(value) => {
+            let value = compile_expr_with_indices(value, variable_indices);
+            Box::new(move |args| value(args).cos())
+        }
+        Expr::tg(value) => {
+            let value = compile_expr_with_indices(value, variable_indices);
+            Box::new(move |args| value(args).tan())
+        }
+        Expr::ctg(value) => {
+            let value = compile_expr_with_indices(value, variable_indices);
+            Box::new(move |args| 1.0 / value(args).tan())
+        }
+        Expr::arcsin(value) => {
+            let value = compile_expr_with_indices(value, variable_indices);
+            Box::new(move |args| value(args).asin())
+        }
+        Expr::arccos(value) => {
+            let value = compile_expr_with_indices(value, variable_indices);
+            Box::new(move |args| value(args).acos())
+        }
+        Expr::arctg(value) => {
+            let value = compile_expr_with_indices(value, variable_indices);
+            Box::new(move |args| value(args).atan())
+        }
+        Expr::arcctg(value) => {
+            let value = compile_expr_with_indices(value, variable_indices);
+            Box::new(move |args| (PI / 2.0) - value(args).atan())
+        }
+    }
+}
 
 /// Return a safe `powi` exponent for a finite integer Expr constant.
 ///
@@ -531,13 +648,119 @@ mod tests {
     }
 
     #[test]
+    fn indexed_lambdify_context_matches_existing_closures() {
+        let expressions = [
+            "x + y * z - 2",
+            "sin(x) + cos(y) + tan(z)",
+            "exp(x) / (1 + y) + ln(z)",
+            "x^3 + y^(-1) + z^0.5",
+        ];
+        let variables = ["x", "y", "z"];
+        let args = [0.25, 1.5, 2.0];
+        let context = ExprLambdifyContext::new(&variables);
+
+        for source in expressions {
+            let expr = Expr::parse_expression(source);
+            let expected = expr.lambdify1(&variables)(&args);
+            let actual = context.compile(&expr)(&args);
+            assert_eq!(actual.to_bits(), expected.to_bits(), "expression: {source}");
+        }
+    }
+
+    #[test]
+    fn indexed_lambdify_preserves_small_and_nonfinite_constants() {
+        let variables = ["T"];
+        let context = ExprLambdifyContext::new(&variables);
+        let temperature = 2_500.0;
+        let coefficients = [
+            5.09024475e-12,
+            -5.09024475e-13,
+            5.09024475e-14,
+            -5.09024475e-16,
+        ];
+
+        for coefficient in coefficients {
+            let constant = Expr::Const(coefficient);
+            let constant_expected = constant.lambdify1(&variables)(&[temperature]);
+            let constant_actual = context.compile(&constant)(&[temperature]);
+            assert_eq!(constant_actual.to_bits(), coefficient.to_bits());
+            assert_eq!(constant_actual.to_bits(), constant_expected.to_bits());
+
+            let scaled = Expr::Mul(
+                Box::new(Expr::Const(coefficient)),
+                Box::new(Expr::Pow(
+                    Box::new(Expr::Var("T".to_owned())),
+                    Box::new(Expr::Const(4.0)),
+                )),
+            );
+            let expected = scaled.lambdify1(&variables)(&[temperature]);
+            let actual = context.compile(&scaled)(&[temperature]);
+            assert_eq!(actual.to_bits(), expected.to_bits());
+            assert_ne!(actual, 0.0, "coefficient={coefficient:e}");
+        }
+
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let constant = Expr::Const(value);
+            let actual = context.compile(&constant)(&[temperature]);
+            if value.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert_eq!(actual.to_bits(), value.to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_lambdify_context_preserves_first_duplicate_argument() {
+        let expr = Expr::Var("x".to_owned());
+        let variables = ["x", "y", "x"];
+        let context = ExprLambdifyContext::new(&variables);
+        let args = [3.0, 5.0, 7.0];
+
+        assert_eq!(
+            context.compile(&expr)(&args),
+            expr.lambdify1(&variables)(&args)
+        );
+        assert_eq!(context.compile(&expr)(&args), 3.0);
+    }
+
+    #[test]
+    fn indexed_lambdify_context_handles_large_argument_orders() {
+        let variables = (0..4096)
+            .map(|index| format!("u_{index}"))
+            .collect::<Vec<_>>();
+        let variable_refs = variables.iter().map(String::as_str).collect::<Vec<_>>();
+        let expr = Expr::parse_expression("u_0 + u_2048 * u_4095");
+        let args = (0..variables.len())
+            .map(|index| index as f64 / 10.0)
+            .collect::<Vec<_>>();
+        let context = ExprLambdifyContext::new(&variable_refs);
+
+        let expected = expr.lambdify1(&variable_refs)(&args);
+        let actual = context.compile(&expr)(&args);
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+
+    #[test]
     fn lambdify_constant_integer_powers_preserve_numeric_semantics() {
         let x = Expr::Var("x".to_string());
         let cases = [
-            (Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(-1.0))), -2.0_f64),
-            (Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(3.0))), -2.0_f64),
-            (Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(0.0))), 0.0_f64),
-            (Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(0.5))), 4.0_f64),
+            (
+                Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(-1.0))),
+                -2.0_f64,
+            ),
+            (
+                Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(3.0))),
+                -2.0_f64,
+            ),
+            (
+                Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(0.0))),
+                0.0_f64,
+            ),
+            (
+                Expr::Pow(Box::new(x.clone()), Box::new(Expr::Const(0.5))),
+                4.0_f64,
+            ),
         ];
 
         for (expr, value) in cases {

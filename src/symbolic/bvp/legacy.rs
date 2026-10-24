@@ -590,6 +590,12 @@ pub struct Jacobian {
     /// Runtime execution policy for pure Lambdify callbacks. This is kept
     /// separate from AOT execution policy and does not affect preparation.
     pub lambdify_execution_policy: BvpLambdifyExecutionPolicy,
+
+    /// Selects indexed argument lookup for ExprLegacy Sparse callbacks.
+    expr_indexed_lambdify_enabled: bool,
+
+    /// Selects dependency-driven ExprLegacy Sparse/Banded Jacobian preparation.
+    expr_dependency_columns_enabled: bool,
 }
 
 /// Owned sparse AOT-ready BVP problem produced by the legacy BVP symbolic
@@ -5168,6 +5174,10 @@ impl Jacobian {
             lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
             aot_telemetry_mode: BvpAotTelemetryMode::Off,
             lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+            // Standalone Jacobian users retain the historical behavior unless
+            // the generated BVP solver explicitly supplies its production policy.
+            expr_indexed_lambdify_enabled: false,
+            expr_dependency_columns_enabled: false,
         }
     }
 
@@ -5222,6 +5232,28 @@ impl Jacobian {
     /// Returns the runtime execution policy used by newly installed callbacks.
     pub fn lambdify_execution_policy(&self) -> BvpLambdifyExecutionPolicy {
         self.lambdify_execution_policy
+    }
+
+    /// Selects indexed argument lookup for subsequent ExprLegacy Sparse callbacks.
+    pub fn set_expr_indexed_lambdify_enabled(&mut self, enabled: bool) {
+        self.expr_indexed_lambdify_enabled = enabled;
+    }
+
+    /// Returns whether new ExprLegacy Sparse callbacks use indexed lookup.
+    pub fn expr_indexed_lambdify_enabled(&self) -> bool {
+        self.expr_indexed_lambdify_enabled
+    }
+
+    /// Enables direct dependency-column enumeration during ExprLegacy
+    /// Sparse/Banded symbolic Jacobian preparation.
+    pub fn set_expr_dependency_columns_enabled(&mut self, enabled: bool) {
+        self.expr_dependency_columns_enabled = enabled;
+    }
+
+    /// Reports whether direct dependency-column enumeration is selected for
+    /// subsequent ExprLegacy Jacobian preparation.
+    pub fn expr_dependency_columns_enabled(&self) -> bool {
+        self.expr_dependency_columns_enabled
     }
 
     /// Creates the owned direct-path snapshot used by the no-Mutex Banded runtime.
@@ -6727,7 +6759,15 @@ impl Jacobian {
     /// The implementation lives in `bvp::legacy_symbolic`; this method keeps
     /// the historical public API stable for downstream callers.
     pub fn calc_jacobian_parallel_smart_optimized_with_given_bandwidth(&mut self) {
-        crate::symbolic::bvp::legacy_symbolic::calc_jacobian_parallel_smart_optimized(self, true);
+        if self.expr_dependency_columns_enabled
+            && self.symbolic_assembly_backend == BvpSymbolicAssemblyBackend::ExprLegacy
+        {
+            crate::symbolic::bvp::legacy_symbolic::calc_jacobian_by_dependency_columns(self, true);
+        } else {
+            crate::symbolic::bvp::legacy_symbolic::calc_jacobian_parallel_smart_optimized(
+                self, true,
+            );
+        }
     }
 
     /// Computes the symbolic Jacobian matrix with smart sparsity detection and HashSet optimization.
@@ -6753,7 +6793,15 @@ impl Jacobian {
     /// - Systems with highly variable sparsity patterns per equation
     /// Compatibility entry point for smart ExprLegacy Jacobian preparation.
     pub fn calc_jacobian_parallel_smart_optimized(&mut self) {
-        crate::symbolic::bvp::legacy_symbolic::calc_jacobian_parallel_smart_optimized(self, false);
+        if self.expr_dependency_columns_enabled
+            && self.symbolic_assembly_backend == BvpSymbolicAssemblyBackend::ExprLegacy
+        {
+            crate::symbolic::bvp::legacy_symbolic::calc_jacobian_by_dependency_columns(self, false);
+        } else {
+            crate::symbolic::bvp::legacy_symbolic::calc_jacobian_parallel_smart_optimized(
+                self, false,
+            );
+        }
     }
 
     /// Computes the symbolic Jacobian matrix using parallel differentiation with smart sparsity optimization.
@@ -7442,16 +7490,31 @@ impl Jacobian {
                 .collect()
         };
         self.jac_function = Some(
-            legacy_lambdify::faer_sparse_jacobian_with_binding_and_policy(
-                sparse_entries,
-                self.vector_of_functions.len(),
-                self.vector_of_variables.len(),
-                flattened_argument_names_owned,
-                binding,
-                self.parameters_string.len(),
-                telemetry,
-                self.lambdify_execution_policy,
-            ),
+            if self.expr_indexed_lambdify_enabled
+                && self.symbolic_assembly_backend == BvpSymbolicAssemblyBackend::ExprLegacy
+            {
+                legacy_lambdify::faer_sparse_jacobian_with_indexed_lookup(
+                    sparse_entries,
+                    self.vector_of_functions.len(),
+                    self.vector_of_variables.len(),
+                    flattened_argument_names_owned,
+                    binding,
+                    self.parameters_string.len(),
+                    telemetry,
+                    self.lambdify_execution_policy,
+                )
+            } else {
+                legacy_lambdify::faer_sparse_jacobian_with_binding_and_policy(
+                    sparse_entries,
+                    self.vector_of_functions.len(),
+                    self.vector_of_variables.len(),
+                    flattened_argument_names_owned,
+                    binding,
+                    self.parameters_string.len(),
+                    telemetry,
+                    self.lambdify_execution_policy,
+                )
+            },
         );
     }
     ////////////////////////////////RESIDUAL LAMBDIFICATION/////////////////////////////////////////////////////////
@@ -7503,14 +7566,27 @@ impl Jacobian {
             }
         }
         let telemetry = self.start_legacy_lambdify_telemetry();
-        self.residiual_function = legacy_lambdify::faer_sparse_residual_with_binding_and_policy(
-            self.vector_of_functions.clone(),
-            variable_str_owned,
-            binding,
-            self.parameters_string.len(),
-            telemetry,
-            self.lambdify_execution_policy,
-        );
+        self.residiual_function = if self.expr_indexed_lambdify_enabled
+            && self.symbolic_assembly_backend == BvpSymbolicAssemblyBackend::ExprLegacy
+        {
+            legacy_lambdify::faer_sparse_residual_with_indexed_lookup(
+                self.vector_of_functions.clone(),
+                variable_str_owned,
+                binding,
+                self.parameters_string.len(),
+                telemetry,
+                self.lambdify_execution_policy,
+            )
+        } else {
+            legacy_lambdify::faer_sparse_residual_with_binding_and_policy(
+                self.vector_of_functions.clone(),
+                variable_str_owned,
+                binding,
+                self.parameters_string.len(),
+                telemetry,
+                self.lambdify_execution_policy,
+            )
+        };
     }
 
     /// Compiles the symbolic Jacobian into the native banded storage path.

@@ -34,6 +34,8 @@ pub fn generate_damped_solver_state(
     lambdify_telemetry_mode: BvpLambdifyTelemetryMode,
     aot_telemetry_mode: BvpAotTelemetryMode,
     lambdify_execution_policy: BvpLambdifyExecutionPolicy,
+    expr_indexed_lambdify_enabled: bool,
+    expr_dependency_columns_enabled: bool,
     callback_runtime: crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedCallbackRuntime,
 ) -> Result<DampedGeneratedSolverState, BvpBackendIntegrationError> {
     if callback_runtime
@@ -140,6 +142,8 @@ pub fn generate_damped_solver_state(
             lambdify_telemetry_mode,
             aot_telemetry_mode,
             lambdify_execution_policy,
+            expr_indexed_lambdify_enabled,
+            expr_dependency_columns_enabled,
         );
         let original_backend_policy = backend_policy;
         let backend_policy =
@@ -186,6 +190,8 @@ pub fn generate_damped_solver_state(
                 lambdify_telemetry_mode,
                 aot_telemetry_mode,
                 lambdify_execution_policy,
+                expr_indexed_lambdify_enabled,
+                expr_dependency_columns_enabled,
             );
             let auto_regenerate_begin = Instant::now();
             bundle = try_generate_sparse_bundle(
@@ -271,6 +277,8 @@ pub fn generate_damped_solver_state(
             lambdify_telemetry_mode,
             aot_telemetry_mode,
             lambdify_execution_policy,
+            expr_indexed_lambdify_enabled,
+            expr_dependency_columns_enabled,
         );
         let legacy_bundle = jacobian_instance.generate_legacy_solver_bundle_with_params(
             eq_system,
@@ -371,6 +379,8 @@ pub fn generate_frozen_solver_state(
             lambdify_telemetry_mode,
             aot_telemetry_mode,
             lambdify_execution_policy,
+            false,
+            false,
         );
         let original_backend_policy = backend_policy;
         let backend_policy =
@@ -417,6 +427,8 @@ pub fn generate_frozen_solver_state(
                 lambdify_telemetry_mode,
                 aot_telemetry_mode,
                 lambdify_execution_policy,
+                false,
+                false,
             );
             let auto_regenerate_begin = Instant::now();
             bundle = try_generate_sparse_bundle(
@@ -505,6 +517,8 @@ pub fn generate_frozen_solver_state(
             lambdify_telemetry_mode,
             aot_telemetry_mode,
             lambdify_execution_policy,
+            false,
+            false,
         );
         let legacy_bundle = jacobian_instance.generate_legacy_solver_bundle_with_params(
             eq_system,

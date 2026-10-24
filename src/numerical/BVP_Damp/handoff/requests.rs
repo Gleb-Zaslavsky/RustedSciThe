@@ -60,6 +60,10 @@ pub struct DampedSolverBuildRequest {
     pub aot_telemetry_mode: BvpAotTelemetryMode,
     /// Runtime execution policy for pure Lambdify residual/Jacobian callbacks.
     pub lambdify_execution_policy: BvpLambdifyExecutionPolicy,
+    /// Indexed ExprLegacy callback compilation; enabled in production config.
+    pub expr_indexed_lambdify_enabled: bool,
+    /// Dependency-driven ExprLegacy Sparse/Banded preparation; enabled by default.
+    pub expr_dependency_columns_enabled: bool,
 }
 
 // The request carries the pure-Lambdify execution policy separately from AOT
@@ -108,6 +112,8 @@ impl DampedSolverBuildRequest {
             self.lambdify_telemetry_mode,
             self.aot_telemetry_mode,
             self.lambdify_execution_policy,
+            self.expr_indexed_lambdify_enabled,
+            self.expr_dependency_columns_enabled,
             callback_runtime,
         )
     }

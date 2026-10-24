@@ -99,6 +99,7 @@
 !src/symbolic/TODO.md
 !src/symbolic/View/TODO.md
 !src/numerical/BVP_Damp/TODO.md
+!src/numerical/BVP_sci/TODO.md
 !src/numerical/LSODE2/TODO.md
 !src/numerical/BE/TODO.md
 !src/numerical/BE/BE_*.md

@@ -218,6 +218,13 @@ pub struct GeneratedBackendConfig {
     /// Runtime execution policy for pure Lambdify residual/Jacobian callbacks.
     /// This is independent from AOT execution policy.
     pub lambdify_execution_policy: BvpLambdifyExecutionPolicy,
+    /// Use indexed argument lookup for ExprLegacy Lambdify callbacks.
+    /// Enabled by default for generated Damped solves; disable only to compare
+    /// against the retained legacy compiler in controlled tests.
+    pub expr_indexed_lambdify_enabled: bool,
+    /// Enumerate actual dependencies directly when preparing ExprLegacy
+    /// Sparse/Banded Jacobians. Enabled by default for generated Damped solves.
+    pub expr_dependency_columns_enabled: bool,
     /// Opt-in structured decision logging for the BVP solver runtime.
     pub bvp_logging_mode: BvpLoggingMode,
     /// Maximum number of retained typed decision events per solve.
@@ -247,6 +254,8 @@ impl Default for GeneratedBackendConfig {
             lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
             aot_telemetry_mode: BvpAotTelemetryMode::Off,
             lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+            expr_indexed_lambdify_enabled: true,
+            expr_dependency_columns_enabled: true,
             bvp_logging_mode: BvpLoggingMode::Off,
             bvp_logging_max_events: BvpLoggingConfig::default().max_events,
             bvp_telemetry_mode: BvpTelemetryMode::Counters,
@@ -339,6 +348,22 @@ impl GeneratedBackendConfig {
     /// parallel callback behavior.
     pub fn with_lambdify_execution_policy(mut self, policy: BvpLambdifyExecutionPolicy) -> Self {
         self.lambdify_execution_policy = policy;
+        self
+    }
+
+    /// Selects indexed argument lookup for ExprLegacy Lambdify callbacks.
+    /// The production default is enabled; set `false` only for an explicit
+    /// compatibility comparison with the retained linear-scan compiler.
+    pub fn with_expr_indexed_lambdify(mut self, enabled: bool) -> Self {
+        self.expr_indexed_lambdify_enabled = enabled;
+        self
+    }
+
+    /// Selects direct dependency-column enumeration for ExprLegacy Sparse or
+    /// Banded Jacobian preparation. The production default is enabled; set
+    /// `false` only to reproduce the former candidate baseline.
+    pub fn with_expr_dependency_columns(mut self, enabled: bool) -> Self {
+        self.expr_dependency_columns_enabled = enabled;
         self
     }
 
@@ -470,6 +495,8 @@ impl GeneratedBackendConfig {
             lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
             aot_telemetry_mode: BvpAotTelemetryMode::Off,
             lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+            expr_indexed_lambdify_enabled: true,
+            expr_dependency_columns_enabled: true,
             bvp_logging_mode: BvpLoggingMode::Off,
             bvp_logging_max_events: BvpLoggingConfig::default().max_events,
             bvp_telemetry_mode: BvpTelemetryMode::Counters,

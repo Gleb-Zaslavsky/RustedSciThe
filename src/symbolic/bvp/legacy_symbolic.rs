@@ -99,6 +99,23 @@ pub(crate) fn calc_jacobian_parallel_smart_optimized(
     jacobian: &mut Jacobian,
     use_configured_bandwidth: bool,
 ) {
+    calc_jacobian_parallel_smart_optimized_impl(jacobian, use_configured_bandwidth, false);
+}
+
+/// Experimental sparse-first preparation that visits the dependency columns
+/// directly instead of scanning every unknown in every residual row.
+pub(crate) fn calc_jacobian_by_dependency_columns(
+    jacobian: &mut Jacobian,
+    use_configured_bandwidth: bool,
+) {
+    calc_jacobian_parallel_smart_optimized_impl(jacobian, use_configured_bandwidth, true);
+}
+
+fn calc_jacobian_parallel_smart_optimized_impl(
+    jacobian: &mut Jacobian,
+    use_configured_bandwidth: bool,
+    dependency_columns: bool,
+) {
     assert!(
         !jacobian.variables_for_all_disrete.is_empty(),
         "symbolic Jacobian preparation requires discretized variable usage"
@@ -125,11 +142,41 @@ pub(crate) fn calc_jacobian_parallel_smart_optimized(
     let mut timings = HashMap::new();
 
     let variable_sets_begin = Instant::now();
-    let variable_sets: Vec<HashSet<&String>> = jacobian
-        .variables_for_all_disrete
-        .iter()
-        .map(|vars| vars.iter().collect())
-        .collect();
+    let candidate_columns = if dependency_columns && sparse_first_backend {
+        let mut columns_by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (column, name) in variable_string.iter().enumerate() {
+            columns_by_name
+                .entry(name.as_str())
+                .or_default()
+                .push(column);
+        }
+        Some(
+            jacobian
+                .variables_for_all_disrete
+                .iter()
+                .map(|dependencies| {
+                    let mut columns = dependencies
+                        .iter()
+                        .filter_map(|name| columns_by_name.get(name.as_str()))
+                        .flatten()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    columns.sort_unstable();
+                    columns.dedup();
+                    columns
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+    let variable_sets: Option<Vec<HashSet<&String>>> = candidate_columns.is_none().then(|| {
+        jacobian
+            .variables_for_all_disrete
+            .iter()
+            .map(|vars| vars.iter().collect())
+            .collect()
+    });
     timings.insert(
         "symbolic jacobian variable sets time".to_string(),
         variable_sets_begin.elapsed().as_secs_f64(),
@@ -149,13 +196,29 @@ pub(crate) fn calc_jacobian_parallel_smart_optimized(
                     (variable_count, 0)
                 };
                 let mut entries = Vec::new();
-                for col in left_border..right_border {
-                    let variable = &variable_string[col];
-                    if variable_sets[row_index].contains(variable) {
-                        let partial =
-                            Expr::diff(&jacobian.vector_of_functions[row_index], variable);
-                        if !partial.is_zero() {
-                            entries.push((row_index, col, partial));
+                if let Some(candidate_columns) = &candidate_columns {
+                    for &col in &candidate_columns[row_index] {
+                        if (left_border..right_border).contains(&col) {
+                            let variable = &variable_string[col];
+                            let partial =
+                                Expr::diff(&jacobian.vector_of_functions[row_index], variable);
+                            if !partial.is_zero() {
+                                entries.push((row_index, col, partial));
+                            }
+                        }
+                    }
+                } else {
+                    let variable_sets = variable_sets
+                        .as_ref()
+                        .expect("legacy dependency sets are built for the scan route");
+                    for col in left_border..right_border {
+                        let variable = &variable_string[col];
+                        if variable_sets[row_index].contains(variable) {
+                            let partial =
+                                Expr::diff(&jacobian.vector_of_functions[row_index], variable);
+                            if !partial.is_zero() {
+                                entries.push((row_index, col, partial));
+                            }
                         }
                     }
                 }
@@ -197,7 +260,11 @@ pub(crate) fn calc_jacobian_parallel_smart_optimized(
                 let mut entries = Vec::new();
                 for col in left_border..right_border {
                     let variable = &variable_string[col];
-                    if variable_sets[row_index].contains(variable) {
+                    if variable_sets
+                        .as_ref()
+                        .expect("dense compatibility route uses dependency sets")[row_index]
+                        .contains(variable)
+                    {
                         let partial =
                             Expr::diff(&jacobian.vector_of_functions[row_index], variable);
                         if !partial.is_zero() {
@@ -366,8 +433,40 @@ pub(crate) fn calc_jacobian_parallel(jacobian: &mut Jacobian) {
 
 #[cfg(test)]
 mod tests {
-    use super::jacobian_smart;
+    use super::{
+        calc_jacobian_by_dependency_columns, calc_jacobian_parallel_smart_optimized, jacobian_smart,
+    };
+    use crate::symbolic::bvp::legacy::{BvpBackendConfig, BvpMatrixBackend, Jacobian};
     use crate::symbolic::symbolic_engine::Expr;
+
+    fn dependency_case(matrix_backend: BvpMatrixBackend) -> Jacobian {
+        let mut jacobian = Jacobian::new();
+        let names = (0..128)
+            .map(|index| format!("u_{index}"))
+            .collect::<Vec<_>>();
+        jacobian.vector_of_variables = names.iter().cloned().map(Expr::Var).collect();
+        jacobian.variable_string = names;
+        jacobian.vector_of_functions = vec![
+            Expr::parse_expression("u_0 + u_127^2"),
+            Expr::parse_expression("sin(u_64)*u_3"),
+            Expr::parse_expression("u_2*u_100 + u_50"),
+        ];
+        jacobian.variables_for_all_disrete = vec![
+            vec!["u_0".to_owned(), "u_127".to_owned()],
+            vec!["u_3".to_owned(), "u_64".to_owned()],
+            vec!["u_2".to_owned(), "u_50".to_owned(), "u_100".to_owned()],
+        ];
+        jacobian.backend_config = BvpBackendConfig::lambdify(matrix_backend);
+        jacobian
+    }
+
+    fn sparse_signature(jacobian: &Jacobian) -> Vec<(usize, usize, String)> {
+        jacobian
+            .symbolic_jacobian_sparse
+            .iter()
+            .map(|(row, col, expr)| (*row, *col, expr.to_string()))
+            .collect()
+    }
 
     #[test]
     fn expr_legacy_jacobian_keeps_ordered_sparse_entries() {
@@ -385,5 +484,61 @@ mod tests {
         assert_eq!((sparse[1].0, sparse[1].1), (0, 1));
         assert_eq!((sparse[2].0, sparse[2].1), (1, 0));
         assert_eq!((sparse[3].0, sparse[3].1), (1, 1));
+    }
+
+    #[test]
+    fn dependency_column_jacobian_matches_scan_for_large_sparse_rows() {
+        let mut scan = dependency_case(BvpMatrixBackend::FaerSparseCol);
+        let mut columns = dependency_case(BvpMatrixBackend::FaerSparseCol);
+
+        calc_jacobian_parallel_smart_optimized(&mut scan, false);
+        calc_jacobian_by_dependency_columns(&mut columns, false);
+
+        assert_eq!(sparse_signature(&columns), sparse_signature(&scan));
+        assert_eq!(
+            sparse_signature(&columns)
+                .iter()
+                .map(|(row, col, _)| (*row, *col))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (0, 127), (1, 3), (1, 64), (2, 2), (2, 50), (2, 100)]
+        );
+        assert!(columns.symbolic_jacobian.is_empty());
+    }
+
+    #[test]
+    fn dependency_column_preparation_matches_legacy_sparse_scan() {
+        let mut legacy = dependency_case(BvpMatrixBackend::FaerSparseCol);
+        let mut experimental = dependency_case(BvpMatrixBackend::FaerSparseCol);
+        experimental.set_expr_dependency_columns_enabled(true);
+
+        legacy.calc_jacobian_parallel_smart_optimized();
+        experimental.calc_jacobian_parallel_smart_optimized();
+
+        assert_eq!(sparse_signature(&experimental), sparse_signature(&legacy));
+        assert!(legacy.symbolic_jacobian_sparse.len() > 0);
+    }
+
+    #[test]
+    fn dependency_column_jacobian_matches_scan_with_explicit_bandwidth() {
+        let mut scan = dependency_case(BvpMatrixBackend::Banded);
+        let mut columns = dependency_case(BvpMatrixBackend::Banded);
+        for jacobian in [&mut scan, &mut columns] {
+            jacobian.vector_of_functions = vec![
+                Expr::parse_expression("u_0 + u_1"),
+                Expr::parse_expression("u_0 + u_1 + u_2"),
+                Expr::parse_expression("u_1 + u_2"),
+            ];
+            jacobian.variables_for_all_disrete = vec![
+                vec!["u_0".to_owned(), "u_1".to_owned()],
+                vec!["u_0".to_owned(), "u_1".to_owned(), "u_2".to_owned()],
+                vec!["u_1".to_owned(), "u_2".to_owned()],
+            ];
+            jacobian.bandwidth = Some((1, 1));
+        }
+
+        calc_jacobian_parallel_smart_optimized(&mut scan, true);
+        calc_jacobian_by_dependency_columns(&mut columns, true);
+
+        assert_eq!(sparse_signature(&columns), sparse_signature(&scan));
     }
 }

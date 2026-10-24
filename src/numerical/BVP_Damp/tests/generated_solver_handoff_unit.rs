@@ -46,6 +46,19 @@ fn linked_runtime_registry_test_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+#[test]
+fn expr_legacy_preparation_optimizations_are_production_defaults() {
+    let defaults = GeneratedBackendConfig::default();
+    assert!(defaults.expr_indexed_lambdify_enabled);
+    assert!(defaults.expr_dependency_columns_enabled);
+
+    let legacy_comparison = GeneratedBackendConfig::sparse_defaults()
+        .with_expr_indexed_lambdify(false)
+        .with_expr_dependency_columns(false);
+    assert!(!legacy_comparison.expr_indexed_lambdify_enabled);
+    assert!(!legacy_comparison.expr_dependency_columns_enabled);
+}
+
 fn real_bvp_inputs() -> (
     Vec<Expr>,
     Vec<String>,
@@ -99,6 +112,8 @@ fn lambdify_telemetry_handles_survive_solver_handoff() {
         lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Detailed,
         aot_telemetry_mode: BvpAotTelemetryMode::Off,
         lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+        expr_indexed_lambdify_enabled: true,
+        expr_dependency_columns_enabled: true,
     };
 
     let mut state = request
@@ -662,6 +677,8 @@ fn damped_solver_handoff_prefers_callable_linked_aot_backend() {
         lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
         aot_telemetry_mode: BvpAotTelemetryMode::Off,
         lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+        expr_indexed_lambdify_enabled: true,
+        expr_dependency_columns_enabled: true,
     };
 
     let state = request.generate().expect("damped handoff should build");
@@ -851,6 +868,8 @@ fn damped_solver_handoff_parallel_policy_uses_chunked_linked_backend_callbacks()
         lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
         aot_telemetry_mode: BvpAotTelemetryMode::Off,
         lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+        expr_indexed_lambdify_enabled: true,
+        expr_dependency_columns_enabled: true,
     };
 
     let state = request
@@ -989,6 +1008,8 @@ fn require_prebuilt_errors_when_compiled_backend_is_missing() {
         lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
         aot_telemetry_mode: BvpAotTelemetryMode::Off,
         lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+        expr_indexed_lambdify_enabled: true,
+        expr_dependency_columns_enabled: true,
     };
 
     let err = request
@@ -1221,6 +1242,8 @@ fn banded_build_if_missing_then_require_prebuilt_keeps_compiled_backend() {
             lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
             aot_telemetry_mode: BvpAotTelemetryMode::Off,
             lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+            expr_indexed_lambdify_enabled: true,
+            expr_dependency_columns_enabled: true,
         };
 
     let built_state = make_request(
@@ -1434,6 +1457,8 @@ fn require_prebuilt_errors_when_artifact_is_registered_but_not_built() {
         lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
         aot_telemetry_mode: BvpAotTelemetryMode::Off,
         lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+        expr_indexed_lambdify_enabled: true,
+        expr_dependency_columns_enabled: true,
     };
 
     let err = request
@@ -1544,6 +1569,8 @@ fn damped_solver_handoff_reuses_compiled_backend_when_only_param_values_change()
         lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
         aot_telemetry_mode: BvpAotTelemetryMode::Off,
         lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+        expr_indexed_lambdify_enabled: true,
+        expr_dependency_columns_enabled: true,
     };
 
     let request_b = DampedSolverBuildRequest {
@@ -1577,6 +1604,8 @@ fn damped_solver_handoff_reuses_compiled_backend_when_only_param_values_change()
         lambdify_telemetry_mode: BvpLambdifyTelemetryMode::Off,
         aot_telemetry_mode: BvpAotTelemetryMode::Off,
         lambdify_execution_policy: BvpLambdifyExecutionPolicy::default(),
+        expr_indexed_lambdify_enabled: true,
+        expr_dependency_columns_enabled: true,
     };
 
     let state_a = request_a

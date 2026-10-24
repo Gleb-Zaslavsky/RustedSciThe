@@ -161,6 +161,16 @@ mod tests {
         matrix: MatrixRoute,
         adaptive: bool,
     ) -> DampedSolverOptions {
+        trace_options_with_expr_optimizations(backend, matrix, adaptive, false, false)
+    }
+
+    fn trace_options_with_expr_optimizations(
+        backend: BvpSymbolicAssemblyBackend,
+        matrix: MatrixRoute,
+        adaptive: bool,
+        indexed_lambdify: bool,
+        dependency_columns: bool,
+    ) -> DampedSolverOptions {
         let bounds = HashMap::from([
             ("y".to_string(), (-10.0, 10.0)),
             ("z".to_string(), (-20.0, 20.0)),
@@ -177,9 +187,13 @@ mod tests {
                 },
             ),
         };
+        let generated = matrix
+            .config(backend)
+            .with_expr_indexed_lambdify(indexed_lambdify)
+            .with_expr_dependency_columns(dependency_columns);
         matrix
             .base_options()
-            .with_generated_backend_config(matrix.config(backend))
+            .with_generated_backend_config(generated)
             .with_strategy_params(Some(strategy))
             .with_abs_tolerance(1e-9)
             .with_rel_tolerance(HashMap::from([
@@ -200,6 +214,14 @@ mod tests {
         backend: BvpSymbolicAssemblyBackend,
         matrix: MatrixRoute,
     ) -> (DMatrix<f64>, BvpTelemetrySnapshot) {
+        solve_with_options(equations, guess, trace_options(backend, matrix, true))
+    }
+
+    fn solve_with_options(
+        equations: Vec<Expr>,
+        guess: DMatrix<f64>,
+        options: DampedSolverOptions,
+    ) -> (DMatrix<f64>, BvpTelemetrySnapshot) {
         let boundary_conditions =
             HashMap::from([("y".to_string(), vec![(0usize, 0.0f64), (1usize, 0.0f64)])]);
         let mut solver = NRBVP::new_with_options(
@@ -211,7 +233,7 @@ mod tests {
             0.0,
             1.0,
             24,
-            trace_options(backend, matrix, true),
+            options,
         );
         solver.dont_save_log(true);
         solver
@@ -221,6 +243,66 @@ mod tests {
             .get_result()
             .expect("symbolic parity trace fixture should publish a result");
         (result, solver.get_statistics().telemetry)
+    }
+
+    #[test]
+    fn expr_sparse_preparation_preserves_full_solver_trace() {
+        let equations = vec![
+            Expr::parse_expression("z"),
+            Expr::parse_expression("-2*exp(y)"),
+        ];
+        let guess = DMatrix::from_fn(2, 24, |row, _column| if row == 0 { 4.0 } else { 0.0 });
+
+        let (baseline, baseline_trace) = solve_with_options(
+            equations.clone(),
+            guess.clone(),
+            trace_options_with_expr_optimizations(
+                BvpSymbolicAssemblyBackend::ExprLegacy,
+                MatrixRoute::Sparse,
+                true,
+                false,
+                false,
+            ),
+        );
+        let (experimental, experimental_trace) = solve_with_options(
+            equations,
+            guess,
+            trace_options_with_expr_optimizations(
+                BvpSymbolicAssemblyBackend::ExprLegacy,
+                MatrixRoute::Sparse,
+                true,
+                true,
+                true,
+            ),
+        );
+
+        assert_matrix_parity(&baseline, &experimental, 1e-10);
+        assert_eq!(
+            baseline_trace.counters.iterations,
+            experimental_trace.counters.iterations
+        );
+        assert_eq!(
+            baseline_trace.counters.residual_requests,
+            experimental_trace.counters.residual_requests
+        );
+        assert_eq!(
+            baseline_trace.counters.jacobian_requests,
+            experimental_trace.counters.jacobian_requests
+        );
+        assert_eq!(
+            baseline_trace.counters.damping_trials,
+            experimental_trace.counters.damping_trials
+        );
+        assert_eq!(
+            baseline_trace.counters.damping_rejections,
+            experimental_trace.counters.damping_rejections
+        );
+        assert_eq!(
+            baseline_trace.counters.grid_refinements,
+            experimental_trace.counters.grid_refinements
+        );
+        assert!(baseline_trace.generation.is_some());
+        assert!(experimental_trace.generation.is_some());
     }
 
     fn event_trace(snapshot: &BvpTelemetrySnapshot) -> Vec<(BvpLogEventKind, u64, u64, u64)> {

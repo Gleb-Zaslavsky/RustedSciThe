@@ -6,6 +6,8 @@ fn prepared_bvp_jacobian(
     lambdify_telemetry_mode: BvpLambdifyTelemetryMode,
     aot_telemetry_mode: BvpAotTelemetryMode,
     lambdify_execution_policy: BvpLambdifyExecutionPolicy,
+    expr_indexed_lambdify_enabled: bool,
+    expr_dependency_columns_enabled: bool,
 ) -> Jacobian {
     let mut jacobian_instance = Jacobian::new();
     jacobian_instance.set_symbolic_assembly_backend(symbolic_assembly_backend);
@@ -15,6 +17,8 @@ fn prepared_bvp_jacobian(
     jacobian_instance.set_lambdify_telemetry_mode(lambdify_telemetry_mode);
     jacobian_instance.set_aot_telemetry_mode(aot_telemetry_mode);
     jacobian_instance.set_lambdify_execution_policy(lambdify_execution_policy);
+    jacobian_instance.set_expr_indexed_lambdify_enabled(expr_indexed_lambdify_enabled);
+    jacobian_instance.set_expr_dependency_columns_enabled(expr_dependency_columns_enabled);
     jacobian_instance
 }
 

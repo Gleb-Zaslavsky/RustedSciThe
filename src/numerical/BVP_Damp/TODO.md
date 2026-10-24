@@ -3050,3 +3050,70 @@ the comparison oracle.
 - [ ] Revisit only if a production-relevant persistent prepared-plan or
   continuation lifecycle can amortize preparation cost; require a matched
   release workload and memory bound before considering any default change.
+
+## 30. ExprLegacy cold-preparation optimization (2026-10-24 to 2026-10-25)
+
+The combustion-3000 Release A/B in `BVP_DAMP_STORY_PERFORMANCE.md` shows that
+ordinary cold `try_solve()` is dominated by work before the warm numerical
+solve. The sparse-first ExprLegacy path already avoids an `N x N` symbolic
+Jacobian for Sparse/Banded and differentiates rows in parallel; this work
+improves the remaining preparation costs rather than recreating those existing
+optimizations. ExprLegacy and AtomView remain independent supported frontends.
+
+- [x] Add an ExprLegacy Lambdify compilation context that builds one
+  variable-name-to-argument-index map and reuses it for residual and Jacobian
+  closures. The current scalar compiler linearly searches the full argument
+  list for every variable leaf, and the sparse Jacobian compiler rebuilds the
+  borrowed argument-name vector for every derivative entry.
+- [x] Add a sparse Jacobian preparation path that maps each row's
+  actual dependencies directly to stable column indices instead of scanning
+  every global unknown and probing a per-row HashSet. Preserve row/column
+  order, scalar differentiation semantics, parameter bindings, and explicit
+  bandwidth validation; never silently discard an out-of-band derivative.
+- [x] Extend the Debug gate with finite-difference Jacobian columns and
+  small/non-finite constants. Indexed Expr compilation preserves signed
+  coefficients around `1e-12..1e-16`, their `c*T^4` products, infinities and
+  NaN; the optimized Sparse Jacobian is included in componentwise
+  central finite-difference checks on the production combustion fixture.
+  Existing tests also cover numeric parameter rebinding, a 4,096-argument
+  order, deterministic sparse coordinates, explicit-band structure parity,
+  and full solver trajectory/counter parity on Bratu-like and combustion-1000
+  Sparse/Banded fixtures.
+- [x] Run interleaved Release A/B on two large BVP_Damp workloads with matched
+  routes/options: Combustion-3000 (18,000 unknowns) on Sparse and Banded, plus
+  Bratu-1024 (2,048 unknowns) on Sparse. Thirty-one paired samples per route
+  report cold preparation, warm residual/Jacobian callbacks, full cold solve and
+  discrete counters. Allocator-level counts are not captured by this harness
+  and are not inferred from wall time; the measured report states this
+  limitation explicitly.
+- [ ] Add allocator-instrumented measurements only if a separate, reliable
+  allocator harness can isolate preparation and callback allocations without
+  contaminating timing results; allocation evidence is not required to
+  evaluate this preparation-focused candidate.
+- [x] Confirm in Debug smoke and Release A/B that every baseline/candidate pair
+  preserves the complete solution trajectory within `1e-8` and identical
+  iterations, residual requests and Jacobian requests. All three Release
+  workloads matched exactly in the recorded trajectory comparison.
+- [x] Run the BVP_Damp non-ignored Release library suite after promotion:
+  304 passed, 0 failed,
+  52 ignored (`--no-default-features`, one test thread).
+- [x] Confirm the 31-sample Release A/B on Combustion-3000 Sparse/Banded and
+  Bratu-1024 Sparse. Cold-solve medians improved by 73.7%, 32.7% and 19.5%,
+  respectively; all paired trajectories and work counters matched exactly.
+- [x] Re-run the production perf-gate after promotion for
+  `bvp_damp_combustion3000_expr_lambdify_sparse`: PASS, 31 samples, current
+  wall time 371.9799 ms versus baseline 893.4410 ms (-58.4%); preparation
+  decreased from 878.9134 to 358.8082 ms, and discrete work counters match.
+  The previous 301-run attempt exceeded the isolated-process timeout; 31
+  samples were stable and sufficient for this gate.
+- [x] Promote indexed ExprLegacy callback compilation and dependency-driven
+  Jacobian preparation to the default generated Damped solver configuration.
+  Preserve an explicit `false` selector solely for legacy parity/A-B tests.
+  AtomView remains the default frontend; Frozen is intentionally unchanged.
+- [x] Record the 31-pair large Release story matrix in
+  `BVP_DAMP_STORY_PERFORMANCE.md` and the machine-readable test report; the
+  former scan/compiler is now retained only through an explicit comparison
+  selector and parity tests.
+- [ ] Refresh the shared performance baseline with `perf-gates --force` only
+  after committing a clean source revision. Do not publish a dirty-source
+  baseline as the reproducible reference.

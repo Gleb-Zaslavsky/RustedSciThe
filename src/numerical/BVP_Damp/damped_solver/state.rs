@@ -193,6 +193,12 @@ impl BuildDampedSolverRequest for NRBVP {
             lambdify_telemetry_mode: self.generated_backend_config.lambdify_telemetry_mode,
             aot_telemetry_mode: self.generated_backend_config.aot_telemetry_mode,
             lambdify_execution_policy: self.generated_backend_config.lambdify_execution_policy,
+            expr_indexed_lambdify_enabled: self
+                .generated_backend_config
+                .expr_indexed_lambdify_enabled,
+            expr_dependency_columns_enabled: self
+                .generated_backend_config
+                .expr_dependency_columns_enabled,
         }
     }
 }

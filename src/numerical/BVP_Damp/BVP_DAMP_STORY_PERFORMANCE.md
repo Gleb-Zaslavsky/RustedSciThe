@@ -4623,3 +4623,50 @@ before generation rather than silently changing matrix layout. Further work
 is only justified if a real persistent prepared-plan/continuation lifecycle
 can amortize the measured preparation cost without changing the numerical
 scheme.
+
+### ExprLegacy sparse preparation promotion (2026-10-25)
+
+The ExprLegacy production preparation path combines two changes: a shared
+variable-name-to-argument-index map for generated Lambdify callbacks, and
+dependency-column iteration for Sparse/Banded symbolic Jacobian assembly.
+Neither change replaces ExprLegacy or AtomView or changes the numerical scheme.
+The former implementation remains explicitly selectable for comparison.
+The A/B harness
+uses identical Sequential ExprLegacy + Lambdify settings, separate fresh
+solver instances for cold solve samples, interleaved baseline/candidate order,
+and 31 samples per route. Debug tests were used only for correctness; their
+timings are not performance evidence.
+
+| Workload / route | Baseline prepare median/MAD ms | Candidate prepare median/MAD ms | Baseline residual callback median/MAD ms | Candidate residual callback median/MAD ms | Baseline Jacobian callback median/MAD ms | Candidate Jacobian callback median/MAD ms | Baseline cold solve median/MAD ms | Candidate cold solve median/MAD ms | Cold solve change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Combustion-3000 / Sparse | 951.870 / 34.406 | 321.893 / 5.871 | 0.8529 / 0.0225 | 0.9325 / 0.0243 | 2.0156 / 0.0318 | 1.9179 / 0.0266 | 1268.573 / 31.579 | 333.795 / 4.622 | -73.69% |
+| Combustion-3000 / Banded | 775.002 / 18.033 | 516.728 / 15.286 | 1.1365 / 0.0280 | 1.1435 / 0.0251 | 1.8139 / 0.0280 | 1.8091 / 0.0219 | 781.762 / 7.133 | 526.270 / 5.977 | -32.68% |
+| Bratu-1024 / Sparse | 92.879 / 3.836 | 73.887 / 4.003 | 0.0464 / 0.0018 | 0.0469 / 0.0017 | 0.0713 / 0.0046 | 0.0677 / 0.0025 | 88.560 / 3.126 | 71.273 / 1.673 | -19.52% |
+
+Each table cell reports median/MAD in milliseconds; callback values are not
+additive to cold solve. All baseline/candidate pairs preserved the
+full solution trajectory exactly in the recorded comparison and had the same
+work counters: 5 iterations, 12 residual requests and 2 Jacobian requests.
+The large preparation reductions, rather than callback speed, explain the
+end-to-end gains. The indexed callback variant itself was approximately even
+with the existing callback route, as expected when callback evaluation is not
+the targeted cost. The test harness does not measure allocator counts, so no
+allocation claim is made.
+
+This is strong evidence for the combined preparation path across two large
+problem families and both Sparse/Banded layouts. The change is now the default
+in generated Damped solver configuration; the low-level `Jacobian` API keeps
+its former behavior unless explicitly configured, and Frozen remains
+unchanged. The machine-local machine-readable Release report is
+`test_reports/bvp_damp/release/expr_legacy_sparse_preparation_large_workload_release_ab.md`;
+it captures the profile, sample count and measured table. The paired
+perf-gate report separately records source revision and toolchain metadata.
+
+The post-promotion full non-ignored BVP_Damp Release library suite passed on
+2026-10-25: `304 passed, 0 failed, 52 ignored`. The production performance
+gate also passed after promotion with 31 samples: 371.9799 ms current versus
+893.4410 ms baseline (-58.4%); preparation fell from 878.9134 to 358.8082 ms,
+and all discrete work counters remained unchanged. The gate report is
+`performance/runs/1792882046393-19292`. No allocator-level claim is made.
+The shared baseline still needs a forced refresh from a clean committed
+revision so the reference is reproducible rather than marked dirty.
