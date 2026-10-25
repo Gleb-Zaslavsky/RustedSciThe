@@ -556,10 +556,10 @@ release-file policy](https://blog.pypi.org/posts/2026-07-22-releases-now-reject-
 ## TestPyPI and production handoff
 
 The Windows `0.1.2` upload commands below are retained as release history.
-`0.1.3` is the current Windows-only production release. For `0.1.4`, build and
-validate all intended platform wheels before uploading the sdist and complete
-wheel set. Linux source installation is not considered validated merely
-because an sdist is available.
+`0.1.4` is the latest published release. For `0.1.5`, build and validate all
+intended platform wheels from the same committed source before uploading the
+sdist and complete wheel set. Linux source installation is not considered
+validated merely because an sdist is available.
 
 Create separate accounts/tokens for TestPyPI and PyPI. For a new project, the
 first token generally needs account-level scope because the project does not
@@ -568,6 +568,60 @@ the `pypi-` prefix, when Twine prompts. Never commit a token or put it into a
 tracked file.
 
 ### Windows upload commands
+
+#### Windows TestPyPI candidate 0.1.5
+
+Use this section for the current candidate; the `0.1.2` commands below are
+historical. Build and validate artifacts from the committed release source,
+then upload the exact sdist and wheel from the output directory. Do not upload
+until the clean installed-wheel contract suite passes.
+
+```powershell
+$ErrorActionPreference = "Stop"
+$python = (Resolve-Path .\.venv-gavin-win\Scripts\python.exe).Path
+$env:PYTHON = $python
+$dist = ".\bindings\python\target\publication-0.1.5-windows"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  .\bindings\python\scripts\build_publication.ps1 `
+  -OutputDirectory $dist
+
+$sdist = (Resolve-Path (Join-Path $dist "rustedscithe-0.1.5.tar.gz")).Path
+$wheel = (Get-ChildItem (Join-Path $dist "wheels-from-sdist") `
+  -Filter "rustedscithe-0.1.5-cp310-abi3-win_amd64.whl").FullName
+if (-not $wheel) { throw "Expected cp310-abi3-win_amd64 wheel was not built." }
+& $python -m twine check $sdist $wheel
+if ($LASTEXITCODE -ne 0) { throw "twine check failed." }
+Get-FileHash -Algorithm SHA256 $sdist, $wheel
+```
+
+Run `test_installed_wheel.ps1` against that exact wheel in a clean venv before
+upload. Then upload both matching artifacts to TestPyPI:
+
+```powershell
+& $python -m twine upload --repository testpypi $sdist $wheel
+if ($LASTEXITCODE -ne 0) { throw "TestPyPI upload failed." }
+```
+
+Install `rustedscithe==0.1.5` from TestPyPI in a clean environment, with
+PyPI as the extra index for NumPy. Confirm verbose pip output selects the
+Windows wheel, then run the smoke test and full Python contract suite against
+the installed package, outside the checkout. Production upload is a separate
+step and requires explicit approval after reviewing these results.
+
+```powershell
+$smoke = Join-Path $env:TEMP "rustedscithe-testpypi-015"
+py -3.14 -m venv $smoke
+$smokePython = Join-Path $smoke "Scripts\python.exe"
+& $smokePython -m pip install --upgrade pip
+& $smokePython -m pip install pytest
+& $smokePython -m pip install --no-cache-dir -v `
+  --only-binary=rustedscithe `
+  --index-url https://test.pypi.org/simple/ `
+  --extra-index-url https://pypi.org/simple/ `
+  rustedscithe==0.1.5
+& $smokePython -c "import importlib.metadata as m, numpy, pathlib, sys, rustedscithe, rustedscithe._native as n; p=pathlib.Path(rustedscithe.__file__).resolve(); assert pathlib.Path(sys.prefix).resolve() in p.parents; assert m.version('rustedscithe') == '0.1.5'; print('version:', m.version('rustedscithe')); print('package:', p); print('native:', n.__file__); print('NumPy:', numpy.__version__); print('Expr:', rustedscithe.Expr.parse('x^2 + 1'))"
+& $smokePython -m pytest -c .\bindings\python\pyproject.toml .\bindings\python\tests -q
+```
 
 Run from the repository root after replacing only the Python executable path
 if necessary:

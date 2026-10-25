@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "RustedSciThe"
-version = "0.4.26"
+version = "0.4.27"
 dependencies = [
  "ahash",
  "append-only-vec",
@@ -7178,7 +7178,7 @@ dependencies = [
 
 [[package]]
 name = "rustedscithe-python"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "RustedSciThe",
  "nalgebra",
