@@ -73,7 +73,7 @@ function Read-IvpGateReport {
             # Row positions are part of append_metrics() in performance/runner/cli.rs.
             # The first wall row is primary; the second, when present, is confirmation.
             $metrics = @(Get-Content -LiteralPath $measurePath | ForEach-Object {
-                if ($_ -match '^\| scenario_wall_ms \(ms/off\) \|') {
+                if ($_ -match '^\| scenario_wall_ms \(ms(?:/off)?\) \|') {
                     $cells = $_.Split('|')
                     if ($cells.Count -ne 11) { throw "Unexpected measurement table: $measurePath" }
                     [pscustomobject]@{
@@ -128,7 +128,7 @@ function Write-IvpGateSummary {
     $lines.Add('# IVP Performance Gate Matrix')
     $lines.Add('')
     $lines.Add("- Status: $Outcome")
-    $lines.Add("- Machine: $($Settings.machine); action: $($Settings.action); warmups: $($Settings.warmups); runs: $($Settings.runs)")
+    $lines.Add("- Machine: $($Settings.machine); action: $($Settings.action); default warmups/runs: $($Settings.warmups)/$($Settings.runs); Radau: $($Settings.radau_warmups)/$($Settings.radau_runs)")
     $lines.Add("- Relative MAD limit: $($Settings.max_relative_mad); record tolerance: $($Settings.tolerance)")
     $lines.Add("- Scenario outcomes: $($counts.passed) passed, $($counts.unstable) unstable, $($counts.regression) regression, $($counts.error) error")
     $stepErrors = @($stepArray | Where-Object status -eq 'error').Count
@@ -138,11 +138,11 @@ function Write-IvpGateSummary {
     $lines.Add('Pending/running steps mean the campaign has not finished. UNSTABLE is not a pass. No automatic retry selects a more favorable result.')
     $lines.Add('Native reports contain source/toolchain identity, counters, stage timings and raw samples. Technical logs retain baseline comparisons and confirmation output.')
     $lines.Add('')
-    $lines.Add('| Solver | Action | Status | Exit | Seconds | Log | Detail |')
-    $lines.Add('| --- | --- | --- | ---: | ---: | --- | --- |')
+    $lines.Add('| Solver | Action | Warmups | Runs | Status | Exit | Seconds | Log | Detail |')
+    $lines.Add('| --- | --- | ---: | ---: | --- | ---: | ---: | --- | --- |')
     foreach ($step in $stepArray) {
         $link = if ($step.log) { "[log]($($step.log))" } else { '-' }
-        $lines.Add("| $($step.solver) | $($step.action) | $($step.status) | $(ConvertTo-IvpGateCell $step.exit_code) | $($step.duration_s) | $link | $(ConvertTo-IvpGateCell $step.detail) |")
+        $lines.Add("| $($step.solver) | $($step.action) | $(ConvertTo-IvpGateCell $step.warmups) | $(ConvertTo-IvpGateCell $step.runs) | $($step.status) | $(ConvertTo-IvpGateCell $step.exit_code) | $($step.duration_s) | $link | $(ConvertTo-IvpGateCell $step.detail) |")
     }
     $lines.Add('')
     $lines.Add('| Solver | Action | Scenario | Status | N | Wall ms | MAD ms | Confirmation ms | Confirmation MAD | Evidence | Detail |')

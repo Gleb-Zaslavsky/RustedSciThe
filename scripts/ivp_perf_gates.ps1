@@ -5,6 +5,8 @@ param(
     [string[]]$Solvers = @("bdf", "radau", "lsode2", "be"),
     [ValidateRange(0, 1000)][int]$Warmups = 20,
     [ValidateRange(3, 10001)][int]$Runs = 301,
+    [ValidateRange(1, 1000)][int]$RadauWarmups = 5,
+    [ValidateRange(3, 10001)][int]$RadauRuns = 31,
     [ValidateRange(0.0, 1.0)][double]$MaxRelativeMad = 0.05,
     [ValidateRange(0.0, 1.0)][double]$Tolerance = 0.10,
     [switch]$Force,
@@ -24,9 +26,11 @@ if ($Solvers.Count -eq 0) { throw "Select at least one IVP solver." }
 $Solvers = @($Solvers | Select-Object -Unique)
 $actions = if ($Action -eq "RecordCompare") { @("Record", "Compare") } else { @($Action) }
 if ($PlanOnly) {
-    Write-Host "IVP perf-gates plan: machine=$Machine warmups=$Warmups runs=$Runs"
+    Write-Host "IVP perf-gates plan: machine=$Machine"
     foreach ($solver in $Solvers) {
-        foreach ($step in $actions) { Write-Host " - $solver / $step" }
+        $solverWarmups = if ($solver -eq 'radau') { $RadauWarmups } else { $Warmups }
+        $solverRuns = if ($solver -eq 'radau') { $RadauRuns } else { $Runs }
+        foreach ($step in $actions) { Write-Host " - $solver / $step (warmups=$solverWarmups runs=$solverRuns)" }
     }
     exit 0
 }
@@ -51,12 +55,13 @@ foreach ($solver in $Solvers) {
     foreach ($step in $actions) {
         $steps.Add([pscustomobject][ordered]@{
             solver = $solver; action = $step.ToLowerInvariant(); status = "pending"
-            exit_code = $null; duration_s = 0; detail = ""; log = ""
+            warmups = 0; runs = 0; exit_code = $null; duration_s = 0; detail = ""; log = ""
         })
     }
 }
 $settings = [ordered]@{
     machine = $Machine; action = $Action; warmups = $Warmups; runs = $Runs
+    radau_warmups = $RadauWarmups; radau_runs = $RadauRuns
     max_relative_mad = $MaxRelativeMad; tolerance = $Tolerance
     force = [bool]$Force; allow_dirty_source = [bool]$AllowDirtySource; toolchain = $Toolchain
 }
@@ -64,6 +69,8 @@ Write-IvpGateSummary $root $settings $steps $scenarios "running"
 Write-Host "IVP matrix reports: $root"
 
 foreach ($step in $steps) {
+    $step.warmups = if ($step.solver -eq 'radau') { $RadauWarmups } else { $Warmups }
+    $step.runs = if ($step.solver -eq 'radau') { $RadauRuns } else { $Runs }
     if ($Action -eq "RecordCompare" -and $step.action -eq "compare") {
         $record = $steps | Where-Object { $_.solver -eq $step.solver -and $_.action -eq "record" }
         if ($record.status -ne "passed") {
@@ -80,7 +87,7 @@ foreach ($step in $steps) {
     Write-Host "`n=== IVP perf-gates: $($step.solver) / $($step.action) ==="
     $arguments = @(
         "-Solver", $step.solver, "-Action", $step.action, "-Machine", $Machine,
-        "-Warmups", [string]$Warmups, "-Runs", [string]$Runs,
+        "-Warmups", [string]$step.warmups, "-Runs", [string]$step.runs,
         "-MaxRelativeMad", $MaxRelativeMad.ToString([Globalization.CultureInfo]::InvariantCulture),
         "-Tolerance", $Tolerance.ToString([Globalization.CultureInfo]::InvariantCulture)
     )
@@ -111,6 +118,11 @@ foreach ($step in $steps) {
             elseif (@($rows | Where-Object status -eq "regression").Count) { "regression" }
             elseif (@($rows | Where-Object status -eq "unstable").Count) { "unstable" }
             else { "passed" }
+        $issues = @($rows | Where-Object { $_.status -ne 'passed' } | ForEach-Object {
+            if ($_.detail) { "$($_.scenario) [$($_.status)]: $($_.detail)" }
+            else { "$($_.scenario) [$($_.status)]" }
+        })
+        $step.detail = $issues -join '; '
         if (($step.exit_code -eq 0) -ne ($step.status -eq "passed")) {
             throw "Process exit and native report disagree (exit $($step.exit_code), report $($step.status))."
         }

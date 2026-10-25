@@ -762,9 +762,24 @@ sample batch.
   unstable primary plus confirmation, regression, missing/incompatible baseline,
   missing tool, timeout, failure without a report, continuation after errors,
   both BE groups, partial-record blocking and side-effect-free `PlanOnly`.
-- [ ] Run the updated IVP matrix overnight on reviewed source and inspect the
-  resulting scenario table. Synthetic orchestration checks are not numerical
-  or performance evidence; Linux orchestration validation remains deferred.
+- [x] Diagnose first 2026-10-25 Windows overnight matrix and fix two adapter
+  issues: accept both `ms/off` and `ms` wall-unit spellings (the latter is used
+  by BE large-system), and return a nonzero first-tier process code when a
+  group fails. Include unstable/timeout scenario IDs and causes in step rows.
+- [x] Reduce only the Radau IVP gate sample count while keeping its workload
+  dimension at 512: default to 5 warmups / 31 runs; retain 20 / 301 for BDF,
+  LSODE2 and BE. Record the effective counts per solver in the matrix summary
+  and keep the 5% relative-MAD threshold. Validate forwarding with synthetic
+  matrix tests before the next numerical overnight run.
+- [x] Rerun BE comparison after fixing the report adapter: all four matrix
+  scenarios and `be_diffusion_chain_128` passed with 301 samples, MAD limit 5%,
+  and regression tolerance 10%. Original force-record had created all five BE
+  baselines; its apparent error was only a false parser classification.
+- [ ] Resolve the real BDF/Radau record gaps from the first overnight run:
+  BDF 7/8 with one unstable route; Radau 20/24 with three 600-second child
+  timeouts and one unstable route. LSODE2 record and compare passed for all 30
+  scenarios. Retry unresolved cases individually; do not repeatedly overwrite
+  successful group baselines. Linux orchestration validation remains deferred.
 
 - [ ] Test selection before computation using fake launch counters; prove BDF
   selection cannot execute another solver. Test list and dry-run do no work.

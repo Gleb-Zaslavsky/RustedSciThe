@@ -25,7 +25,10 @@ try {
     $env:IVP_GATE_TEST_MODE = 'mixed'
     $mixed = Invoke-MatrixTest 'mixed' @('-Action', 'Compare') 1
     Assert-Gate ($mixed.steps.Count -eq 4) 'All four solvers must be attempted'
+    Assert-Gate ($mixed.steps[0].warmups -eq 20 -and $mixed.steps[0].runs -eq 301) 'Non-Radau defaults must remain 20/301'
+    Assert-Gate ($mixed.steps[1].warmups -eq 5 -and $mixed.steps[1].runs -eq 31) 'Radau defaults must be 5/31'
     Assert-Gate ($mixed.steps[1].status -eq 'passed') 'Radau must run after BDF failure'
+    Assert-Gate ($mixed.steps[0].detail -like '*bdf_noisy*') 'Step summary must identify unstable scenario'
     Assert-Gate ($mixed.steps[2].status -eq 'error') 'Preflight failure must be explicit'
     Assert-Gate ($mixed.steps[3].status -eq 'error') 'BE must run after preflight failure'
     Assert-Gate ($mixed.counts.unstable -eq 1 -and $mixed.counts.regression -eq 1) 'Distinct noise and regression outcomes'
@@ -58,11 +61,14 @@ try {
     Assert-Gate ($paired.steps[1].status -eq 'blocked') 'Failed record must block same-solver compare'
     Assert-Gate ($paired.steps[2].status -eq 'passed' -and $paired.steps[3].status -eq 'passed') 'Next solver must record and compare'
     $calls = Get-Content -LiteralPath (Join-Path $root 'calls.txt')
+    Assert-Gate (@($calls | Where-Object { $_ -match '^radau/compare warmups=5 runs=31' }).Count -ge 1) 'Radau counts must be forwarded to its runner'
+    Assert-Gate (@($calls | Where-Object { $_ -match '^bdf/compare warmups=20 runs=301' }).Count -eq 1) 'Other solver counts must be forwarded unchanged'
     Assert-Gate (@($calls | Where-Object { $_ -match '/compare force=True|/compare .*dirty=True' }).Count -eq 0) 'Record flags must not reach compare'
 
     $env:IVP_GATE_TEST_MODE = 'pass'
     $passed = Invoke-MatrixTest 'passed' @('-Action', 'RecordCompare', '-Solvers', 'be', '-Force') 0
     Assert-Gate ($passed.status -eq 'completed' -and $passed.scenarios.Count -eq 4) 'Both BE groups must be collected in both actions'
+    Assert-Gate (($passed.scenarios | Where-Object scenario -eq 'be_large_ok' | Where-Object { $_.wall_ms -eq 123.456 }).Count -eq 2) 'Plain millisecond units must be read for BE large-system reports'
 
     $env:IVP_GATE_TEST_MODE = 'missing'
     $missing = Invoke-MatrixTest 'missing' @('-Action', 'Compare', '-Solvers', 'bdf') 1

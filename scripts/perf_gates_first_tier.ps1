@@ -56,6 +56,7 @@ foreach ($group in $groups[$Solver]) {
 
 if ($failures.Count -gt 0) {
     $failureList = $failures -join "`n - "
-    throw "Some $Solver perf-gates groups did not complete:`n - $failureList"
+    [Console]::Error.WriteLine("Some $Solver perf-gates groups did not complete:`n - $failureList")
+    exit 1
 }
 Write-Host "`n$Solver $($Action.ToLowerInvariant()) completed for: $($groups[$Solver] -join ', ')"

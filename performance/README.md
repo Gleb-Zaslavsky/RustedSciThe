@@ -333,6 +333,36 @@ Reports use the runner's generated summary format; unrecognized or inconsistent
 formats are errors rather than guessed successes. No Python installation is
 required for this performance-only matrix.
 
+The matrix uses per-solver sample counts. BDF, LSODE2 and BE default to 20
+warmups and 301 measured runs; Radau keeps the same 512-state workload but
+defaults to 5 warmups and 31 runs. This follows the demonstrated 31-sample
+stability of larger BVP_Damp workloads and avoids spending 301 gate samples
+plus 301 diagnostic samples on every expensive Radau route. The 5% relative
+MAD requirement is unchanged. Override with `-RadauWarmups` and `-RadauRuns`
+when needed; the report records each solver's actual counts. If a Radau cell
+is unstable at 31 runs, repeat only that scenario with more runs rather than
+rerunning the whole matrix.
+
+The first overnight `RecordCompare` (2026-10-25) exposed two PowerShell/report
+adapter defects, now covered by the synthetic contracts: BE's `large-system`
+report uses wall units `(ms)` while the other gates use `(ms/off)`, and an
+unhandled PowerShell group error could escape with process exit 0. The parser
+accepts both unit spellings and the first-tier wrapper now returns exit 1 when
+any group fails. Step summaries also list each unstable or timed-out scenario.
+After fixing the BE report reader, a fresh 301-sample BE comparison passed all
+five scenarios, including the diffusion-chain case (+5.5%, within the 10%
+regression threshold). In the original force run, BE had already recorded all
+five scenarios successfully; its `error` status was only the adapter defect.
+
+The original BDF/Radau outcomes were genuine measurement results: BDF recorded
+7/8 scenarios and one remained unstable (relative MAD 7.4%); Radau recorded
+20/24, with three scenarios reaching the native 600-second child timeout and
+one unstable result (relative MAD 8.1%). Those solver steps correctly block
+their RecordCompare follow-up. LSODE2 recorded and compared all 30 scenarios
+successfully. Rerun unresolved BDF/Radau cases as addressed scenarios with
+`perf_gates_run.ps1 -Scenario <id>`; do not force-record a complete group just
+to retry one noisy or timed-out cell.
+
 For the explicitly approved baseline refresh, run one solver's record and
 compare before proceeding to the next solver:
 

@@ -5,7 +5,7 @@ param(
     [switch]$AllowDirtySource, [string]$Toolchain
 )
 $ErrorActionPreference = 'Stop'
-Add-Content -LiteralPath (Join-Path $env:IVP_GATE_TEST_ROOT 'calls.txt') -Value "$Solver/$Action force=$Force dirty=$AllowDirtySource"
+Add-Content -LiteralPath (Join-Path $env:IVP_GATE_TEST_ROOT 'calls.txt') -Value "$Solver/$Action warmups=$Warmups runs=$Runs force=$Force dirty=$AllowDirtySource"
 if ($env:IVP_GATE_TEST_MODE -eq 'missing' -or $Solver -eq 'lsode2') {
     [Console]::Error.WriteLine('perf-gates: invalid configuration: refusing to record a baseline from dirty source revision synthetic; commit the source or pass --allow-dirty-source explicitly')
     exit 2
@@ -46,11 +46,12 @@ foreach ($group in $groups) {
     'schema_version = 1' | Set-Content -LiteralPath (Join-Path $path 'summary.toml')
     foreach ($id in $ids) {
         if ($id -in @('be_missing', 'be_incompatible', 'be_tool', 'be_timeout')) { continue }
+        $wallUnit = if ($id -eq 'be_large_ok') { 'ms' } else { 'ms/off' }
         $measure = @(
             "# Performance run: $id", '', '## Primary', '',
             '| Metric | Phase | Scope | Parent scope | Samples | Median | MAD | Min | Max |',
             '| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |',
-            '| scenario_wall_ms (ms/off) | gate_off | scenario_outer_wall | - | 301 | 123.456000 | 6.700000 | 110 | 140 |'
+            "| scenario_wall_ms ($wallUnit) | gate_off | scenario_outer_wall | - | 301 | 123.456000 | 6.700000 | 110 | 140 |"
         )
         if ($id -eq 'bdf_noisy') {
             # A passing confirmation must not erase the final UNSTABLE outcome.
