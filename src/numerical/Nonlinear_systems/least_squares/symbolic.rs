@@ -139,6 +139,38 @@ impl PreparedSymbolicLeastSquaresProblem {
         (self.residual_count(), self.parameter_count())
     }
 
+    /// Evaluate the prepared residual system without entering an optimizer.
+    ///
+    /// This direct path uses the same production symbolic backend as the
+    /// least-squares solver and is useful for inspection, validation and
+    /// application-owned evaluation loops.
+    pub fn evaluate_residual(&self, x: &DVector<f64>) -> Result<DVector<f64>, SolveError> {
+        NonlinearProblem::residual(self.prepared.as_problem(), x)
+    }
+
+    /// Evaluate the prepared dense Jacobian without entering an optimizer.
+    pub fn evaluate_jacobian(&self, x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+        JacobianProvider::jacobian(self.prepared.as_problem(), x)
+    }
+
+    /// Fill caller-owned residual storage using the prepared production backend.
+    pub fn evaluate_residual_into(
+        &self,
+        x: &DVector<f64>,
+        out: &mut DVector<f64>,
+    ) -> Result<(), SolveError> {
+        NonlinearProblem::residual_into(self.prepared.as_problem(), x, out)
+    }
+
+    /// Fill caller-owned dense Jacobian storage using the prepared backend.
+    pub fn evaluate_jacobian_into(
+        &self,
+        x: &DVector<f64>,
+        out: &mut DMatrix<f64>,
+    ) -> Result<(), SolveError> {
+        JacobianProvider::jacobian_into(self.prepared.as_problem(), x, out)
+    }
+
     /// Returns the selected symbolic backend kind.
     pub fn backend_kind(&self) -> SymbolicBackendKind {
         self.prepared.backend_kind()
@@ -466,6 +498,50 @@ mod tests {
                 .shape(),
             (3, 2)
         );
+    }
+
+    #[test]
+    fn direct_evaluation_and_into_buffers_match_the_bound_solver_route() {
+        for frontend in [
+            SymbolicLambdifyFrontend::ExprLegacy,
+            SymbolicLambdifyFrontend::AtomViewNative,
+        ] {
+            let prepared = PreparedSymbolicLeastSquaresProblem::from_expressions(
+                equations(),
+                options().with_lambdify_frontend(frontend),
+            )
+            .expect("production symbolic frontend should prepare");
+            let point = DVector::from_vec(vec![0.5, 0.25]);
+            let bound = prepared
+                .bind_initial()
+                .expect("unparameterized model should bind");
+            let expected_residual = bound
+                .residual(&point)
+                .expect("bound residual should evaluate");
+            let expected_jacobian = bound
+                .jacobian(&point)
+                .expect("bound Jacobian should evaluate");
+
+            assert_eq!(
+                prepared.evaluate_residual(&point).unwrap(),
+                expected_residual
+            );
+            assert_eq!(
+                prepared.evaluate_jacobian(&point).unwrap(),
+                expected_jacobian
+            );
+
+            let mut residual_out = DVector::from_element(3, f64::NAN);
+            let mut jacobian_out = DMatrix::from_element(3, 2, f64::NAN);
+            prepared
+                .evaluate_residual_into(&point, &mut residual_out)
+                .expect("residual into should reuse its output buffer");
+            prepared
+                .evaluate_jacobian_into(&point, &mut jacobian_out)
+                .expect("Jacobian into should reuse its output buffer");
+            assert_eq!(residual_out, expected_residual);
+            assert_eq!(jacobian_out, expected_jacobian);
+        }
     }
 
     #[test]

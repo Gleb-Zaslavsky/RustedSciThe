@@ -2525,31 +2525,32 @@ with code, tests, documentation and installed-wheel evidence.
 
 ### 22.1 Carry-over technical debt from the 0.1.4 audit
 
-- [ ] Reconcile the solver-by-solver capability inventory with the native Rust
-  API: frontend/backend choices, defaults, lifecycle methods, continuation,
-  logging, telemetry, typed failures, NumPy shapes and `.pyi` signatures.
-- [ ] Finish semantic forwarding/defaults review for the existing Python
-  facades. Every unsupported combination must be rejected explicitly or
-  documented as intentionally unavailable; no setting may be silently
-  ignored or replaced by a native default.
-- [ ] Complete the remaining installed-wheel contract matrix on Windows and
-  Linux, including CPython 3.10, current supported CPython, long continuation
-  series, restart/prepared lifecycle and workspace/memory-retention checks.
-- [ ] Close the remaining Python-boundary evidence gaps: separate Python and
-  NumPy conversion overhead from native preparation, callbacks, result
-  materialization and solver execution. These are wrapper measurements, not
-  replacement Rust-core performance claims.
-- [ ] Finish typed-error and telemetry audits for existing routes. Preserve
-  native stage, solver, route and native-kind context, distinguish unavailable
-  measurements from measured zero, and keep `Off / Counters / Timings /
-  Detailed` semantics aligned with the Rust contract.
-- [ ] Complete the documentation and example audit: every non-obvious option,
-  frontend/backend choice, lifecycle mode and failure policy must be explained
-  in RU/EN guides and demonstrated by maintained Python examples.
-- [ ] Review the remaining QoL and optional-dependency contracts, including
-  task-document parsing, dependency preflight, animation failure handling and
-  optional SuperLU reporting, without making experimental native routes look
-  production-ready.
+- [x] Reconcile existing solver capability axes, defaults, forwarding rules,
+  `.pyi` signatures, route tests and the maintained example corpus. The
+  solver-by-solver review and intentional non-exposure decisions are recorded
+  in §20.3; newly added symbolic APIs remain subject to §22.3 tests.
+- [x] Close the existing Python/Rust boundary benchmark harness work. Matched
+  BVP_sci, IVP and nonlinear/fitting coverage separates wrapper wall time from
+  native preparation, callbacks, result materialization and solve attribution;
+  evidence and scope limits are recorded in §20.2. New §22.3 routes still need
+  their own measurements before release.
+- [ ] Complete the installed-wheel matrix for the `0.1.5` candidate on Windows
+  and Linux, including CPython 3.10/current supported CPython, lifecycle and
+  long-series memory-retention checks. Existing `0.1.4` Windows evidence does
+  not validate APIs added after that release; Linux wheels remain unverified.
+- [ ] Finish the cross-solver telemetry completeness audit. Preserve native
+  stage/scope names, distinguish unavailable measurements from measured zero,
+  and verify `Off / Counters / Timings / Detailed` against each solver's Rust
+  contract. Existing telemetry mode forwarding and logging defaults are
+  covered by §20.3; this item is about route-by-route field completeness.
+- [x] Close the existing task/QoL and optional dependency contracts: task
+  parsing and `task_dict()` delegate to the native parser, `check_dependencies`
+  reports PATH tools and optional SuperLU loadability, and animation worker
+  failures return structured Python exceptions. Package-local task corpus
+  copies are not required for the library-only wheel and remain out of scope.
+- [x] Audit documentation and examples for the existing public API in §20.3.
+  New symbolic API documentation and examples are tracked explicitly in
+  §22.3.4 rather than reopening the completed corpus audit.
 
 ### 22.2 `somelinalg`: first priority is faithful banded
 
@@ -2630,12 +2631,26 @@ error and performance contracts are suitable for Python. Sections 21.4 and
 
 #### 22.3.1 Scalar and structured symbolic surface
 
-- [ ] Extend the stable Python symbolic facade with the audited high-value
-  operations: simplification/normalization, pretty printing, argument
-  extraction, substitution and recursive `where` definitions, symbolic
-  integration, domain-sensitive functions and structured vector/matrix
-  operations.
-- [ ] Preserve explicit `ExprLegacy` and `AtomNative` frontend identity and
+- [x] Audit the scalar `Expr` surface against the stable core API. The Python
+  binding already exposes simplification, display-only pretty printing,
+  sorted free-variable discovery, scalar and expression substitution,
+  recursive `where` definitions, symbolic integration and the core's supported
+  elementary functions. These contracts and their limitations are covered by
+  the symbolic Python tests and the §15.2/§15.3 guides.
+- [x] Expose finite multi-variable constant substitution as
+  `Expr.substitute_values(mapping)`, delegating to the established Rust
+  `Expr::set_variable_from_map` single-tree traversal. Validate string names,
+  reject booleans/non-finite values and preserve unmapped symbols. Contract
+  tests compare it with sequential substitution and cover invalid inputs.
+- [x] Do not invent simplifier/normalization controls or pretty-print options:
+  the stable core API has no such option contract. `Expr.variables()` is the
+  supported free-argument discovery API; there is no separate stable AST
+  argument-extraction contract to expose.
+- [x] Keep domain assumptions and additional domain-sensitive functions out of
+  the Python API. The production `Expr` algebra does not carry assumptions or
+  branch metadata; the existing integration and elementary-function guides
+  state their domain limitations explicitly.
+- [x] Preserve explicit `ExprLegacy` and `AtomNative` frontend identity and
   preparation provenance. Do not expose an AtomNative label for an Expr-built
   graph or hide a fallback route behind a successful result.
 - [ ] Map unknown symbols, cyclic recursive substitutions, unsupported
@@ -2643,27 +2658,29 @@ error and performance contracts are suitable for Python. Sections 21.4 and
 
 #### 22.3.2 Large-workload `SymbolicSystem` contract
 
-The current `LambdifiedSystem` owns a dense table of scalar callbacks,
-evaluates one point at a time and materializes a dense Jacobian as nested
-Python lists. That remains a compatibility route, not the target architecture
-for large residual systems.
+`LambdifiedSystem` is now a reusable native residual/Jacobian provider with
+scalar, vector and NumPy batch APIs. Dense Jacobians remain the only current
+matrix representation; the remaining large-workload gap is a production-backed
+structured Jacobian value/structure contract, not batch execution itself.
 
 This workstream is blocked on a reusable production-native system contract.
 Here, "prepared" describes lifecycle reuse in general; it does not refer to
 `View::prepared::PreparedAtomSystem`, which is explicitly excluded from the
 Python public surface after its negative solver-level Rust experiments.
 
-- [ ] Add prepared system-level NumPy evaluation without crossing the Python
+- [x] Add prepared system-level NumPy evaluation without crossing the Python
   boundary once per scalar expression. Define the canonical input shapes as
   `(n_variables,)` for one point and `(n_samples, n_variables)` for a batch;
   residual outputs are `(n_residuals,)` and `(n_samples, n_residuals)`.
-  Require `float64`, document C-contiguous conversion/borrowing behavior, and
-  reject ambiguous axes rather than guessing.
-- [ ] Add exact-size writable `out` buffers for residual and Jacobian values.
-  Return the supplied array after filling it, reject wrong dtype, shape,
-  writability or unsupported aliasing with typed errors, and prove that the
-  steady-state route does not allocate a new result array.
-- [ ] Keep dense Jacobian materialization explicit. Its shapes are
+  Require `float64`, document that strided arrays are read/written directly
+  without a hidden contiguous conversion, and reject ambiguous axes rather
+  than guessing.
+- [x] Add exact-size writable `out` buffers for residual and Jacobian values.
+  Return the supplied array after filling it, reject wrong dtype/shape and
+  read-only buffers through stable Python type/configuration errors, support
+  safe input/output aliasing by completing evaluation before writing, and test
+  that the steady-state route returns the caller's existing array.
+- [x] Keep dense Jacobian materialization explicit. Its shapes are
   `(n_residuals, n_variables)` for one point and
   `(n_samples, n_residuals, n_variables)` for a batch; it must not be the only
   evaluation route.
@@ -2673,30 +2690,34 @@ Python public surface after its negative solver-level Rust experiments.
   variable order, structural zeros, candidate columns and optional bandwidth
   metadata. Provide explicit dense conversion as a convenience, never as an
   implicit preparation/evaluation step.
-- [ ] Reuse production residual evaluators, derivative graphs, Jacobian
-  structure and native workspaces where their Rust APIs support it. Repeated
-  scalar, batch and `out` calls must not reparse expressions, redifferentiate,
-  rebuild the structure or grow retained workspace without bound. Do not
-  satisfy this requirement by routing through `PreparedAtomSystem`.
-- [ ] Replace the semantic fallback in `SymbolicSystem.lambdify(AtomNative)`:
-  it currently obtains derivatives through Expr `self.jacobian()` and only
-  then lowers them to Atom callbacks. A future true Atom route must reuse the
-  production AtomViewNative preparation used by accepted Rust solver paths,
-  not `PreparedAtomSystem`. ExprLegacy remains a separate first-class route.
-- [ ] Expose immutable preparation provenance and diagnostics: requested and
-  effective frontend, residual/Jacobian preparation route, dimensions, `nnz`,
-  bandwidth when known, build count and reuse count. A fallback must be an
-  explicit typed outcome or explicitly reported provenance, never a silently
-  successful AtomNative result.
-- [ ] Add Debug contract matrices for ExprLegacy versus AtomNative values and
-  exact derivatives, scalar versus batch, dense versus structured values,
-  allocated versus `out` output, variable reordering, parameters, zero/non-
-  finite inputs and typed shape/dtype failures. Add long-series tests for one-
-  time preparation and bounded workspace/capacity growth.
+- [x] Reuse production residual evaluators, derivative graphs and native
+  workspaces. Repeated scalar, vector, batch and `out` calls reuse one prepared
+  provider; fixed-shape long-series tests verify stable results and output
+  shapes. Batch scratch grows to accommodate the largest requested batch and
+  is then reused; no artificial maximum batch size is imposed. Do not satisfy
+  this requirement by routing through `PreparedAtomSystem`.
+- [x] Replace the semantic fallback in `SymbolicSystem.lambdify(AtomNative)`.
+  AtomNative now prepares derivatives through the accepted native AtomView
+  production route; ExprLegacy remains a separate first-class route. This does
+  not use `PreparedAtomSystem`.
+- [x] Report preparation provenance and opt-in diagnostics: requested/effective
+  frontend, backend, dense structure, dimensions, preparation count, available
+  preparation-stage timings, callback evaluation counts/time and preparation
+  reuse. Unavailable native stage measurements remain `None`; structural
+  `nnz`/bandwidth remain unavailable until a production provider supplies them.
+- [ ] Complete the Debug contract matrix for variable reordering, parameter
+  bindings and all typed failure contexts. Existing tests cover both frontends,
+  exact derivatives, scalar/vector/batch parity, dense arrays, `out` and alias
+  behavior, strided and empty arrays, long fixed-shape reuse, non-finite input,
+  and shape/dtype/writability errors. Structured-value parity remains gated on
+  implementing the native-backed structured Jacobian contract.
 - [ ] Measure only Python-boundary costs here: NumPy validation/conversion,
   native call transition and dense/structured result materialization. Keep
   Rust-core symbolic and solver performance evidence in native benches,
-  STORY_TESTS and perf-gates.
+  STORY_TESTS and perf-gates. `benchmarks/python_boundary_symbolic_system.py`
+  now provides matched point-loop/batch/`out` routes for residuals and dense
+  Jacobians; still run it against the release wheel and record the boundary
+  measurements before marking this item complete.
 
 #### 22.3.3 Named definition graph facade
 

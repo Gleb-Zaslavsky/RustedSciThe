@@ -1796,6 +1796,26 @@ def test_scalar_expression_numeric_operators_and_reflected_forms():
         _ = x + True
 
 
+def test_scalar_expression_multi_value_substitution_matches_sequential_route():
+    expression = Expr.parse("sin(x) + y^2 + exp(z)")
+    replacements = {"x": 0.5, "z": -1.0, "unused": 12.0}
+
+    mapped = expression.substitute_values(replacements)
+    sequential = expression.substitute("x", 0.5).substitute("z", -1.0)
+    assert mapped.variables() == ["y"]
+    assert mapped.evaluate([2.0]) == pytest.approx(sequential.evaluate([2.0]))
+    assert expression.variables() == ["x", "y", "z"]
+
+    with pytest.raises(InvalidExpressionError, match="must not be empty"):
+        expression.substitute_values({"": 1.0})
+    with pytest.raises(InvalidExpressionError, match="finite"):
+        expression.substitute_values({"x": float("nan")})
+    with pytest.raises(TypeError, match="boolean"):
+        expression.substitute_values({"x": True})
+    with pytest.raises(TypeError, match="keys must be strings"):
+        expression.substitute_values({1: 2.0})
+
+
 def test_symbol_batches_renaming_pretty_print_and_scalar_derivatives():
     x, y = Expr.symbols(["x", "y"])
     x0, x1, x2 = Expr.indexed("x", 3)
@@ -2099,6 +2119,100 @@ def test_expr_legacy_and_atom_native_standalone_callables_match_with_diagnostics
     assert prepared.preparation_ms is not None and prepared.preparation_ms >= 0.0
     assert len(residual) == 2 and len(jacobian) == 2
     assert prepared.diagnostics()["evaluations"] == 6
+
+
+@pytest.mark.parametrize("frontend", [SymbolicFrontend.ExprLegacy, SymbolicFrontend.AtomNative])
+def test_symbolic_system_numpy_batch_and_reusable_out_buffers(frontend):
+    x, y = Expr.symbols(["x", "y"])
+    system = SymbolicSystem([x**2 + y, x * y], ["x", "y"])
+    compiled = system.lambdify(frontend=frontend, diagnostics=True)
+    assert compiled.residual_count == 2
+    assert compiled.jacobian_shape == (2, 2)
+    provenance = compiled.provenance()
+    assert provenance["requested_frontend"] == compiled.frontend
+    assert provenance["effective_frontend"] == compiled.frontend
+    assert provenance["jacobian_structure"] == "dense"
+    assert provenance["structural_nnz"] is None
+    preparation_stages = compiled.diagnostics()["preparation_stages"]
+    assert isinstance(preparation_stages, list)
+    assert {stage["name"] for stage in preparation_stages} >= {
+        "input_validation",
+        "jacobian_differentiation",
+    }
+    points = np.array([[2.0, -1.0, 3.0], [4.0, -1.0, 5.0]])[:, ::2]
+
+    expected_residuals = np.array([[7.0, 6.0], [21.0, 20.0]])
+    expected_jacobians = np.array(
+        [[[4.0, 1.0], [3.0, 2.0]], [[8.0, 1.0], [5.0, 4.0]]]
+    )
+    np.testing.assert_allclose(compiled.evaluate_batch(points), expected_residuals)
+    np.testing.assert_allclose(compiled.evaluate_jacobian_batch(points), expected_jacobians)
+
+    residual_out = np.empty_like(expected_residuals)
+    jacobian_out = np.empty_like(expected_jacobians)
+    assert compiled.evaluate_batch_into(points, residual_out) is residual_out
+    assert compiled.evaluate_jacobian_batch_into(points, jacobian_out) is jacobian_out
+    np.testing.assert_allclose(residual_out, expected_residuals)
+    np.testing.assert_allclose(jacobian_out, expected_jacobians)
+
+    point_out = np.empty(2)
+    jacobian_point_out = np.empty((2, 2))
+    one_point = np.array([2.0, 3.0])
+    assert compiled.evaluate_array_into(one_point, point_out) is point_out
+    assert compiled.evaluate_jacobian_array_into(one_point, jacobian_point_out) is jacobian_point_out
+    np.testing.assert_allclose(point_out, expected_residuals[0])
+    np.testing.assert_allclose(jacobian_point_out, expected_jacobians[0])
+    np.testing.assert_allclose(compiled.evaluate_array(one_point), expected_residuals[0])
+    np.testing.assert_allclose(compiled.evaluate_jacobian_array(one_point), expected_jacobians[0])
+
+    report = compiled.diagnostics()
+    assert report["evaluations"] == 2 * 2 + 2 * 2 * 2 + 2 * 2 + 2 * 2 * 2 + 2 + 4 + 2 + 4
+    assert report["callback_time_ms"] >= 0.0
+
+
+def test_symbolic_system_out_alias_shape_and_writability_contract():
+    x, y = Expr.symbols(["x", "y"])
+    compiled = SymbolicSystem([x + y, x * y], ["x", "y"]).lambdify()
+    assert compiled.diagnostics()["preparation_stages"] is None
+    shared = np.array([[2.0, 3.0], [4.0, 5.0]])
+    returned = compiled.evaluate_batch_into(shared, shared)
+    assert returned is shared
+    np.testing.assert_allclose(shared, [[5.0, 6.0], [9.0, 20.0]])
+
+    with pytest.raises(InvalidConfigurationError, match="out must have shape"):
+        compiled.evaluate_batch_into(np.ones((3, 2)), np.empty((3, 1)))
+    read_only = np.empty((2, 2))
+    read_only.flags.writeable = False
+    with pytest.raises(InvalidConfigurationError, match="out must be writable"):
+        compiled.evaluate_batch_into(np.ones((2, 2)), read_only)
+    with pytest.raises(InvalidConfigurationError, match="columns"):
+        compiled.evaluate_batch(np.ones((2, 1)))
+    with pytest.raises(InvalidConfigurationError, match="finite"):
+        compiled.evaluate_batch(np.array([[1.0, np.nan]]))
+    with pytest.raises(InvalidConfigurationError, match="float64"):
+        compiled.evaluate_batch(np.ones((2, 2), dtype=np.float32))
+    with pytest.raises(InvalidConfigurationError, match="float64"):
+        compiled.evaluate_batch_into(np.ones((2, 2)), np.empty((2, 2), dtype=np.float32))
+
+    strided_out_storage = np.empty((2, 4), dtype=np.float64)
+    strided_out = strided_out_storage[:, ::2]
+    assert compiled.evaluate_batch_into(np.array([[2.0, 3.0], [4.0, 5.0]]), strided_out) is strided_out
+    np.testing.assert_allclose(strided_out, [[5.0, 6.0], [9.0, 20.0]])
+
+
+def test_symbolic_system_empty_and_long_reuse_batches_keep_numpy_shapes():
+    x = Expr.variable("x")
+    compiled = SymbolicSystem([x**2, x + 1.0], ["x"]).lambdify()
+    empty_points = np.empty((0, 1), dtype=np.float64)
+    assert compiled.evaluate_batch(empty_points).shape == (0, 2)
+    assert compiled.evaluate_jacobian_batch(empty_points).shape == (0, 2, 1)
+
+    points = np.linspace(-2.0, 2.0, 17, dtype=np.float64).reshape(-1, 1)
+    out = np.empty((len(points), 2), dtype=np.float64)
+    for _ in range(200):
+        assert compiled.evaluate_batch_into(points, out) is out
+    np.testing.assert_allclose(out[:, 0], points[:, 0] ** 2)
+    np.testing.assert_allclose(out[:, 1], points[:, 0] + 1.0)
 
 
 def test_symbolic_system_exposes_residual_jacobian_and_reusable_vector_callable():

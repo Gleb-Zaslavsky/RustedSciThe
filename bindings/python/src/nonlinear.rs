@@ -45,7 +45,12 @@ fn map_solve_error(error: SolveError) -> PyErr {
     map_solve_error_context(error, "solve", "nonlinear_system", "lambdify")
 }
 
-fn map_solve_error_context(error: SolveError, stage: &str, solver: &str, route: &str) -> PyErr {
+pub(crate) fn map_solve_error_context(
+    error: SolveError,
+    stage: &str,
+    solver: &str,
+    route: &str,
+) -> PyErr {
     let native_kind = native_variant(&error);
     annotate_native(
         match error {

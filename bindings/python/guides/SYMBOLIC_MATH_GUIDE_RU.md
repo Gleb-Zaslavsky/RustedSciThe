@@ -33,6 +33,9 @@ rate = Expr.variable("rate")
 model = (rate * x + y).where_substitute(
     {"rate": Expr.constant(2.0)}
 )
+
+# Одновременная подстановка нескольких известных числовых значений.
+fixed = (x + y).substitute_values({"x": 1.5, "y": -0.25})
 ```
 
 `substitute_expr` заменяет один символ выражением. `substitute_many` и
@@ -146,3 +149,42 @@ Kronecker-операции пока не входят в Python-контракт
 
 Запускаемые примеры: [`symbolic_calculus.py`](../examples/symbolic_calculus.py)
 и [`symbolic_arrays.py`](../examples/symbolic_arrays.py).
+
+## Подготовленные системы невязок
+
+`SymbolicSystem.lambdify()` подготавливает всю систему невязок и якобиан через
+production symbolic backend нелинейного ядра. `ExprLegacy` и `AtomNative` —
+раздельные нативные маршруты; AtomNative не дифференцирует выражения сначала
+через Expr. Подготовленный объект повторно использует Rust-буферы входа,
+невязок и плотного якобиана. NumPy batch-вход имеет форму
+`(samples, variables)`, невязки — `(samples, residuals)`, а плотные якобианы —
+`(samples, residuals, variables)`. Поддерживаются strided views.
+
+Методы `*_into` заполняют и возвращают принадлежащие приложению массивы.
+Требуются точные формы и `float64`; read-only или уже занятый буфер отклоняется.
+Весь batch вычисляется до записи в `out`, поэтому входной массив можно
+переиспользовать и как выходной. Native batch-workspace сохраняет ёмкость до
+наибольшего запрошенного batch. Плотный якобиан создаётся только по явному
+запросу: его объём растёт как `samples * residuals * variables`.
+
+```python
+x, y = Expr.symbols(["x", "y"])
+system = SymbolicSystem([x**2 + y, x * y], ["x", "y"])
+prepared = system.lambdify(frontend=SymbolicFrontend.AtomNative)
+points = np.array([[2.0, 3.0], [4.0, 5.0]])
+residuals = prepared.evaluate_batch(points)            # (2, 2)
+jacobians = prepared.evaluate_jacobian_batch(points)  # (2, 2, 2)
+prepared.evaluate_batch_into(points, residuals)        # заполняет и возвращает residuals
+```
+
+При `diagnostics=True` счётчик `evaluations` считает scalar-equivalent элементы
+невязки и якобиана, а `callback_time_ms` — время нативного вычисления системы.
+`preparation_stages` содержит включённые stage-тайминги ядра; неприменимые
+стадии остаются `None`. При отключённой диагностике timeline равен `None`.
+Python/NumPy-преобразования не входят ни в evaluation, ни в preparation-таймеры.
+
+Полный запускаемый пример пакетной работы с системой:
+[`symbolic_system_numpy_batch.py`](../examples/symbolic_system_numpy_batch.py).
+Wrapper-only измерительный скрипт:
+[`python_boundary_symbolic_system.py`](../benchmarks/python_boundary_symbolic_system.py);
+он не подменяет измерения Rust-core.

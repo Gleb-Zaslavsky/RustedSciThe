@@ -33,6 +33,9 @@ rate = Expr.variable("rate")
 model = (rate * x + y).where_substitute(
     {"rate": Expr.constant(2.0)}
 )
+
+# Bind several known numeric values in one native expression-tree traversal.
+fixed = (x + y).substitute_values({"x": 1.5, "y": -0.25})
 ```
 
 `substitute_expr` replaces one variable; `substitute_many` and
@@ -149,3 +152,43 @@ print(compiled.diagnostics())
 
 See [`symbolic_calculus.py`](../examples/symbolic_calculus.py) and
 [`symbolic_arrays.py`](../examples/symbolic_arrays.py) for runnable examples.
+
+## Prepared residual systems
+
+`SymbolicSystem.lambdify()` prepares the complete residual/Jacobian provider in
+the production nonlinear symbolic backend. `ExprLegacy` and `AtomNative` are
+separate native preparation routes; AtomNative does not differentiate through
+Expr first. A prepared object reuses its Rust input, residual and dense-Jacobian
+workspace. The NumPy batch input convention is `(samples, variables)`, residual
+output is `(samples, residuals)`, and dense Jacobians have shape
+`(samples, residuals, variables)`. Strided input and output views are supported.
+
+Use the `*_into` methods when an application owns reusable arrays. They require
+exact `float64` shapes, return the same output array, and reject read-only or
+currently borrowed output buffers. The whole batch is evaluated before writing
+to `out`, so using an input array as its own output is safe. These methods reuse
+the retained native batch workspace; its capacity grows only to the largest
+batch requested so far. Dense Jacobians are intentionally explicit because
+their storage grows as `samples * residuals * variables`.
+
+```python
+x, y = Expr.symbols(["x", "y"])
+system = SymbolicSystem([x**2 + y, x * y], ["x", "y"])
+prepared = system.lambdify(frontend=SymbolicFrontend.AtomNative)
+points = np.array([[2.0, 3.0], [4.0, 5.0]])
+residuals = prepared.evaluate_batch(points)                 # (2, 2)
+jacobians = prepared.evaluate_jacobian_batch(points)       # (2, 2, 2)
+prepared.evaluate_batch_into(points, residuals)             # fills and returns residuals
+```
+
+With `diagnostics=True`, `evaluations` counts scalar-equivalent residual and
+Jacobian entries, while `callback_time_ms` measures native system evaluation
+time. `preparation_stages` contains the core's opt-in stage timings (unavailable
+stages remain `None`); disabled diagnostics return `None` for that timeline.
+Neither evaluation nor preparation timings include Python-side NumPy conversion.
+
+For a complete runnable system/batch example, see
+[`symbolic_system_numpy_batch.py`](../examples/symbolic_system_numpy_batch.py).
+The wrapper-only timing harness is
+[`python_boundary_symbolic_system.py`](../benchmarks/python_boundary_symbolic_system.py);
+it keeps Rust-core comparisons out of Python boundary measurements.

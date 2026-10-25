@@ -6,6 +6,25 @@ and the declared benchmark dependencies installed. To benchmark a release
 wheel, invoke the script with that wheel's virtual-environment Python while
 working outside the checkout import path.
 
+## Prepared SymbolicSystem Batch Boundary
+
+`python_boundary_symbolic_system.py` compares a Python point loop (including
+list conversion and repeated native calls) with the NumPy residual/Jacobian
+batch routes and reusable `out` buffers. Each row uses the same prepared Rust
+provider and passes a value-parity gate. Select one frontend per run; the table
+is for Python-call/array-boundary costs, not an Expr-versus-Atom core comparison.
+`--strided` checks the supported non-contiguous NumPy input route.
+
+```powershell
+& $wheelPython .\bindings\python\benchmarks\python_boundary_symbolic_system.py `
+  --dimension 32 --samples 256 --repeats 15 --frontend atom_native `
+  --output $env:TEMP\python_boundary_symbolic_system_atom.md
+```
+
+Run the same command with `--frontend expr_legacy` for a separate diagnostic
+report. Do not interpret differences across those files as a controlled Rust
+frontend benchmark.
+
 ## Boundary And NumPy Microbenchmark
 
 `python_boundary_overhead.py` measures a minimal constant-expression PyO3

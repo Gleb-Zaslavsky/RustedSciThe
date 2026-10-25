@@ -301,6 +301,31 @@ impl PyExpr {
         Ok(Self::from_inner(self.inner.set_variable(variable, value)))
     }
 
+    /// Substitute several variables with finite numeric constants in one tree
+    /// traversal. Variables omitted from the mapping remain symbolic; entries
+    /// that do not occur in the expression are ignored.
+    pub fn substitute_values(&self, replacements: &Bound<'_, PyDict>) -> PyResult<Self> {
+        let mut values = HashMap::with_capacity(replacements.len());
+        for (name, value) in replacements.iter() {
+            let name = name
+                .extract::<String>()
+                .map_err(|_| PyTypeError::new_err("substitution mapping keys must be strings"))?;
+            Self::checked_name(&name, "substitution variable")?;
+            if value.is_instance_of::<PyBool>() {
+                return Err(PyTypeError::new_err(
+                    "boolean values are not valid symbolic substitution values",
+                ));
+            }
+            let scalar = value
+                .extract::<f64>()
+                .map_err(|_| PyTypeError::new_err("substitution values must be finite numbers"))?;
+            Self::checked_finite(scalar, "substitution values")?;
+            values.insert(name, scalar);
+        }
+
+        Ok(Self::from_inner(self.inner.set_variable_from_map(&values)))
+    }
+
     /// Substitute another expression for one variable.
     pub fn substitute_expr(&self, variable: &str, value: &PyExpr) -> PyResult<Self> {
         Self::checked_name(variable, "substitution variable")?;

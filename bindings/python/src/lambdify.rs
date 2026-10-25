@@ -119,17 +119,6 @@ impl LambdifiedExpr {
             Err("lambdify evaluation produced a non-finite value".to_owned())
         }
     }
-
-    pub(crate) fn diagnostic_counts(&self) -> (u64, u64) {
-        (
-            self.evaluation_count.load(Ordering::Relaxed),
-            self.callback_time_ns.load(Ordering::Relaxed),
-        )
-    }
-
-    pub(crate) fn preparation_time_ms(&self) -> Option<f64> {
-        self.preparation_ms
-    }
 }
 
 fn validate_variable_list(required: &[String], variables: &[String]) -> PyResult<()> {
