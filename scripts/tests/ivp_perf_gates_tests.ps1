@@ -26,7 +26,7 @@ try {
     $mixed = Invoke-MatrixTest 'mixed' @('-Action', 'Compare') 1
     Assert-Gate ($mixed.steps.Count -eq 4) 'All four solvers must be attempted'
     Assert-Gate ($mixed.steps[0].warmups -eq 20 -and $mixed.steps[0].runs -eq 301) 'Non-Radau defaults must remain 20/301'
-    Assert-Gate ($mixed.steps[1].warmups -eq 5 -and $mixed.steps[1].runs -eq 31) 'Radau defaults must be 5/31'
+    Assert-Gate ($mixed.steps[1].warmups -eq 5 -and $mixed.steps[1].runs -eq 62) 'Radau defaults must be 5/62'
     Assert-Gate ($mixed.steps[1].status -eq 'passed') 'Radau must run after BDF failure'
     Assert-Gate ($mixed.steps[0].detail -like '*bdf_noisy*') 'Step summary must identify unstable scenario'
     Assert-Gate ($mixed.steps[2].status -eq 'error') 'Preflight failure must be explicit'
@@ -61,7 +61,7 @@ try {
     Assert-Gate ($paired.steps[1].status -eq 'blocked') 'Failed record must block same-solver compare'
     Assert-Gate ($paired.steps[2].status -eq 'passed' -and $paired.steps[3].status -eq 'passed') 'Next solver must record and compare'
     $calls = Get-Content -LiteralPath (Join-Path $root 'calls.txt')
-    Assert-Gate (@($calls | Where-Object { $_ -match '^radau/compare warmups=5 runs=31' }).Count -ge 1) 'Radau counts must be forwarded to its runner'
+    Assert-Gate (@($calls | Where-Object { $_ -match '^radau/compare warmups=5 runs=62' }).Count -ge 1) 'Radau counts must be forwarded to its runner'
     Assert-Gate (@($calls | Where-Object { $_ -match '^bdf/compare warmups=20 runs=301' }).Count -eq 1) 'Other solver counts must be forwarded unchanged'
     Assert-Gate (@($calls | Where-Object { $_ -match '/compare force=True|/compare .*dirty=True' }).Count -eq 0) 'Record flags must not reach compare'
 

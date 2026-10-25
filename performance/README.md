@@ -334,14 +334,14 @@ formats are errors rather than guessed successes. No Python installation is
 required for this performance-only matrix.
 
 The matrix uses per-solver sample counts. BDF, LSODE2 and BE default to 20
-warmups and 301 measured runs; Radau keeps the same 512-state workload but
-defaults to 5 warmups and 31 runs. This follows the demonstrated 31-sample
-stability of larger BVP_Damp workloads and avoids spending 301 gate samples
-plus 301 diagnostic samples on every expensive Radau route. The 5% relative
-MAD requirement is unchanged. Override with `-RadauWarmups` and `-RadauRuns`
-when needed; the report records each solver's actual counts. If a Radau cell
-is unstable at 31 runs, repeat only that scenario with more runs rather than
-rerunning the whole matrix.
+warmups and 301 measured runs; Radau keeps the same 512-state workload and uses
+5 warmups with 62 runs. The first 31-run Radau attempt recorded 22/24 cells;
+the remaining two had a relative MAD of 5.2%, just above the unchanged 5%
+limit. Doubling Radau's sample count is intended to firm up those borderline
+measurements while still avoiding the cost of 301 runs for this expensive
+matrix. Override with `-RadauWarmups` and `-RadauRuns` when needed; the report
+records each solver's actual counts. If a cell remains unstable at 62 runs,
+repeat only that scenario with more runs rather than rerunning the whole matrix.
 
 The first overnight `RecordCompare` (2026-10-25) exposed two PowerShell/report
 adapter defects, now covered by the synthetic contracts: BE's `large-system`

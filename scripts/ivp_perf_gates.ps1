@@ -6,7 +6,7 @@ param(
     [ValidateRange(0, 1000)][int]$Warmups = 20,
     [ValidateRange(3, 10001)][int]$Runs = 301,
     [ValidateRange(1, 1000)][int]$RadauWarmups = 5,
-    [ValidateRange(3, 10001)][int]$RadauRuns = 31,
+    [ValidateRange(3, 10001)][int]$RadauRuns = 62,
     [ValidateRange(0.0, 1.0)][double]$MaxRelativeMad = 0.05,
     [ValidateRange(0.0, 1.0)][double]$Tolerance = 0.10,
     [switch]$Force,

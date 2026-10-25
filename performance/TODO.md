@@ -767,10 +767,15 @@ sample batch.
   by BE large-system), and return a nonzero first-tier process code when a
   group fails. Include unstable/timeout scenario IDs and causes in step rows.
 - [x] Reduce only the Radau IVP gate sample count while keeping its workload
-  dimension at 512: default to 5 warmups / 31 runs; retain 20 / 301 for BDF,
+  dimension at 512: initially default to 5 warmups / 31 runs; retain 20 / 301 for BDF,
   LSODE2 and BE. Record the effective counts per solver in the matrix summary
   and keep the 5% relative-MAD threshold. Validate forwarding with synthetic
   matrix tests before the next numerical overnight run.
+- [x] Raise the Radau count to 62 after its first 31-run matrix recorded 22/24
+  scenarios and left two parallel Lambdify cells at MAD/median 5.2%, narrowly
+  above the 5% gate. Preserve the 512-state workload, five warmups and 5%
+  threshold; the next run will show whether 62 samples resolves the borderline
+  variability.
 - [x] Rerun BE comparison after fixing the report adapter: all four matrix
   scenarios and `be_diffusion_chain_128` passed with 301 samples, MAD limit 5%,
   and regression tolerance 10%. Original force-record had created all five BE
