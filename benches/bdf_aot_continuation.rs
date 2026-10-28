@@ -273,7 +273,7 @@ fn benchmark_aot_parameter_continuation(c: &mut Criterion) {
                                     for index in 1..=segments {
                                         let target = width * (index + 1) as f64;
                                         solver
-                                            .try_continue_with_parameter_values(
+                                            .try_continue_in_time_with_parameter_values(
                                                 parameter_continuation_target(
                                                     &workload.parameter_values,
                                                     index,

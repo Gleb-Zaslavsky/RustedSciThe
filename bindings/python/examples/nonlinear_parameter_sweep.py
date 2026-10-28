@@ -29,7 +29,7 @@ print("frontend:", solver.frontend(), "backend:", solver.backend())
 print("prepared once:", solver.is_prepared())
 
 for a_value in (0.5, 1.0, 2.0, 4.0):
-    result = solver.solve([1.0, 1.0], parameters=[a_value])
+    result = solver.solve_with_parameter_values([1.0, 1.0], [a_value])
     x_value, y_value = result.solution()
     expected = 3.0 / (a_value + 1.0)
     assert abs(x_value - expected) < 1e-7

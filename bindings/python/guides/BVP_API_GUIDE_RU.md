@@ -88,5 +88,12 @@ route-specific отчёте и не прерывает цикл, если уда
 Для BVP_sci возвращается `BvpSciParameterLoopReport`, для BVP_Damp —
 `BvpDampParameterLoopReport`; структура телеметрии и типизированные ошибки
 сохраняют native-семантику. Пример: `python examples/bvp_api_parameter_loop.py`.
+Для более крупного примера с шестью уравнениями горения и десятью значениями
+тепловыделения см. `examples/bvp_api_combustion_parameter_loop.py`.
+
+Единый текстовый уровень логирования задаётся через общий
+`options.set_logging_level("info")` для Damped, Frozen/Naive и BVP_sci.
+Параметр `logging_mode` у Damped/Frozen управляет отдельным ограниченным
+decision trace и не заменяет текстовый лог.
 
 Пример выбора solver-а: `python examples/bvp_api_solver_selection.py`.

@@ -16,7 +16,7 @@ use nalgebra::DVector;
 fn problem_options() -> SymbolicProblemOptions {
     SymbolicProblemOptions::new()
         .with_variables(vec!["x".into(), "y".into()])
-        .with_equation_parameters(vec!["a".into(), "b".into()])
+        .with_parameter_names(vec!["a".into(), "b".into()])
 }
 
 fn solve_options() -> SolveOptions {

@@ -1082,7 +1082,7 @@ fn run_continuation_lifecycle_row(
                 let parameter = continuation_parameter(index, count);
                 target.store(parameter.to_bits(), Ordering::Relaxed);
                 solver
-                    .set_parameter_values(vec![parameter])
+                    .set_parameter_guess(vec![parameter])
                     .map_err(|error| error.to_string())?;
                 solver.solve().map_err(|error| error.to_string())?;
             }
@@ -1527,7 +1527,7 @@ fn run_row(
                 .to_bits(),
             Ordering::Relaxed,
         );
-        if let Err(error) = solver.set_parameter_values(workload.parameter(index)) {
+        if let Err(error) = solver.set_parameter_guess(workload.parameter(index)) {
             return failed_solver_row(
                 workload,
                 frontend,

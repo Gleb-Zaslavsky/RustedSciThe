@@ -1,6 +1,6 @@
 //! Public solve boundary for the new BVP architecture.
 
-use crate::numerical::logging::SolverLogGuard;
+use crate::numerical::logging::{SolverLogGuard, solver_debug, solver_info};
 use std::sync::Arc;
 
 use super::{
@@ -531,6 +531,13 @@ impl BvpSciSolver {
     /// storage; the prepared symbolic plan and its evaluators remain intact.
     pub fn solve(&mut self) -> Result<BvpSciSolution, BvpSciNewError> {
         let _logging_scope = SolverLogGuard::try_enter(self.options.logging_level)?;
+        solver_info!(
+            "BVP_sci solve started: states={}, mesh_nodes={}, execution={:?}, layout={:?}",
+            self.plan.dimension(),
+            self.x.len(),
+            self.options.execution,
+            self.options.matrix_layout
+        );
         let _full_solve_timer = self.plan.telemetry().start_full_solve();
         if self.continuation_pending {
             self.plan.telemetry().record_continuation_solve();
@@ -544,6 +551,11 @@ impl BvpSciSolver {
         let mut outer_solve_attempts = 0usize;
 
         for refinement in 0..=self.options.max_mesh_refinements {
+            solver_debug!(
+                "BVP_sci mesh pass {} started with {} nodes",
+                refinement,
+                self.x.len()
+            );
             // A mesh pass has two phases: bounded Newton convergence on the
             // current grid, then a defect estimate that decides whether the
             // grid should grow. Symbolic preparation never belongs here.
@@ -580,6 +592,13 @@ impl BvpSciSolver {
                 let solution =
                     self.solution(norm.max(max_error), total_iterations, interval_errors)?;
                 self.has_successful_solve = true;
+                solver_info!(
+                    "BVP_sci solve converged: mesh_nodes={}, iterations={}, refinements={}, residual_norm={:.6e}",
+                    self.x.len(),
+                    total_iterations,
+                    refinement,
+                    norm.max(max_error)
+                );
                 return Ok(solution);
             }
             // SciPy returns status 3 after ten outer solves when the defect is
@@ -612,6 +631,11 @@ impl BvpSciSolver {
                 continue;
             }
             self.refine_mesh(&interval_errors)?;
+            solver_info!(
+                "BVP_sci refined mesh after pass {}: {} nodes",
+                refinement,
+                self.x.len()
+            );
         }
 
         Err(BvpSciNewError::MeshRefinementLimit {
@@ -1849,7 +1873,7 @@ mod tests {
         assert!((first.y[first.y.len() - 1] - (1.0f64.exp() - 1.0)).abs() < 1e-10);
         target.store((2.0 * (1.0f64.exp() - 1.0)).to_bits(), Ordering::Relaxed);
         solver
-            .set_parameter_values(vec![2.0])
+            .set_parameter_guess(vec![2.0])
             .expect("parameter rebind should preserve shape");
         let second = solver
             .solve()

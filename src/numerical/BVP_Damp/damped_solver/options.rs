@@ -100,6 +100,22 @@ pub struct DampedSolverOptions {
 }
 
 impl DampedSolverOptions {
+    /// Selects the maximum Rust log level emitted while solving.
+    /// The legacy string field remains available to compatibility callers.
+    pub fn with_logging_level(mut self, level: crate::numerical::logging::SolverLogLevel) -> Self {
+        self.loglevel = Some(
+            match level {
+                crate::numerical::logging::SolverLogLevel::Off => "off",
+                crate::numerical::logging::SolverLogLevel::Error => "error",
+                crate::numerical::logging::SolverLogLevel::Warn => "warn",
+                crate::numerical::logging::SolverLogLevel::Info => "info",
+                crate::numerical::logging::SolverLogLevel::Debug => "debug",
+            }
+            .to_owned(),
+        );
+        self
+    }
+
     /// Returns whether this solver should initialize Rust-side logging.
     ///
     /// An absent level is the library-safe default and means logging is off.

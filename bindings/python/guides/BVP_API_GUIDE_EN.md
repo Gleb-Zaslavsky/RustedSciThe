@@ -80,6 +80,10 @@ The returned report is intentionally route-specific:
 `BvpDampParameterLoopReport` for Damped/Frozen. Point telemetry and typed
 failures are not normalized into a lossy common schema. See
 `examples/bvp_api_parameter_loop.py` for a runnable BVP_sci example.
+For a larger six-state sparse combustion study with ten heat-release values,
+see `examples/bvp_api_combustion_parameter_loop.py`. Across all three routes,
+`options.set_logging_level("info")` enables the shared native Rust text log;
+`logging_mode` on Damped/Frozen controls their separate bounded decision trace.
 
 `BvpApiSolution` always provides detached node-major values and the accepted
 mesh. `sci_details` additionally exposes the complete native BVP_sci result,

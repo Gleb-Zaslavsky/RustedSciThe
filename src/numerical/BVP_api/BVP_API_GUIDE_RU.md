@@ -183,6 +183,10 @@ solver-specific lifecycle, диагностики и изменения runtime-
 инициализации возвращается как типизированная native-ошибка, и расчёт не
 продолжается с незаметно выключенным логом. Путь к файлу доступен через
 `numerical::logging::solver_log_path()`.
+Для одинаковой текстовой политики во всех маршрутах используйте
+`BvpSolverConfig::with_logging_level(SolverLogLevel::Info)`. Она не меняет
+телеметрию и отдельный ограниченный decision trace. Rust-пример большого
+параметрического исследования горения: `examples/bvp_api_combustion_parameter_loop.rs`.
 
 Task-document parser — самостоятельная подсистема. Для чтения и исполнения
 документов используйте `command_interpreter::task_parser_bvp`; он напрямую

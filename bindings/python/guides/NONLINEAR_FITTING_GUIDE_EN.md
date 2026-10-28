@@ -54,6 +54,12 @@ controls. `method_vectors={"diag": [...]}` is MINPACK-only and requires
 system API does not expose a separate positive-domain declaration or Python
 callbacks; these are not silently substituted.
 
+For a named value-only rebind on the prepared square-system solver, use
+`solve_with_parameter_values(initial_guess, values)`. The parameter-name schema
+is declared at construction; each call is a fresh solve from the supplied
+guess, not parameter continuation. The existing `solve(initial_guess,
+parameters=...)` form remains available.
+
 ## Least-squares fitting
 
 `FittingSolver` minimizes a vector of symbolic residual equations. Its

@@ -76,7 +76,7 @@ fn run_policy(policy: LambdifyExecutionPolicy) -> Result<(), Box<dyn std::error:
         vec!["x^2 - a".to_string(), "y - b*x".to_string()],
         SymbolicProblemOptions::new()
             .with_variables(vec!["x".to_string(), "y".to_string()])
-            .with_equation_parameters(vec!["a".to_string(), "b".to_string()])
+            .with_parameter_names(vec!["a".to_string(), "b".to_string()])
             .with_lambdify_backend()
             .with_lambdify_execution_policy(policy),
     )?;

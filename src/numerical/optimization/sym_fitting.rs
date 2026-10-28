@@ -720,7 +720,7 @@ impl Fitting {
         let equations = self.active_equations();
         let options = SymbolicProblemOptions::new()
             .with_variables(self.unknown_coeffs.clone())
-            .with_equation_parameters(vec![self.arg.clone()])
+            .with_parameter_names(vec![self.arg.clone()])
             .with_lambdify_backend()
             .with_lambdify_frontend(self.symbolic_frontend)
             .with_lambdify_execution_policy(self.lambdify_execution_policy);
@@ -1383,7 +1383,7 @@ mod tests {
                 equations.clone(),
                 SymbolicProblemOptions::new()
                     .with_variables(variables.clone())
-                    .with_equation_parameters(vec!["x".to_string()])
+                    .with_parameter_names(vec!["x".to_string()])
                     .with_lambdify_backend()
                     .with_lambdify_frontend(frontend)
                     .with_lambdify_execution_policy(LambdifyExecutionPolicy::Sequential),
@@ -1498,7 +1498,7 @@ mod tests {
             vec![Expr::parse_expression("a*ln(x)")],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["a".to_string()])
-                .with_equation_parameters(vec!["x".to_string()])
+                .with_parameter_names(vec!["x".to_string()])
                 .with_lambdify_frontend(SymbolicLambdifyFrontend::ExprLegacy)
                 .with_lambdify_execution_policy(LambdifyExecutionPolicy::Sequential),
         )

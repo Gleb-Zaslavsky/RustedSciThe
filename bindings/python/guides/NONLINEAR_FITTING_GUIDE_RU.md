@@ -54,6 +54,12 @@ detailed timings. Числовые и boolean-настройки передаю�
 границе. Отдельная positive-domain политика и Python callbacks для этого
 square-system API не поддерживаются и не подменяются скрыто другими режимами.
 
+Для явного переназначения числовых параметров подготовленной square-системы
+используйте `solve_with_parameter_values(initial_guess, values)`. Имена
+параметров объявляются при создании solver-а; каждый вызов запускает новое
+решение с переданным guess, а не continuation. Форма
+`solve(initial_guess, parameters=...)` также сохранена.
+
 ## Least-squares fitting
 
 `FittingSolver` минимизирует вектор символьных residual equations. Схема

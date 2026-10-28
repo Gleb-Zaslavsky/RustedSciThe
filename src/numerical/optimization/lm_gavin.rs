@@ -2212,8 +2212,8 @@ mod tests {
 
         let options = SymbolicProblemOptions::new()
             .with_variables(vec!["a".to_string(), "b".to_string()])
-            .with_equation_parameters(vec!["x".to_string()])
-            .with_equation_parameter_values(dvector![0.0])
+            .with_parameter_names(vec!["x".to_string()])
+            .with_parameter_values(dvector![0.0])
             .with_lambdify_backend();
         let prepared =
             PreparedSymbolicLeastSquaresProblem::from_strings(vec!["a + b*x".to_string()], options)
@@ -2253,8 +2253,8 @@ mod tests {
             vec!["ln(a) + x".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["a".to_string()])
-                .with_equation_parameters(vec!["x".to_string()])
-                .with_equation_parameter_values(dvector![0.0])
+                .with_parameter_names(vec!["x".to_string()])
+                .with_parameter_values(dvector![0.0])
                 .with_lambdify_backend(),
         )
         .expect("symbolic model should prepare");
@@ -2285,8 +2285,8 @@ mod tests {
             vec!["ln(a) + x".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["a".to_string()])
-                .with_equation_parameters(vec!["x".to_string()])
-                .with_equation_parameter_values(dvector![0.0])
+                .with_parameter_names(vec!["x".to_string()])
+                .with_parameter_values(dvector![0.0])
                 .with_lambdify_backend(),
         )
         .expect("symbolic model should prepare");
@@ -2335,8 +2335,8 @@ mod tests {
 
         let options = SymbolicProblemOptions::new()
             .with_variables(vec!["a".to_string(), "b".to_string()])
-            .with_equation_parameters(vec!["x".to_string()])
-            .with_equation_parameter_values(dvector![0.0])
+            .with_parameter_names(vec!["x".to_string()])
+            .with_parameter_values(dvector![0.0])
             .with_lambdify_backend();
         let prepared =
             PreparedSymbolicLeastSquaresProblem::from_strings(vec!["a + b*x".to_string()], options)
@@ -2771,8 +2771,8 @@ mod additional_tests {
             equations,
             SymbolicProblemOptions::new()
                 .with_variables(unknowns.iter().map(|name| (*name).to_string()).collect())
-                .with_equation_parameters(vec!["x".to_string()])
-                .with_equation_parameter_values(dvector![0.0])
+                .with_parameter_names(vec!["x".to_string()])
+                .with_parameter_values(dvector![0.0])
                 .with_lambdify_backend(),
         )
         .expect("shared symbolic preparation should succeed");

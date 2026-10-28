@@ -406,7 +406,7 @@ fn realistic_lambdify_problem_with_policy(
         equations,
         SymbolicProblemOptions::new()
             .with_variables(variables)
-            .with_equation_parameters(vec!["a".to_string()])
+            .with_parameter_names(vec!["a".to_string()])
             .with_lambdify_execution_policy(execution_policy)
             .with_lambdify_backend(),
     )

@@ -220,11 +220,13 @@ impl NRBVP {
     /// errors. Enabled logging must initialize its persistent file sink before
     /// numerical work begins.
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
-        let log_level = match self.telemetry_counters.logging_mode() {
-            BvpLoggingMode::Off => SolverLogLevel::Off,
-            BvpLoggingMode::Warnings => SolverLogLevel::Warn,
-            BvpLoggingMode::Detailed => SolverLogLevel::Info,
-        };
+        let log_level =
+            self.logging_level
+                .unwrap_or_else(|| match self.telemetry_counters.logging_mode() {
+                    BvpLoggingMode::Off => SolverLogLevel::Off,
+                    BvpLoggingMode::Warnings => SolverLogLevel::Warn,
+                    BvpLoggingMode::Detailed => SolverLogLevel::Info,
+                });
         let _logging_scope = SolverLogGuard::try_enter(log_level)
             .map_err(|source| BvpBackendIntegrationError::LogSetupFailed { source })?;
         // TODO! СЃСЂР°РІРЅРёС‚СЊ СЏРІРЅС‹Р№ РјСЌС€ СЃ РЅРµСЏРІРЅС‹Рј
@@ -261,11 +263,13 @@ impl NRBVP {
     pub fn try_solver_prepared(
         &mut self,
     ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
-        let log_level = match self.telemetry_counters.logging_mode() {
-            BvpLoggingMode::Off => SolverLogLevel::Off,
-            BvpLoggingMode::Warnings => SolverLogLevel::Warn,
-            BvpLoggingMode::Detailed => SolverLogLevel::Info,
-        };
+        let log_level =
+            self.logging_level
+                .unwrap_or_else(|| match self.telemetry_counters.logging_mode() {
+                    BvpLoggingMode::Off => SolverLogLevel::Off,
+                    BvpLoggingMode::Warnings => SolverLogLevel::Warn,
+                    BvpLoggingMode::Detailed => SolverLogLevel::Info,
+                });
         let _logging_scope = SolverLogGuard::try_enter(log_level)
             .map_err(|source| BvpBackendIntegrationError::LogSetupFailed { source })?;
         let prepared_fingerprint = self.prepared_plan_fingerprint();

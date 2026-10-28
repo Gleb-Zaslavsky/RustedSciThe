@@ -328,7 +328,7 @@ fn run_row(
             } else {
                 initial_parameter + 0.25 * index as f64 / (continuation_count - 1) as f64
             };
-            if let Err(error) = solver.set_parameter_values(vec![parameter]) {
+            if let Err(error) = solver.set_parameter_guess(vec![parameter]) {
                 status = format!("error: rebind: {error}");
                 break;
             }

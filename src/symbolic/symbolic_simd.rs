@@ -39,7 +39,7 @@ impl Expr {
                     let b = base_fn(x);
                     let e = exp_fn(x);
                     let e = e.to_array()[0];
-                    b.powf(e)
+                    b.powf_simd(f64x4::splat(e))
                 })
             }
             Expr::Exp(expr) => {

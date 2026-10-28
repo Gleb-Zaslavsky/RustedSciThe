@@ -46,7 +46,7 @@ fn parameter_sweep() -> Result<(), Box<dyn std::error::Error>> {
         vec!["a*x + y - 3".to_string(), "x - y".to_string()],
         SymbolicProblemOptions::new()
             .with_variables(vec!["x".to_string(), "y".to_string()])
-            .with_equation_parameters(vec!["a".to_string()]),
+            .with_parameter_names(vec!["a".to_string()]),
     )?;
     println!("   prepared backend: {:?}", prepared.backend_kind());
     println!(

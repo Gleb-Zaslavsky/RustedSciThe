@@ -601,7 +601,7 @@ fn run_stiff_combustion(
         }
         "radau" => {
             let problem = RadauProblem::new(equations, variables, time_variable)
-                .with_parameter_names(parameter_names);
+                .with_equation_parameters(parameter_names);
             let config = RadauConfig {
                 t_bound,
                 first_step: Some(t_bound * 1e-3),

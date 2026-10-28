@@ -375,7 +375,7 @@ fn run_compact_report() {
                             let parameters =
                                 parameter_continuation_target(&parameter_values, index);
                             if let Err(error) = continuation_solver
-                                .try_continue_with_parameter_values(parameters, t0 + width)
+                                .try_continue_in_time_with_parameter_values(parameters, t0 + width)
                                 .and_then(|_| continuation_solver.try_solve())
                             {
                                 status = format!("continuation-error: {error}");

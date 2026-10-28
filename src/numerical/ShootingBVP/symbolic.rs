@@ -58,8 +58,8 @@ impl PreparedShootingRhs {
         let state_dimension = variables.len();
         let symbolic_options = SymbolicProblemOptions::new()
             .with_variables(variables)
-            .with_equation_parameters(vec![independent_variable])
-            .with_equation_parameter_values(DVector::zeros(1))
+            .with_parameter_names(vec![independent_variable])
+            .with_parameter_values(DVector::zeros(1))
             .with_backend_config(SymbolicBackendConfig::lambdify())
             .with_lambdify_frontend(options.frontend)
             .with_lambdify_execution_policy(options.execution_policy)

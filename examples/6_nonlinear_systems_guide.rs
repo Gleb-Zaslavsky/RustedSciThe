@@ -343,14 +343,14 @@ fn example_9_native_parametric() {
     let solver = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1, eq2])
         .with_unknowns(vec!["x".to_string(), "y".to_string()])
-        .with_parameters(vec!["a".to_string(), "b".to_string()])
+        .with_parameter_names(vec!["a".to_string(), "b".to_string()])
         .with_initial_guess(vec![0.5, 0.5])
         .with_tolerance(1e-8)
         .with_loglevel("none".to_string())
         .build();
 
     let mut solver = solver;
-    solver.solve_with_params(vec![1.0, 1.0]);
+    solver.solve_with_parameter_values(vec![1.0, 1.0]);
 
     if let Some(map) = solver.map_of_solutions {
         println!("Solution with a=1, b=1:");
@@ -373,14 +373,14 @@ fn example_9_native_parametric() {
     let solver2 = SymbolicLeastSquaresSolver::new()
         .with_equations(vec![eq1_2, eq2_2])
         .with_unknowns(vec!["x".to_string(), "y".to_string()])
-        .with_parameters(vec!["a".to_string(), "b".to_string()])
+        .with_parameter_names(vec!["a".to_string(), "b".to_string()])
         .with_initial_guess(vec![0.5, 0.5])
         .with_tolerance(1e-8)
         .with_loglevel("none".to_string())
         .build();
 
     let mut solver2 = solver2;
-    solver2.solve_with_params(vec![2.0, 0.5]);
+    solver2.solve_with_parameter_values(vec![2.0, 0.5]);
 
     if let Some(map) = solver2.map_of_solutions {
         println!("\nSolution with a=2, b=0.5:");

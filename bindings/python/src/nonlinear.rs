@@ -1277,6 +1277,17 @@ impl NonlinearSolver {
             self.solve_inner(initial_guess, parameters)
         })
     }
+
+    /// Rebind numeric parameters and solve from an explicit initial guess.
+    /// The prepared symbolic system is reused; this is a fresh solve, not a
+    /// parameter-continuation operation.
+    pub fn solve_with_parameter_values(
+        &mut self,
+        initial_guess: Vec<f64>,
+        parameter_values: Vec<f64>,
+    ) -> PyResult<NonlinearSolution> {
+        self.solve(initial_guess, Some(parameter_values))
+    }
 }
 
 impl NonlinearSolver {
@@ -1301,9 +1312,9 @@ impl NonlinearSolver {
             .with_preparation_telemetry(self.preparation_telemetry);
         options = match (self.parameter_names.clone(), self.parameters.clone()) {
             (Some(names), Some(values)) => options
-                .with_equation_parameters(names)
-                .with_equation_parameter_values(DVector::from_vec(values)),
-            (Some(names), None) => options.with_equation_parameters(names),
+                .with_parameter_names(names)
+                .with_parameter_values(DVector::from_vec(values)),
+            (Some(names), None) => options.with_parameter_names(names),
             _ => options,
         };
         let route = self.route();
@@ -1541,7 +1552,7 @@ impl FittingSolver {
             inner = inner.with_unknowns(values);
         }
         if let Some(values) = parameters {
-            inner = inner.with_parameters(values);
+            inner = inner.with_parameter_names(values);
         }
         if let Some(value) = tolerance {
             inner = inner.with_tolerance(value);
@@ -1620,7 +1631,7 @@ impl FittingSolver {
             || {
                 let report = self
                     .inner
-                    .try_solve_with_params(parameters)
+                    .try_solve_with_parameter_values(parameters)
                     .map_err(map_least_squares_error)?;
                 let solution = self
                     .inner

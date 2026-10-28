@@ -260,8 +260,8 @@ fn run_once(
     };
     let problem_options = SymbolicProblemOptions::new()
         .with_variables(variables)
-        .with_equation_parameters(vec!["p0".into()])
-        .with_equation_parameter_values(DVector::from_vec(vec![1.0]))
+        .with_parameter_names(vec!["p0".into()])
+        .with_parameter_values(DVector::from_vec(vec![1.0]))
         .with_lambdify_frontend(frontend.public())
         .with_lambdify_execution_policy(dispatch.public())
         .with_preparation_telemetry(preparation_telemetry);

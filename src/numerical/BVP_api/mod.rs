@@ -24,6 +24,7 @@ use crate::numerical::BVP_sci::new::{
     BvpSciSolution, BvpSciSolver, BvpSciSparseFactorization as NativeBvpSciSparseFactorization,
     BvpSciTelemetrySnapshot,
 };
+use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
 use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
@@ -344,6 +345,25 @@ pub enum BvpSolverConfig {
         initial_guess: DMatrix<f64>,
         free_parameters: BvpSciFreeParameters,
     },
+}
+
+impl BvpSolverConfig {
+    /// Applies one consistent Rust text-logging level to the selected route.
+    /// Native telemetry and bounded typed decision traces remain independent.
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        match &mut self {
+            Self::Damped { options, .. } => {
+                *options = options.clone().with_logging_level(level);
+            }
+            Self::Frozen { options, .. } => {
+                *options = options.clone().with_logging_level(level);
+            }
+            Self::Sci { options, .. } | Self::SciWithFreeParameters { options, .. } => {
+                *options = options.clone().with_logging_level(level);
+            }
+        }
+        self
+    }
 }
 
 /// Native solver retained by the facade so callers can reach solver-specific

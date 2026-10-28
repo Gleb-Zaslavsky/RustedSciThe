@@ -108,6 +108,7 @@ impl NRBVP {
             linear_sys_method,
             method,
             max_iterations,
+            logging_level: None,
             max_error: 0.0,
             result: None,
             x_mesh,
@@ -228,6 +229,7 @@ impl NRBVP {
         n_steps: usize,
         options: FrozenSolverOptions,
     ) -> NRBVP {
+        let logging_level = options.logging_level;
         Self::new_with_generated_backend_config(
             eq_system,
             initial_guess,
@@ -246,6 +248,16 @@ impl NRBVP {
             options.generated_backend_config,
         )
         .with_scheme_name(options.scheme)
+        .with_solver_logging_level(logging_level)
+    }
+
+    /// Overrides text logging independently of the typed decision trace.
+    pub fn with_solver_logging_level(
+        mut self,
+        level: Option<crate::numerical::logging::SolverLogLevel>,
+    ) -> Self {
+        self.logging_level = level;
+        self
     }
 
     /// Returns a solver configured with the provided generated-backend settings.

@@ -184,6 +184,12 @@ so a failed retry cannot expose the previous result as if it were new. Use
 `native()` and `native_mut()` for the complete solver-specific lifecycle,
 diagnostics, and runtime policy controls.
 
+For the same text-log policy across Damped, Frozen/Naive, and BVP_sci, apply
+`BvpSolverConfig::with_logging_level(SolverLogLevel::Info)` before constructing
+`BvpSolver`. This controls the shared Rust log file; native telemetry and the
+bounded Frozen/Damped decision trace remain separate settings. Python callers
+can set `SolverOptions(logging_level="info")` on each `BvpSolverRequest` route.
+
 `telemetry_snapshot()` returns `BvpSolverTelemetrySnapshot`, with one variant
 per solver family. Native scopes and measured-zero versus absent-measurement
 semantics are preserved; the facade does not merge or rename metrics. Select a
@@ -202,6 +208,11 @@ the shared timestamped file sink before BVP preparation/solve proceeds; setup
 failure is returned as a typed native error rather than silently running with
 logging disabled. The shared log path is available from
 `numerical::logging::solver_log_path()`.
+`BvpSolverConfig::with_logging_level(SolverLogLevel::Info)` provides one
+typed text-log setting across Damped, Frozen/Naive and BVP_sci. It does not
+replace each route's telemetry or bounded typed decision trace. The Rust
+counterpart of the combustion loop example is
+`examples/bvp_api_combustion_parameter_loop.rs`.
 
 The process-wide `log` interface currently cannot return file write/flush
 failures to the solver call site. Such a failure produces one stderr

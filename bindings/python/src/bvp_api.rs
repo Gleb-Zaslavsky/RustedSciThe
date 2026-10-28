@@ -367,11 +367,6 @@ impl PyBvpSolverRequest {
     ) -> PyResult<Self> {
         let options = shared_options(options)?;
         validate_symbolic_damp_route(&options)?;
-        if options.logging_level() != "off" {
-            return Err(UnsupportedOptionError::new_err(
-                "BVP_Damp Frozen/Naive does not expose the shared Rust log-level control; use logging_mode for its native decision trace",
-            ));
-        }
         let problem = problem(
             expressions,
             state_variables.clone(),
@@ -420,6 +415,7 @@ impl PyBvpSolverRequest {
         frozen.linear_sys_method = linear_sys_method;
         frozen.tolerance = tolerance;
         frozen.max_iterations = max_iterations;
+        frozen = frozen.with_logging_level(crate::contract::native_logging_level(&options, "bvp_api")?);
         frozen.generated_backend_config = config;
         Ok(Self {
             problem: Some(problem),

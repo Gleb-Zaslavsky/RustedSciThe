@@ -299,7 +299,7 @@ impl GavinSymbolicFitting {
 
         let options = SymbolicProblemOptions::new()
             .with_variables(self.unknowns.clone())
-            .with_equation_parameters(vec![sample_parameter])
+            .with_parameter_names(vec![sample_parameter])
             .with_lambdify_backend()
             .with_lambdify_frontend(self.frontend)
             .with_lambdify_execution_policy(self.execution_policy)

@@ -181,7 +181,7 @@ pub fn radau() -> Result<ScenarioOutput, RunnerError> {
         vec!["y".into()],
         "t",
     )
-    .with_parameter_names(vec!["rate".into()]);
+    .with_equation_parameters(vec!["rate".into()]);
     let config = RadauConfig {
         t_bound: T_BOUND,
         max_step: 0.01,

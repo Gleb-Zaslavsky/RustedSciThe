@@ -640,7 +640,7 @@ pub(crate) fn native_logging_level(
 fn supports_common_logging_level(solver: &str) -> bool {
     matches!(
         solver,
-        "bdf" | "backward_euler" | "lsode2" | "bvp_sci" | "shooting_bvp"
+        "bdf" | "backward_euler" | "lsode2" | "bvp_sci" | "bvp_api" | "shooting_bvp"
     )
 }
 

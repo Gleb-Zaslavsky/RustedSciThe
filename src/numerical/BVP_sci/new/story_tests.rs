@@ -1142,7 +1142,7 @@ fn lambdify_frontend_backend_fidelity_matrix_is_compact_and_complete() {
     let reference_solution = reference.solve().expect("reference should converge");
     reference_target.store(2.0f64.to_bits(), Ordering::Relaxed);
     reference
-        .set_parameter_values(vec![2.0])
+        .set_parameter_guess(vec![2.0])
         .expect("reference continuation rebind should work");
     let reference_continued = reference
         .solve()
@@ -1167,7 +1167,7 @@ fn lambdify_frontend_backend_fidelity_matrix_is_compact_and_complete() {
             let continuation_started = Instant::now();
             target.store(2.0f64.to_bits(), Ordering::Relaxed);
             solver
-                .set_parameter_values(vec![2.0])
+                .set_parameter_guess(vec![2.0])
                 .expect("rebind should work");
             let continued = solver.solve().expect("continuation row should converge");
             let continuation_ms = continuation_started.elapsed().as_secs_f64() * 1e3;
@@ -1231,7 +1231,7 @@ fn lambdify_continuation_keeps_preparation_and_reports_stage_counters() {
     for parameter in 2..=8 {
         let parameter = parameter as f64;
         target.store(parameter.to_bits(), Ordering::Relaxed);
-        solver.set_parameter_values(vec![parameter]).unwrap();
+        solver.set_parameter_guess(vec![parameter]).unwrap();
         solver.solve().expect("continued solve should work");
     }
     let telemetry = solver.plan().telemetry_snapshot();
@@ -1360,7 +1360,7 @@ pub(super) fn run_sparse_reusable_kernel_full_solve_continuation_ab_is_compact()
                 let parameter = initial_parameter + (index + 1) as f64 * 0.1;
                 target.store(parameter.to_bits(), Ordering::Relaxed);
                 solver
-                    .set_parameter_values(vec![parameter])
+                    .set_parameter_guess(vec![parameter])
                     .unwrap_or_else(|error| {
                         panic!("large logistic parameter rebind failed for {name}: {error:?}")
                     });
@@ -1980,7 +1980,7 @@ pub(super) fn run_sparse_kernel_official_60_state_continuation_ab_is_compact() {
             let continuation_started = Instant::now();
             for parameters in parameter_series.iter().take(continuation_rebinds) {
                 solver
-                    .set_parameter_values(parameters.to_vec())
+                    .set_parameter_guess(parameters.to_vec())
                     .expect("valid 60-state parameter rebind");
                 let continued = solver.solve().unwrap_or_else(|error| {
                     panic!("official 60-state continuation solve failed: {error:?}")
@@ -2248,7 +2248,7 @@ fn lambdify_parameter_rebind_rebuilds_numeric_factorization_but_reuses_workspace
     let before = solver.plan().telemetry_snapshot();
     target.store(2.0f64.to_bits(), Ordering::Relaxed);
     solver
-        .set_parameter_values(vec![2.0])
+        .set_parameter_guess(vec![2.0])
         .expect("parameter rebind should work");
     solver
         .solve()
@@ -2295,14 +2295,14 @@ fn parameter_values_bound_before_first_solve_are_not_counted_as_continuation() {
         BvpSciExecutionPolicy::Sequential,
     );
     assert!(matches!(
-        solver.set_parameter_values(vec![]),
+        solver.set_parameter_guess(vec![]),
         Err(BvpSciNewError::ParameterBindingMismatch {
             expected: 1,
             actual: 0,
         })
     ));
     solver
-        .set_parameter_values(vec![2.0])
+        .set_parameter_guess(vec![2.0])
         .expect("initial parameter values should be bindable before solving");
     solver
         .solve()
@@ -2532,7 +2532,7 @@ fn lambdify_failure_and_exhaustion_paths_are_typed_and_compact() {
         BvpSciExecutionPolicy::Sequential,
     );
     let parameter_error = solver
-        .set_parameter_values(vec![f64::NAN])
+        .set_parameter_guess(vec![f64::NAN])
         .expect_err("non-finite parameter binding must be rejected");
     assert!(matches!(
         parameter_error,
@@ -3326,7 +3326,7 @@ fn lambdify_medium_large_parameter_continuation_matrix_is_compact() {
                         let parameter = 1.0 + (step + 1) as f64 * 0.25;
                         target.store(parameter.to_bits(), Ordering::Relaxed);
                         solver
-                            .set_parameter_values(vec![parameter])
+                            .set_parameter_guess(vec![parameter])
                             .expect("continuation rebind should work");
                         solver
                             .solve()
@@ -3567,7 +3567,7 @@ fn lambdify_continuation_fresh_prepared_warm_retention_matrix_is_compact() {
                     let parameter = parameter_at(index);
                     target.store(parameter.to_bits(), Ordering::Relaxed);
                     solver
-                        .set_parameter_values(vec![parameter])
+                        .set_parameter_guess(vec![parameter])
                         .map_err(|error| error.to_string())?;
                     solver.solve().map_err(|error| error.to_string())?;
                 }
@@ -4489,7 +4489,7 @@ fn aot_solver_route_continuation_and_policy_matrix_is_compact() {
                     let solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
                     let continuation_started = Instant::now();
                     solver
-                        .set_parameter_values(vec![2.0])
+                        .set_parameter_guess(vec![2.0])
                         .expect("AOT continuation rebind should preserve schema");
                     let continued = solver
                         .solve()
@@ -4719,7 +4719,7 @@ fn aot_full_solve_matches_lambdify_on_medium_parameterized_systems() {
                     });
                     let solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
                     solver
-                        .set_parameter_values(vec![0.75])
+                        .set_parameter_guess(vec![0.75])
                         .expect("full-solve continuation rebind should work");
                     let continuation_started = Instant::now();
                     let continued = solver.solve().unwrap_or_else(|error| {
@@ -5129,7 +5129,7 @@ fn aot_continuation_restart_retention_matrix_is_compact() {
             let before_aot = before.aot.clone().expect("AOT retention telemetry");
             for index in 0..count {
                 solver
-                    .set_parameter_values(vec![1.0 + index as f64 * 0.01])
+                    .set_parameter_guess(vec![1.0 + index as f64 * 0.01])
                     .expect("parameter rebind should preserve prepared model");
                 let solution = solver.solve().expect("continuation solve should converge");
                 assert!(solution.y.iter().all(|value| value.abs() < 1e-10));

@@ -849,6 +849,23 @@ def test_nonlinear_solver_exposes_prepared_symbolic_methods_and_telemetry():
     assert "total_ms" in result.telemetry_timings_ms()
 
 
+def test_nonlinear_solver_explicit_parameter_rebind_shortcut():
+    system = SymbolicSystem([Expr.parse("a*x - 2")], ["x", "a"])
+    solver = NonlinearSolver(
+        system,
+        parameters=["a"],
+        parameter_values=[1.0],
+        tolerance=1e-10,
+    )
+    solver.prepare()
+    first = solver.solve_with_parameter_values([1.0], [1.0])
+    second = solver.solve_with_parameter_values([1.0], [2.0])
+    assert first.solution()[0] == pytest.approx(2.0, abs=1e-8)
+    assert second.solution()[0] == pytest.approx(1.0, abs=1e-8)
+    with pytest.raises(InvalidConfigurationError, match="parameter"):
+        solver.solve_with_parameter_values([1.0], [])
+
+
 def test_nonlinear_solver_accepts_method_specific_options_and_rejects_typos():
     system = SymbolicSystem([Expr.parse("x^2 - 4")], ["x"])
     solver = NonlinearSolver(
@@ -4064,6 +4081,23 @@ def test_bvp_api_damped_and_frozen_requests_keep_route_specific_guess_shapes(rou
     telemetry = solver.telemetry_snapshot()
     assert telemetry["route"] == route
     assert telemetry["counters"]
+
+
+def test_bvp_api_frozen_accepts_shared_text_logging_level():
+    y = Expr.variable("y")
+    options = SolverOptions(frontend="atom_native")
+    options.set_logging_level("info")
+    request = BvpSolverRequest.frozen(
+        [-y],
+        ["y"],
+        "x",
+        [0.0, 0.5, 1.0],
+        [(0, "left", 1.0)],
+        [[1.0], [math.exp(-0.5)], [math.exp(-1.0)]],
+        options=options,
+        tolerance=1e-5,
+    )
+    assert request.prepare().route == "frozen"
 
 
 def test_bvp_api_rejects_unsupported_numerical_symbolic_facade_route():

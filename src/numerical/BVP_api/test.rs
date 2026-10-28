@@ -131,6 +131,49 @@ fn native_solver_defaults_are_distinct_and_facade_preserves_them() {
 }
 
 #[test]
+fn common_logging_level_is_forwarded_without_overwriting_typed_trace_settings() {
+    use super::BvpSolverConfig;
+    use crate::numerical::logging::SolverLogLevel;
+
+    let level = SolverLogLevel::Debug;
+    let damped = BvpSolverConfig::Damped {
+        options: DampedSolverOptions::default(),
+        initial_guess: DMatrix::zeros(1, 2),
+    }
+    .with_logging_level(level);
+    let BvpSolverConfig::Damped { options, .. } = damped else {
+        unreachable!()
+    };
+    assert_eq!(options.loglevel.as_deref(), Some("debug"));
+
+    let frozen = BvpSolverConfig::Frozen {
+        options: FrozenSolverOptions::default().with_bvp_logging_mode(BvpLoggingMode::Detailed),
+        initial_guess: DMatrix::zeros(1, 3),
+    }
+    .with_logging_level(level);
+    let BvpSolverConfig::Frozen { options, .. } = frozen else {
+        unreachable!()
+    };
+    assert_eq!(options.logging_level, Some(level));
+    assert_eq!(
+        options.generated_backend_config.bvp_logging_mode,
+        BvpLoggingMode::Detailed
+    );
+
+    let sci = BvpSolverConfig::Sci {
+        options: BvpSciOptions::default(),
+        sparse_factorization: BvpSciSparseFactorization::default(),
+        aot_config: None,
+        initial_guess: DMatrix::zeros(1, 2),
+    }
+    .with_logging_level(level);
+    let BvpSolverConfig::Sci { options, .. } = sci else {
+        unreachable!()
+    };
+    assert_eq!(options.logging_level, level);
+}
+
+#[test]
 fn problem_rejects_duplicate_conditions_and_non_finite_data() {
     let duplicate = BvpProblem::new(
         vec![Expr::parse_expression("v"), Expr::parse_expression("-y")],

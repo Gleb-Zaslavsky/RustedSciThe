@@ -16,6 +16,9 @@ pub struct NRBVP {
     pub method: String,
     pub tolerance: f64,
     pub max_iterations: usize,
+    /// Optional common text-log override; `None` preserves the historical
+    /// mapping from the bounded BVP decision-log mode.
+    pub logging_level: Option<crate::numerical::logging::SolverLogLevel>,
     pub max_error: f64,
     pub result: Option<DVector<f64>>,
     pub x_mesh: DVector<f64>,

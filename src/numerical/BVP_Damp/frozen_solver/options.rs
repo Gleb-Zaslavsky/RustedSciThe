@@ -15,6 +15,8 @@ pub struct FrozenSolverOptions {
     pub tolerance: f64,
     /// Maximum nonlinear iterations.
     pub max_iterations: usize,
+    /// Optional common text-log level, independent of the bounded decision trace.
+    pub logging_level: Option<crate::numerical::logging::SolverLogLevel>,
     /// Generated-backend configuration used by sparse solver paths.
     pub generated_backend_config: GeneratedBackendConfig,
 }
@@ -37,6 +39,7 @@ impl FrozenSolverOptions {
             method,
             tolerance,
             max_iterations,
+            logging_level: None,
             generated_backend_config: GeneratedBackendConfig::default(),
         }
     }
@@ -62,6 +65,13 @@ impl FrozenSolverOptions {
     /// Selects typed solver decision logging for diagnostic runs.
     pub fn with_bvp_logging_mode(mut self, mode: BvpLoggingMode) -> Self {
         self.generated_backend_config = self.generated_backend_config.with_bvp_logging_mode(mode);
+        self
+    }
+
+    /// Selects the common Rust text-logging level without changing typed
+    /// decision-trace settings.
+    pub fn with_logging_level(mut self, level: crate::numerical::logging::SolverLogLevel) -> Self {
+        self.logging_level = Some(level);
         self
     }
 
@@ -314,6 +324,7 @@ impl Default for FrozenSolverOptions {
             method: default_sparse_method_name(),
             tolerance: 1e-6,
             max_iterations: DEFAULT_MAX_ITERATIONS,
+            logging_level: None,
             generated_backend_config: GeneratedBackendConfig::default(),
         }
     }

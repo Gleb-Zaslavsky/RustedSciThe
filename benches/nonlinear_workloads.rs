@@ -257,8 +257,8 @@ fn options(
 ) -> SymbolicProblemOptions {
     SymbolicProblemOptions::new()
         .with_variables(variables.to_vec())
-        .with_equation_parameters(vec!["p0".to_owned()])
-        .with_equation_parameter_values(DVector::from_vec(vec![1.0]))
+        .with_parameter_names(vec!["p0".to_owned()])
+        .with_parameter_values(DVector::from_vec(vec![1.0]))
         .with_lambdify_execution_policy(policy.execution())
         .with_preparation_telemetry(PreparationTelemetryMode::Collect)
         .with_lambdify_frontend(frontend)

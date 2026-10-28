@@ -70,7 +70,7 @@ fn options(
 ) -> SymbolicProblemOptions {
     SymbolicProblemOptions::new()
         .with_variables(variables.to_vec())
-        .with_equation_parameters(vec!["p0".into(), "p1".into(), "p2".into()])
+        .with_parameter_names(vec!["p0".into(), "p1".into(), "p2".into()])
         .with_preparation_telemetry(mode)
         .with_lambdify_frontend(frontend)
 }
