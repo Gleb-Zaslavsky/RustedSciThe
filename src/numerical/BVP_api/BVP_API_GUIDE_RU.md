@@ -62,6 +62,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 [`examples/bvp_api_parameter_rebind.rs`](../../../../examples/bvp_api_parameter_rebind.rs).
 Запускаемый пример цикла BVP_sci с фиксированными внешними параметрами:
 [`examples/bvp_api_parameter_loop.rs`](../../../../examples/bvp_api_parameter_loop.rs).
+Циклы фиксированных входных параметров через оба маршрута BVP_Damp, включая
+различия checkpoint и отчётов об ошибках:
+[`examples/bvp_api_damped_frozen_parameter_loop.rs`](../../../../examples/bvp_api_damped_frozen_parameter_loop.rs).
 
 ## Выбор маршрута и данные
 
@@ -96,6 +99,12 @@ AOT-конфигурацию. Для fixed inputs в Damped/Frozen перед п
 `BvpProblem::with_external_parameters(names, initial_values)` до подготовки
 символьных callbacks. `solve_parameter_loop` меняет значения перед каждым
 solve и использует последний успешный профиль как начальное приближение.
+Фасад сохраняет нативную семантику циклов: Damped может передавать следующей
+точке также новую уточнённую сетку, а Frozen/Naive сохраняет исходную сетку и
+передаёт только успешный профиль. Ошибка отдельной точки записывается в отчёт и
+не заменяет последний успешный checkpoint. Фасад не превращает уточнение сетки
+в parameter continuation и не сводит разные native-отчёты к искусственному
+общему типу.
 Для неизвестных параметров и зависимых от них boundary callbacks используйте
 отдельный free-parameter маршрут. Для численных RHS и Jacobian callbacks
 обращайтесь напрямую к native BVP_Damp API.

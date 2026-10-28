@@ -3411,3 +3411,30 @@ ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2509 filtered out; finished in 8.78s
 
      Running unittests src\main.rs (target\release\deps\RustedSciThe-b708f4e002ed0aab.exe)
+
+## Fixed-Input Parameter-Loop Performance Gate (2026-10-28)
+
+The isolated `bvp-sci-parameter-loop` gate passed its Windows Release baseline
+comparison on clean source revision `84e4f0d6ca48` (`rustc 1.98.1`,
+`windows-x86-64-release-3be3b406e86e4f83`). The scenario uses the prepared
+AtomViewNative/BandedAuto route for 48 states, 129 nodes and three ordered
+fixed-input solves. It is a parameter loop, not the BVP solver's internal mesh
+refinement or unknown-parameter solve.
+
+| measure | baseline median/MAD | compare median/MAD | change |
+| --- | ---: | ---: | ---: |
+| Uninstrumented full scenario wall time | 220.6349 / 2.3354 ms | 210.2648 / 2.6694 ms | -4.7% |
+| Detailed parameter-loop diagnostic | - | 217.0569 / 2.2366 ms | diagnostic only |
+
+The comparison result was `PASS` for the single registered scenario. The
+detailed pass reported 3 parameter rebinds, 2 continuation solves, 3
+factorizations, 6 linear solves, 2,310 cumulative RHS calls and 771 cumulative
+Jacobian calls. Maximum exact-solution absolute error was `8.89e-12`; final
+residual norm was `2.22e-8`. These are correctness/work diagnostics; detailed
+stage times are instrumented and are not added to the uninstrumented gate
+time. This evidence is Windows-local and does not establish Linux timing.
+
+The raw 101-sample comparison report is
+[`bvp_sci_atom_banded_external_parameter_loop_48x129.md`](../../../performance/runs/1793183684081-16236/bvp_sci_atom_banded_external_parameter_loop_48x129.md);
+the run summary is
+[`summary.md`](../../../performance/runs/1793183684081-16236/summary.md).

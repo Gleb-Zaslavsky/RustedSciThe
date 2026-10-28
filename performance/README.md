@@ -517,3 +517,39 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\ivp_parameter_
 It runs only the BDF, Backward Euler, LSODE2, Radau and StiffAPI parameter-loop
 tests, retaining technical logs and a compact summary under
 `test_reports/IVP_parameter_loop_release/`.
+
+## Large Facade Parameter-Loop Gates
+
+The separate `facade-parameter-loop` scenarios stress the public facades on
+repeated fixed-parameter solves while keeping symbolic preparation outside the
+timed loop. BVP_api covers the six-state combustion system through BVP_Damp
+(3000 intervals) and BVP_sci (1000 nodes), each with ten nearby heat-scale
+values. StiffAPI covers the shared three-state combustion kinetics through
+BDF, Radau and LSODE2 (ten rate values over `t=[0,0.5]`), plus a 128-state
+nonlinear diffusion chain through BDF. The diffusion chain complements the
+chemistry workload with a larger state dimension and mathematically local
+coupling, while respecting BDF's native dense implementation.
+
+Every point is checked for a successful typed result, expected trajectory or
+profile shape, finite values and workload-specific invariants. The timed pass
+uses telemetry Off; a separate diagnostic pass captures Detailed telemetry
+and point/counter data. These are opt-in gates and do not replace the solver's
+independent STORY tests or broad solver matrices.
+
+Run the focused Release correctness matrix without recording performance:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\facade_parameter_loop_release_matrix.ps1
+```
+
+Record and compare only BVP_api, only StiffAPI, or both:
+
+```powershell
+.\scripts\facade_parameter_loop_perf_gates.ps1 -Action RecordCompare -Facade BvpApi -Machine windows-dev -Warmups 10 -Runs 101
+.\scripts\facade_parameter_loop_perf_gates.ps1 -Action RecordCompare -Facade StiffApi -Machine windows-dev -Warmups 10 -Runs 101
+```
+
+For a reviewed replacement, add `-Force` to a Record action. Baselines are
+machine/environment-specific; record them only from the intended source
+revision after the Release matrix passes. `-Facade All` selects both facade
+groups, while `-PlanOnly` prints the commands without running them.

@@ -2001,4 +2001,19 @@ not justify a major symbolic-preparation rewrite.
   scenario.
 - [x] Add focused Release-test and performance-gate scripts so the loop checks
   can run without repeating the full BVP_sci or all-solver campaigns.
-- [ ] Record and compare a stable baseline for the dedicated large loop gate.
+- [x] Record and compare a stable Windows baseline for the dedicated large
+  loop gate. The 101-sample comparison passed on `windows-dev`; reports are
+  `performance/runs/1793183598259-30416` (record) and
+  `performance/runs/1793183684081-16236` (compare). Native Linux calibration
+  remains open in `performance/TODO.md`.
+# Facade Parameter-Loop Stress Workload
+
+- [x] Extend the six-state, 1000-node combustion workload with a fixed external
+  heat-scale coefficient and ten nearby values through BVP_api. Debug gate
+  checks convergence, boundary/residual quality, point count and profile reuse;
+  fixed external inputs remain distinct from BVP_sci free Newton parameters.
+  The focused Release matrix and `bvp-api-parameter-loop` performance scenario
+  are registered. Windows baseline calibration remains pending.
+- [ ] Keep the existing 48-state x 129-node decoupled exponential perf-gate as
+  a focused infrastructure control, not as a substitute for the physical
+  combustion stress case.

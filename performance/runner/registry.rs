@@ -741,6 +741,116 @@ static CORE_SCENARIOS: &[Scenario] = &[
         run: crate::scenarios::nonlinear::run_quadratic_chain,
         diagnose: None,
     },
+    Scenario {
+        id: "bvp_api_sci_combustion_parameter_loop_6x1000x10",
+        solver: "bvp-api",
+        groups: &["facade-parameter-loop", "bvp-api-parameter-loop"],
+        workload: "six-state combustion BVP, 1000 nodes, 10 fixed external heat-scale values",
+        frontend: "AtomViewNative",
+        execution: "Lambdify",
+        linear_algebra: "Sparse (BVP_sci facade)",
+        parallel_policy: "Sequential",
+        telemetry: "off wall gate + Detailed per-point diagnostic",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "Large combustion fixed-parameter loop through BVP_api and BVP_sci with pointwise boundary/residual validation",
+        run: crate::scenarios::facade_parameter_loops::bvp_sci_combustion_loop,
+        diagnose: Some(crate::scenarios::facade_parameter_loops::diagnose_bvp_sci_combustion_loop),
+    },
+    Scenario {
+        id: "bvp_api_damped_combustion_parameter_loop_6x3000x10",
+        solver: "bvp-api",
+        groups: &["facade-parameter-loop", "bvp-api-parameter-loop"],
+        workload: "six-state combustion BVP, 3000 intervals, 10 fixed heat-scale values",
+        frontend: "AtomView",
+        execution: "Lambdify",
+        linear_algebra: "Sparse",
+        parallel_policy: "Sequential",
+        telemetry: "off wall gate + Detailed per-point diagnostic",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "Large combustion fixed-parameter loop through BVP_api and BVP_Damp, reusing the prepared callbacks on the fixed mesh",
+        run: crate::scenarios::facade_parameter_loops::bvp_damped_combustion_loop,
+        diagnose: Some(
+            crate::scenarios::facade_parameter_loops::diagnose_bvp_damped_combustion_loop,
+        ),
+    },
+    Scenario {
+        id: "stiff_api_bdf_combustion_parameter_loop_10",
+        solver: "stiff-api",
+        groups: &["facade-parameter-loop", "stiff-api-parameter-loop"],
+        workload: "three-state combustion kinetics IVP, t=[0,0.5], 10 fixed rate values",
+        frontend: "ExprLegacy",
+        execution: "Lambdify",
+        linear_algebra: "Dense",
+        parallel_policy: "Sequential",
+        telemetry: "off wall gate + Detailed per-point diagnostic",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "StiffAPI BDF combustion parameter loop with fixed initial state and pointwise mass/positivity checks",
+        run: crate::scenarios::facade_parameter_loops::stiff_api_bdf_combustion_loop,
+        diagnose: Some(
+            crate::scenarios::facade_parameter_loops::diagnose_stiff_api_bdf_combustion_loop,
+        ),
+    },
+    Scenario {
+        id: "stiff_api_radau_combustion_parameter_loop_10",
+        solver: "stiff-api",
+        groups: &["facade-parameter-loop", "stiff-api-parameter-loop"],
+        workload: "three-state combustion kinetics IVP, t=[0,0.5], 10 fixed rate values",
+        frontend: "ExprLegacy",
+        execution: "Lambdify",
+        linear_algebra: "Dense",
+        parallel_policy: "Sequential",
+        telemetry: "off wall gate + Detailed per-point diagnostic",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "StiffAPI Radau combustion parameter loop with fixed initial state and pointwise mass/positivity checks",
+        run: crate::scenarios::facade_parameter_loops::stiff_api_radau_combustion_loop,
+        diagnose: Some(
+            crate::scenarios::facade_parameter_loops::diagnose_stiff_api_radau_combustion_loop,
+        ),
+    },
+    Scenario {
+        id: "stiff_api_lsode2_combustion_parameter_loop_10",
+        solver: "stiff-api",
+        groups: &["facade-parameter-loop", "stiff-api-parameter-loop"],
+        workload: "three-state combustion kinetics IVP, t=[0,0.5], 10 fixed rate values",
+        frontend: "ExprLegacy",
+        execution: "Lambdify/Bridge",
+        linear_algebra: "Dense",
+        parallel_policy: "Sequential",
+        telemetry: "off wall gate + Detailed per-point diagnostic",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "StiffAPI LSODE2 combustion parameter loop with fixed initial state and pointwise mass/positivity checks",
+        run: crate::scenarios::facade_parameter_loops::stiff_api_lsode2_combustion_loop,
+        diagnose: Some(
+            crate::scenarios::facade_parameter_loops::diagnose_stiff_api_lsode2_combustion_loop,
+        ),
+    },
+    Scenario {
+        id: "stiff_api_bdf_diffusion_chain_parameter_loop_128x10",
+        solver: "stiff-api",
+        groups: &[
+            "facade-parameter-loop",
+            "stiff-api-parameter-loop",
+            "ivp-large",
+        ],
+        workload: "128-state nonlinear diffusion chain, t=[0,0.1], 10 fixed decay-rate values",
+        frontend: "ExprLegacy",
+        execution: "Lambdify",
+        linear_algebra: "Dense (BDF native route)",
+        parallel_policy: "Sequential",
+        telemetry: "off wall gate + Detailed per-point diagnostic",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "Additional large StiffAPI workload using the shared nonlinear diffusion-chain fixture and fixed-initial-state parameter loop",
+        run: crate::scenarios::facade_parameter_loops::stiff_api_bdf_diffusion_chain_loop,
+        diagnose: Some(
+            crate::scenarios::facade_parameter_loops::diagnose_stiff_api_bdf_diffusion_chain_loop,
+        ),
+    },
 ];
 
 /// The fixed registry is stored as two compile-time tables so the BVP_Damp
@@ -1297,6 +1407,45 @@ mod tests {
                 && scenario
                     .workload
                     .contains("512 independent scalar decay solves")
+        }));
+    }
+
+    #[test]
+    fn facade_parameter_loop_groups_select_only_registered_stress_workloads() {
+        let bvp = select(&Selector {
+            group: Some("bvp-api-parameter-loop".into()),
+            ..Selector::default()
+        })
+        .unwrap();
+        assert_eq!(bvp.len(), 2);
+        assert!(bvp.iter().all(|scenario| {
+            scenario.solver == "bvp-api"
+                && scenario.workload.contains("combustion BVP")
+                && scenario.gate_metrics == ["scenario_wall_ms"]
+                && scenario.diagnose.is_some()
+        }));
+
+        let stiff = select(&Selector {
+            group: Some("stiff-api-parameter-loop".into()),
+            ..Selector::default()
+        })
+        .unwrap();
+        assert_eq!(stiff.len(), 4);
+        assert!(stiff.iter().all(|scenario| {
+            scenario.solver == "stiff-api"
+                && scenario.workload.contains("10 fixed")
+                && scenario.diagnose.is_some()
+        }));
+
+        let all_facades = select(&Selector {
+            group: Some("facade-parameter-loop".into()),
+            ..Selector::default()
+        })
+        .unwrap();
+        assert_eq!(all_facades.len(), 6);
+        assert!(all_facades.iter().all(|scenario| {
+            scenario.gate_metrics == ["scenario_wall_ms"]
+                && scenario.telemetry.starts_with("off wall gate")
         }));
     }
 }

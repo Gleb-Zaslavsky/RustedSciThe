@@ -670,6 +670,117 @@ fn frozen_facade_rebinds_fixed_inputs_and_warm_starts_on_the_same_mesh() {
 }
 
 #[test]
+fn damped_and_frozen_facade_parameter_loops_keep_native_point_contracts() {
+    use super::BvpParameterLoopReport;
+    use crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedParameterLoopOutcome;
+    use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenParameterLoopOutcome;
+
+    let make_problem = || {
+        BvpProblem::new(
+            vec![Expr::parse_expression("1 / rate")],
+            vec!["y".into()],
+            "x",
+            vec![0.0, 0.25, 0.5, 0.75, 1.0],
+            vec![BvpBoundaryCondition {
+                state: 0,
+                side: BvpBoundarySide::Left,
+                value: 0.0,
+            }],
+        )
+        .expect("parameterized facade problem should validate")
+    };
+    let parameter_vectors = [vec![1.0], vec![0.0], vec![4.0]];
+
+    let mut damped = BvpSolver::new(
+        make_problem(),
+        BvpSolverConfig::Damped {
+            options: DampedSolverOptions::default()
+                .with_bounds(HashMap::from([("y".to_string(), (-10.0, 10.0))]))
+                .with_rel_tolerance(HashMap::from([("y".to_string(), 1e-6)]))
+                .with_bvp_telemetry_mode(BvpTelemetryMode::Counters),
+            initial_guess: DMatrix::zeros(1, 4),
+        },
+    )
+    .expect("Damped facade route should construct");
+    damped
+        .bind_parameters(vec!["rate".into()], vec![1.0])
+        .expect("fixed input schema should bind before the loop");
+    let BvpParameterLoopReport::Damped(damped_report) = damped
+        .solve_parameter_loop(&parameter_vectors)
+        .expect("Damped facade should return a point report")
+    else {
+        panic!("facade must preserve the Damped loop report variant");
+    };
+    assert_eq!(damped_report.points.len(), 3);
+    assert!(damped_report.stop_error.is_none());
+    assert!(matches!(
+        &damped_report.points[0].outcome,
+        DampedParameterLoopOutcome::Converged { values, telemetry, .. }
+            if (values[(4, 0)] - 1.0).abs() < 1e-7
+                && telemetry.telemetry_mode == BvpTelemetryMode::Counters
+    ));
+    assert!(matches!(
+        &damped_report.points[1].outcome,
+        DampedParameterLoopOutcome::Failed { error, .. }
+            if matches!(
+                error,
+                BvpBackendIntegrationError::CallbackExecutionFailed { .. }
+                    | BvpBackendIntegrationError::NonFiniteCallbackValue { .. }
+                    | BvpBackendIntegrationError::LinearSolveFailed { .. }
+            )
+    ));
+    assert!(matches!(
+        &damped_report.points[2].outcome,
+        DampedParameterLoopOutcome::Converged { values, telemetry, .. }
+            if (values[(4, 0)] - 0.25).abs() < 1e-7
+                && telemetry.telemetry_mode == BvpTelemetryMode::Counters
+    ));
+
+    let mut frozen = BvpSolver::new(
+        make_problem(),
+        BvpSolverConfig::Frozen {
+            options: FrozenSolverOptions::default()
+                .with_bvp_telemetry_mode(BvpTelemetryMode::Counters),
+            initial_guess: DMatrix::zeros(1, 5),
+        },
+    )
+    .expect("Frozen facade route should construct");
+    frozen
+        .bind_parameters(vec!["rate".into()], vec![1.0])
+        .expect("fixed input schema should bind before the loop");
+    let BvpParameterLoopReport::Frozen(frozen_report) = frozen
+        .solve_parameter_loop(&parameter_vectors)
+        .expect("Frozen facade should return a point report")
+    else {
+        panic!("facade must preserve the Frozen loop report variant");
+    };
+    assert_eq!(frozen_report.points.len(), 3);
+    assert!(frozen_report.stop_error.is_none());
+    assert!(matches!(
+        &frozen_report.points[0].outcome,
+        FrozenParameterLoopOutcome::Converged { values, telemetry, .. }
+            if (values[(4, 0)] - 1.0).abs() < 1e-7
+                && telemetry.telemetry_mode == BvpTelemetryMode::Counters
+    ));
+    assert!(matches!(
+        &frozen_report.points[1].outcome,
+        FrozenParameterLoopOutcome::Failed { error, .. }
+            if matches!(
+                error,
+                BvpBackendIntegrationError::CallbackExecutionFailed { .. }
+                    | BvpBackendIntegrationError::NonFiniteCallbackValue { .. }
+                    | BvpBackendIntegrationError::LinearSolveFailed { .. }
+            )
+    ));
+    assert!(matches!(
+        &frozen_report.points[2].outcome,
+        FrozenParameterLoopOutcome::Converged { values, telemetry, .. }
+            if (values[(4, 0)] - 0.25).abs() < 1e-7
+                && telemetry.telemetry_mode == BvpTelemetryMode::Counters
+    ));
+}
+
+#[test]
 fn facade_does_not_treat_bvp_sci_unknowns_as_fixed_inputs() {
     let problem = valid_problem();
     let mut solver = BvpSolver::new(

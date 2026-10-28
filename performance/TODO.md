@@ -8,8 +8,10 @@
   returned point and do not introduce previous-state continuation.
 - [x] Add a focused `ivp-parameter-loop` selector and PowerShell runner so
   record/compare does not rerun unrelated perf-gates.
-- [ ] Run and review the isolated Release gate on Windows, then record/compare
-  its baselines. Linux calibration remains a separate platform task.
+- [x] Run and review the isolated Release gate on Windows, then record/compare
+  its baselines. All four direct solver scenarios passed comparison on
+  `windows-dev` in `performance/runs/1793181607784-24572`; Linux calibration
+  remains a separate platform task.
 
 ## Focused BVP_sci Parameter-Loop Gate
 
@@ -29,7 +31,39 @@
 - [x] Verify the group selector resolves only its registered scenario and add
   a standalone command. Keep its baselines under the existing machine/
   environment scheme and do not force-rewrite unrelated solver gates.
-- [ ] Record and compare the gate on Windows and Linux after source is committed.
+- [x] Record and compare the focused gate on Windows from clean source revision
+  `84e4f0d6ca48`; the 101-sample compare passed on `windows-dev`.
+- [ ] Record and compare the gate on a native Linux host. Keep Linux baselines
+  separate from Windows and do not compare timing values across hosts.
+
+## Large Facade Parameter-Loop Stress Matrices
+
+- [x] Add large, physically grounded BVP_api parameter-loop scenarios using
+  the six-state combustion family: BVP_Damp with 3000 intervals and BVP_sci
+  with 1000 nodes, each over ten nearby heat-scale values. The classical
+  10-interval Damped seed did not converge on the first fixed parameter in
+  this facade fixture; do not misrepresent it as an accepted stress case.
+  The selected large-mesh Damped route has no adaptive refinement so this gate
+  isolates prepared fixed-mesh parameter-loop behavior.
+- [x] Add StiffAPI facade loop scenarios for BDF, Radau and LSODE2 on the
+  shared three-state combustion kinetics with ten nearby rate values, fixed
+  initial state and `t=[0,0.5]`. Add a 128-state nonlinear diffusion-chain loop
+  through BDF as a complementary large-dimensional workload grounded in the
+  shared IVP fixture.
+- [x] Add focused Release correctness and perf-gate scripts plus distinct
+  BVP_api and StiffAPI groups. Gates time telemetry-Off full loops and run a
+  separate Detailed diagnostic pass; correctness checks cover every point,
+  trajectory/profile shape, finiteness, boundary/residual quality and
+  combustion invariants. Keep existing one-solve STORY tests and broad solver
+  matrices independent.
+- [x] Run the focused facade Release matrix on Windows after the final scenario
+  and telemetry extraction changes; all 5 focused tests passed in 2.13 seconds
+  after compilation in
+  `test_reports/Facade_parameter_loop_release/20261028T120112880Z-2268/`.
+- [ ] Record/compare stable Windows baselines from the intended clean source
+  revision. Keep Linux calibration separate and host-specific.
+- [ ] Only record machine baselines after the selected workload is stable and
+  representative; keep the Windows and Linux baselines host-specific.
 
 Decision date: 2026-10-20.
 Source requirements: user specification sections 1-25, including the separate

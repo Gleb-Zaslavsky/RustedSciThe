@@ -11,9 +11,28 @@
 - [x] Test each facade route against its direct solver loop for values,
   failures, trajectory shape and native telemetry. Add RU/EN guide coverage and
   one Rust example demonstrating solver selection over parameter vectors.
+- [x] Add direct-native parity for BDF, Radau, Backward Euler and LSODE2:
+  compare successful trajectories and route-specific discrete telemetry, and
+  verify each facade retains its typed failure and continues to the next point.
+  Debug test: `stiff_parameter_loop_matches_all_native_routes`.
+- [x] Run the all-route native parity test in Debug and Release; both passed
+  on Windows on 2026-10-28.
 - [x] Expose the facade loop in Python with NumPy results and per-point typed
   failure context; test all four routes and add RU/EN guide notes plus a
   runnable Python example.
+- [x] Add Debug-correctness-gated combustion parameter-loop scenarios for
+  StiffAPI BDF, Radau and LSODE2:
+  use the established three-state combustion-like kinetics fixture, sweep ten
+  fixed parameter vectors with identical initial conditions and interval, and
+  verify every returned trajectory for positivity, conservation, finite values
+  and completion at the configured bound. Keep this independent-loop contract
+  distinct from continuation. A 128-state shared nonlinear diffusion-chain
+  workload is also implemented for BDF. HIRES remains a possible later
+  complementary workload, not a blocker for this stress-gate slice.
+- [x] Register separate `stiff-api-parameter-loop` performance gates and a
+  focused Release matrix. Telemetry-Off full-loop timing is gated; Detailed
+  diagnostics run separately. Windows baseline record/compare remains after
+  the focused Release matrix on the intended clean revision.
 
 Planning record: 2026-10-26. The first implementation slice is now registered
 as `crate::numerical::StiffAPI`: typed composable presets and direct
@@ -306,9 +325,9 @@ new solve algorithm and not a universal promise of cross-solver support.
 - [x] Define fresh solve, parameter rebinding and restart separately. Fresh
   solve shortcuts now make the reset-and-run semantics explicit; BDF's
   time-segment parameter switch retains its distinct name and behavior.
-- [ ] Design solution-seeded parameter continuation as a separate capability.
-  Decide solver-by-solver whether it is supported and what state/trajectory
-  supplies the next initial guess; reject unsupported routes explicitly.
+- [x] Keep solution-seeded parameter continuation out of the IVP parameter-loop
+  API for now. IVP loops intentionally restart each point from the same caller
+  `y0`; BDF time-segment continuation remains a distinct native operation.
 - [ ] Define which changes invalidate preparation and which reuse it. Forward
   native invalidation rules; do not build a second cache with different keys.
 - [ ] Treat changing solver family as construction of a different solver.

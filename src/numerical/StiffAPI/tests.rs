@@ -87,6 +87,287 @@ fn stiff_parameter_loop_keeps_each_native_failure_and_continues() {
     }
 }
 
+fn assert_parameter_loop_outputs_match<NativeTelemetry, NativeError>(
+    native: &crate::numerical::ivp_parameter_loop::IvpParameterLoopReport<
+        NativeTelemetry,
+        NativeError,
+    >,
+    facade: &StiffParameterLoopReport,
+) {
+    assert_eq!(native.points.len(), facade.points.len());
+    for (native_point, facade_point) in native.points.iter().zip(&facade.points) {
+        assert_eq!(native_point.index, facade_point.index);
+        assert_eq!(native_point.parameter_values, facade_point.parameter_values);
+        assert_eq!(native_point.result.is_ok(), facade_point.result.is_ok());
+        if let (Ok(native_solution), Ok(facade_solution)) =
+            (&native_point.result, &facade_point.result)
+        {
+            assert_eq!(native_solution.x_mesh, facade_solution.x_mesh);
+            assert_eq!(native_solution.values, facade_solution.values);
+        }
+    }
+}
+
+#[test]
+fn stiff_parameter_loop_matches_all_native_routes() {
+    use crate::numerical::BDF::BDF_api::BdfTelemetryMode;
+    use crate::numerical::BE::BeTelemetryMode;
+    use crate::numerical::LSODE2::{IvpTelemetry, Lsode2ProblemConfig};
+    use crate::numerical::Radau::api::{
+        RadauConfig, RadauOutputPolicy, RadauProblem, RadauSolver, RadauTelemetryMode,
+    };
+
+    let parameter_vectors = [vec![0.5], vec![], vec![1.5]];
+    let initial_state = DVector::from_element(1, 1.0);
+
+    let bdf_options = || {
+        BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("-rate*y")],
+            vec!["y".into()],
+            "t".into(),
+            0.0,
+            initial_state.clone(),
+            0.2,
+            0.02,
+            1e-8,
+            1e-10,
+            None,
+            false,
+            Some(0.01),
+        )
+        .with_equation_parameters(vec!["rate".into()])
+        .with_equation_parameter_values(DVector::from_element(1, 1.0))
+        .with_telemetry_mode(BdfTelemetryMode::Counters)
+    };
+    let mut native_bdf = BdfSolver::new_with_options(bdf_options());
+    native_bdf.try_generate().unwrap();
+    let native_bdf_report =
+        native_bdf.try_solve_parameter_loop(initial_state.clone(), &parameter_vectors);
+    let mut facade_bdf = StiffSolverRequest::Bdf {
+        options: bdf_options(),
+    }
+    .prepare(None)
+    .unwrap();
+    let facade_bdf_report =
+        facade_bdf.try_solve_parameter_loop(initial_state.clone(), &parameter_vectors);
+    assert_parameter_loop_outputs_match(&native_bdf_report, &facade_bdf_report);
+    assert!(matches!(
+        facade_bdf_report.points[1].result,
+        Err(StiffParameterLoopError::Solve(StiffSolveError::Bdf(_)))
+    ));
+    for (native, facade) in native_bdf_report
+        .points
+        .iter()
+        .zip(&facade_bdf_report.points)
+    {
+        let Some(StiffTelemetrySnapshot::Bdf { statistics, .. }) = &facade.telemetry else {
+            panic!("BDF facade loop must preserve its native telemetry variant");
+        };
+        assert_eq!(
+            native.telemetry.statistics.solve_calls,
+            statistics.solve_calls
+        );
+        assert_eq!(
+            native.telemetry.statistics.residual_calls,
+            statistics.residual_calls
+        );
+        assert_eq!(
+            native.telemetry.statistics.jacobian_calls,
+            statistics.jacobian_calls
+        );
+    }
+
+    let radau_problem = || {
+        RadauProblem::new(
+            vec![Expr::parse_expression("-rate*y")],
+            vec!["y".into()],
+            "t",
+        )
+        .with_parameter_names(vec!["rate".into()])
+    };
+    let radau_config = RadauConfig {
+        t_bound: 0.2,
+        first_step: Some(0.02),
+        max_step: 0.05,
+        output: RadauOutputPolicy::Dense,
+        telemetry: RadauTelemetryMode::Counters,
+        ..RadauConfig::default()
+    };
+    let mut native_radau = RadauSolver::prepare(radau_problem(), radau_config.clone()).unwrap();
+    let native_radau_report = native_radau.try_solve_parameter_loop(&[1.0], &parameter_vectors);
+    let mut facade_radau = StiffSolverRequest::Radau {
+        problem: radau_problem(),
+        config: radau_config,
+        initial_state: vec![1.0],
+        parameters: vec![1.0],
+    }
+    .prepare(None)
+    .unwrap();
+    let facade_radau_report =
+        facade_radau.try_solve_parameter_loop(initial_state.clone(), &parameter_vectors);
+    assert_parameter_loop_outputs_match(&native_radau_report, &facade_radau_report);
+    assert!(matches!(
+        facade_radau_report.points[1].result,
+        Err(StiffParameterLoopError::Solve(StiffSolveError::Radau(_)))
+    ));
+    for (native, facade) in native_radau_report
+        .points
+        .iter()
+        .zip(&facade_radau_report.points)
+    {
+        match (&native.telemetry, &facade.telemetry) {
+            (Some(native), Some(StiffTelemetrySnapshot::Radau(facade))) => {
+                assert_eq!(native.counters, facade.counters);
+            }
+            (None, None) => {}
+            (native, facade) => panic!(
+                "Radau telemetry availability/route differs: native={native:?}, facade={facade:?}"
+            ),
+        }
+    }
+
+    let be_options = || {
+        BeSolverOptions::new(
+            vec![Expr::parse_expression("-rate*y")],
+            vec!["y".into()],
+            "t".into(),
+            1e-9,
+            20,
+            Some(0.01),
+            0.0,
+            0.2,
+            initial_state.clone(),
+        )
+        .with_telemetry_mode(BeTelemetryMode::Counters)
+    };
+    let mut native_be = BE::try_new_with_options(be_options()).unwrap();
+    native_be
+        .try_set_equation_parameters(Some(&["rate"]))
+        .unwrap();
+    native_be
+        .try_set_parameter_values(DVector::from_element(1, 1.0))
+        .unwrap();
+    let native_be_report =
+        native_be.try_solve_parameter_loop(initial_state.clone(), &parameter_vectors);
+    let mut facade_be = StiffSolverRequest::BackwardEuler {
+        options: be_options(),
+        equation_parameters: vec!["rate".into()],
+        parameter_values: vec![1.0],
+    }
+    .prepare(None)
+    .unwrap();
+    let facade_be_report =
+        facade_be.try_solve_parameter_loop(initial_state.clone(), &parameter_vectors);
+    assert_parameter_loop_outputs_match(&native_be_report, &facade_be_report);
+    assert!(matches!(
+        facade_be_report.points[1].result,
+        Err(StiffParameterLoopError::Solve(
+            StiffSolveError::BackwardEuler(_)
+        ))
+    ));
+    for (native, facade) in native_be_report.points.iter().zip(&facade_be_report.points) {
+        let Some(StiffTelemetrySnapshot::BackwardEuler {
+            statistics,
+            details,
+            ..
+        }) = &facade.telemetry
+        else {
+            panic!("Backward Euler facade loop must preserve its native telemetry variant");
+        };
+        assert_eq!(
+            native.telemetry.statistics.solve_calls,
+            statistics.solve_calls
+        );
+        assert_eq!(native.telemetry.details, *details);
+    }
+
+    let lsode2_config = || {
+        Lsode2ProblemConfig::new(
+            vec![Expr::parse_expression("-rate*y")],
+            vec!["y".into()],
+            "t".into(),
+            0.0,
+            initial_state.clone(),
+            0.2,
+            0.02,
+            1e-8,
+            1e-10,
+        )
+        .with_equation_parameters(vec!["rate".into()])
+        .with_equation_parameter_values(DVector::from_element(1, 1.0))
+        .with_telemetry(IvpTelemetry::counters())
+    };
+    let mut native_lsode2 = Lsode2Solver::new(lsode2_config()).unwrap();
+    let native_lsode2_report =
+        native_lsode2.try_solve_parameter_loop(initial_state.clone(), &parameter_vectors);
+    let mut facade_lsode2 = StiffSolverRequest::Lsode2 {
+        config: lsode2_config(),
+        logging_level: None,
+    }
+    .prepare(None)
+    .unwrap();
+    let facade_lsode2_report =
+        facade_lsode2.try_solve_parameter_loop(initial_state, &parameter_vectors);
+    assert_parameter_loop_outputs_match(&native_lsode2_report, &facade_lsode2_report);
+    assert!(matches!(
+        facade_lsode2_report.points[1].result,
+        Err(StiffParameterLoopError::Solve(StiffSolveError::Lsode2(_)))
+    ));
+    for (native, facade) in native_lsode2_report
+        .points
+        .iter()
+        .zip(&facade_lsode2_report.points)
+    {
+        let Some(StiffTelemetrySnapshot::Lsode2 {
+            statistics,
+            native: native_statistics,
+            ..
+        }) = &facade.telemetry
+        else {
+            panic!("LSODE2 facade loop must preserve its native telemetry variant");
+        };
+        assert_eq!(
+            native.telemetry.statistics.solve_calls,
+            statistics.solve_calls
+        );
+        assert_eq!(
+            native.telemetry.native_statistics.solve_calls,
+            native_statistics.solve_calls
+        );
+        assert_eq!(
+            native.telemetry.native_statistics.executed_bdf_count,
+            native_statistics.executed_bdf_count
+        );
+        assert_eq!(
+            native.telemetry.native_statistics.native_step_attempts,
+            native_statistics.native_step_attempts
+        );
+        assert_eq!(
+            native.telemetry.native_statistics.native_step_accepts,
+            native_statistics.native_step_accepts
+        );
+        assert_eq!(
+            native
+                .telemetry
+                .native_statistics
+                .native_step_rejects_error_test,
+            native_statistics.native_step_rejects_error_test
+        );
+        assert_eq!(
+            native.telemetry.native_statistics.native_residual_calls,
+            native_statistics.native_residual_calls
+        );
+        assert_eq!(
+            native.telemetry.native_statistics.native_jacobian_calls,
+            native_statistics.native_jacobian_calls
+        );
+        assert_eq!(
+            native.telemetry.native_statistics.native_linear_solve_calls,
+            native_statistics.native_linear_solve_calls
+        );
+    }
+}
+
 #[test]
 fn prepared_solver_reports_unavailable_or_solver_specific_trajectory_routes() {
     let bdf = prepare_bdf(

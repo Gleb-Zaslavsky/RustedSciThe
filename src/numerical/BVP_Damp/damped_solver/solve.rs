@@ -674,12 +674,6 @@ impl NRBVP {
         &mut self,
     ) -> Result<(Vec<f64>, DVector<f64>, usize), BvpBackendIntegrationError> {
         info!("================GRID REFINEMENT===================");
-        let y = self.result.clone().unwrap().clone_box();
-        let y_DVector = y.to_DVectorType();
-        let number_of_Ys = self.values.len();
-        let n_steps = self.n_steps;
-
-        // dbg!(&y_DMatrix.);
         let method = self
             .strategy_params
             .as_ref()
@@ -692,6 +686,37 @@ impl NRBVP {
                     .to_string(),
             })?;
 
+        let expected_unknowns = self.n_steps.checked_mul(self.values.len()).ok_or_else(|| {
+            BvpBackendIntegrationError::InvalidProblem {
+                field: "grid_refinement_state".to_string(),
+                message: "current unknown count overflowed while refining the mesh".to_string(),
+            }
+        })?;
+        let y_DVector = self
+            .result
+            .as_ref()
+            .filter(|result| result.len() == expected_unknowns)
+            .map(|result| result.to_DVectorType())
+            .or_else(|| {
+                (self.y.len() == expected_unknowns).then(|| self.y.to_DVectorType())
+            })
+            .or_else(|| {
+                (self.initial_guess.len() == expected_unknowns)
+                    .then(|| DVector::from_column_slice(self.initial_guess.as_slice()))
+            })
+            .ok_or_else(|| BvpBackendIntegrationError::InvalidProblem {
+                field: "grid_refinement_state".to_string(),
+                message: format!(
+                    "no stored profile matches the active grid: expected {expected_unknowns} unknowns, result={}, iterate={}, initial_guess={}",
+                    self.result.as_ref().map_or(0, |result| result.len()),
+                    self.y.len(),
+                    self.initial_guess.len()
+                ),
+            })?;
+        let number_of_Ys = self.values.len();
+        let n_steps = self.n_steps;
+
+        // dbg!(&y_DMatrix.);
         self.custom_timer.grid_refinement_tic();
 
         let BC_position_and_value = self.BC_position_and_value.clone();
@@ -714,9 +739,8 @@ impl NRBVP {
                 // compute residuals on the current grid
                 let fun = &self.fun;
                 let p = self.p;
-                let y_dvector = self.result.clone().unwrap();
                 let y = crate::numerical::BVP_Damp::BVP_traits::Vectors_type_casting(
-                    &y_dvector,
+                    &y_DVector,
                     self.effective_runtime_method(),
                 );
                 self.telemetry_counters.record_residual_call();

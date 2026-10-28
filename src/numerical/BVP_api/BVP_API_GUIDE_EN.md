@@ -65,6 +65,9 @@ shapes, see
 [`examples/bvp_api_damped_frozen.rs`](../../../../examples/bvp_api_damped_frozen.rs).
 For a prepared BVP_sci external-input parameter loop, see
 [`examples/bvp_api_parameter_loop.rs`](../../../../examples/bvp_api_parameter_loop.rs).
+For fixed-input loops through both BVP_Damp routes, including their distinct
+checkpoint and failure-report behavior, see
+[`examples/bvp_api_damped_frozen_parameter_loop.rs`](../../../../examples/bvp_api_damped_frozen_parameter_loop.rs).
 
 ## Routes And Data
 
@@ -101,6 +104,13 @@ preparation; `solve_parameter_loop` then rebinds each supplied vector and
 warm-starts from the last successful profile. This external-input schema is
 distinct from free parameter unknowns and their parameter-dependent boundary
 residuals. For numerical RHS or Jacobian callbacks, use the native BVP_Damp API.
+
+`solve_parameter_loop` preserves each route's native loop semantics. Damped
+may carry a newly refined mesh together with the last successful profile;
+Frozen/Naive retains its fixed mesh and carries the successful profile only.
+Point failures are recorded and do not replace the last successful checkpoint.
+The facade does not convert mesh refinement into parameter continuation or
+share a fabricated common result type.
 
 The facade also exposes the native unknown-parameter route through
 `BvpSolverConfig::SciWithFreeParameters`. Keep the `n` ordinary scalar endpoint

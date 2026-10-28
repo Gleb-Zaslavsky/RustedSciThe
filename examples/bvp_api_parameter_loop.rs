@@ -1,6 +1,5 @@
 //! Use the typed BVP facade for a prepared BVP_sci fixed-input sweep.
 
-use nalgebra::DMatrix;
 use RustedSciThe::numerical::BVP_api::{
     BvpBoundaryCondition, BvpBoundarySide, BvpParameterLoopReport, BvpProblem,
     BvpSciSparseFactorization, BvpSolver, BvpSolverConfig,
@@ -9,6 +8,7 @@ use RustedSciThe::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciOptions, BvpSciTelemetryMode,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
+use nalgebra::DMatrix;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // y' = rate*y, y(0)=1, with exact solution exp(rate*x).
@@ -16,10 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let guess = DMatrix::from_row_slice(
         1,
         mesh.len(),
-        &mesh
-            .iter()
-            .map(|x| (0.5 * x).exp())
-            .collect::<Vec<_>>(),
+        &mesh.iter().map(|x| (0.5 * x).exp()).collect::<Vec<_>>(),
     );
     let problem = BvpProblem::new(
         vec![Expr::parse_expression("rate * y")],
@@ -57,8 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let terminal = solution.y.last().copied().unwrap_or(f64::NAN);
                 println!(
                     "rate={:.2}: y(1)={terminal:.8}, RHS calls={}",
-                    point.external_parameters[0],
-                    point.telemetry.rhs_calls
+                    point.external_parameters[0], point.telemetry.rhs_calls
                 );
             }
             Err(error) => eprintln!(

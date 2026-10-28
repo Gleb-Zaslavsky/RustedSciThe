@@ -3129,14 +3129,17 @@ optimizations. ExprLegacy and AtomView remain independent supported frontends.
   invalidate numeric runtime state that depends on the iterate.
 - [x] Cover accepted prepared-iterate replacement and typed rejection of an
   invalid shape in a Debug unit test.
-- [ ] Keep fixed-input rebinding (`set_parameter_values`) distinct from a
+- [x] Keep fixed-input rebinding (`set_parameter_values`) distinct from a
   warm re-solve (`solve_with_parameter_values`): the latter also seeds the
   nonlinear solve from the last successful profile. Document mesh-refinement
   behavior explicitly, since changed mesh dimensions may require rebuilding
-  numeric state while retaining an interpolated prior profile.
-- [ ] Add route-by-route lifecycle/telemetry coverage for Damped, Frozen and
+  numeric state while retaining an interpolated prior profile. Native/facade
+  contracts and the Rust/Python guides describe the distinct operations; Damped
+  mesh refinement remains solver-owned.
+- [x] Add route-by-route lifecycle/telemetry coverage for Damped, Frozen and
   Naive, including failed solves and whether a failed result may seed a later
-  solve. Do not describe fixed-input rebinding alone as parameter continuation.
+  solve. Release tests passed on 2026-10-28; Naive uses the Frozen/Naive native
+  route. Fixed-input rebinding alone is not parameter continuation.
 
 ### Ordered Fixed-Parameter Loop (Solver-Specific Pilot)
 
@@ -3147,13 +3150,11 @@ the next initial guess; it is not merely `set_parameter_values`, automatic
 mesh refinement, or BVP_sci's free-parameter Newton solve. Keep the fixed
 parameter schema unchanged throughout a loop.
 
-Start with **Frozen/Naive** as the pilot because its mesh is fixed and it has
-no adaptive refinement to complicate recovery. Then add **Damped**, where a
-successful adaptive solve may change the mesh and the profile/mesh must be
-checkpointed and restored together. Do not implement BVP_sci in this stage:
-its current `parameters` are unknowns solved as part of the BVP. A later
-BVP_sci loop requires a distinct native API for fixed external model inputs,
-kept separate from free Newton parameters and callback-captured values.
+Implemented in stages: Frozen/Naive established the fixed-mesh contract first;
+Damped then added adaptive `(mesh, profile)` checkpoints; BVP_sci later added a
+separate fixed-external-input loop without conflating those values with its free
+Newton unknowns. The three solver families retain distinct native report and
+recovery contracts.
 
 - [x] Define a native, solver-specific loop result containing one ordered
   outcome per requested parameter vector. A success retains its parameter
@@ -3200,11 +3201,30 @@ kept separate from free Newton parameters and callback-captured values.
   Debug coverage exercises adaptive success-failure-success, retained telemetry,
   the successful final solver state, and malformed-input rejection before any
   preparation or mutation. Rust and Python examples/guides are provided.
-- [ ] Extract shared loop orchestration only after Frozen/Naive and Damped
-  independently prove the same ordering, checkpoint and failure semantics.
-  Keep mesh policy, recovery, telemetry and native error types solver-specific;
-  do not build a generic framework prematurely.
-- [ ] Design BVP_sci fixed external parameters separately from its free Newton
-  unknowns. Implement and test its native loop only after that distinction is
-  represented in the model/evaluator API; then forward the stable
-  solver-specific contracts through `BVP_api` and Python bindings.
+- [x] Keep loop orchestration solver-specific. Shared generic orchestration was
+  not justified: adaptive mesh recovery, fixed-mesh checkpoints, telemetry and
+  native error contracts differ. Revisit only if a concrete duplicated defect
+  or maintenance cost appears.
+- [x] Represent BVP_sci fixed external parameters separately from free Newton
+  unknowns and forward its native loop through `BVP_api` and Python. Details and
+  validation evidence are maintained in `../BVP_sci/TODO.md`.
+- [x] Add a dedicated substantial BVP_api parameter-loop perf-gate for the
+  combustion-3000 Damped route, with ten heat-scale values, telemetry-Off wall
+  timing and a separate Detailed diagnostic pass. The current gate validates
+  loop correctness and amortization lifecycle; do not claim a speedup over
+  independently prepared solves until that matched comparison is recorded.
+- [x] Prevent adaptive refinement from rebuilding a full profile using a stale
+  previous-grid result after Newton has moved to a refined mesh. Prefer a
+  result matching the active unknown count, otherwise use the active iterate;
+  return a typed invalid-problem error if neither matches.
+# Facade Parameter-Loop Stress Workload
+
+- [x] Add the large BVP_api facade loop based on the established six-state
+  combustion equations, with 3000 intervals, ten nearby heat-scale values,
+  pointwise boundary checks, finite profiles and telemetry counters. The
+  classical 10-interval seed did not converge at the first parameter and is
+  not used as a performance fixture; this gate exercises a fixed mesh, leaving
+  adaptive refinement solver-owned and independently tested.
+- [ ] Consider Bratu/Lane-Emden and the established Grcar/Pearson/Twopnt cases
+  as additional BVP workloads only where their native fixture exposes a
+  meaningful parameter and the whole sweep has a stable success region.

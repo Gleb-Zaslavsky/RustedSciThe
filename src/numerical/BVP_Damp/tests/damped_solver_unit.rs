@@ -217,6 +217,7 @@ fn try_calc_residual_surfaces_callback_panic_as_typed_error() {
 #[test]
 fn grid_refinement_surfaces_sci_residual_callback_failure_as_typed_error() {
     let mut solver = sparse_surface_test_solver();
+    solver.BC_position_and_value = vec![(0, 0, 0.0), (4, 1, 1.0)];
     solver.result = Some(DVector::from_element(
         solver.values.len() * (solver.n_steps + 1),
         1.0,
@@ -236,12 +237,15 @@ fn grid_refinement_surfaces_sci_residual_callback_failure_as_typed_error() {
     let error = solver
         .create_new_grid()
         .expect_err("Sci grid refinement must expose residual callback errors");
-    assert!(matches!(
-        error,
-        BvpBackendIntegrationError::CallbackExecutionFailed { stage, message }
-            if stage == "grid refinement residual"
-                && message.contains("grid residual failed deliberately")
-    ));
+    assert!(
+        matches!(
+            &error,
+            BvpBackendIntegrationError::CallbackExecutionFailed { stage, message }
+                if stage == "grid refinement residual"
+                    && message.contains("grid residual failed deliberately")
+        ),
+        "unexpected grid-refinement error: {error:?}"
+    );
 }
 
 #[test]
