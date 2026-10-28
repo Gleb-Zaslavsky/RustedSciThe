@@ -190,7 +190,7 @@ entry points.
 |:--|:--|:--|
 | IVP: **LSODE2** | LSODE/LSODA-inspired Adams/BDF families; explicit family selection or automatic switching; Dense, Sparse, Banded | [Lambdify guide](examples/lsode2_lambdify_guide.rs) |
 | IVP: **Radau** | SciPy-inspired fifth-order Radau IIA; adaptive integration; Dense, Sparse, Banded | [Public API guide](examples/radau_public_api_guide.rs) |
-| IVP: **BDF** | SciPy-inspired variable-order BDF/NDF with adaptive step control; deliberately Dense | [Symbolic continuation](examples/bdf_symbolic_continuation_guide.rs) |
+| IVP: **BDF** | SciPy-inspired variable-order BDF/NDF with adaptive step control; deliberately Dense | [Time-segment parameter update](examples/bdf_time_segment_parameter_update_guide.rs) |
 | IVP: **Backward Euler** | First-order implicit method with dense Newton solves; explicit fixed-step use for small/medium systems | [Native callbacks](examples/be_native_callbacks_guide.rs) |
 | IVP: **non-stiff methods** | Explicit methods including RK45 and Dormand-Prince | [Universal ODE example](examples/universal_ode_example.rs) |
 | BVP: **Damped / Frozen Newton** | Nonlinear boundary-value systems with damping or modified-Newton strategies and configurable linear algebra | [BVP backend guide](examples/bvp_backends_guide.rs) |
@@ -298,8 +298,8 @@ Jacobian evaluation**, **full solve**, and **the complete continuation series**.
 Faster callbacks alone do not guarantee a faster full solve. AOT setup pays off
 only when its subsequent savings outweigh compilation/loading costs.
 
-Examples: [LSODE2 AOT continuation](examples/lsode2_parameter_continuation_aot.rs),
-[BE symbolic continuation](examples/be_symbolic_continuation_guide.rs),
+Examples: [LSODE2 AOT parameter rebinding across fresh solves](examples/lsode2_parameter_rebind_aot.rs),
+[BE time-segment parameter update](examples/be_time_segment_parameter_update_guide.rs),
 [BDF AOT](examples/bdf_aot_guide.rs),
 [BVP_sci AOT](examples/bvp_sci_aot_guide.rs), and
 [nonlinear AOT lifecycle](examples/nonlinear_aot_lifecycle_guide.rs).
