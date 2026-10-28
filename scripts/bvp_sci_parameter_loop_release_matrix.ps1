@@ -18,9 +18,20 @@ try {
 
     foreach ($test in $tests) {
         Write-Host "[BVP_sci parameter-loop Release] $($test.Name)"
-        & cargo test --release --lib $test.Filter -- --nocapture --test-threads=1
-        if ($LASTEXITCODE -ne 0) {
-            throw "Release test failed: $($test.Name) (exit code $LASTEXITCODE)"
+        # Windows PowerShell 5 can promote Cargo warnings on stderr to
+        # terminating errors under Stop; judge the test by Cargo's exit code.
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & cargo test --release --lib $test.Filter -- --nocapture --test-threads=1 2>&1 |
+                ForEach-Object { Write-Host $_.ToString() }
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($exitCode -ne 0) {
+            throw "Release test failed: $($test.Name) (exit code $exitCode)"
         }
     }
 }
