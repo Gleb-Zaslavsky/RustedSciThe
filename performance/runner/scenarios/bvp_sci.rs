@@ -104,7 +104,7 @@ const PARAMETER_LOOP_NODES: usize = 129;
 const PARAMETER_LOOP_VALUES: [f64; 4] = [0.70, 0.80, 0.90, 1.00];
 
 fn run_external_parameter_loop(
-    telemetry: BvpSciTelemetryMode,
+    telemetry_mode: BvpSciTelemetryMode,
 ) -> Result<ScenarioOutput, RunnerError> {
     let full_started = Instant::now();
     let mesh = (0..PARAMETER_LOOP_NODES)
@@ -136,7 +136,7 @@ fn run_external_parameter_loop(
         .with_tolerance(2.0e-6)
         .with_limits(512, 12, 6)
         .with_output_policy(BvpSciOutputPolicy::MeshAndValues)
-        .with_telemetry(telemetry);
+        .with_telemetry(telemetry_mode);
     // The callback ABI exposes endpoint state and residual in the same order.
     builder = builder.with_boundary_callback(move |left, _right, _parameters, residual| {
         for index in 0..residual.len() {
@@ -215,11 +215,25 @@ fn run_external_parameter_loop(
         .clone();
     black_box((&points, &telemetry));
 
-    let mut metrics = vec![
-        ("scenario_wall_ms".into(), "ms/off".into(), scenario_wall_ms),
-        ("solver_setup_ms".into(), "ms/off".into(), setup_ms),
-        ("parameter_loop_ms".into(), "ms/off".into(), loop_ms),
-    ];
+    // The gate pass is uninstrumented and owns the sole outer-wall metric.
+    // Diagnostic passes use distinct IDs so the runner never merges timings
+    // measured under different telemetry modes as if they were one series.
+    let mut metrics = if telemetry_mode == BvpSciTelemetryMode::Off {
+        vec![("scenario_wall_ms".into(), "ms/off".into(), scenario_wall_ms)]
+    } else {
+        vec![
+            (
+                "diagnostic_solver_setup_ms".into(),
+                "ms/detailed".into(),
+                setup_ms,
+            ),
+            (
+                "diagnostic_parameter_loop_ms".into(),
+                "ms/detailed".into(),
+                loop_ms,
+            ),
+        ]
+    };
     for (name, value) in [
         ("stage_preparation_ms", telemetry.preparation_ms),
         ("stage_callback_ms", telemetry.callback_ms),
@@ -345,6 +359,30 @@ mod parameter_loop_tests {
                 "missing positive cumulative counter {counter}"
             );
         }
+    }
+
+    #[test]
+    fn perf_gate_keeps_uninstrumented_and_diagnostic_metric_sets_disjoint() {
+        let scenario = crate::registry::SCENARIOS
+            .iter()
+            .find(|scenario| scenario.id == "bvp_sci_atom_banded_external_parameter_loop_48x129")
+            .expect("BVP_sci parameter-loop scenario should be registered");
+        let measured = crate::measurement::measure(scenario, 0, 3)
+            .expect("gate and Detailed diagnostic metric sets must not overlap");
+
+        assert_eq!(measured.gate_metrics, ["scenario_wall_ms"]);
+        assert!(
+            measured
+                .metrics
+                .iter()
+                .any(|metric| { metric.id == "scenario_wall_ms" && metric.phase == "gate_off" })
+        );
+        assert!(measured.metrics.iter().any(|metric| {
+            metric.id == "stage_full_solve_total_ms" && metric.phase == "instrumented_diagnostic"
+        }));
+        assert!(measured.metrics.iter().any(|metric| {
+            metric.id == "diagnostic_parameter_loop_ms" && metric.phase == "instrumented_diagnostic"
+        }));
     }
 }
 
