@@ -910,3 +910,17 @@ diagnostic cross-check rather than a portable performance gate. The paired
 21-run full-solve A/B above is the stronger evidence for the coordinate
 Jacobian correction. No AOT/cold-build or continuation break-even conclusion
 is drawn from this Lambdify-only repeat.
+
+### Independent Parameter-Loop Release Contract (2026-10-28)
+
+The focused Release matrix passed Radau's ordered parameter-loop test. It
+records a malformed parameter vector as a typed point failure, continues to
+the following vector, checks each successful trajectory starts from the same
+initial state, and verifies that returned output follows the configured
+Dense policy and includes native accepted-step telemetry.
+
+Result: `1 passed; 0 failed` (Radau filter; 3928 unrelated tests filtered
+out). This is correctness/output-policy evidence, not a performance result.
+The captured summary is the
+[`IVP parameter-loop Release report`](../../../test_reports/IVP_parameter_loop_release/20261028T093912725Z-12916/summary.md);
+the full test output is in `technical/Radau.log`.

@@ -26,8 +26,17 @@ try {
         $logPath = Join-Path $technicalRoot ("{0}.log" -f ($step.Name -replace '\s+', '_'))
         $watch = [Diagnostics.Stopwatch]::StartNew()
         Write-Host "`n=== IVP parameter-loop Release: $($step.Name) ==="
-        & cargo test --release --lib $step.Filter -- --nocapture --test-threads=1 2>&1 |
-            Tee-Object -FilePath $logPath | ForEach-Object { Write-Host $_ }
+        # Windows PowerShell 5 promotes native stderr to NativeCommandError when
+        # ErrorActionPreference is Stop; Cargo warnings are expected stderr.
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & cargo test --release --lib $step.Filter -- --nocapture --test-threads=1 2>&1 |
+                Tee-Object -FilePath $logPath | ForEach-Object { Write-Host $_ }
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         $exitCode = $LASTEXITCODE
         $watch.Stop()
         $testSummary = Get-Content -LiteralPath $logPath |

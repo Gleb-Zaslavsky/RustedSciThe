@@ -382,3 +382,15 @@ measurement with substantial spread, so neither a cold-AOT regression nor a
 reliable cold break-even point is established. Keep cold compilation separate
 from warm solve/preparation comparisons; a larger repeated sample is needed
 before making a stronger claim.
+
+### Independent Parameter-Loop Release Contract (2026-10-28)
+
+The focused Release matrix passed the Backward Euler parameter-loop test. It
+records a malformed parameter vector as a point-local failure, proceeds to
+the next vector, and verifies that successful points use the same initial
+state while producing different terminal values for different parameters.
+
+Result: `1 passed; 0 failed` (BE filter; 3928 unrelated tests filtered out).
+This is Release correctness/lifecycle evidence, not a benchmark. See the
+[`IVP parameter-loop Release report`](../../../test_reports/IVP_parameter_loop_release/20261028T093912725Z-12916/summary.md)
+and its `technical/Backward_Euler.log` for the captured command output.

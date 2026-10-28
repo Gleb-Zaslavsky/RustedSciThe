@@ -268,3 +268,17 @@ Rayon worker setting also passed correctness, but had higher and more variable
 timings; it is not compared to the historical four-worker rows. The nightly
 failure remains a transient, unreproduced assertion event, not evidence of a
 numerical or solver-counter regression.
+
+### Independent Parameter-Loop Release Contract (2026-10-28)
+
+The focused Release matrix passed the LSODE2 parameter-loop contract using
+the symbolic ExprLegacy/Lambdify Bridge route. A malformed point retained its
+native typed error, the later point still solved, successful trajectories
+started at the configured initial state, and backend telemetry reported solve
+activity.
+
+Result: `1 passed; 0 failed` (LSODE2 filter; 3928 unrelated tests filtered
+out). This confirms Release lifecycle/correctness only; it makes no speed
+claim. The summary is in the
+[`IVP parameter-loop Release report`](../../../test_reports/IVP_parameter_loop_release/20261028T093912725Z-12916/summary.md),
+with full output in `technical/LSODE2.log`.

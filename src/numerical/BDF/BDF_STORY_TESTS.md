@@ -644,3 +644,17 @@ The compact route table is
 The clean final test-filter output (`95/0/13`) was supplied after the initial
 nightly capture; it supersedes the initial `94 passed; 1 failed` summary for
 the final correctness status while preserving the timer-flake history above.
+
+### Independent Parameter-Loop Release Contract (2026-10-28)
+
+The focused Release matrix passed the BDF parameter-loop contract test. The
+test verifies that the prepared BDF backend accepts ordered parameter points,
+retains a typed failure for a malformed vector, continues with the following
+point, and restarts each successful solve from the same initial state. Both
+successful trajectories retained matching mesh/value dimensions and the
+native solve telemetry reported activity.
+
+Result: `1 passed; 0 failed` (BDF filter; 3928 unrelated tests filtered out).
+This is Release correctness/lifecycle evidence only, not a performance
+measurement. The full matrix summary and technical log are in
+[`IVP parameter-loop Release report`](../../../test_reports/IVP_parameter_loop_release/20261028T093912725Z-12916/summary.md).
