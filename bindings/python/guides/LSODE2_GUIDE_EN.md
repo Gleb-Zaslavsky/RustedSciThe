@@ -40,15 +40,19 @@ Sparse or Banded may be more suitable when the Jacobian structure supports
 them. There is no universally fastest layout. Compare matched workloads and
 inspect the selected linear solver and provenance.
 
-The Python constructor exposes the layout-specific band widths directly;
-they are not inferred from an equation:
+For symbolic expressions, `matrix_layout="banded"` infers the Jacobian
+bandwidth automatically when both width hints are omitted. Supply both
+`band_lower` and `band_upper` only to constrain or declare the structure
+explicitly; `(0, 0)` means a diagonal Jacobian, not automatic inference.
+Numerical Python callbacks have no symbolic structure to inspect and must
+provide both widths when using Banded layout.
 
 | Control | Python API | Notes |
 | --- | --- | --- |
 | Controller | `create_ivp(..., controller=...)` | `"bdf"`, `"adams"` or `"auto"`; `"lsoda"` defaults to `"auto"` |
 | Tolerances | `rtol`, `atol` | Local error control for the IVP solver |
 | Parameters | `parameters`, `parameter_values` | Names and order must match the expressions |
-| Banded widths | `band_lower`, `band_upper` | Both are required only with Banded layout |
+| Banded widths | `band_lower`, `band_upper` | Optional together for symbolic Banded; required together for numerical callbacks |
 | Callbacks | `residual_callback`, `jacobian_callback` | Native callback path; omitted Jacobian uses FD |
 | Execution | `SolverOptions(execution=...)` | `lambdify` or `aot` |
 | Scheduling | `SolverOptions(execution_policy=...)` | `sequential`, `parallel` or `auto` where supported |
@@ -59,7 +63,8 @@ constructor argument; the common `create_ivp` facade calls the same setting
 direct adapter also accepts `band_lower`/`band_upper` constructor keywords or
 `SolverOptions.set_banded_width(lower, upper)`. If both width forms are
 provided, matching values are accepted and conflicting values raise a typed
-configuration error. Widths are rejected for non-Banded layouts.
+configuration error. Widths are rejected for non-Banded layouts; providing
+only one width is invalid.
 
 The Python wrapper also exposes native analytical residual/Jacobian callbacks
 for supported layouts. These callbacks cross into Python and retain the GIL;
@@ -67,13 +72,14 @@ Rust callback worker settings do not make Python callbacks equivalent to
 Rust-native callbacks or promise Python-thread scalability. For a numerical
 hot path, prefer symbolic preparation when possible.
 
-## Preparation, continuation and restart
+## Preparation, fresh solves and time segments
 
 Use `create_ivp` for explicit lifecycle control. `prepare()` builds the
-selected symbolic route once. `continue_with_parameters(...)` continues from
-the last successful endpoint; `restart(...)` is the explicit new-initial-state
-route. Keep the distinction clear in parameter sweeps: warm continuation is
-not a batch of independent solves.
+selected symbolic route once. `solve_with_parameter_values(y0, values)` starts
+a fresh solve on the configured interval; its `_in_interval(t0, y0, t_end,
+values)` counterpart also changes the interval. `continue_with_parameters(...)`
+is a separate time-segment operation from the previous accepted endpoint, and
+`restart(...)` starts a new segment with a supplied state and interval.
 
 ## Telemetry and AOT
 

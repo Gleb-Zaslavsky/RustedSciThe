@@ -42,7 +42,7 @@ mod tests {
     fn problem_options() -> SymbolicProblemOptions {
         SymbolicProblemOptions::new()
             .with_variables(vec!["x".to_string(), "y".to_string()])
-            .with_equation_parameters(vec!["a".to_string()])
+            .with_parameter_names(vec!["a".to_string()])
     }
 
     fn solve_options() -> SolveOptions {
@@ -137,7 +137,7 @@ mod tests {
     fn invalid_parameter_updates_are_atomic() -> usize {
         let mut problem = SymbolicNonlinearProblem::from_strings_with_options(
             equations(),
-            problem_options().with_equation_parameter_values(DVector::from_vec(vec![2.0])),
+            problem_options().with_parameter_values(DVector::from_vec(vec![2.0])),
         )
         .expect("parameterized problem should be valid");
         let key_before = problem
@@ -218,7 +218,7 @@ mod tests {
             equations,
             SymbolicProblemOptions::new()
                 .with_variables(variables)
-                .with_equation_parameters(vec!["a".to_string()])
+                .with_parameter_names(vec!["a".to_string()])
                 .with_lambdify_backend(),
         )
         .expect("realistic Lambdify corpus should prepare");

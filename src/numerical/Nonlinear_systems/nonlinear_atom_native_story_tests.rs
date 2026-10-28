@@ -28,8 +28,8 @@ mod tests {
     fn options(frontend: SymbolicLambdifyFrontend) -> SymbolicProblemOptions {
         SymbolicProblemOptions::new()
             .with_variables(vec!["x".to_string(), "y".to_string()])
-            .with_equation_parameters(vec!["a".to_string()])
-            .with_equation_parameter_values(DVector::from_vec(vec![2.0]))
+            .with_parameter_names(vec!["a".to_string()])
+            .with_parameter_values(DVector::from_vec(vec![2.0]))
             .with_lambdify_execution_policy(LambdifyExecutionPolicy::Sequential)
             .with_lambdify_frontend(frontend)
             .with_preparation_telemetry(PreparationTelemetryMode::Collect)

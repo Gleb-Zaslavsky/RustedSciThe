@@ -89,7 +89,7 @@ fn aot_continuation_break_even_matches_fresh_reprepare() {
                 for parameters in &parameter_targets {
                     continued_final = Some(
                         prepared
-                            .continue_with_parameters(&initial_state, parameters)
+                            .try_solve_with_parameter_values(&initial_state, parameters)
                             .unwrap_or_else(|error| {
                                 panic!(
                                     "AOT continuation failed for {frontend:?}/{layout:?}: {error}"
@@ -118,7 +118,7 @@ fn aot_continuation_break_even_matches_fresh_reprepare() {
                         .unwrap_or_else(|error| panic!("AOT fresh prepare failed: {error}"));
                     fresh_final = Some(
                         fresh
-                            .solve_with_parameters(&initial_state, parameters)
+                            .try_solve_with_parameter_values(&initial_state, parameters)
                             .unwrap_or_else(|error| panic!("AOT fresh solve failed: {error}")),
                     );
                 }
@@ -199,7 +199,7 @@ fn aot_continuation_long_series_keeps_artifact_and_build_counts_stable() {
             );
             final_solution = Some(
                 solver
-                    .continue_with_parameters(&initial_state, parameters.as_slice())
+                    .try_solve_with_parameter_values(&initial_state, parameters.as_slice())
                     .unwrap_or_else(|error| panic!("AOT retention continuation failed: {error}")),
             );
         }

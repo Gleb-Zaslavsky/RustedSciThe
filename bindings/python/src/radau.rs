@@ -30,6 +30,7 @@ use crate::errors::{
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
+use crate::parameter_loop::{PyIvpParameterLoopPoint, run_parameter_loop};
 
 /// Adapt Python callbacks to the native Radau callback ABI.
 ///
@@ -141,7 +142,7 @@ fn build_native_callbacks(
     })
 }
 
-fn finite_vector(values: &[f64], label: &str) -> PyResult<()> {
+pub(crate) fn finite_vector(values: &[f64], label: &str) -> PyResult<()> {
     if values.iter().any(|value| !value.is_finite()) {
         return Err(InvalidConfigurationError::new_err(format!(
             "{label} must contain only finite values"
@@ -150,7 +151,7 @@ fn finite_vector(values: &[f64], label: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn validate_names(names: &[String], label: &str, allow_empty: bool) -> PyResult<()> {
+pub(crate) fn validate_names(names: &[String], label: &str, allow_empty: bool) -> PyResult<()> {
     if !allow_empty && names.is_empty() {
         return Err(InvalidConfigurationError::new_err(format!(
             "{label} must not be empty"
@@ -170,7 +171,7 @@ fn validate_names(names: &[String], label: &str, allow_empty: bool) -> PyResult<
     Ok(())
 }
 
-fn validate_scalar(value: f64, label: &str) -> PyResult<()> {
+pub(crate) fn validate_scalar(value: f64, label: &str) -> PyResult<()> {
     if !value.is_finite() {
         return Err(InvalidConfigurationError::new_err(format!(
             "{label} must be finite"
@@ -179,7 +180,7 @@ fn validate_scalar(value: f64, label: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn validate_route(
+pub(crate) fn validate_route(
     options: &SolverOptions,
 ) -> PyResult<(
     RadauFrontend,
@@ -206,17 +207,14 @@ fn validate_route(
     let matrix_layout = match options.matrix_layout() {
         "dense" => RadauMatrixLayout::Dense,
         "sparse" => RadauMatrixLayout::Sparse,
-        "banded" => RadauMatrixLayout::Banded {
-            lower: options.band_lower().ok_or_else(|| {
-                InvalidConfigurationError::new_err(
-                    "Banded Radau requires options.set_banded_width(lower, upper)",
-                )
-            })?,
-            upper: options.band_upper().ok_or_else(|| {
-                InvalidConfigurationError::new_err(
-                    "Banded Radau requires options.set_banded_width(lower, upper)",
-                )
-            })?,
+        "banded" => match (options.band_lower(), options.band_upper()) {
+            (Some(lower), Some(upper)) => RadauMatrixLayout::Banded { lower, upper },
+            (None, None) => RadauMatrixLayout::BandedAuto,
+            _ => {
+                return Err(InvalidConfigurationError::new_err(
+                    "band_lower and band_upper must be configured together",
+                ));
+            }
         },
         _ => {
             return Err(UnsupportedOptionError::new_err(
@@ -248,7 +246,7 @@ fn validate_route(
     Ok((frontend, telemetry, policy, matrix_layout))
 }
 
-fn map_radau_error(error: RadauError) -> PyErr {
+pub(crate) fn map_radau_error(error: RadauError) -> PyErr {
     let native_kind = crate::errors::native_variant(&error.kind());
     let message = error.to_string();
     annotate_native(
@@ -273,7 +271,7 @@ fn map_radau_error(error: RadauError) -> PyErr {
     )
 }
 
-fn validate_expression_symbols(
+pub(crate) fn validate_expression_symbols(
     expressions: &[PyExpr],
     state_variables: &[String],
     time_variable: &str,
@@ -321,11 +319,11 @@ pub struct RadauSolution {
     timings_ms: HashMap<String, f64>,
     aot_metadata: HashMap<String, String>,
     aot_artifact_keys: Vec<String>,
-    native: CoreRadauSolution,
+    pub(crate) native: CoreRadauSolution,
 }
 
 impl RadauSolution {
-    fn from_native(native: CoreRadauSolution) -> Self {
+    pub(crate) fn from_native(native: CoreRadauSolution) -> Self {
         Self::from_native_with_metadata(native, HashMap::new())
     }
 
@@ -384,6 +382,30 @@ impl RadauSolution {
     /// Owned NumPy array containing the terminal state.
     pub fn final_state_array<'py>(&self, py: Python<'py>) -> Bound<'py, numpy::PyArray1<f64>> {
         crate::numpy_support::vector(py, &self.final_state)
+    }
+
+    /// Copy this solve's retained output axis and time-by-state values into NumPy.
+    ///
+    /// `output="dense"` returns accepted-step boundaries, `sampled` returns
+    /// configured sample times, and `final` returns only the terminal point.
+    pub fn trajectory_arrays<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Bound<'py, numpy::PyArray1<f64>>,
+        Bound<'py, numpy::PyArray2<f64>>,
+    )> {
+        let (times, values) = self
+            .native
+            .output_trajectory()
+            .map_err(map_radau_error)?;
+        let rows = (0..values.nrows())
+            .map(|row| (0..values.ncols()).map(|col| values[(row, col)]).collect())
+            .collect::<Vec<Vec<f64>>>();
+        Ok((
+            crate::numpy_support::vector(py, times.as_slice()),
+            crate::numpy_support::matrix(py, &rows)?,
+        ))
     }
 
     #[getter]
@@ -553,6 +575,28 @@ impl RadauSolution {
     pub fn sample(&self, time: f64) -> PyResult<Vec<f64>> {
         catch_panic("postprocess", "radau5", "dense_output", || {
             self.native.sample(time).map_err(map_radau_error)
+        })
+    }
+
+    /// Execute an explicit shared output plan on samples from Radau dense output.
+    #[pyo3(signature=(plan, sample_times, axis_name, variable_names))]
+    pub fn postprocess(
+        &self,
+        py: Python<'_>,
+        plan: PyRef<'_, crate::stiff_api::PyStiffPostprocessPlan>,
+        sample_times: Vec<f64>,
+        axis_name: String,
+        variable_names: Vec<String>,
+    ) -> PyResult<Py<PyDict>> {
+        crate::errors::catch_panic("postprocess", "radau5", "stiff_api:postprocess", || {
+            crate::stiff_api::postprocess_radau_solution(
+                py,
+                self,
+                &plan,
+                &sample_times,
+                axis_name,
+                variable_names,
+            )
         })
     }
 
@@ -781,7 +825,7 @@ impl RadauSolver {
             state_variables,
             time_variable,
         )
-        .with_parameters(parameters);
+        .with_parameter_names(parameters);
         if let Some(jacobian) = jacobian {
             problem = problem.with_jacobian(
                 jacobian
@@ -839,8 +883,8 @@ impl RadauSolver {
     /// Solve one initial state, optionally binding declared value-only parameters.
     ///
     /// The method prepares lazily if needed and returns the terminal result
-    /// plus telemetry. For repeated parameter values, use
-    /// `continue_with_parameters()` to retain prepared symbolic callbacks.
+    /// plus telemetry. Repeated parameterized solves can reuse preparation;
+    /// each solve still starts from the supplied `y0`.
     #[pyo3(signature=(y0, parameters=None))]
     pub fn solve(&mut self, y0: Vec<f64>, parameters: Option<Vec<f64>>) -> PyResult<RadauSolution> {
         let route = format!(
@@ -853,35 +897,93 @@ impl RadauSolver {
         })
     }
 
-    /// Reuse prepared callbacks for another parameter segment.
+    /// Solve from `y0` after binding new values on the prepared symbolic model.
     ///
-    /// `y0` is the initial state for this segment and `parameters` must match
-    /// the declared parameter count. The returned solution is detached.
-    pub fn continue_with_parameters(
+    /// This retains symbolic preparation and uses exactly the supplied `y0`.
+    /// This is a fresh initial-value solve. The caller supplies `y0` directly;
+    /// no state from a previous solution is retained implicitly.
+    pub fn solve_with_parameter_values(
         &mut self,
         y0: Vec<f64>,
-        parameters: Vec<f64>,
+        parameter_values: Vec<f64>,
     ) -> PyResult<RadauSolution> {
         finite_vector(&y0, "y0")?;
-        finite_vector(&parameters, "parameters")?;
+        finite_vector(&parameter_values, "parameter_values")?;
         let route = format!(
             "{}:{}:{}",
             self.frontend, self.execution, self.matrix_layout
         );
         let panic_state = self.panic_state.clone();
-        panic_state.run("continuation", "radau5", &route, || {
+        panic_state.run("solve", "radau5", &route, || {
             self.prepare()?;
-            if parameters.len() != self.parameter_count {
+            if parameter_values.len() != self.parameter_count {
                 return Err(InvalidConfigurationError::new_err(format!(
                     "expected {} parameter values, got {}",
                     self.parameter_count,
-                    parameters.len()
+                    parameter_values.len()
                 )));
             }
             self.solver
                 .as_mut()
                 .ok_or_else(|| InvalidConfigurationError::new_err("Radau solver is not prepared"))?
-                .continue_with_parameters(&y0, &parameters)
+                .try_solve_with_parameter_values(&y0, &parameter_values)
+                .map(RadauSolution::from_native)
+                .map_err(map_radau_error)
+        })
+    }
+
+    /// Run independent solves in caller-specified parameter order. Every
+    /// point uses this same initial state and configured time interval.
+    pub fn solve_parameter_loop(
+        &mut self,
+        py: Python<'_>,
+        y0: Vec<f64>,
+        parameter_vectors: Vec<Vec<f64>>,
+    ) -> PyResult<Vec<Py<PyIvpParameterLoopPoint>>> {
+        finite_vector(&y0, "y0")?;
+        let route = format!("{}:{}:{}", self.frontend, self.execution, self.matrix_layout);
+        run_parameter_loop(py, "radau5", &route, parameter_vectors, |parameters| {
+            let solution = self.solve_with_parameter_values(y0.clone(), parameters.to_vec())?;
+            Py::new(py, solution).map(Py::into_any)
+        })
+    }
+
+    /// Start a fresh solve with new parameters, initial state and interval.
+    /// Prepared callbacks and generated artifacts are reused.
+    pub fn solve_with_parameter_values_in_interval(
+        &mut self,
+        t0: f64,
+        y0: Vec<f64>,
+        t_end: f64,
+        parameter_values: Vec<f64>,
+    ) -> PyResult<RadauSolution> {
+        finite_vector(&y0, "y0")?;
+        finite_vector(&parameter_values, "parameter_values")?;
+        validate_scalar(t0, "t0")?;
+        validate_scalar(t_end, "t_end")?;
+        if t0 == t_end {
+            return Err(InvalidConfigurationError::new_err(
+                "t0 and t_end must differ",
+            ));
+        }
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "radau5", &route, || {
+            self.prepare()?;
+            if parameter_values.len() != self.parameter_count {
+                return Err(InvalidConfigurationError::new_err(format!(
+                    "expected {} parameter values, got {}",
+                    self.parameter_count,
+                    parameter_values.len()
+                )));
+            }
+            self.solver
+                .as_mut()
+                .ok_or_else(|| InvalidConfigurationError::new_err("Radau solver is not prepared"))?
+                .try_solve_with_parameter_values_in_interval(t0, &y0, t_end, &parameter_values)
                 .map(RadauSolution::from_native)
                 .map_err(map_radau_error)
         })
@@ -890,7 +992,7 @@ impl RadauSolver {
     /// Change the interval while retaining prepared symbolic callbacks.
     ///
     /// This changes the configured integration bounds, not the initial state;
-    /// pass the desired state to `solve()` or continuation.
+    /// pass the desired state to `solve()`.
     pub fn restart(&mut self, t0: f64, t_end: f64) -> PyResult<()> {
         validate_scalar(t0, "t0")?;
         validate_scalar(t_end, "t_end")?;
@@ -983,7 +1085,7 @@ impl RadauSolver {
         self.solver
             .as_mut()
             .ok_or_else(|| InvalidConfigurationError::new_err("Radau solver is not prepared"))?
-            .solve_with_parameters(&y0, &parameters)
+            .try_solve_with_parameter_values(&y0, &parameters)
             .map(|native| RadauSolution::from_native_with_metadata(native, aot_metadata))
             .map_err(map_radau_error)
     }
@@ -1189,34 +1291,6 @@ impl RadauCallbackSolver {
         })
     }
 
-    /// Continue the existing interval from a new initial state.
-    ///
-    /// The callback bindings and configured tolerances are retained. Use
-    /// `restart()` first if the time interval also needs to change.
-    pub fn continue_with_initial_state(&mut self, y0: Vec<f64>) -> PyResult<RadauSolution> {
-        if y0.len() != self.dimension {
-            return Err(InvalidConfigurationError::new_err(format!(
-                "expected y0 with {} values, got {}",
-                self.dimension,
-                y0.len()
-            )));
-        }
-        finite_vector(&y0, "y0")?;
-        let panic_state = self.panic_state.clone();
-        panic_state.run("continuation", "radau5", "python_callback", || {
-            let result = self.solver.continue_with_initial_state(&y0);
-            if let Some(error) =
-                self.failure
-                    .take_pyerr("continuation", "radau5", "python_callback")
-            {
-                return Err(error);
-            }
-            result
-                .map(RadauSolution::from_native)
-                .map_err(map_radau_error)
-        })
-    }
-
     /// Replace the integration interval while retaining callbacks and policy.
     pub fn restart(&mut self, t0: f64, t_end: f64) -> PyResult<()> {
         validate_scalar(t0, "t0")?;
@@ -1299,7 +1373,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn radau_route_accepts_sparse_and_validates_banded_widths() {
+    fn radau_route_accepts_sparse_and_infers_or_validates_banded_widths() {
         let options = SolverOptions::new(
             Some("atom_native"),
             Some("lambdify"),
@@ -1326,7 +1400,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(validate_route(&banded).is_err());
+        assert!(validate_route(&banded).is_ok());
         banded.set_banded_width(1, 1);
         assert!(validate_route(&banded).is_ok());
     }

@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .status
         .success()
     {
-        println!("Skipping Radau AOT continuation example: tcc is not on PATH.");
+        println!("Skipping Radau AOT parameter-sweep example: tcc is not on PATH.");
         return Ok(());
     }
     let problem = RadauProblem::new(
@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec!["y".to_owned()],
         "t",
     )
-    .with_parameters(vec!["k".to_owned()])
+    .with_parameter_names(vec!["k".to_owned()])
     .with_jacobian(vec![Expr::parse_expression("-k")]);
     let config = RadauConfig {
         execution: RadauExecution::Aot,
@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut solver = RadauSolver::prepare(problem, config)?;
     for k in [0.5, 1.0, 2.0, 4.0] {
-        let solution = solver.continue_with_parameters(&[1.0], &[k])?;
+        let solution = solver.try_solve_with_parameter_values(&[1.0], &[k])?;
         let telemetry = solution.telemetry();
         println!(
             "k={k:.1} y(1)={:.9e} builds={} links={} rebinds={}",

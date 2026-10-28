@@ -379,11 +379,13 @@ fn run_damped(config: &RunConfig, telemetry: BvpTelemetryMode) -> Result<RunResu
         make_damped_options(config, telemetry),
     );
     solver.dont_save_log(true);
-    solver.try_set_params(Some(&["alpha"])).map_err(|error| {
-        RunnerError::Scenario(format!("BVP_Damp parameter declaration: {error:?}"))
-    })?;
     solver
-        .try_set_param_values(Some(vec![1.0]))
+        .try_set_parameter_names(Some(&["alpha"]))
+        .map_err(|error| {
+            RunnerError::Scenario(format!("BVP_Damp parameter declaration: {error:?}"))
+        })?;
+    solver
+        .try_set_parameter_values(Some(vec![1.0]))
         .map_err(|error| RunnerError::Scenario(format!("BVP_Damp parameter binding: {error:?}")))?;
     let setup_ms = setup_started.elapsed().as_secs_f64() * 1_000.0;
 
@@ -403,7 +405,7 @@ fn run_damped(config: &RunConfig, telemetry: BvpTelemetryMode) -> Result<RunResu
     let mut continuation_prepare_ms = 0.0;
     for index in 1..CONTINUATION_STEPS {
         solver
-            .try_set_param_values(Some(vec![1.0 + index as f64 * 0.1]))
+            .try_set_parameter_values(Some(vec![1.0 + index as f64 * 0.1]))
             .map_err(|error| {
                 RunnerError::Scenario(format!("BVP_Damp Damped continuation bind: {error:?}"))
             })?;
@@ -473,11 +475,13 @@ fn run_frozen(config: &RunConfig, telemetry: BvpTelemetryMode) -> Result<RunResu
         make_frozen_options(config, telemetry),
     );
     solver.dont_save_log(true);
-    solver.try_set_params(Some(&["alpha"])).map_err(|error| {
-        RunnerError::Scenario(format!("BVP_Damp Frozen parameter declaration: {error:?}"))
-    })?;
     solver
-        .try_set_param_values(Some(vec![1.0]))
+        .try_set_parameter_names(Some(&["alpha"]))
+        .map_err(|error| {
+            RunnerError::Scenario(format!("BVP_Damp Frozen parameter declaration: {error:?}"))
+        })?;
+    solver
+        .try_set_parameter_values(Some(vec![1.0]))
         .map_err(|error| {
             RunnerError::Scenario(format!("BVP_Damp Frozen parameter binding: {error:?}"))
         })?;
@@ -499,7 +503,7 @@ fn run_frozen(config: &RunConfig, telemetry: BvpTelemetryMode) -> Result<RunResu
     let mut continuation_prepare_ms = 0.0;
     for index in 1..CONTINUATION_STEPS {
         solver
-            .try_set_param_values(Some(vec![1.0 + index as f64 * 0.1]))
+            .try_set_parameter_values(Some(vec![1.0 + index as f64 * 0.1]))
             .map_err(|error| {
                 RunnerError::Scenario(format!("BVP_Damp Frozen continuation bind: {error:?}"))
             })?;

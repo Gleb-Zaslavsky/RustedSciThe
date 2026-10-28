@@ -260,8 +260,8 @@ mod tests {
             canonical_fixture_equations(),
             SymbolicProblemOptions::new()
                 .with_variables(variables)
-                .with_equation_parameters(parameters)
-                .with_equation_parameter_values(parameter_values),
+                .with_parameter_names(parameters)
+                .with_parameter_values(parameter_values),
         )
         .expect("exact KiThe TP-1907 fixture must parse through the public string API")
     }
@@ -709,8 +709,8 @@ mod tests {
             tp1907_equations(),
             SymbolicProblemOptions::new()
                 .with_variables(variables)
-                .with_equation_parameters(parameters)
-                .with_equation_parameter_values(parameter_values),
+                .with_parameter_names(parameters)
+                .with_parameter_values(parameter_values),
         )
         .expect("TP-1907 symbolic problem should parse");
         let initial = DVector::from_vec(vec![
@@ -789,8 +789,8 @@ mod tests {
             tp1907_expression_equations(),
             SymbolicProblemOptions::new()
                 .with_variables(variables)
-                .with_equation_parameters(parameters)
-                .with_equation_parameter_values(parameter_values),
+                .with_parameter_names(parameters)
+                .with_parameter_values(parameter_values),
         )
         .expect("programmatic TP-1907 symbolic problem should prepare")
     }

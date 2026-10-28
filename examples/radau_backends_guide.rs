@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (
             "AtomViewNative/Banded",
             RadauFrontend::AtomViewNative,
-            RadauMatrixLayout::Banded { lower: 1, upper: 1 },
+            RadauMatrixLayout::BandedAuto,
         ),
     ] {
         let config = RadauConfig {

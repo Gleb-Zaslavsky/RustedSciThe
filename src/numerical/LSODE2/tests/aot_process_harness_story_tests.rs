@@ -339,7 +339,7 @@ fn handoff_structure(variant: HandoffVariant) -> Lsode2LinearSystemStructure {
         HandoffVariant::Layout => Lsode2LinearSystemStructure::Sparse,
         HandoffVariant::JacobianPattern => Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 },
         HandoffVariant::Baseline | HandoffVariant::ParameterSchema => {
-            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
+            Lsode2LinearSystemStructure::BandedAuto
         }
     }
 }
@@ -369,9 +369,9 @@ fn apply_handoff_variant(
                     super::Lsode2LinearSolverChoice::FaerSparseLu,
                 );
             } else {
-                // A zero-width scalar band intentionally falls back to the
-                // residual-only identity. Use a real compact band here so
-                // the producer/consumer gate exercises layout provenance.
+                // Use a real compact band so the producer/consumer gate
+                // exercises layout provenance rather than only an artifact
+                // identity with diagonal structure.
                 config.linear_system_structure =
                     Lsode2LinearSystemStructure::Banded { kl: 1, ku: 1 };
             }

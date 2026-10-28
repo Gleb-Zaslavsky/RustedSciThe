@@ -217,7 +217,7 @@ fn benchmark_aot_parameter_continuation(c: &mut Criterion) {
                         let target = t0 + width;
 
                         continued
-                            .try_continue_with_parameter_values(parameters.clone(), target)
+                            .try_continue_in_time_with_parameter_values(parameters.clone(), target)
                             .expect("continuation restart");
                         continued.try_solve().expect("continued AOT solve");
                         fresh = make_solver(

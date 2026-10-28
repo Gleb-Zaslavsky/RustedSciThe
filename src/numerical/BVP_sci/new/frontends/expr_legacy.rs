@@ -22,6 +22,7 @@ pub struct ExprLegacyLambdifyPlan {
     independent_name: String,
     state_names: Vec<String>,
     parameter_names: Vec<String>,
+    external_parameter_names: Vec<String>,
     residuals: Vec<ScalarEvaluator>,
     jacobian: Vec<(usize, usize, ScalarEvaluator)>,
     parameter_jacobian: Vec<(usize, usize, ScalarEvaluator)>,
@@ -39,8 +40,31 @@ impl ExprLegacyLambdifyPlan {
         independent_name: impl Into<String>,
         telemetry: BvpSciTelemetry,
     ) -> Result<Self, BvpSciNewError> {
+        Self::prepare_with_external_parameters(
+            equations,
+            state_names,
+            parameter_names,
+            &[],
+            independent_name,
+            telemetry,
+        )
+    }
+
+    /// Prepare callbacks for free Newton parameters and fixed model inputs.
+    /// Both groups are callback arguments, but only `parameter_names` enter
+    /// the global collocation unknown vector and `df/dp` block.
+    pub fn prepare_with_external_parameters(
+        equations: &[Expr],
+        state_names: &[String],
+        parameter_names: &[String],
+        external_parameter_names: &[String],
+        independent_name: impl Into<String>,
+        telemetry: BvpSciTelemetry,
+    ) -> Result<Self, BvpSciNewError> {
         let independent_name = independent_name.into();
-        validate_names(&independent_name, state_names, parameter_names)?;
+        let mut all_parameter_names = parameter_names.to_vec();
+        all_parameter_names.extend(external_parameter_names.iter().cloned());
+        validate_names(&independent_name, state_names, &all_parameter_names)?;
         if equations.is_empty() || equations.len() != state_names.len() {
             return Err(BvpSciNewError::ShapeMismatch {
                 stage: BvpSciStage::SymbolicPreparation,
@@ -50,10 +74,13 @@ impl ExprLegacyLambdifyPlan {
         }
 
         let started = telemetry.start_timing();
-        let mut argument_names = Vec::with_capacity(1 + state_names.len() + parameter_names.len());
+        let mut argument_names = Vec::with_capacity(
+            1 + state_names.len() + parameter_names.len() + external_parameter_names.len(),
+        );
         argument_names.push(independent_name.clone());
         argument_names.extend(state_names.iter().cloned());
         argument_names.extend(parameter_names.iter().cloned());
+        argument_names.extend(external_parameter_names.iter().cloned());
         let argument_refs: Vec<&str> = argument_names.iter().map(String::as_str).collect();
 
         // Residual closures are materialized before any solver is created.
@@ -155,6 +182,7 @@ impl ExprLegacyLambdifyPlan {
             independent_name,
             state_names: state_names.to_vec(),
             parameter_names: parameter_names.to_vec(),
+            external_parameter_names: external_parameter_names.to_vec(),
             residuals,
             jacobian,
             parameter_jacobian,
@@ -178,6 +206,10 @@ impl ExprLegacyLambdifyPlan {
     /// Return the number of runtime parameters accepted by each evaluator.
     pub fn parameter_dimension(&self) -> usize {
         self.parameter_names.len()
+    }
+
+    pub fn external_parameter_dimension(&self) -> usize {
+        self.external_parameter_names.len()
     }
 
     pub fn independent_name(&self) -> &str {
@@ -453,10 +485,12 @@ impl ExprLegacyLambdifyPlan {
                 stage: BvpSciStage::CallbackInput,
             });
         }
-        if state.len() != self.dimension() || parameters.len() != self.parameter_dimension() {
+        let runtime_parameter_dimension =
+            self.parameter_dimension() + self.external_parameter_dimension();
+        if state.len() != self.dimension() || parameters.len() != runtime_parameter_dimension {
             return Err(BvpSciNewError::ShapeMismatch {
                 stage: BvpSciStage::CallbackInput,
-                expected: 1 + self.dimension() + self.parameter_dimension(),
+                expected: 1 + self.dimension() + runtime_parameter_dimension,
                 actual: 1 + state.len() + parameters.len(),
             });
         }

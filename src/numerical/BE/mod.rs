@@ -4,6 +4,8 @@ use crate::Utils::plots::plots;
 /// Backward Euler method for solving systems of ordinary differential equation
 /// Newton-Raphson calculation on each step of the method is made by using the analytic jacobian
 pub mod NR_for_Euler;
+/// Independent parameter sweeps over a prepared Backward Euler model.
+pub mod parameter_loop;
 
 /// Common Backward Euler types for applications using the direct solver API.
 pub mod prelude {
@@ -1031,6 +1033,10 @@ impl BE {
             .expect("Backward Euler stop condition should be valid");
     }
 
+    /// Declare the ordered symbolic parameter-name schema.
+    ///
+    /// This does not bind numeric values or continue an existing trajectory;
+    /// use `set_parameter_values` for value-only rebinding.
     pub fn set_equation_parameters(&mut self, params: Option<&[&str]>) {
         self.try_set_equation_parameters(params)
             .expect("Backward Euler parameter schema should be valid");
@@ -1066,6 +1072,7 @@ impl BE {
         Ok(())
     }
 
+    /// Fallibly declare the ordered symbolic parameter-name schema.
     pub fn try_set_equation_parameters(&mut self, params: Option<&[&str]>) -> Result<(), BeError> {
         if self.newton.eq_system.is_empty() {
             return Err(BeError::InvalidConfiguration(
@@ -1076,6 +1083,9 @@ impl BE {
         Ok(())
     }
 
+    /// Rebind numeric values without changing the declared parameter schema.
+    /// This does not continue the accepted trajectory; `try_continue_to`
+    /// extends the current state, while this setter only updates callback data.
     pub fn set_parameter_values(&mut self, values: DVector<f64>) -> Result<(), BeError> {
         if self.newton.eq_system.is_empty() {
             let start = self.telemetry_mode.collects_timings().then(Instant::now);
@@ -1479,6 +1489,34 @@ impl BE {
         self.newton.t_bound = Some(t_bound);
         self.newton.set_initial_guess(y0);
         Ok(())
+    }
+
+    /// Starts a fresh solve with new symbolic parameter values and initial
+    /// state, retaining the configured time interval and prepared callbacks.
+    pub fn try_solve_with_parameter_values(
+        &mut self,
+        y0: DVector<f64>,
+        values: DVector<f64>,
+    ) -> Result<(), BeError> {
+        let t0 = self.t0;
+        let t_bound = self.t_bound;
+        self.try_solve_with_parameter_values_in_interval(t0, y0, t_bound, values)
+    }
+
+    /// Starts a fresh solve with new symbolic parameter values, initial state
+    /// and time interval, reusing the prepared callbacks/backend.
+    pub fn try_solve_with_parameter_values_in_interval(
+        &mut self,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        values: DVector<f64>,
+    ) -> Result<(), BeError> {
+        if !self.newton.eq_system.is_empty() || !values.is_empty() {
+            self.try_set_parameter_values(values)?;
+        }
+        self.try_restart_with_initial_state(t0, y0, t_bound)?;
+        self.try_solve()
     }
 
     fn try_continue_to_inner(&mut self, new_t_bound: f64) -> Result<(), BeError> {

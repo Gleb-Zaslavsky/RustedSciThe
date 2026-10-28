@@ -52,6 +52,11 @@ pub struct BvpSciCollocationWorkspace {
     /// Caller-owned callback argument/output storage.  These vectors avoid
     /// per-RHS allocation in both collocation and Jacobian assembly.
     pub callback_arguments: Vec<f64>,
+    /// Runtime inputs passed to symbolic callbacks: free Newton parameters
+    /// followed by fixed external model parameters.
+    pub runtime_parameters: Vec<f64>,
+    /// Runtime input scratch used while finite-differencing free parameters.
+    pub trial_runtime_parameters: Vec<f64>,
     pub callback_output: Vec<f64>,
     /// RHS scratch used when a singular term transforms a callback output.
     pub callback_rhs: Vec<f64>,
@@ -130,6 +135,8 @@ impl BvpSciCollocationWorkspace {
             boundary_parameter_jacobian: vec![0.0; boundary_parameter_len],
             boundary_trial_output: vec![0.0; boundary_len],
             callback_arguments: Vec::new(),
+            runtime_parameters: Vec::new(),
+            trial_runtime_parameters: Vec::new(),
             callback_output: vec![0.0; n],
             callback_rhs: vec![0.0; n],
             callback_jacobian: Vec::new(),
@@ -137,6 +144,7 @@ impl BvpSciCollocationWorkspace {
             entries: Vec::new(),
         };
         workspace.resize(n, m, k, telemetry)?;
+        workspace.set_runtime_parameter_dimension(k, telemetry);
         Ok(workspace)
     }
 
@@ -255,6 +263,24 @@ impl BvpSciCollocationWorkspace {
         Ok(())
     }
 
+    /// Size callback-only parameter scratch without changing Newton dimension.
+    pub fn set_runtime_parameter_dimension(
+        &mut self,
+        dimension: usize,
+        telemetry: &BvpSciTelemetry,
+    ) {
+        let capacity_before = self.capacity_units();
+        self.runtime_parameters.resize(dimension, 0.0);
+        self.trial_runtime_parameters.resize(dimension, 0.0);
+        self.callback_arguments.resize(1 + self.n + dimension, 0.0);
+        self.boundary_parameters.resize(dimension, 0.0);
+        self.boundary_parameter_jacobian
+            .resize(self.boundary_residual.len() * dimension, 0.0);
+        if self.capacity_units() > capacity_before {
+            telemetry.record_allocation();
+        }
+    }
+
     fn capacity_units(&self) -> usize {
         [
             self.h.capacity(),
@@ -282,6 +308,8 @@ impl BvpSciCollocationWorkspace {
             self.boundary_parameter_jacobian.capacity(),
             self.boundary_trial_output.capacity(),
             self.callback_arguments.capacity(),
+            self.runtime_parameters.capacity(),
+            self.trial_runtime_parameters.capacity(),
             self.callback_output.capacity(),
             self.callback_rhs.capacity(),
             self.callback_jacobian.capacity(),

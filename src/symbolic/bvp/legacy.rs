@@ -1322,6 +1322,10 @@ pub enum BvpBackendIntegrationError {
     InvalidLogLevel { level: String },
     /// The solver could not create the requested log file.
     LogFileCreationFailed { path: String, message: String },
+    /// The process-wide solver file logger could not be initialized.
+    LogSetupFailed {
+        source: crate::numerical::logging::SolverLoggingError,
+    },
     /// A compiled AOT backend was required by the outer policy, but the
     /// selection layer could not provide a compiled artifact.
     CompiledAotRequiredButUnavailable {
@@ -1415,6 +1419,9 @@ impl fmt::Display for BvpBackendIntegrationError {
             Self::LogFileCreationFailed { path, message } => {
                 write!(f, "cannot create BVP log file `{path}`: {message}")
             }
+            Self::LogSetupFailed { source } => {
+                write!(f, "cannot initialize BVP solver logging: {source}")
+            }
             Self::CompiledAotRequiredButUnavailable {
                 problem_key,
                 effective_backend,
@@ -1500,7 +1507,14 @@ impl fmt::Display for BvpBackendIntegrationError {
     }
 }
 
-impl std::error::Error for BvpBackendIntegrationError {}
+impl std::error::Error for BvpBackendIntegrationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::LogSetupFailed { source } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 impl From<AotLifecycleError> for BvpBackendIntegrationError {
     fn from(error: AotLifecycleError) -> Self {

@@ -31,7 +31,7 @@ and telemetry reports. The public API story module covers:
 
 `examples/radau_public_api_guide.rs` is the runnable API guide. The dedicated
 `radau_lambdify_single.rs`, `radau_lambdify_continuation.rs`,
-`radau_aot_single.rs` and `radau_aot_continuation.rs` examples cover the four
+`radau_aot_single.rs` and `radau_aot_parameter_sweep.rs` examples cover the four
 primary symbolic/AOT workflows. `radau_native_callbacks.rs` covers the native
 analytic-Jacobian and residual-only finite-difference paths. `RADAU_USER_GUIDE_EN.md` and
 `RADAU_USER_GUIDE_RU.md` document the same contract and explicitly avoid a

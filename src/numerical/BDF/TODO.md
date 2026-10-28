@@ -1,5 +1,21 @@
 # BDF: Audit and Refactoring Plan
 
+## Independent IVP Parameter Loop
+
+- [x] Add `try_solve_parameter_loop(y0, parameter_vectors)` over the existing
+  prepared BDF solver. Each point uses the same initial state and configured
+  time interval, with fresh BDF numerical history; this is a parameter sweep,
+  not continuation from a prior solution.
+- [x] Preserve each point's input vector, trajectory (`x_mesh` and
+  time-by-state values), BDF telemetry/statistics, or native typed failure.
+  Continue after a failed point.
+- [x] Test success/failure/success and parity against separate BDF solves,
+  including unchanged `y0`, per-point telemetry, and invalid input handling.
+  Add RU/EN guide notes and a Rust example.
+- [x] Expose the direct Python loop with NumPy results and retained per-point
+  errors/telemetry; add contract tests, both guide updates and a runnable
+  Python example.
+
 Audit started 2026-09-30 from `BDF_api.rs`, `BDF_solver.rs`, `common.rs`,
 utilities, tests and integration points; updated 2026-10-03 after the first
 confirmed P0 fixes and timeout lifecycle coverage. Other static findings still
@@ -155,7 +171,7 @@ Companion plans: [BE](../BE/TODO.md), [Radau](../Radau/TODO.md).
   early convergence-rate break, with a direct unit test.
 - [~] **BD-07: Make parameter changes invalidate numerical history safely.**
   `set_parameter_values` remains a value-slot update, not a continuation API.
-  `try_continue_with_parameter_values(values, t_bound)` now starts a fresh
+  `try_continue_in_time_with_parameter_values(values, t_bound)` now starts a fresh
   numerical segment from the last accepted `(t,y)`, resets history/J/LU and
   reuses retained prepared residual/Jacobian callbacks (no symbolic reprepare).
   ExprLegacy and AtomView stories compare with fresh segment solves and verify

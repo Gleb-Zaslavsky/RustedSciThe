@@ -1,7 +1,7 @@
-use crate::numerical::ivp_workloads::{build_workload, WorkloadKind};
 use crate::numerical::BDF::BDF_api::{
     BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver,
 };
+use crate::numerical::ivp_workloads::{WorkloadKind, build_workload};
 use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 use nalgebra::DVector;
 
@@ -259,7 +259,7 @@ fn bdf_parameter_continuation_reuses_prepared_callbacks_and_restarts_history() {
             "one symbolic preparation before continuation"
         );
         assert!(matches!(
-            continued.try_continue_with_parameter_values(DVector::zeros(0), 0.2),
+            continued.try_continue_in_time_with_parameter_values(DVector::zeros(0), 0.2),
             Err(BdfSolveError::Backend(_))
         ));
         let (times_after_invalid_rebind, states_after_invalid_rebind) = continued.get_result_ref();
@@ -277,7 +277,7 @@ fn bdf_parameter_continuation_reuses_prepared_callbacks_and_restarts_history() {
         );
 
         continued
-            .try_continue_with_parameter_values(DVector::from_element(1, 3.0), 0.2)
+            .try_continue_in_time_with_parameter_values(DVector::from_element(1, 3.0), 0.2)
             .expect("parameter continuation restart");
         assert_eq!(continued.get_status(), "running", "{assembly:?}");
         assert_eq!(
@@ -417,7 +417,10 @@ fn bdf_long_parameter_series_reuses_prepared_model_and_bounds_segment_output() {
         let y0 = states.row(states.nrows() - 1).transpose();
         let next_rate = 2.0 + index as f64 * 0.01;
         solver
-            .try_continue_with_parameter_values(DVector::from_element(1, next_rate), t0 + 0.01)
+            .try_continue_in_time_with_parameter_values(
+                DVector::from_element(1, next_rate),
+                t0 + 0.01,
+            )
             .expect("parameter segment restart");
         assert!(solver.get_result_ref().0.is_empty());
         solver.try_solve().expect("continued parameter segment");
@@ -524,7 +527,7 @@ fn bdf_parameter_continuation_matches_fresh_segments_on_shared_workloads() {
                 let t_bound = t0 + segment_width;
 
                 continued
-                    .try_continue_with_parameter_values(target.clone(), t_bound)
+                    .try_continue_in_time_with_parameter_values(target.clone(), t_bound)
                     .expect("parameterized workload continuation");
                 continued.try_solve().expect("continued workload segment");
 
@@ -568,7 +571,7 @@ fn bdf_parameter_continuation_matches_fresh_segments_on_shared_workloads() {
 
 #[test]
 fn bdf_piecewise_parameter_continuation_matches_lsode2_and_backward_euler() {
-    use crate::numerical::BE::{BeTelemetryMode, BE};
+    use crate::numerical::BE::{BE, BeTelemetryMode};
     use crate::numerical::LSODE2::config::{
         Lsode2ProblemConfig, Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend,
         Lsode2SymbolicExecutionMode,
@@ -603,7 +606,7 @@ fn bdf_piecewise_parameter_continuation_matches_lsode2_and_backward_euler() {
         .with_equation_parameter_values(DVector::from_element(1, RATE_0)),
     );
     bdf.try_solve().expect("BDF first piecewise segment");
-    bdf.try_continue_with_parameter_values(DVector::from_element(1, RATE_1), END)
+    bdf.try_continue_in_time_with_parameter_values(DVector::from_element(1, RATE_1), END)
         .expect("BDF parameter change at accepted boundary");
     bdf.try_solve().expect("BDF second piecewise segment");
     let bdf_final = bdf.get_result_ref().1[(bdf.get_result_ref().1.nrows() - 1, 0)];
@@ -849,7 +852,7 @@ fn bdf_parameterized_aot_cache_handoff_is_independent_per_assembly_backend() {
         producer.solve();
         let prepare_calls_before_continuation = producer.get_statistics().backend_prepare_calls;
         producer
-            .try_continue_with_parameter_values(DVector::from_element(1, 3.0), 0.2)
+            .try_continue_in_time_with_parameter_values(DVector::from_element(1, 3.0), 0.2)
             .unwrap_or_else(|error| {
                 panic!("{assembly:?} AOT continuation restart failed: {error}")
             });

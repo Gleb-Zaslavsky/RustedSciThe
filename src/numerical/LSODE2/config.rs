@@ -352,7 +352,15 @@ impl Lsode2ResidualJacobianSource {
 pub enum Lsode2LinearSystemStructure {
     Dense,
     Sparse,
-    Banded { kl: usize, ku: usize },
+    /// Infer the compact half-bandwidth from the symbolic Jacobian structure.
+    /// Numerical callback routes cannot use this variant because they do not
+    /// expose symbolic dependency structure.
+    BandedAuto,
+    /// Use a caller-supplied half-bandwidth hint.
+    Banded {
+        kl: usize,
+        ku: usize,
+    },
 }
 
 impl Default for Lsode2LinearSystemStructure {
@@ -366,7 +374,7 @@ impl Lsode2LinearSystemStructure {
         match self {
             Self::Dense => "dense",
             Self::Sparse => "sparse",
-            Self::Banded { .. } => "banded",
+            Self::BandedAuto | Self::Banded { .. } => "banded",
         }
     }
 }
@@ -1125,6 +1133,17 @@ impl Lsode2ProblemConfig {
         self
     }
 
+    /// Select faithful banded storage and infer its half-width from the
+    /// symbolic Jacobian structure.
+    pub fn with_banded_auto(self) -> Self {
+        self.with_linear_system_structure(Lsode2LinearSystemStructure::BandedAuto)
+    }
+
+    /// Select faithful banded storage with a validated structural hint.
+    pub fn with_banded_width(self, kl: usize, ku: usize) -> Self {
+        self.with_linear_system_structure(Lsode2LinearSystemStructure::Banded { kl, ku })
+    }
+
     pub fn with_linear_solver_policy(mut self, policy: Lsode2LinearSolverPolicy) -> Self {
         self.linear_solver_policy = policy;
         self.sync_legacy_backend_from_policy();
@@ -1137,7 +1156,8 @@ impl Lsode2ProblemConfig {
             Lsode2LinearSolverPolicy::Auto => match self.linear_system_structure {
                 Lsode2LinearSystemStructure::Dense => Lsode2LinearSolverChoice::DenseLu,
                 Lsode2LinearSystemStructure::Sparse => Lsode2LinearSolverChoice::FaerSparseLu,
-                Lsode2LinearSystemStructure::Banded { .. } => {
+                Lsode2LinearSystemStructure::BandedAuto
+                | Lsode2LinearSystemStructure::Banded { .. } => {
                     Lsode2LinearSolverChoice::LapackFaithfulBandedLu
                 }
             },
@@ -1148,7 +1168,8 @@ impl Lsode2ProblemConfig {
             Lsode2LinearSolverPolicy::Auto => match self.linear_system_structure {
                 Lsode2LinearSystemStructure::Dense => "auto_from_linear_structure_dense",
                 Lsode2LinearSystemStructure::Sparse => "auto_from_linear_structure_sparse",
-                Lsode2LinearSystemStructure::Banded { .. } => "auto_from_linear_structure_banded",
+                Lsode2LinearSystemStructure::BandedAuto
+                | Lsode2LinearSystemStructure::Banded { .. } => "auto_from_linear_structure_banded",
             },
         };
 
@@ -1277,7 +1298,7 @@ impl Lsode2ProblemConfig {
                 Lsode2LinearSolverChoice::FaerSparseLu,
             ),
             Lsode2LinearSolverBackend::BandedFaithful => (
-                Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
+                Lsode2LinearSystemStructure::BandedAuto,
                 Lsode2LinearSolverChoice::LapackFaithfulBandedLu,
             ),
         };

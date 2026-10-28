@@ -40,8 +40,8 @@ mod tests {
     fn parameterized_problem_options() -> SymbolicProblemOptions {
         SymbolicProblemOptions::new()
             .with_variables(vec!["x".to_string(), "y".to_string()])
-            .with_equation_parameters(vec!["a".to_string()])
-            .with_equation_parameter_values(DVector::from_vec(vec![2.0]))
+            .with_parameter_names(vec!["a".to_string()])
+            .with_parameter_values(DVector::from_vec(vec![2.0]))
             .with_lambdify_backend()
     }
 

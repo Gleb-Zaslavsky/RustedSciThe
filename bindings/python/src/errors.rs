@@ -3,8 +3,8 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 
 /// Attach machine-readable context without changing the exception class or
@@ -173,6 +173,7 @@ native_error_kinds!(rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError {
 });
 
 native_error_kinds!(rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError {
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::Logging(_) => "Logging",
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::InvalidConfiguration(_) => "InvalidConfiguration",
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::Callback { .. } => "Callback",
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::ShapeMismatch { .. } => "ShapeMismatch",
@@ -191,7 +192,7 @@ native_error_kinds!(rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError {
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::AotHandoff { .. } => "AotHandoff",
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::AotRuntime { .. } => "AotRuntime",
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::AotCallback { .. } => "AotCallback",
-    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::ContinuationMismatch => "ContinuationMismatch",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::ParameterBindingMismatch { .. } => "ParameterBindingMismatch",
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::OutputOutOfDomain => "OutputOutOfDomain",
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::OutputUnavailable => "OutputUnavailable",
 });
@@ -293,6 +294,7 @@ native_error_kinds!(rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrat
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::PipelinePanicked(_) => "PipelinePanicked",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::InvalidLogLevel { .. } => "InvalidLogLevel",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::LogFileCreationFailed { .. } => "LogFileCreationFailed",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::LogSetupFailed { .. } => "LogSetupFailed",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::CompiledAotRequiredButUnavailable { .. } => "CompiledAotRequiredButUnavailable",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AutomaticAotBuildRequested { .. } => "AutomaticAotBuildRequested",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AutomaticAotRebuildRequested { .. } => "AutomaticAotRebuildRequested",
@@ -802,11 +804,11 @@ mod tests {
 
     #[test]
     fn native_kind_uses_explicit_enum_discriminants() {
-        use rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError;
-        use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
-        use rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError;
         use rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError;
         use rustedscithe_core::numerical::BE::BeError;
+        use rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError;
+        use rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError;
+        use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
 
         assert_eq!(
             native_variant(&BdfSolveError::InvalidMaxSteps),
@@ -819,6 +821,12 @@ mod tests {
         assert_eq!(
             native_variant(&BvpSciNewError::SingularJacobian),
             "SingularJacobian"
+        );
+        assert_eq!(
+            native_variant(&BvpSciNewError::Logging(
+                rustedscithe_core::numerical::logging::SolverLoggingError::LoggerAlreadyInstalled,
+            )),
+            "Logging"
         );
         let varpro_failure = SymbolicVarProError::SolverFailed {
             termination: "MaxIterationsReached { limit: 1 }".to_owned(),

@@ -105,6 +105,10 @@
 !src/numerical/BE/BE_*.md
 !src/numerical/BDF/TODO.md
 !src/numerical/optimization/TODO.md
+!src/numerical/StiffAPI/TODO.md
+!src/numerical/StiffAPI/CONTRACT_AUDIT.md
+!src/numerical/StiffAPI/STIFF_API_GUIDE_EN.md
+!src/numerical/StiffAPI/STIFF_API_GUIDE_RU.md
 !src/numerical/Radau/RADAU_USER_GUIDE_EN.md
 !src/numerical/Radau/RADAU_USER_GUIDE_RU.md
 !src/numerical/optimization/OPTIMIZATION_USER_GUIDE_EN.md

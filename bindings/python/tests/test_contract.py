@@ -28,9 +28,17 @@ from rustedscithe import (
     BvpDampSolution,
     BvpDampFrozenSolver,
     BvpDampNaiveSolver,
+    BvpDampParameterLoopPoint,
+    BvpDampParameterLoopReport,
     BvpDampSolver,
     BvpSciSolution,
+    BvpSciParameterLoopPoint,
+    BvpSciParameterLoopReport,
     BvpSciSolver,
+    BvpSolverRequest,
+    PreparedBvpSolver,
+    BvpApiSolution,
+    BvpPostprocessPlan,
     BvpTaskResult,
     BSplineInterpolator,
     BdfCallbackSolver,
@@ -46,6 +54,7 @@ from rustedscithe import (
     InvalidConfigurationError,
     InvalidExpressionError,
     IvpTaskResult,
+    IvpParameterLoopPoint,
     FittingSolver,
     GavinFittingSolver,
     GavinFittingSolution,
@@ -2656,8 +2665,8 @@ def test_radau_symbolic_dense_lambdify_supports_frontend_output_and_continuation
         "max_newton_iterations": "6",
         "max_retries": "12",
     }
-    continued = solver.continue_with_parameters([1.0], [2.0])
-    assert continued.final_state[0] == pytest.approx(math.exp(-2.0), rel=4e-3)
+    rebound = solver.solve_with_parameter_values([1.0], [2.0])
+    assert rebound.final_state[0] == pytest.approx(math.exp(-2.0), rel=4e-3)
 
 
 def test_radau_telemetry_modes_have_disjoint_collection_contracts():
@@ -2725,7 +2734,7 @@ def test_radau_long_parameter_series_retains_preparation_and_detached_results():
     first_state = first.final_state
     assert solver.is_prepared
     for index in range(16):
-        result = solver.continue_with_parameters(
+        result = solver.solve_with_parameter_values(
             [1.0], [0.5 + index * 0.01]
         )
         assert result.final_time == pytest.approx(0.05)
@@ -2772,11 +2781,23 @@ def test_radau_accepts_dense_sparse_and_banded_layouts():
             options=SolverOptions(matrix_layout="sparse"),
         ).solve([1.0])
 
-    with pytest.raises(InvalidConfigurationError, match="set_banded_width"):
+    # Widths are inferred from the symbolic Jacobian when omitted. The
+    # explicit setter remains an optional override for validated hints.
+    automatic = RadauSolver(
+        [-y], ["y"], "t", 0.0, 0.1, 0.05,
+        options=SolverOptions(matrix_layout="banded"),
+        jacobian=jacobian,
+    )
+    assert automatic.solve([1.0]).final_state[0] == pytest.approx(math.exp(-0.1), rel=3e-3)
+
+    narrow = SolverOptions(matrix_layout="banded")
+    narrow.set_banded_width(0, 0)
+    with pytest.raises(InvalidConfigurationError, match="narrower than the inferred"):
         RadauSolver(
-            [-y], ["y"], "t", 0.0, 1.0, 0.1,
-            options=SolverOptions(matrix_layout="banded"),
-        )
+            [Expr.parse("-2*y0 + y1"), Expr.parse("y0 - 2*y1 + y2"), Expr.parse("y1 - 2*y2")],
+            ["y0", "y1", "y2"], "t", 0.0, 0.1, 0.05,
+            options=narrow,
+        ).prepare()
 
 
 @pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
@@ -2788,11 +2809,8 @@ def test_radau_frontend_layout_capability_cross_product(frontend, layout):
         matrix_layout=layout,
         telemetry="counters",
     )
-    if layout == "banded":
-        options.set_banded_width(1, 1)
-
     # Structured routes need an explicit layout-aware Jacobian; this matrix
-    # checks the advertised frontend/layout product rather than FD fallback.
+    # checks automatic bandwidth inference for both symbolic frontends.
     solver = RadauSolver(
         [-y], [str(y)], "t", 0.0, 0.1, 0.05,
         options=options,
@@ -3872,7 +3890,6 @@ def test_lsode2_sparse_python_analytical_callbacks_and_typed_callback_failure():
         failing.solve()
     assert isinstance(callback_error.value.__cause__, RuntimeError)
     assert str(callback_error.value.__cause__) == "callback fixture failure"
-
     with pytest.raises(InvalidConfigurationError, match="provided together"):
         Lsode2Solver(
             [Expr.constant(0.0)], ["y"], "t", [1.0], 0.0, 0.2, 0.1,
@@ -3882,6 +3899,34 @@ def test_lsode2_sparse_python_analytical_callbacks_and_typed_callback_failure():
         Lsode2Solver(
             [Expr.constant(0.0)], ["y"], "t", [1.0], 0.0, 0.2, 0.1,
             method="unsupported",
+        )
+
+
+def test_lsode2_symbolic_banded_layout_infers_width_and_zero_width_is_explicit():
+    y = Expr.variable("lsode2_banded_y")
+    automatic = Lsode2Solver(
+        [-y], [str(y)], "t", [1.0], 0.0, 0.2, 0.05,
+        options=SolverOptions(matrix_layout="banded", telemetry="counters"),
+    )
+    automatic_solution = automatic.solve()
+    assert automatic_solution.final_state[0] == pytest.approx(math.exp(-0.2), rel=5e-3)
+    assert automatic.provenance()["matrix_layout"] == "banded"
+
+    explicit_diagonal = Lsode2Solver(
+        [-y], [str(y)], "t", [1.0], 0.0, 0.2, 0.05,
+        options=SolverOptions(matrix_layout="banded", telemetry="counters"),
+        band_lower=0,
+        band_upper=0,
+    )
+    explicit_solution = explicit_diagonal.solve()
+    assert explicit_solution.final_state[0] == pytest.approx(math.exp(-0.2), rel=5e-3)
+
+    with pytest.raises(UnsupportedOptionError, match="requires symbolic expressions"):
+        Lsode2Solver(
+            [Expr.constant(0.0)], ["y"], "t", [1.0], 0.0, 0.2, 0.1,
+            options=SolverOptions(matrix_layout="banded"),
+            residual_callback=lambda _t, state: [-state[0]],
+            jacobian_callback=lambda _t, _state: [[-1.0]],
         )
 
 
@@ -3901,6 +3946,288 @@ def test_ivp_solution_telemetry_report_writes_compact_file_without_noise(tmp_pat
 
     with pytest.raises(TelemetryError, match="path must not be empty"):
         solution.write_telemetry_report("")
+
+
+def test_bvp_api_typed_request_builds_native_sci_route_and_keeps_telemetry():
+    """The generic facade should route to Rust and return node-major arrays."""
+    y = Expr.variable("y")
+    request = BvpSolverRequest.sci(
+        [-y], ["y"], "x", [0.0, 0.5, 1.0], [(0, "left", 1.0)],
+        [[1.0], [math.exp(-0.5)], [math.exp(-1.0)]],
+        options=SolverOptions(
+            frontend="expr_legacy", execution="lambdify", matrix_layout="dense",
+            telemetry="counters",
+        ),
+        tolerance=1e-5,
+    )
+    solver = request.prepare()
+    assert isinstance(solver, PreparedBvpSolver)
+    assert solver.route == "sci"
+    solution = solver.solve()
+    assert isinstance(solution, BvpApiSolution)
+    assert solution.route == "sci"
+    assert solution.values_array().shape[1] == 1
+    assert solution.values()[0][0] == pytest.approx(1.0, abs=1e-7)
+    telemetry = solver.telemetry_snapshot()
+    assert telemetry["route"] == "sci"
+    assert telemetry["mode"] == "counters"
+    assert telemetry["counters"]["rhs_calls"] > 0
+    assert telemetry["timings_ms"] == {}
+
+
+def test_bvp_api_sci_external_parameter_loop_uses_native_route_report():
+    """Fixed inputs are prepared once and rebound before each continued solve."""
+    y = Expr.variable("y")
+    request = BvpSolverRequest.sci(
+        [Expr.variable("rate") * y],
+        ["y"],
+        "x",
+        [index / 20.0 for index in range(21)],
+        [(0, "left", 1.0)],
+        [[1.0] for _ in range(21)],
+        options=SolverOptions(frontend="expr_legacy", telemetry="counters"),
+        tolerance=1e-6,
+        external_parameters=["rate"],
+        external_parameter_values=[0.5],
+    )
+    solver = request.prepare()
+    report = solver.solve_parameter_loop([[0.5], [1.0]])
+
+    assert isinstance(report, BvpSciParameterLoopReport)
+    assert len(report.points) == 2
+    assert [point.external_parameters for point in report.points] == [[0.5], [1.0]]
+    assert all(point.succeeded for point in report.points)
+    assert report.points[0].solution.values()[-1][0] == pytest.approx(math.exp(0.5), rel=2e-4)
+    assert report.points[1].solution.values()[-1][0] == pytest.approx(math.e, rel=2e-4)
+    assert all(point.telemetry_counters["rhs_calls"] > 0 for point in report.points)
+    assert solver.telemetry_snapshot()["counters"]["rhs_calls"] > 0
+
+
+def test_bvp_api_frozen_parameter_loop_returns_native_damped_report():
+    """The facade does not replace the Frozen/Naive point report contract."""
+    request = BvpSolverRequest.frozen(
+        [Expr.variable("rate")],
+        ["y"],
+        "x",
+        [index / 4 for index in range(5)],
+        [(0, "left", 0.0)],
+        [[0.0] for _ in range(5)],
+        parameters=["rate"],
+        parameter_values=[1.0],
+        options=SolverOptions(frontend="atom_native", telemetry="counters"),
+    )
+    report = request.prepare().solve_parameter_loop([[1.0], [2.0]])
+
+    assert isinstance(report, BvpDampParameterLoopReport)
+    assert [point.parameters for point in report.points] == [[1.0], [2.0]]
+    assert all(point.status == "converged" for point in report.points)
+    first_solution = report.points[0].solution
+    second_solution = report.points[1].solution
+    assert first_solution is not None and second_solution is not None
+    # The native BVP_Damp report keeps state-major [state][mesh] values.
+    assert first_solution.values()[0][-1] == pytest.approx(1.0, abs=1e-7)
+    assert second_solution.values()[0][-1] == pytest.approx(2.0, abs=1e-7)
+    assert report.points[1].telemetry_counters()["residual_calls"] > 0
+
+
+@pytest.mark.parametrize(
+    ("route", "guess"),
+    [
+        ("damped", [[1.0], [math.exp(-0.5)]]),
+        ("frozen", [[1.0], [math.exp(-0.5)], [math.exp(-1.0)]]),
+    ],
+)
+def test_bvp_api_damped_and_frozen_requests_keep_route_specific_guess_shapes(route, guess):
+    y = Expr.variable("y")
+    options = SolverOptions(frontend="atom_native", telemetry="counters")
+    if route == "damped":
+        request = BvpSolverRequest.damped(
+            [-y], ["y"], "x", [0.0, 0.5, 1.0], [(0, "left", 1.0)], guess,
+            options=options, bounds={"y": (-10.0, 10.0)}, tolerance=1e-5,
+        )
+    else:
+        request = BvpSolverRequest.frozen(
+            [-y], ["y"], "x", [0.0, 0.5, 1.0], [(0, "left", 1.0)], guess,
+            options=options, tolerance=1e-5,
+        )
+    solver = request.prepare()
+    assert solver.route == route
+    solution = solver.solve()
+    assert solution.route == route
+    assert solution.values_array().shape == (3, 1)
+    terminal_value = solution.values()[-1][0]
+    assert math.isfinite(terminal_value)
+    assert 0.0 < terminal_value < 1.0
+    if route == "damped":
+        # The default forward discretization on two intervals yields (1 - h)^2.
+        assert terminal_value == pytest.approx(0.25, abs=2e-3)
+    telemetry = solver.telemetry_snapshot()
+    assert telemetry["route"] == route
+    assert telemetry["counters"]
+
+
+def test_bvp_api_rejects_unsupported_numerical_symbolic_facade_route():
+    y = Expr.variable("y")
+    with pytest.raises(UnsupportedOptionError, match="numerical callbacks"):
+        BvpSolverRequest.sci(
+            [-y], ["y"], "x", [0.0, 1.0], [(0, "left", 1.0)], [[1.0], [math.exp(-1.0)]],
+            options=SolverOptions(execution="numerical"),
+        )
+
+
+def test_bvp_api_sci_free_parameter_callback_and_native_postprocessing(tmp_path):
+    """Unknown BVP parameters and output actions remain native facade features."""
+    p = Expr.variable("p")
+    y = Expr.variable("y")
+    request = BvpSolverRequest.sci(
+        [p], ["y"], "x", [0.0, 0.5, 1.0], [(0, "left", 0.0)],
+        [[0.0], [0.5], [1.0]],
+        options=SolverOptions(frontend="expr_legacy", telemetry="counters"),
+        tolerance=1e-6,
+        free_parameter_names=["p"],
+        free_parameter_guess=[0.7],
+        boundary_residual=lambda _ya, yb, _params: [yb[0] - 1.0],
+        boundary_jacobian=lambda _ya, _yb, _params: (
+            [[0.0]], [[1.0]], [[0.0]],
+        ),
+    )
+    solver = request.prepare()
+    solution = solver.solve()
+    assert solution.sci_details is not None
+    assert solution.sci_details.status_code == 0
+    assert solver.parameter_guess() == pytest.approx([1.0], rel=1e-5)
+
+    output_path = tmp_path / "facade.csv"
+    report = solver.execute_postprocessing(BvpPostprocessPlan().save_csv(str(output_path)))
+    assert output_path.exists()
+    assert report[0]["status"] == "done"
+    assert report[0]["path"] == str(output_path)
+
+
+def test_bvp_api_sci_callback_failure_keeps_typed_native_context():
+    y = Expr.variable("y")
+
+    def fail_boundary(_ya, _yb, _parameters):
+        raise LookupError("original BVP_api boundary failure")
+
+    request = BvpSolverRequest.sci(
+        [y], ["y"], "x", [0.0, 0.5, 1.0], [(0, "left", 0.0)],
+        [[0.0], [0.5], [1.0]],
+        free_parameter_names=["p"],
+        free_parameter_guess=[1.0],
+        boundary_residual=fail_boundary,
+    )
+
+    with pytest.raises(CallbackError) as failure:
+        request.prepare().solve()
+
+    assert failure.value.stage == "solve"
+    assert failure.value.solver == "bvp_api"
+    assert failure.value.route == "sci"
+    assert failure.value.native_kind == "Callback"
+    assert "original BVP_api boundary failure" in str(failure.value)
+    assert isinstance(failure.value.__cause__, LookupError)
+    assert str(failure.value.__cause__) == "original BVP_api boundary failure"
+
+
+@pytest.mark.parametrize("route", ["damped", "frozen", "sci"])
+@pytest.mark.parametrize("mode", ["off", "counters", "timings", "detailed"])
+def test_bvp_api_telemetry_modes_preserve_native_channel_semantics(route, mode):
+    y = Expr.variable("y")
+    mesh = [0.0, 0.5, 1.0]
+    common = ([-y], ["y"], "x", mesh, [(0, "left", 1.0)])
+    guess = [[1.0], [math.exp(-0.5)], [math.exp(-1.0)]]
+    options = SolverOptions(frontend="expr_legacy", telemetry=mode)
+    if route == "damped":
+        request = BvpSolverRequest.damped(
+            *common, guess[:-1], options=options, tolerance=1e-5,
+            bounds={"y": (-10.0, 10.0)},
+        )
+    elif route == "frozen":
+        request = BvpSolverRequest.frozen(
+            *common, guess, options=options, tolerance=1e-5,
+        )
+    else:
+        request = BvpSolverRequest.sci(
+            *common, guess, options=options, tolerance=1e-5,
+        )
+
+    solver = request.prepare()
+    solution = solver.solve()
+    snapshot = solver.telemetry_snapshot()
+    assert snapshot["mode"] == mode
+    if route in {"damped", "frozen"}:
+        assert set(snapshot["scopes"]) == {
+            "solve", "mesh_revision", "iteration", "damping_trial",
+        }
+        if mode in {"counters", "detailed"}:
+            assert set(snapshot["counters"]) == {
+                "iterations", "scalar_evaluations", "residual_calls",
+                "residual_requests", "jacobian_requests", "jacobian_recalculations",
+                "residual_chunks", "jacobian_chunks", "conversions", "copies",
+                "damping_trials", "damping_rejections", "linear_solves",
+                "factorizations", "factorization_cache_hits",
+                "factorization_invalidations", "rhs_solves", "grid_refinements",
+            }
+        if mode in {"timings", "detailed"}:
+            assert {
+                "total", "residual", "jacobian", "linear_system",
+                "factorization", "rhs_solve", "symbolic_operations", "grid_refinement",
+            } <= set(snapshot["timings_ms"])
+        expected_scope_fields = {
+            "events" if mode in {"counters", "detailed"} else None,
+            "elapsed_ms" if mode in {"timings", "detailed"} else None,
+        } - {None}
+        assert all(set(scope) == expected_scope_fields for scope in snapshot["scopes"].values())
+    else:
+        # The generic projection and the retained route-native BVP_sci view
+        # must expose identical counter/timing vocabularies and measured values.
+        details = solution.sci_details
+        assert details is not None
+        assert snapshot["counters"] == details.telemetry_counters()
+        assert snapshot["timings_ms"] == details.telemetry_timings_ms()
+    if mode in {"off", "timings"}:
+        assert snapshot["counters"] == {}
+    else:
+        assert snapshot["counters"]
+    if mode in {"off", "counters"}:
+        assert snapshot["timings_ms"] == {}
+    else:
+        assert snapshot["timings_ms"]
+
+
+def test_bvp_api_factory_defaults_match_native_iteration_budget():
+    assert inspect.signature(BvpSolverRequest.damped).parameters["max_iterations"].default == 25
+    assert inspect.signature(BvpSolverRequest.frozen).parameters["max_iterations"].default == 25
+
+
+@pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
+@pytest.mark.parametrize("toolchain", ["gcc", "tcc", "zig", "rust"])
+def test_bvp_api_aot_require_prebuilt_forwards_frontend_and_toolchain(
+    tmp_path, frontend, toolchain,
+):
+    """A missing strict artifact must fail natively, never downgrade to Lambdify."""
+    state = f"missing_{frontend}_{toolchain}_{tmp_path.name.replace('-', '_')}"
+    y = Expr.variable(state)
+    options = SolverOptions(
+        frontend=frontend,
+        execution="aot",
+        aot_policy="require_prebuilt",
+        aot_toolchain=toolchain,
+        aot_output_dir=str(tmp_path / "artifacts"),
+    )
+    request = BvpSolverRequest.sci(
+        [-y], [state], "x", [0.0, 1.0], [(0, "left", 1.0)], [[1.0], [math.exp(-1.0)]],
+        options=options,
+    )
+
+    with pytest.raises((AotArtifactError, PreparationError)) as failure:
+        request.prepare()
+
+    assert failure.value.stage == "construct"
+    assert failure.value.solver == "bvp_api"
+    assert failure.value.route == "sci"
+    assert failure.value.native_kind in {"AotPreparation", "AotHandoff"}
 
 
 @pytest.mark.parametrize("telemetry", ["timings", "detailed"])
@@ -3956,6 +4283,45 @@ def test_bvp_sci_direct_lambdify_builder_supports_mesh_output_and_restart(tmp_pa
     assert restarted.mesh()[-1] == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
+def test_bvp_sci_banded_layout_infers_width_from_symbolic_equations(frontend):
+    y = Expr.variable("y")
+    solver = BvpSciSolver(
+        [-y],
+        ["y"],
+        [Expr.parse("ya_y - 1")],
+        [0.0, 0.5, 1.0],
+        [1.0, 0.7, math.exp(-1.0)],
+        options=SolverOptions(
+            frontend=frontend,
+            execution="lambdify",
+            matrix_layout="banded",
+            telemetry="counters",
+        ),
+        tolerance=1e-5,
+    )
+    result = solver.solve()
+    assert solver.matrix_layout == "banded"
+    assert result.status_code == 0
+    assert result.values()[-1][0] == pytest.approx(math.exp(-1.0), rel=3e-3)
+
+    narrow = SolverOptions(
+        frontend=frontend,
+        execution="lambdify",
+        matrix_layout="banded",
+    )
+    narrow.set_banded_width(0, 0)
+    with pytest.raises(InvalidConfigurationError, match="narrower than the inferred"):
+        BvpSciSolver(
+            [Expr.parse("y + z"), Expr.parse("y")],
+            ["y", "z"],
+            [Expr.parse("ya_y - 1"), Expr.parse("yb_z - 1")],
+            [0.0, 0.5, 1.0],
+            [1.0, 1.0, 0.7, 0.7, math.exp(-1.0), math.exp(-1.0)],
+            options=narrow,
+        )
+
+
 def test_bvp_sci_long_parameter_series_reuses_plan_and_detaches_results():
     rate = Expr.variable("rate")
     solver = BvpSciSolver(
@@ -3965,7 +4331,7 @@ def test_bvp_sci_long_parameter_series_reuses_plan_and_detaches_results():
         [index / 8.0 for index in range(9)],
         [0.0] * 9,
         parameters=["rate"],
-        parameter_values=[1.0],
+        parameter_guess=[1.0],
         options=SolverOptions(telemetry="detailed"),
         tolerance=1e-5,
         max_nodes=64,
@@ -3980,10 +4346,11 @@ def test_bvp_sci_long_parameter_series_reuses_plan_and_detaches_results():
 
     for index in range(20):
         parameter_guess = 0.5 + index * 0.05
-        solver.set_parameters([parameter_guess])
+        solver.set_parameter_guess([parameter_guess])
         result = solver.solve()
         assert result.status_code == 0
         assert result.parameters == pytest.approx([1.0], abs=1e-6)
+        assert solver.parameter_guess() == pytest.approx([1.0], abs=1e-6)
         assert result.values()[-1][0] == pytest.approx(1.0, abs=1e-6)
         assert len(result.mesh()) <= 64
         assert result.telemetry_counters()["preparation_calls"] == 1
@@ -3994,6 +4361,101 @@ def test_bvp_sci_long_parameter_series_reuses_plan_and_detaches_results():
     assert final_counters["workspace_resizes"] <= first_counters["workspace_resizes"] + 1
     assert first.mesh() == first_mesh
     assert first.values_flat() == first_values
+
+
+def test_bvp_sci_external_parameter_loop_keeps_failures_and_continues():
+    rate = Expr.variable("rate")
+    seen_parameter_pairs = []
+
+    def boundary(ya, yb, runtime_parameters):
+        # Free Newton unknowns precede fixed external inputs in callback data.
+        seen_parameter_pairs.append(tuple(runtime_parameters))
+        slope, rate_value = runtime_parameters
+        if rate_value < 0.0:
+            raise RuntimeError("intentional parameter-point failure")
+        return [ya[0], yb[0] - slope]
+
+    solver = BvpSciSolver(
+        [rate], ["y"], [], [0.0, 0.5, 1.0], [0.0, 0.0, 0.0],
+        parameters=["slope"], parameter_guess=[0.0],
+        external_parameters=["rate"], external_parameter_values=[1.0],
+        boundary_callback=boundary,
+        options=SolverOptions(frontend="expr_legacy", execution="lambdify", telemetry="detailed"),
+        tolerance=1e-6,
+    )
+    report = solver.solve_parameter_loop([[1.0], [-1.0], [2.0]])
+
+    assert isinstance(report, BvpSciParameterLoopReport)
+    assert all(isinstance(point, BvpSciParameterLoopPoint) for point in report.points)
+    assert [point.succeeded for point in report.points] == [True, False, True]
+    assert report.stopped_early is False
+    assert report.points[0].external_parameters == pytest.approx([1.0])
+    assert {(0.0, 1.0), (1.0, -1.0), (1.0, 2.0)}.issubset(set(seen_parameter_pairs))
+    assert report.points[1].native_kind is not None
+    assert "intentional parameter-point failure" in report.points[1].error_message
+    with pytest.raises(CallbackError, match="intentional parameter-point failure") as failure:
+        report.points[1].raise_if_failed()
+    assert isinstance(failure.value.__cause__, RuntimeError)
+    assert report.points[0].solution.parameters == pytest.approx([1.0], abs=1e-6)
+    assert report.points[2].solution.values()[-1][0] == pytest.approx(2.0, abs=1e-6)
+    assert report.points[2].solution.parameters == pytest.approx([2.0], abs=1e-6)
+    assert report.points[0].solution.values()[0][0] == pytest.approx(0.0, abs=1e-6)
+    assert report.points[0].telemetry_mode == "detailed"
+    assert report.points[0].telemetry_counters["residual_evaluations"] > 0
+    assert solver.external_parameter_values() == pytest.approx([2.0])
+    assert solver.parameter_guess() == pytest.approx([2.0], abs=1e-6)
+
+
+@pytest.mark.slow
+def test_bvp_sci_external_parameter_loop_runs_on_atom_aot(tmp_path):
+    compiler = shutil.which("tcc") or shutil.which("gcc")
+    if compiler is None:
+        pytest.skip("no supported C compiler is available for BVP_sci AOT loop")
+    toolchain = "tcc" if compiler.lower().endswith(("tcc", "tcc.exe")) else "gcc"
+    rate = Expr.variable("rate")
+
+    def boundary(ya, yb, runtime_parameters):
+        slope, rate_value = runtime_parameters
+        if rate_value < 0.0:
+            raise RuntimeError("intentional AOT parameter-point failure")
+        return [ya[0], yb[0] - slope]
+
+    solver = BvpSciSolver(
+        [rate], ["y"], [], [0.0, 0.5, 1.0], [0.0, 0.0, 0.0],
+        parameters=["slope"], parameter_guess=[0.0],
+        external_parameters=["rate"], external_parameter_values=[1.0],
+        boundary_callback=boundary,
+        options=SolverOptions(
+            frontend="atom_native", execution="aot", aot_toolchain=toolchain,
+            aot_profile="debug", aot_output_dir=str(tmp_path / "external-input-aot"),
+            telemetry="detailed",
+        ),
+        tolerance=1e-6,
+    )
+    report = solver.solve_parameter_loop([[1.0], [-1.0], [2.0]])
+
+    assert [point.succeeded for point in report.points] == [True, False, True]
+    assert report.points[0].solution.external_parameters == pytest.approx([1.0])
+    assert report.points[0].solution.parameters == pytest.approx([1.0], abs=1e-6)
+    assert report.points[2].solution.values()[-1][0] == pytest.approx(2.0, abs=1e-6)
+    assert report.points[2].solution.parameters == pytest.approx([2.0], abs=1e-6)
+    assert "intentional AOT parameter-point failure" in report.points[1].error_message
+    assert report.points[0].solution.telemetry_aot_metadata()["execution"] == "aot"
+
+
+def test_bvp_sci_constructor_rejects_ambiguous_parameter_guess_aliases():
+    rate = Expr.variable("rate")
+    with pytest.raises(InvalidConfigurationError, match="pass only parameter_guess"):
+        BvpSciSolver(
+            [rate],
+            ["y"],
+            [Expr.parse("ya_y"), Expr.parse("yb_y - 1")],
+            [0.0, 0.5, 1.0],
+            [0.0, 0.0, 0.0],
+            parameters=["rate"],
+            parameter_guess=[0.7],
+            parameter_values=[0.7],
+        )
 
 
 def test_bvp_sci_numerical_callbacks_support_analytic_state_and_parameter_jacobians():
@@ -4610,8 +5072,7 @@ def test_bvp_damp_naive_prepared_parameter_rebind_uses_native_route(capsys):
     assert first.telemetry_counters()["iterations"] >= 1
     assert first.telemetry_timings_ms()["total_ms"] >= 0.0
 
-    solver.set_parameters([2.0])
-    warm = solver.solve_prepared()
+    warm = solver.solve_with_parameter_values([2.0])
     assert warm.parameters == pytest.approx([2.0])
     assert warm.values()[0][-1] == pytest.approx(2.0, abs=1e-8)
     assert capsys.readouterr().out == ""
@@ -4713,12 +5174,109 @@ def test_bvp_damp_frozen_prepared_parameter_rebind():
     )
     solver.prepare()
     first = solver.solve_prepared()
-    solver.set_parameters([2.0])
-    second = solver.solve_prepared()
+    second = solver.solve_with_parameter_values([2.0])
     assert first.values()[0][-1] == pytest.approx(1.0, abs=1e-8)
     assert second.values()[0][-1] == pytest.approx(2.0, abs=1e-8)
     assert second.parameters == pytest.approx([2.0])
     assert second.telemetry_timings_ms()["total_ms"] >= 0.0
+
+
+def test_bvp_damp_frozen_parameter_loop_keeps_typed_failures_and_continues():
+    solver = BvpDampFrozenSolver(
+        [Expr.parse("alpha^0.5")], ["y"], {"y": [(0, 0.0)]},
+        [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], [0.0] * 6,
+        parameters=["alpha"], parameter_values=[1.0],
+        options=SolverOptions(
+            frontend="expr_legacy", execution="lambdify", matrix_layout="sparse",
+            telemetry="detailed",
+        ),
+        policy="Frozen_naive",
+    )
+
+    report = solver.solve_parameter_loop([[1.0], [-1.0], [4.0]])
+    assert isinstance(report, BvpDampParameterLoopReport)
+    assert report.completed_count() == 3
+    assert report.stop_error is None
+    first, failed, last = report.points
+    assert all(isinstance(point, BvpDampParameterLoopPoint) for point in report.points)
+    assert [point.index for point in report.points] == [0, 1, 2]
+    assert [point.status for point in report.points] == ["converged", "failed", "converged"]
+    assert first.parameters == [1.0]
+    assert first.solution.values()[0][-1] == pytest.approx(1.0, abs=1e-8)
+    assert first.solution.telemetry_counters()["iterations"] >= 1
+    assert first.telemetry_timings_ms()["total_ms"] >= 0.0
+    assert failed.solution is None
+    assert isinstance(failed.error, SolverError)
+    assert failed.error.solver == "bvp_damp_frozen"
+    assert failed.error.stage == "solve"
+    assert failed.error.route == "expr_legacy:lambdify:sparse"
+    assert failed.error.native_kind is not None
+    assert failed.telemetry_counters()["iterations"] >= 1
+    assert failed.telemetry_timings_ms()["total_ms"] >= 0.0
+    assert failed.telemetry_scope_timings_ms()
+    assert last.solution.values()[0][-1] == pytest.approx(2.0, abs=1e-8)
+    assert last.parameters == [4.0]
+    assert solver.parameter_values == [4.0]
+
+
+def test_bvp_damp_frozen_parameter_loop_rejects_invalid_input_before_prepare():
+    solver = BvpDampFrozenSolver(
+        [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
+        [0.0, 0.5, 1.0], [0.0] * 3,
+        parameters=["rate"], parameter_values=[1.0],
+    )
+    with pytest.raises(InvalidConfigurationError, match="at least one"):
+        solver.solve_parameter_loop([])
+    with pytest.raises(InvalidConfigurationError, match="expected 1 values"):
+        solver.solve_parameter_loop([[1.0], [2.0, 3.0]])
+    assert solver.provenance()["prepared"] == "false"
+
+
+def test_bvp_damp_naive_parameter_loop_uses_same_ordered_failure_contract():
+    solver = BvpDampNaiveSolver(
+        [Expr.parse("alpha^0.5")], ["y"], {"y": [(0, 0.0)]},
+        [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5,
+        parameters=["alpha"], parameter_values=[1.0],
+        options=SolverOptions(telemetry="counters"),
+    )
+    report = solver.solve_parameter_loop([[1.0], [-1.0], [4.0]])
+    assert [point.status for point in report.points] == ["converged", "failed", "converged"]
+    assert report.points[2].solution.values()[0][-1] == pytest.approx(2.0, abs=1e-8)
+    assert isinstance(report.points[1].error, SolverError)
+    assert report.points[1].error.solver == "bvp_damp_naive"
+    assert report.points[1].telemetry_counters()
+
+
+def test_bvp_damp_adaptive_parameter_loop_recovers_after_failed_parameter():
+    solver = BvpDampSolver(
+        [Expr.parse("alpha^0.5")], ["y"], {"y": [(0, 0.0)]},
+        [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5,
+        parameters=["alpha"], parameter_values=[1.0],
+        options=SolverOptions(
+            frontend="expr_legacy", execution="lambdify", matrix_layout="dense",
+            telemetry="counters",
+        ),
+        tolerance=1e-9, max_refinements=1, grid_method="double_points",
+        bounds={"y": (-10.0, 10.0)},
+    )
+
+    report = solver.solve_parameter_loop([[1.0], [-1.0], [4.0]])
+    assert report.stop_error is None
+    assert [point.index for point in report.points] == [0, 1, 2]
+    assert [point.status for point in report.points] == ["converged", "failed", "converged"]
+    first, failed, last = report.points
+    assert len(first.solution.mesh()) > 5
+    assert first.solution.values()[0][-1] == pytest.approx(1.0, abs=1e-7)
+    assert isinstance(failed.error, SolverError)
+    assert failed.error.solver == "bvp_damp"
+    assert failed.error.stage == "solve"
+    assert failed.error.route == "expr_legacy:lambdify:dense"
+    assert failed.error.native_kind is not None
+    assert last.parameters == [4.0]
+    assert last.solution.values()[0][-1] == pytest.approx(2.0, abs=1e-7)
+    assert len(last.solution.mesh()) >= len(first.solution.mesh())
+    assert last.telemetry_counters()["iterations"] > 0
+    assert solver.parameter_values == [4.0]
 
 
 @pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
@@ -4788,7 +5346,7 @@ def test_bvp_damp_prepared_parameter_continuation_and_restart_contract():
     first_counters = first.telemetry_counters()
     assert first.status == "finished"
 
-    solver.set_parameters([5.0])
+    solver.set_parameter_values([5.0])
     assert solver.parameter_values == pytest.approx([5.0])
     second = solver.solve_prepared()
     second_counters = second.telemetry_counters()
@@ -4822,9 +5380,9 @@ def test_bvp_damp_prepared_lifecycle_and_parameter_failures_are_typed():
     with pytest.raises(SolverError, match="prepared plan"):
         solver.solve_prepared()
     with pytest.raises(InvalidConfigurationError, match="must contain 1 values"):
-        solver.set_parameters([])
+        solver.set_parameter_values([])
     with pytest.raises(InvalidConfigurationError, match="finite"):
-        solver.set_parameters([math.nan])
+        solver.set_parameter_values([math.nan])
     with pytest.raises(InvalidConfigurationError, match="initial_state"):
         solver.restart([1.0, 1.0])
 
@@ -4982,10 +5540,49 @@ def test_core_ivp_pyo3_types_and_lifecycle_methods_have_python_docstrings():
     """Rust API comments must survive PyO3 export and be useful via help()."""
     documented = (
         (SolverOptions, ("frontend", "execution", "telemetry")),
-        (BdfSolver, ("prepare", "solve", "restart", "continue_with_parameters")),
-        (BackwardEulerSolver, ("validate", "solve", "continue_to", "restart")),
-        (RadauSolver, ("prepare", "solve", "continue_with_parameters", "restart")),
-        (Lsode2Solver, ("prepare", "solve", "continue_with_parameters", "restart")),
+        (
+            BdfSolver,
+            (
+                "prepare",
+                "solve",
+                "solve_with_parameter_values",
+                "solve_with_parameter_values_in_interval",
+                "restart",
+                "continue_with_parameters",
+            ),
+        ),
+        (
+            BackwardEulerSolver,
+            (
+                "validate",
+                "solve",
+                "solve_with_parameter_values",
+                "solve_with_parameter_values_in_interval",
+                "continue_to",
+                "restart",
+            ),
+        ),
+        (
+            RadauSolver,
+            (
+                "prepare",
+                "solve",
+                "solve_with_parameter_values",
+                "solve_with_parameter_values_in_interval",
+                "restart",
+            ),
+        ),
+        (
+            Lsode2Solver,
+            (
+                "prepare",
+                "solve",
+                "solve_with_parameter_values",
+                "solve_with_parameter_values_in_interval",
+                "continue_with_parameters",
+                "restart",
+            ),
+        ),
     )
     for exposed_type, expected_terms in documented:
         assert exposed_type.__doc__ and len(exposed_type.__doc__.strip()) > 40
@@ -4995,6 +5592,144 @@ def test_core_ivp_pyo3_types_and_lifecycle_methods_have_python_docstrings():
             assert method.__doc__ and len(method.__doc__.strip()) > 20, (
                 f"{exposed_type.__name__}.{method_name} lacks a Python-visible contract"
             )
+
+
+def test_ivp_solver_fresh_parameterized_solve_shortcuts():
+    from rustedscithe import (
+        BackwardEulerSolver,
+        BdfSolver,
+        Lsode2Solver,
+        RadauSolver,
+    )
+
+    make_options = lambda: SolverOptions(telemetry="counters")
+    solvers = [
+        (
+            BdfSolver(
+                [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1, 0.02,
+                parameters=["rate"], parameter_values=[1.0], options=make_options(),
+            ),
+            lambda solver: solver.solve_with_parameter_values([2.0], [1.5]),
+            lambda solver: solver.solve_with_parameter_values_in_interval(
+                0.2, [3.0], 0.4, [0.8],
+            ),
+        ),
+        (
+            BackwardEulerSolver(
+                [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1,
+                h=0.001, parameters=["rate"], parameter_values=[1.0],
+                options=make_options(),
+            ),
+            lambda solver: solver.solve_with_parameter_values([2.0], [1.5]),
+            lambda solver: solver.solve_with_parameter_values_in_interval(
+                0.2, [3.0], 0.4, [0.8],
+            ),
+        ),
+        (
+            Lsode2Solver(
+                [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1, 0.01,
+                parameters=["rate"], parameter_values=[1.0], options=make_options(),
+            ),
+            lambda solver: solver.solve_with_parameter_values([2.0], [1.5]),
+            lambda solver: solver.solve_with_parameter_values_in_interval(
+                0.2, [3.0], 0.4, [0.8],
+            ),
+        ),
+        (
+            RadauSolver(
+                [Expr.parse("-rate*y")], ["y"], "t", 0.0, 0.1, 0.02,
+                parameters=["rate"], parameter_values=[1.0], options=make_options(),
+            ),
+            lambda solver: solver.solve_with_parameter_values([2.0], [1.5]),
+            lambda solver: solver.solve_with_parameter_values_in_interval(
+                0.2, [3.0], 0.4, [0.8],
+            ),
+        ),
+    ]
+
+    def terminal_state(solution):
+        if hasattr(solution, "states_array"):
+            return float(solution.states_array()[-1, 0])
+        return float(solution.final_state_array()[0])
+
+    def end_time(solution):
+        if hasattr(solution, "times_array"):
+            return float(solution.times_array()[-1])
+        return float(solution.final_time)
+
+    for solver, solve_configured_interval, solve_new_interval in solvers:
+        prepare = getattr(solver, "prepare", None)
+        if prepare is not None:
+            prepare()
+        first = solve_configured_interval(solver)
+        assert terminal_state(first) == pytest.approx(
+            2.0 * math.exp(-1.5 * 0.1), rel=3e-3,
+        )
+        second = solve_new_interval(solver)
+        assert terminal_state(second) == pytest.approx(
+            3.0 * math.exp(-0.8 * 0.2), rel=3e-3,
+        )
+        assert end_time(second) == pytest.approx(0.4)
+
+
+def test_radau_fresh_solve_api_has_no_continuation_aliases():
+    from rustedscithe import PreparedStiffSolver, RadauCallbackSolver, RadauSolver
+
+    assert not hasattr(RadauSolver, "continue_with_parameters")
+    assert not hasattr(RadauCallbackSolver, "continue_with_initial_state")
+    assert not hasattr(PreparedStiffSolver, "continue_radau_with_parameters")
+
+
+def test_stiff_api_fresh_parameterized_solve_shortcuts_dispatch_all_routes():
+    from rustedscithe import StiffSolverRequest
+
+    expression = [Expr.parse("-rate*y")]
+    common = dict(
+        expressions=expression,
+        state_variables=["y"],
+        time_variable="t",
+        parameters=["rate"],
+        parameter_values=[1.0],
+        options=SolverOptions(telemetry="counters"),
+    )
+    requests = [
+        StiffSolverRequest.bdf(
+            **common, y0=[1.0], t0=0.0, t_end=0.1, max_step=0.02,
+        ),
+        StiffSolverRequest.backward_euler(
+            **common, y0=[1.0], t0=0.0, t_end=0.1, h=0.001,
+        ),
+        StiffSolverRequest.lsode2(
+            **common, y0=[1.0], t0=0.0, t_end=0.1, max_step=0.01,
+        ),
+        StiffSolverRequest.radau(
+            **common, y0=[1.0], t0=0.0, t_end=0.1, max_step=0.02,
+        ),
+    ]
+
+    def terminal_state(solution):
+        if hasattr(solution, "states_array"):
+            return float(solution.states_array()[-1, 0])
+        return float(solution.final_state_array()[0])
+
+    def end_time(solution):
+        if hasattr(solution, "times_array"):
+            return float(solution.times_array()[-1])
+        return float(solution.final_time)
+
+    for request in requests:
+        prepared = request.prepare()
+        first = prepared.solve_with_parameter_values([2.0], [1.5])
+        assert terminal_state(first) == pytest.approx(
+            2.0 * math.exp(-1.5 * 0.1), rel=3e-3,
+        )
+        second = prepared.solve_with_parameter_values_in_interval(
+            0.2, [3.0], 0.4, [0.8],
+        )
+        assert terminal_state(second) == pytest.approx(
+            3.0 * math.exp(-0.8 * 0.2), rel=3e-3,
+        )
+        assert end_time(second) == pytest.approx(0.4)
 
 
 def test_internal_native_helpers_are_not_exposed_as_python_methods():
@@ -5049,7 +5784,7 @@ def test_callback_ivp_and_nonlinear_pyo3_docs_cover_public_contracts():
         ),
         (
             RadauCallbackSolver,
-            ("solve", "continue_with_initial_state", "restart", "provenance"),
+            ("solve", "restart", "provenance"),
         ),
         (
             NonlinearSolution,
@@ -5630,3 +6365,696 @@ def test_solver_options_expose_opt_in_native_logging_levels():
         options.validate_for("radau")
     assert capabilities("bdf").supports_logging is True
     assert capabilities("nonstiff").supports_logging is False
+
+
+def test_stiff_preset_catalog_composition_and_native_validation():
+    from rustedscithe import StiffPreset
+
+    catalog = StiffPreset.catalog()
+    assert {item["name"] for item in catalog} >= {
+        "solve_1d",
+        "expr_dense",
+        "atom_sparse",
+        "aot_tcc",
+    }
+
+    preset = (
+        StiffPreset.solve_1d()
+        .with_telemetry("detailed")
+        .with_logging("info")
+        .with_callback_policy("sequential")
+    )
+    details = preset.describe()
+    assert details["required_state_dimension"] == 1
+    assert "symbolic_frontend" in details["fields_changed"]
+    assert "telemetry_mode" in details["fields_changed"]
+    assert {item["solver"] for item in details["solvers"]} == {
+        "bdf",
+        "radau",
+        "backward_euler",
+        "lsode2",
+    }
+
+    composed = StiffPreset.expr_dense().compose(StiffPreset.lambdify())
+    assert "symbolic_execution" in composed.describe()["fields_changed"]
+    with pytest.raises(InvalidConfigurationError, match="frontend"):
+        StiffPreset.expr_dense().compose(StiffPreset.atom_dense())
+    with pytest.raises(UnsupportedOptionError, match="frontend"):
+        StiffPreset.expr_dense().with_frontend("numerical")
+
+
+def test_stiff_api_bdf_native_request_prepares_and_dispatches_without_wrapper_copy():
+    from rustedscithe import BdfSolution, StiffPreset, StiffSolverRequest
+
+    request = StiffSolverRequest.bdf(
+        [Expr.parse("-y")],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.1,
+        0.025,
+        options=SolverOptions(telemetry="counters"),
+    )
+    prepared = request.prepare(StiffPreset.solve_1d())
+    assert prepared.solver == "bdf"
+    assert prepared.telemetry_mode == "counters"
+    with pytest.raises(InvalidConfigurationError, match="not available before"):
+        prepared.trajectory_arrays()
+    result = prepared.solve()
+    assert isinstance(result, BdfSolution)
+    assert prepared.status == result.status
+    assert result.states()[-1][0] == pytest.approx(math.exp(-0.1), rel=2e-3)
+    times, states = prepared.trajectory_arrays()
+    np.testing.assert_array_equal(times, result.times_array())
+    np.testing.assert_array_equal(states, result.states_array())
+    snapshot = prepared.telemetry_snapshot()
+    assert snapshot["solver"] == "bdf"
+    assert snapshot["mode"] == "counters"
+    assert snapshot["bdf"]["counters"] == result.telemetry_counters()
+    restarted = prepared.restart(0.0, [2.0], 0.1)
+    assert isinstance(restarted, BdfSolution)
+    assert restarted.states()[-1][0] == pytest.approx(2.0 * math.exp(-0.1), rel=2e-3)
+    with pytest.raises(InvalidConfigurationError, match="already been consumed"):
+        request.prepare()
+
+
+def test_bdf_parameter_loop_retains_typed_failures_and_solution_telemetry():
+    solver = BdfSolver(
+        [Expr.parse("-rate*y")],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.2,
+        0.02,
+        options=SolverOptions(telemetry="counters"),
+        parameters=["rate"],
+        parameter_values=[1.0],
+    )
+    solver.prepare()
+
+    points = solver.solve_parameter_loop([1.0], [[1.0], [], [2.0]])
+
+    assert all(isinstance(point, IvpParameterLoopPoint) for point in points)
+    assert [point.index for point in points] == [0, 1, 2]
+    assert [point.succeeded for point in points] == [True, False, True]
+    assert points[0].parameter_values == [1.0]
+    first, last = points[0].solution, points[2].solution
+    assert first is not None and last is not None
+    np.testing.assert_allclose(first.states_array()[0], [1.0])
+    np.testing.assert_allclose(last.states_array()[0], [1.0])
+    assert first.telemetry_mode == "counters"
+    assert first.telemetry_counters()["solve_calls"] > 0
+    assert points[1].solution is None
+    assert isinstance(points[1].error, InvalidConfigurationError)
+    assert points[1].error.stage == "solve"
+    assert points[1].error.solver == "bdf"
+    assert points[1].error.route.startswith("expr_legacy:")
+
+
+@pytest.mark.parametrize(
+    "solver_factory,output",
+    [
+        (
+            lambda: BackwardEulerSolver(
+                [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1,
+                h=0.01, parameters=["rate"], parameter_values=[1.0],
+                options=SolverOptions(telemetry="counters"),
+            ),
+            "states_array",
+        ),
+        (
+            lambda: Lsode2Solver(
+                [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1,
+                0.02, parameters=["rate"], parameter_values=[1.0],
+                options=SolverOptions(telemetry="counters"),
+            ),
+            "states_array",
+        ),
+        (
+            lambda: RadauSolver(
+                [Expr.parse("-rate*y")], ["y"], "t", 0.0, 0.1, 0.02,
+                parameters=["rate"], parameter_values=[1.0], output="dense",
+                options=SolverOptions(telemetry="counters"),
+            ),
+            "trajectory_arrays",
+        ),
+    ],
+)
+def test_direct_ivp_parameter_loops_keep_success_failure_success(solver_factory, output):
+    solver = solver_factory()
+    if hasattr(solver, "prepare"):
+        solver.prepare()
+
+    points = solver.solve_parameter_loop([1.0], [[0.5], [], [2.0]])
+
+    assert [point.succeeded for point in points] == [True, False, True]
+    assert [point.index for point in points] == [0, 1, 2]
+    assert isinstance(points[1].error, InvalidConfigurationError)
+    assert points[1].error.stage == "solve"
+    for point in (points[0], points[2]):
+        solution = point.solution
+        if output == "trajectory_arrays":
+            times, states = solution.trajectory_arrays()
+        else:
+            times = solution.times_array()
+            states = solution.states_array()
+        assert states.shape == (len(times), 1)
+        assert times[0] == pytest.approx(0.0)
+        assert states[0, 0] == pytest.approx(1.0)
+        assert solution.telemetry_counters()
+
+
+def test_stiff_api_parameter_loop_preserves_each_route_and_failure():
+    from rustedscithe import StiffPreset, StiffSolverRequest
+
+    request = StiffSolverRequest.backward_euler(
+        [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1,
+        h=0.01, parameters=["rate"], parameter_values=[1.0],
+        options=SolverOptions(telemetry="counters"),
+    )
+    prepared = request.prepare(StiffPreset.solve_1d())
+    points = prepared.solve_parameter_loop([1.0], [[0.5], [], [2.0]])
+
+    assert [point.succeeded for point in points] == [True, False, True]
+    assert points[1].error is not None
+    assert points[1].error.stage == "solve"
+    assert points[1].error.solver == "backward_euler"
+    assert points[1].error.route == "stiff_api"
+    times, states = points[2].solution.times_array(), points[2].solution.states_array()
+    assert states.shape == (len(times), 1)
+    assert states[0, 0] == pytest.approx(1.0)
+    assert points[2].solution.telemetry_counters()
+
+
+@pytest.mark.parametrize(
+    "request_factory",
+    [
+        lambda Expr, SolverOptions, StiffSolverRequest: StiffSolverRequest.bdf(
+            [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1, 0.02,
+            parameters=["rate"], parameter_values=[1.0],
+            options=SolverOptions(telemetry="counters"),
+        ),
+        lambda Expr, SolverOptions, StiffSolverRequest: StiffSolverRequest.radau(
+            [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1, 0.02,
+            parameters=["rate"], parameter_values=[1.0], output="dense",
+            options=SolverOptions(telemetry="counters"),
+        ),
+        lambda Expr, SolverOptions, StiffSolverRequest: StiffSolverRequest.lsode2(
+            [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1, 0.02,
+            parameters=["rate"], parameter_values=[1.0],
+            options=SolverOptions(telemetry="counters"), native_execution="bridge",
+        ),
+    ],
+    ids=["bdf", "radau", "lsode2"],
+)
+def test_stiff_api_parameter_loop_continues_after_failure_for_each_route(request_factory):
+    from rustedscithe import StiffPreset, StiffSolverRequest
+
+    request = request_factory(Expr, SolverOptions, StiffSolverRequest)
+    prepared = request.prepare(StiffPreset.solve_1d())
+    points = prepared.solve_parameter_loop([1.0], [[0.5], [], [2.0]])
+
+    assert [point.succeeded for point in points] == [True, False, True]
+    assert points[1].error is not None
+    assert points[1].error.stage == "solve"
+    assert points[1].error.solver == prepared.solver
+    assert points[1].error.route
+    for point in (points[0], points[2]):
+        if hasattr(point.solution, "trajectory_arrays"):
+            times, states = point.solution.trajectory_arrays()
+        else:
+            times = point.solution.times_array()
+            states = point.solution.states_array()
+        assert states.shape == (len(times), 1)
+        assert states[0, 0] == pytest.approx(1.0)
+        assert point.solution.telemetry_counters()
+
+
+def test_stiff_api_backward_euler_preserves_fixed_step_and_parameter_binding():
+    from rustedscithe import BackwardEulerSolution, StiffPreset, StiffSolverRequest
+
+    request = StiffSolverRequest.backward_euler(
+        [Expr.parse("-rate*y")],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.2,
+        h=0.01,
+        parameters=["rate"],
+        parameter_values=[2.0],
+        options=SolverOptions(telemetry="counters"),
+    )
+    prepared = request.prepare(StiffPreset.solve_1d())
+    assert prepared.solver == "backward_euler"
+    assert prepared.telemetry_mode == "counters"
+    result = prepared.solve()
+    assert isinstance(result, BackwardEulerSolution)
+    assert prepared.status == result.status
+    assert result.states()[-1][0] == pytest.approx((1.0 + 2.0 * 0.01) ** -20, rel=1e-10)
+    times, states = prepared.trajectory_arrays()
+    np.testing.assert_array_equal(times, result.times_array())
+    np.testing.assert_array_equal(states, result.states_array())
+    assert len(result.times()) == 21
+    restarted = prepared.restart(0.0, [2.0], 0.2)
+    assert isinstance(restarted, BackwardEulerSolution)
+    assert restarted.states()[-1][0] == pytest.approx(2.0 * (1.0 + 0.02) ** -20, rel=1e-10)
+
+    with pytest.raises(InvalidConfigurationError, match="parameter values"):
+        StiffSolverRequest.backward_euler(
+            [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1,
+            parameters=["rate"], parameter_values=[1.0, 2.0],
+        )
+
+
+def test_stiff_api_radau_preserves_initial_state_output_and_native_telemetry():
+    from rustedscithe import RadauSolution, StiffPreset, StiffSolverRequest
+
+    request = StiffSolverRequest.radau(
+        [Expr.parse("-y")],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.2,
+        0.1,
+        options=SolverOptions(telemetry="counters"),
+        output="dense",
+    )
+    prepared = request.prepare(StiffPreset.solve_1d())
+    assert prepared.solver == "radau"
+    assert prepared.telemetry_mode == "counters"
+    assert prepared.status is None
+    result = prepared.solve()
+    assert isinstance(result, RadauSolution)
+    assert result.final_time is not None
+    assert result.final_time == pytest.approx(0.2)
+    assert result.final_state[0] == pytest.approx(math.exp(-0.2), rel=3e-3)
+    assert result.sample(0.1)[0] == pytest.approx(math.exp(-0.1), rel=3e-3)
+    assert result.telemetry_counters()
+    restarted = prepared.restart(0.0, [2.0], 0.2)
+    assert isinstance(restarted, RadauSolution)
+    assert restarted.final_state[0] == pytest.approx(2.0 * math.exp(-0.2), rel=3e-3)
+    with pytest.raises(InvalidConfigurationError, match="dimension") as captured:
+        prepared.restart(0.0, [2.0, 3.0], 0.2)
+    assert captured.value.stage == "restart"
+    assert captured.value.solver == "radau"
+    assert captured.value.route == "stiff_api"
+    assert captured.value.native_kind == "InitialStateDimension"
+    with pytest.raises(UnsupportedOptionError, match="RadauSolution returned by solve"):
+        prepared.telemetry_snapshot()
+    with pytest.raises(InvalidConfigurationError, match="belongs to the RadauSolution"):
+        prepared.trajectory_arrays()
+
+    with pytest.raises(UnsupportedOptionError, match="logging"):
+        logging_options = SolverOptions()
+        logging_options.set_logging_level("info")
+        StiffSolverRequest.radau(
+            [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.1, 0.05,
+            options=logging_options,
+        )
+
+
+def test_stiff_api_lsode2_keeps_method_native_execution_and_parameter_values():
+    from rustedscithe import Lsode2Solution, StiffPreset, StiffSolverRequest
+
+    request = StiffSolverRequest.lsode2(
+        [Expr.parse("-rate*y")],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.2,
+        0.05,
+        parameters=["rate"],
+        parameter_values=[0.7],
+        method="bdf",
+        native_execution="native",
+        options=SolverOptions(telemetry="counters"),
+    )
+    prepared = request.prepare(StiffPreset.solve_1d())
+    assert prepared.solver == "lsode2"
+    assert prepared.telemetry_mode == "counters"
+    result = prepared.solve()
+    assert isinstance(result, Lsode2Solution)
+    assert prepared.status == result.status
+    assert result.final_time is not None
+    assert result.final_time == pytest.approx(0.2)
+    assert result.states()[-1][0] == pytest.approx(math.exp(-0.14), rel=3e-2)
+    assert result.method == "bdf"
+    assert result.telemetry_counters()
+    times, states = prepared.trajectory_arrays()
+    np.testing.assert_array_equal(times, result.times_array())
+    np.testing.assert_array_equal(states, result.states_array())
+    restarted = prepared.restart(0.0, [2.0], 0.2)
+    assert isinstance(restarted, Lsode2Solution)
+    assert restarted.states()[-1][0] == pytest.approx(2.0 * math.exp(-0.14), rel=3e-2)
+
+    with pytest.raises(UnsupportedOptionError, match="method"):
+        StiffSolverRequest.lsode2(
+            [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.1, 0.05,
+            method="radau",
+        )
+
+
+def test_stiff_api_lsode2_analytical_callbacks_restore_original_python_exception():
+    from rustedscithe import StiffSolverRequest
+
+    def residual(_time, _state):
+        raise ValueError("residual callback sentinel")
+
+    def jacobian(_time, _state):
+        return [[-1.0]]
+
+    request = StiffSolverRequest.lsode2(
+        [Expr.parse("-y")],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.2,
+        0.05,
+        residual_callback=residual,
+        jacobian_callback=jacobian,
+        options=SolverOptions(telemetry="counters"),
+    )
+    prepared = request.prepare()
+    with pytest.raises(CallbackError, match="residual_callback raised") as captured:
+        prepared.solve()
+
+    assert captured.value.category == "callback"
+    assert captured.value.stage == "solve"
+    assert captured.value.solver == "lsode2"
+    assert captured.value.route.endswith("lambdify:dense")
+    assert isinstance(captured.value.__cause__, ValueError)
+    assert str(captured.value.__cause__) == "residual callback sentinel"
+
+
+def test_stiff_api_lsode2_rejects_unpaired_python_callbacks():
+    from rustedscithe import StiffSolverRequest
+
+    with pytest.raises(InvalidConfigurationError, match="must be provided together"):
+        StiffSolverRequest.lsode2(
+            [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.1, 0.05,
+            residual_callback=lambda _time, state: [-state[0]],
+        )
+
+
+def test_stiff_api_lsode2_python_callbacks_reject_aot_and_inferred_bands():
+    from rustedscithe import StiffSolverRequest
+
+    callbacks = {
+        "residual_callback": lambda _time, state: [-state[0]],
+        "jacobian_callback": lambda _time, _state: [[-1.0]],
+    }
+    with pytest.raises(UnsupportedOptionError, match="require execution='lambdify'"):
+        StiffSolverRequest.lsode2(
+            [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.1, 0.05,
+            options=SolverOptions(execution="aot"), **callbacks,
+        )
+
+    with pytest.raises(UnsupportedOptionError, match="explicit band width"):
+        StiffSolverRequest.lsode2(
+            [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.1, 0.05,
+            options=SolverOptions(matrix_layout="banded"), **callbacks,
+        )
+
+
+def test_stiff_api_prepare_preserves_typed_unsupported_capability_context():
+    from rustedscithe import StiffPreset, StiffSolverRequest
+
+    request = StiffSolverRequest.radau(
+        [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.1, 0.05,
+    )
+    preset = StiffPreset.expr_dense().with_logging("info")
+    with pytest.raises(UnsupportedOptionError, match="logging") as captured:
+        request.prepare(preset)
+
+    error = captured.value
+    assert error.category == "unsupported_option"
+    assert error.stage == "configuration"
+    assert error.solver == "radau"
+    assert error.route == "stiff_api:preset"
+    assert error.native_kind == "UnsupportedCapability"
+
+
+def test_stiff_api_radau_forwards_sampled_output_policy():
+    from rustedscithe import RadauSolution, StiffPreset, StiffSolverRequest
+
+    request = StiffSolverRequest.radau(
+        [Expr.parse("-y")],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.2,
+        0.1,
+        output="sampled",
+        sample_times=[0.1, 0.2],
+    )
+    solution = request.prepare(StiffPreset.solve_1d()).solve()
+    assert isinstance(solution, RadauSolution)
+    assert solution.sample(0.1)[0] == pytest.approx(math.exp(-0.1), rel=3e-3)
+    assert solution.sample(0.2)[0] == pytest.approx(math.exp(-0.2), rel=3e-3)
+
+    with pytest.raises(InvalidConfigurationError, match="sample_times are required"):
+        StiffSolverRequest.radau(
+            [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.1, 0.05,
+            output="sampled",
+        )
+
+
+def test_stiff_api_postprocess_plan_exports_retained_and_radau_trajectories(tmp_path):
+    from rustedscithe import StiffPostprocessPlan, StiffSolverRequest
+
+    bdf = StiffSolverRequest.bdf(
+        [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.2, 0.05,
+        options=SolverOptions(telemetry="counters"),
+    ).prepare()
+    bdf.solve()
+    csv_path = tmp_path / "bdf.csv"
+    report_path = tmp_path / "bdf.md"
+    plan = StiffPostprocessPlan().save_csv(str(csv_path)).write_report(str(report_path))
+    result = bdf.postprocess(plan, "time", ["y"])
+    assert result["all_done"] is True
+    assert [entry["status"] for entry in result["entries"]] == ["done", "done"]
+    assert csv_path.is_file() and report_path.is_file()
+    csv_rows = csv_path.read_text(encoding="utf-8").splitlines()
+    assert csv_rows[0].split(",") == ["time", "y"]
+    assert float(csv_rows[-1].split(",")[0]) == pytest.approx(0.2)
+
+    times = [0.0, 0.1, 0.2]
+    radau_solution = StiffSolverRequest.radau(
+        [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.2, 0.05,
+        output="sampled", sample_times=times,
+    ).prepare().solve()
+    radau_csv = tmp_path / "radau.csv"
+    radau_report = radau_solution.postprocess(
+        StiffPostprocessPlan().save_csv(str(radau_csv)),
+        times,
+        "time",
+        ["y"],
+    )
+    assert radau_report["all_done"] is True
+    assert radau_report["entries"][0]["action"] == "save_csv"
+    assert radau_csv.is_file()
+
+
+def test_stiff_api_postprocess_preserves_typed_missing_trajectory_error():
+    from rustedscithe import StiffPostprocessPlan, StiffSolverRequest
+
+    prepared = StiffSolverRequest.bdf(
+        [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.2, 0.05,
+    ).prepare()
+    with pytest.raises(InvalidConfigurationError, match="not available") as captured:
+        prepared.postprocess(StiffPostprocessPlan().save_csv("unused.csv"), "time", ["y"])
+    assert captured.value.stage == "postprocess"
+    assert captured.value.solver == "bdf"
+    assert captured.value.native_kind == "ResultUnavailable"
+
+
+def test_stiff_api_time_segments_and_fresh_radau_solve_keep_native_semantics():
+    from rustedscithe import (
+        BackwardEulerSolution,
+        BdfSolution,
+        Lsode2Solution,
+        RadauSolution,
+        StiffSolverRequest,
+    )
+
+    bdf = StiffSolverRequest.bdf(
+        [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1, 0.02,
+        parameters=["rate"], parameter_values=[0.5],
+    ).prepare()
+    bdf_first = bdf.solve()
+    bdf_next = bdf.continue_bdf_with_parameters([1.2], 0.2)
+    assert isinstance(bdf_first, BdfSolution) and isinstance(bdf_next, BdfSolution)
+    assert bdf_next.states()[-1][0] == pytest.approx(
+        bdf_first.states()[-1][0] * math.exp(-1.2 * 0.1), rel=2e-6
+    )
+
+    backward_euler = StiffSolverRequest.backward_euler(
+        [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1,
+        h=0.001, parameters=["rate"], parameter_values=[0.5],
+    ).prepare()
+    be_first = backward_euler.solve()
+    be_next = backward_euler.continue_backward_euler(0.2, [1.2])
+    assert isinstance(be_first, BackwardEulerSolution) and isinstance(be_next, BackwardEulerSolution)
+    assert be_next.states()[-1][0] == pytest.approx(
+        be_first.states()[-1][0] * math.exp(-1.2 * 0.1), rel=2e-3
+    )
+
+    radau = StiffSolverRequest.radau(
+        [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1, 0.025,
+        parameters=["rate"], parameter_values=[0.5], output="dense",
+    ).prepare()
+    radau.solve()
+    radau_next = radau.solve_with_parameter_values([0.8], [1.2])
+    assert isinstance(radau_next, RadauSolution)
+    assert radau_next.sample(0.1)[0] == pytest.approx(0.8 * math.exp(-1.2 * 0.1), rel=2e-6)
+
+    lsode2 = StiffSolverRequest.lsode2(
+        [Expr.parse("-rate*y")], ["y"], "t", [1.0], 0.0, 0.1, 0.02,
+        parameters=["rate"], parameter_values=[0.5],
+    ).prepare()
+    lsode_first = lsode2.solve()
+    lsode_next = lsode2.continue_lsode2_with_parameters([1.2], 0.2)
+    assert isinstance(lsode_first, Lsode2Solution) and isinstance(lsode_next, Lsode2Solution)
+    assert lsode_next.states()[-1][0] == pytest.approx(
+        lsode_first.states()[-1][0] * math.exp(-1.2 * 0.1), rel=2e-5
+    )
+
+
+def test_stiff_api_continuation_rejects_wrong_solver_method_with_context():
+    from rustedscithe import StiffSolverRequest
+
+    prepared = StiffSolverRequest.bdf(
+        [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.1, 0.02,
+    ).prepare()
+    with pytest.raises(UnsupportedOptionError, match="only available for Backward Euler") as captured:
+        prepared.continue_backward_euler(0.2)
+    assert captured.value.stage == "continuation"
+    assert captured.value.solver == "stiff_api"
+    assert captured.value.route == "stiff_api:continuation"
+    assert captured.value.native_kind == "WrongSolverRoute"
+
+
+@pytest.mark.parametrize("frontend", ["expr_legacy", "atom_native"])
+def test_stiff_api_matches_direct_solver_routes_and_exact_decay(frontend):
+    from rustedscithe import StiffSolverRequest
+
+    options = SolverOptions(frontend=frontend, telemetry="counters")
+    expression = [Expr.parse("-rate*y")]
+    shared = dict(
+        expressions=expression,
+        state_variables=["y"],
+        time_variable="t",
+        y0=[1.0],
+        t0=0.0,
+        t_end=0.1,
+        parameters=["rate"],
+        parameter_values=[0.8],
+        options=options,
+    )
+
+    direct_bdf = BdfSolver(max_step=0.02, **shared).solve()
+    stiff_bdf = StiffSolverRequest.bdf(max_step=0.02, **shared).prepare().solve()
+    assert stiff_bdf.states()[-1] == pytest.approx(direct_bdf.states()[-1], rel=1e-10)
+    assert stiff_bdf.states()[-1][0] == pytest.approx(math.exp(-0.08), rel=2e-6)
+
+    direct_be = BackwardEulerSolver(h=0.001, **shared).solve()
+    stiff_be = StiffSolverRequest.backward_euler(h=0.001, **shared).prepare().solve()
+    assert stiff_be.states()[-1] == pytest.approx(direct_be.states()[-1], rel=1e-12)
+    assert stiff_be.states()[-1][0] == pytest.approx(math.exp(-0.08), rel=5e-4)
+
+    direct_radau = RadauSolver(
+        expression, ["y"], "t", 0.0, 0.1, 0.02,
+        options=options, parameters=["rate"], parameter_values=[0.8], output="dense",
+    ).solve([1.0])
+    stiff_radau = StiffSolverRequest.radau(
+        expression, ["y"], "t", [1.0], 0.0, 0.1, 0.02,
+        options=options, parameters=["rate"], parameter_values=[0.8], output="dense",
+    ).prepare().solve()
+    assert stiff_radau.final_state == pytest.approx(direct_radau.final_state, rel=1e-12)
+    assert stiff_radau.final_state[0] == pytest.approx(math.exp(-0.08), rel=2e-6)
+
+    direct_lsode2 = Lsode2Solver(max_step=0.02, **shared).solve()
+    stiff_lsode2 = StiffSolverRequest.lsode2(max_step=0.02, **shared).prepare().solve()
+    assert stiff_lsode2.states()[-1] == pytest.approx(direct_lsode2.states()[-1], rel=1e-10)
+    assert stiff_lsode2.states()[-1][0] == pytest.approx(math.exp(-0.08), rel=2e-5)
+
+
+def test_stiff_api_aot_missing_artifact_context_is_preserved_for_each_factory(tmp_path):
+    from rustedscithe import PreparationError, SolverOptions, StiffSolverRequest
+
+    # Keep each request's compiler input unique: RequirePrebuilt may reuse an
+    # already-registered native artifact even when this test's output folder
+    # is empty.
+    token = tmp_path.name.replace("-", "_")
+    options = SolverOptions(
+        execution="aot",
+        aot_policy="require_prebuilt",
+        aot_output_dir=str(tmp_path / "missing-artifacts"),
+    )
+    for solver_name in ("bdf", "backward_euler", "radau", "lsode2"):
+        state_name = f"missing_{solver_name}_{token}"
+        expressions = [Expr.parse(f"-{state_name}")]
+        symbols = [state_name]
+        if solver_name == "bdf":
+            request = StiffSolverRequest.bdf(
+                expressions, symbols, "t", [1.0], 0.0, 0.1, 0.02,
+                options=options,
+            )
+        elif solver_name == "backward_euler":
+            request = StiffSolverRequest.backward_euler(
+                expressions, symbols, "t", [1.0], 0.0, 0.1,
+                options=options,
+            )
+        elif solver_name == "radau":
+            request = StiffSolverRequest.radau(
+                expressions, symbols, "t", [1.0], 0.0, 0.1, 0.02,
+                options=options,
+            )
+        else:
+            request = StiffSolverRequest.lsode2(
+                expressions, symbols, "t", [1.0], 0.0, 0.1, 0.02,
+                options=options,
+            )
+        try:
+            prepared = request.prepare()
+            prepared.solve()
+        except (AotArtifactError, PreparationError) as error:
+            captured_error = error
+        else:
+            pytest.fail(f"{solver_name} unexpectedly solved without a required AOT artifact")
+        error = captured_error
+        assert error.solver == solver_name
+        assert error.stage in {"prepare", "preparation", "solve"}
+        assert error.route is not None
+        assert error.native_kind is not None
+
+
+def test_stiff_api_postprocess_io_failure_does_not_erase_solved_result(tmp_path):
+    from rustedscithe import SolverError, StiffPostprocessPlan, StiffSolverRequest
+
+    prepared = StiffSolverRequest.bdf(
+        [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.1, 0.02,
+    ).prepare()
+    prepared.solve()
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("file", encoding="utf-8")
+
+    with pytest.raises(SolverError) as captured:
+        prepared.postprocess(
+            StiffPostprocessPlan().save_csv(str(blocker / "result.csv")),
+            "time",
+            ["y"],
+        )
+    assert captured.value.stage == "postprocess"
+    assert captured.value.solver == "bdf"
+    assert captured.value.native_kind == "PostprocessPlanExecution"
+    times, states = prepared.trajectory_arrays()
+    assert times[-1] == pytest.approx(0.1)
+    assert states[-1, 0] == pytest.approx(math.exp(-0.1), rel=2e-6)

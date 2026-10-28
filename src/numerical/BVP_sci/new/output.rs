@@ -156,6 +156,8 @@ pub struct BvpSciSolution {
     pub y: Vec<f64>,
     /// Parameter values used by the final solve.
     pub parameters: Vec<f64>,
+    /// Fixed model inputs used by the prepared callbacks.
+    pub external_parameters: Vec<f64>,
     /// Maximum of the normalized collocation and boundary residuals.
     pub residual_norm: f64,
     /// Per-interval SciPy-style Lobatto RMS residuals.

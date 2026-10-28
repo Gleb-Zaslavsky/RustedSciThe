@@ -232,8 +232,12 @@ impl SymbolicFunction {
         })
     }
 
-    /// Update parameters and regenerate functions
-    pub fn set_parameters(
+    /// Rebuilds the parameter-substituted expression and its callbacks.
+    ///
+    /// Unlike value-only rebinding on prepared system solvers, this operation
+    /// substitutes into the original expression, differentiates it again, and
+    /// recompiles both the function and derivative callbacks.
+    pub fn set_parameter_values_and_reprepare(
         &mut self,
         parameters: HashMap<String, f64>,
     ) -> Result<(), RootFindingError> {
@@ -252,6 +256,15 @@ impl SymbolicFunction {
         self.derivative_func = Some(derivative_expr.lambdify1D());
 
         Ok(())
+    }
+
+    /// Legacy name for [`Self::set_parameter_values_and_reprepare`].
+    #[deprecated(note = "this rebuilds symbolic callbacks; use set_parameter_values_and_reprepare")]
+    pub fn set_parameters(
+        &mut self,
+        parameters: HashMap<String, f64>,
+    ) -> Result<(), RootFindingError> {
+        self.set_parameter_values_and_reprepare(parameters)
     }
 
     /// Get the symbolic expression as string
@@ -1349,7 +1362,7 @@ mod symbolic_tests {
         // Update parameter a=4, so f(x) = 4*x^2 - 4, root at x=1
         let mut new_params = HashMap::new();
         new_params.insert("a".to_string(), 4.0);
-        func.set_parameters(new_params).unwrap();
+        func.set_parameter_values_and_reprepare(new_params).unwrap();
         // 4*1^2 - 4,
         println!("func.evaluate(1.0) ,{}", func.evaluate(1.0));
         assert!(approx_equal(func.evaluate(1.0), 0.0, 1e-10));

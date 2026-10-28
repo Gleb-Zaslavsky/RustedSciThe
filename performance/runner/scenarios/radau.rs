@@ -40,7 +40,7 @@ fn assemble_workload(
         workload.variables,
         workload.time_variable,
     )
-    .with_parameters(workload.parameter_names);
+    .with_parameter_names(workload.parameter_names);
     let aot = if execution == RadauExecution::Aot {
         Some(RadauAotConfig::build_if_missing_release(artifact_root()?).with_c_compiler("tcc"))
     } else {
@@ -88,7 +88,7 @@ fn solve_workload(
 
     let solve_started = Instant::now();
     let solution = solver
-        .solve_with_parameters(&initial_state, &parameters)
+        .solve_with_parameter_values(&initial_state, &parameters)
         .map_err(|error| RunnerError::Scenario(format!("Radau solve: {error}")))?;
     let solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
     let scenario_wall_ms = full_started.elapsed().as_secs_f64() * 1_000.0;
@@ -137,7 +137,7 @@ fn solve_workload(
         RadauTelemetryMode::Timings,
     )?;
     let diagnostic_solution = diagnostic_solver
-        .solve_with_parameters(&diagnostic_y0, &diagnostic_parameters)
+        .solve_with_parameter_values(&diagnostic_y0, &diagnostic_parameters)
         .map_err(|error| RunnerError::Scenario(format!("Radau timed diagnostic solve: {error}")))?;
     validate_solution(
         &diagnostic_solution.y,
@@ -533,7 +533,10 @@ mod tests {
             .expect("final-time diagnostic")
             .2;
 
-        assert!(accepted_steps >= 50.0, "expected a large integration workload");
+        assert!(
+            accepted_steps >= 50.0,
+            "expected a large integration workload"
+        );
         assert!((final_time - 0.15).abs() <= 1.5e-11);
     }
 }

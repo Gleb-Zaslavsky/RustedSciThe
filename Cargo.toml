@@ -515,17 +515,17 @@ path = "examples/rus/lsode2_task_shell_guide.rs"
 name = "rus_lsode2_three_body_problem"
 path = "examples/rus/lsode2_three_body_problem.rs"
 [[example]]
-name = "lsode2_parameter_continuation_lambdify"
-path = "examples/lsode2_parameter_continuation_lambdify.rs"
+name = "lsode2_parameter_rebind_lambdify"
+path = "examples/lsode2_parameter_rebind_lambdify.rs"
 [[example]]
-name = "lsode2_parameter_continuation_aot"
-path = "examples/lsode2_parameter_continuation_aot.rs"
+name = "lsode2_parameter_rebind_aot"
+path = "examples/lsode2_parameter_rebind_aot.rs"
 [[example]]
 name = "be_native_callbacks_guide"
 path = "examples/be_native_callbacks_guide.rs"
 [[example]]
-name = "be_symbolic_continuation_guide"
-path = "examples/be_symbolic_continuation_guide.rs"
+name = "be_time_segment_parameter_update_guide"
+path = "examples/be_time_segment_parameter_update_guide.rs"
 [[example]]
 name = "be_aot_guide"
 path = "examples/be_aot_guide.rs"
@@ -533,8 +533,8 @@ path = "examples/be_aot_guide.rs"
 name = "bdf_native_dense_guide"
 path = "examples/bdf_native_dense_guide.rs"
 [[example]]
-name = "bdf_symbolic_continuation_guide"
-path = "examples/bdf_symbolic_continuation_guide.rs"
+name = "bdf_time_segment_parameter_update_guide"
+path = "examples/bdf_time_segment_parameter_update_guide.rs"
 [[example]]
 name = "bdf_aot_guide"
 path = "examples/bdf_aot_guide.rs"
@@ -542,8 +542,8 @@ path = "examples/bdf_aot_guide.rs"
 name = "rus_be_native_callbacks_guide"
 path = "examples/rus/be_native_callbacks_guide.rs"
 [[example]]
-name = "rus_be_symbolic_continuation_guide"
-path = "examples/rus/be_symbolic_continuation_guide.rs"
+name = "rus_be_time_segment_parameter_update_guide"
+path = "examples/rus/be_time_segment_parameter_update_guide.rs"
 [[example]]
 name = "rus_be_aot_guide"
 path = "examples/rus/be_aot_guide.rs"
@@ -551,8 +551,8 @@ path = "examples/rus/be_aot_guide.rs"
 name = "rus_bdf_native_dense_guide"
 path = "examples/rus/bdf_native_dense_guide.rs"
 [[example]]
-name = "rus_bdf_symbolic_continuation_guide"
-path = "examples/rus/bdf_symbolic_continuation_guide.rs"
+name = "rus_bdf_time_segment_parameter_update_guide"
+path = "examples/rus/bdf_time_segment_parameter_update_guide.rs"
 [[example]]
 name = "rus_bdf_aot_guide"
 path = "examples/rus/bdf_aot_guide.rs"

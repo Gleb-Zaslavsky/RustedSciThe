@@ -1,5 +1,20 @@
 # RustedSciThe Python bindings TODO
 
+## IVP Parameter Loop API
+
+- [x] Expose ordered parameter loops for direct LSODE2, BDF, Backward Euler
+  and Radau wrappers. Reuse each prepared native solver; every solve receives
+  the same initial state and interval. This is a sweep, never continuation.
+- [x] Return a stable per-point Python representation: parameter vector,
+  success trajectory as NumPy arrays and native telemetry, or retained typed
+  failure context. Failure at one point must not raise out of or abort the loop.
+- [x] Add direct-wrapper contract tests for success/failure/success, parity
+  with independent solves, fixed initial values, trajectory shapes and
+  telemetry. Update RU/EN guides and add one runnable example per direct solver.
+- [x] Add the same capability to StiffAPI, preserving route-specific typed
+  failures/telemetry. Test all four routes and provide RU/EN guide coverage and
+  a runnable facade example.
+
 This is the implementation checklist for the optional Python interface. The
 binding package is deliberately separate from the core `RustedSciThe` crate:
 the core remains independent of PyO3 and Python, while this package provides a
@@ -168,9 +183,10 @@ than reopening completed work.
 - [x] Verify dense AOT artifact keys and lifecycle provenance on detached
   Radau solutions, including process-isolated RequirePrebuilt handoff.
 - [x] Expose Dense, Sparse and Banded layouts with their native settings for
-  symbolic Radau routes. Banded width is configured with
-  `SolverOptions.set_banded_width(lower, upper)`; the selected backend writes
-  its native layout directly.
+  symbolic Radau routes. Banded width is inferred from symbolic residual or
+  Jacobian structure when omitted; `SolverOptions.set_banded_width(lower,
+  upper)` remains an optional validated hint. The selected backend writes its
+  native layout directly.
 - [x] Expose a separate Dense `RadauCallbackSolver` with an analytic
   residual/Jacobian route and native finite-difference fallback. Keep the
   callback contract sequential/Lambdify-only and reject AOT/structured routes
@@ -329,12 +345,15 @@ concrete adapter.
 - [x] Add the direct Lambdify Python solver wrapper after the task-document
   result slice is stable.
 - [x] Expose ExprLegacy and AtomNative frontends in that direct wrapper.
-- [x] Expose Dense, Sparse and Banded Lambdify layouts with explicit bandwidth
-  validation for Banded.
+- [x] Expose Dense, Sparse and Banded Lambdify layouts. Symbolic Banded routes
+  infer bandwidth automatically; optional explicit widths are validated
+  against the prepared structural Jacobian. Numerical callbacks remain Dense-
+  only because they provide no symbolic structure to infer.
 - [x] Expose symbolic boundary residual/Jacobian preparation and the native
   finite-difference boundary-Jacobian fallback.
-- [x] Expose mesh refinement, parameter continuation, restart and dense
-  output sampling for the direct Lambdify route.
+- [x] Expose mesh refinement, free-parameter initial guesses and prior-profile
+  continuation, restart and dense output sampling for the direct Lambdify route.
+  BVP_sci `parameters` are Newton unknowns; they are not fixed model inputs.
 - [x] Expose SciPy singular terms in the direct Lambdify wrapper as a
   validated `(singular_term_a, singular_term_matrix)` pair and preserve the
   native `singular_term_applications` counter.
@@ -391,8 +410,9 @@ concrete adapter.
 - [x] Document solver-specific differences instead of forcing one universal
   BVP result type too early; direct BVP_Damp now documents adaptive mesh and
   prepared/restart semantics.
-- [x] Add direct prepared parameter continuation, warm iterate and structural
-  restart controls with typed stale-plan errors.
+- [x] Add direct fixed-input rebinding, warm-iterate replacement and
+  structural restart controls with typed stale-plan errors. Rebinding an input
+  and seeding from the prior solution are separate operations.
 - [x] Add a compact exact-solution gate and typed preparation, continuation,
   restart and invalid-input failure gates for the Python BVP_Damp surface.
 - [x] Add a separate direct Python combustion story with a compact report;
@@ -416,14 +436,16 @@ concrete adapter.
 - [x] Expose `Naive` as a distinct `BvpDampNaiveSolver` using the native
   Frozen/Naive core, not the damped solver. It forwards ExprLegacy/AtomNative,
   Lambdify/AOT, Dense/Sparse/Banded, scheme, tolerance, iteration limit,
-  telemetry/logging policy, linear method, and prepared parameter rebinds.
+  telemetry/logging policy, linear method, fixed-input rebinding and prepared
+  iterate replacement.
   The adapter rejects nonuniform meshes and explicit band widths because the
   native route generates a uniform mesh and infers its structure. It does not
   claim damping, bounds, adaptive refinement, or in-place initial-state/mesh
   restart, which the native Naive contract does not expose.
 - [x] Expose the native `Frozen` strategy as an independent
   `BvpDampFrozenSolver`, with all five Jacobian-reuse policies, typed policy
-  validation, native telemetry/provenance and prepared parameter rebinding.
+  validation, native telemetry/provenance, fixed-input rebinding and prepared
+  iterate replacement.
   It is not mapped to `Naive` or the damped solver. It shares the fixed,
   uniform-mesh and no in-place guess/interval restart limits of this native
   core; broader logging/output controls remain those available from the core.
@@ -434,13 +456,14 @@ concrete adapter.
 
 | wrapper | faithfully forwarded | intentional limitation | native gap / follow-up |
 | --- | --- | --- | --- |
-| `RadauSolver` | ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded widths, Sequential/Parallel/Auto, tolerances, step/Newton/retry budgets, output, continuation, AOT output/handoff/provenance | `RadauCallbackSolver` is a separate Dense + sequential + Lambdify callback API; callback Jacobians cannot become structured/AOT artifacts | execution policy uses native fixed `min_work=1`; expose a worker-threshold object only if the core public contract needs it |
+| `RadauSolver` | ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded widths, Sequential/Parallel/Auto, tolerances, step/Newton/retry budgets, fresh parameterized solves, AOT output/handoff/provenance | `RadauCallbackSolver` is a separate Dense + sequential + Lambdify callback API; callback Jacobians cannot become structured/AOT artifacts | execution policy uses native fixed `min_work=1`; expose a worker-threshold object only if the core public contract needs it |
 | `BdfSolver` | ExprLegacy/AtomNative, Dense, Lambdify/AOT, tolerances/order/step/budget, continuation/restart, AOT output/handoff/provenance | Sparse/Banded are unsupported by the native BDF core; `BdfCallbackSolver` is a separate Dense callback route and does not inherit symbolic AOT/parallel options | no silent gap found in accepted common options |
 | `BackwardEulerSolver` | ExprLegacy/AtomNative, Dense, sequential Lambdify/AOT, tolerance/step/iteration, continuation/restart, AOT output/handoff | Sparse/Banded, parallel and callback routes are rejected; preparation is intentionally lazy until solve | explicit `prepare()` can wait for a native BE preparation boundary |
 | `Lsode2Solver` | ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded widths, Sequential/Parallel/Auto, BDF/Adams/auto controller, callbacks, continuation, lifecycle/provenance | Python callbacks are Lambdify-only; the wrapper does not claim AOT embedding of Python closures | matched callback performance evidence and configurable worker thresholds remain follow-up |
-| `BvpSciSolver` | ExprLegacy/AtomNative + Lambdify/AOT on Dense/Sparse/Banded; Numerical frontend/execution on Dense with RHS and optional analytic `df/dy`, `df/dp`; continuation/restart, output, singular terms, boundary callbacks and AOT lifecycle | Numerical callback route cannot be mixed with symbolic execution or non-Dense layouts; SuperLU remains opt-in and can fall back to StandardFaer | native telemetry modes are now included in `capabilities()`; add future output/worker options only when the core exposes them |
+| `BvpSciSolver` | ExprLegacy/AtomNative + Lambdify/AOT on Dense/Sparse/Banded; Numerical frontend/execution on Dense with RHS and optional analytic `df/dy`, `df/dp`; free-parameter initial guesses via `parameter_guess` / `set_parameter_guess`, previous-profile continuation/restart, output, singular terms, boundary callbacks and AOT lifecycle | `parameters` are free Newton unknowns, not fixed inputs; constructor `parameter_values` remains a deprecated alias; numerical callback route cannot be mixed with symbolic execution or non-Dense layouts; SuperLU remains opt-in and can fall back to StandardFaer | native telemetry currently labels guess changes `parameter_rebinds`; rename/report the counter as a guess update in a telemetry-contract pass |
 | `ShootingBvpSolver` | ExprLegacy/AtomNative, Lambdify, Dense, Sequential/Parallel, native telemetry and logging | No AOT, continuation, or Python numerical callback route; intended for scalar/very small systems | no missing setting found in the current native ShootingBVP API |
-| `BvpDampSolver` / `BvpDampNaiveSolver` / `BvpDampFrozenSolver` | Damped route: ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded, execution policies, damping/Jacobian budgets, six grid methods, bounds and adaptive refinement. Naive and Frozen routes: symbolic frontend/execution/layout axes, fixed uniform mesh, native prepare and parameter rebind, telemetry; Frozen also exposes all five native reuse policies | Non-standard sparse factorization belongs to BVP_sci and is typed-rejected here; Naive/Frozen do not claim adaptive mesh or in-place guess/interval restart | Native `GeneratedBackendConfig` lacks direct AOT output-directory support; fixed-mesh routes cannot replace their initial guess/interval in place |
+| `BvpDampSolver` / `BvpDampNaiveSolver` / `BvpDampFrozenSolver` | Damped route: ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded, execution policies, damping/Jacobian budgets, six grid methods, bounds and adaptive refinement. Naive and Frozen routes: symbolic frontend/execution/layout axes, fixed uniform mesh, native prepare, fixed-input rebind and prepared iterate replacement; all three expose `solve_with_parameter_values` for rebind plus last-successful-profile warm start and telemetry; Frozen also exposes all five native reuse policies | Non-standard sparse factorization belongs to BVP_sci and is typed-rejected here; Naive/Frozen do not claim adaptive mesh or interval restart | Native `GeneratedBackendConfig` lacks direct AOT output-directory support; fixed-mesh routes cannot replace their interval in place |
+| `BvpSolverRequest` / `PreparedBvpSolver` | Typed native `BVP_api` request for Damped, Frozen and symbolic BVP_sci; node-major guesses/results, fixed parameter rebinding, BVP_sci free-parameter callbacks, native telemetry maps/scopes, typed errors and native postprocessing plan; EN/RU guide and route-selection example | Python numerical callbacks, experimental sparse factorizations and arbitrary nonuniform Damped/Frozen meshes remain explicitly unsupported by this facade; direct solver APIs retain their own routes | Python contract tests cover all four telemetry modes on each route, the Damped/Frozen field schema, BVP_sci snapshot consistency and strict AOT artifact-policy forwarding for both frontends and GCC/TCC/Zig/Rust settings; actual compiler builds remain in native integration suites, while boundary overhead remains open |
 | `UniversalNonStiffSolver` | ODE_api2 RK45/DOPRI/AB4; ExprLegacy/Lambdify, Dense, Sequential; step size and named stop conditions | No AOT, AtomNative, parallel mode, telemetry, parameters, restart or continuation; fixed-step end may overshoot by less than one step | Stiff methods use their direct solver wrappers; do not route stiff workloads through ODE_api2 |
 
 The policy is now explicit: a convenience constructor may choose native
@@ -460,6 +483,22 @@ ownership, parameter rebind, restart, dense sampling, AOT lifecycle, singular
 terms, sparse policies and typed Python boundary callbacks. The wrapper
 preserves native stage telemetry rather than silently replacing unsupported
 routes with Lambdify.
+
+Completed typed BVP facade slice (2026-10-27): `BvpSolverRequest` and
+`PreparedBvpSolver` now call the redesigned native `BVP_api` directly. Damped,
+Frozen and symbolic BVP_sci requests preserve their separate guess dimensions
+and route options; BVP_sci free-parameter residual/Jacobian callbacks,
+parameter semantics, telemetry scopes, typed errors (including original Python
+callback exceptions as `__cause__`) and native postprocessing are exposed.
+Numerical Python callbacks, experimental sparse factorization
+variants and nonuniform Damped/Frozen meshes are rejected/documented rather
+than silently normalized. Follow-up contracts cover all telemetry modes on all
+three routes, typed callback failures, and strict AOT artifact forwarding for
+both symbolic frontends across accepted toolchain settings. Damped/Frozen
+iteration defaults match the native value of 25. Actual compiler builds remain
+covered by native BVP_sci integration suites; route telemetry schemas are
+contract-tested, while boundary-overhead measurement remains tracked
+separately.
 
 Completed facade slice (2026-10-14): `create_bvp` and `solve_bvp` provide a
 thin family selector for `bvp_sci` and `bvp_damp`. They preserve the native
@@ -1047,7 +1086,7 @@ a blocker for stabilizing the published Windows package.
 ### 14.2 Error boundaries, panic safety and diagnostics
 
 - [x] Add typed panic boundaries to public preparation, solve, restart and
-  continuation operations for BDF, Backward Euler, LSODE2, Radau, BVP_sci,
+  time-segment continuation operations for BDF, Backward Euler, LSODE2, Radau, BVP_sci,
   BVP_Damp, nonlinear systems and fitting where the underlying Rust call may
   panic. Preserve stage, solver and route metadata in `PanicError`.
 - [x] Guard constructor-time native setup for BDF, Backward Euler, LSODE2,
@@ -1653,9 +1692,9 @@ capabilities as accidental omissions.
   requires `rhs_callback`; `df/dy` and `df/dp` are optional, with native FD
   fallback. Capability metadata, typed callback failures, docs, example and
   tests cover the route. Sparse/Banded and AOT remain explicitly unsupported.
-- [x] Add long continuation-series tests for BDF, Backward Euler, Radau,
-  LSODE2 and BVP_sci. They verify detached result stability, prepared-route
-  retention and bounded BVP workspace resizes. Python tests cannot observe
+- [x] Add long prepared-solve/rebind series tests for BDF, Backward Euler,
+  Radau, LSODE2 and BVP_sci. They verify detached result stability,
+  prepared-route retention and bounded BVP workspace resizes. Python tests cannot observe
   Rust allocations via `tracemalloc`; no process-heap claim is made.
 - [x] Add a wrapper-specific BVP boundary diagnostic benchmark that separates
   constructor, Python solve wall time and nested native stages on one exact
@@ -2770,3 +2809,93 @@ physical model inspectable before any expansion or numerical execution.
 - [ ] Publish only after the `somelinalg` faithful banded route and selected
   Symbolic additions have matching `.pyi`, RU/EN documentation, examples,
   Tabled reports and no unresolved release-blocking failures.
+
+## 23. Native StiffAPI Python Binding
+
+The Rust StiffAPI is the normative owner of preset composition, applicability,
+solver selection, shared lifecycle, typed errors, telemetry snapshots and
+postprocessing. Python must remain a thin consumer of that API and must not
+grow a second solver-dispatch table.
+
+- [x] Expose the native preset catalog and composable common profiles through
+  PyO3, including frontend/layout, callback policy, telemetry, logging, and
+  AOT toolchain presets.
+- [x] Preserve native preset descriptions and solver applicability metadata;
+  reject invalid profile names/axes with the existing compact exception tree.
+- [x] Add `.pyi` declarations and contract coverage for catalog, composition,
+  metadata and invalid combinations.
+- [x] Add an explicit BDF request factory that builds `BdfSolverOptions`
+  without constructing or retaining a second Python solver object; apply
+  profiles and dispatch solve through native StiffAPI.
+- [x] Add a Backward Euler request factory that preserves fixed-step controls,
+  native frontend/AOT/logging/telemetry settings, and declared parameter names
+  and values through native request preparation.
+- [x] Add equivalent typed request/configuration builders for Radau,
+  Backward Euler and LSODE2, preserving each solver's native symbolic routes,
+  solver-specific method/step/output controls, parameter binding and telemetry.
+- [x] Preserve LSODE2's controller family independently from its native versus
+  Bridge execution policy, and forward its native logging threshold through
+  the native StiffAPI request.
+- [x] Add RU/EN Python guides and a runnable parameterized BDF example that
+  explain preset composition, solver-specific semantics, telemetry ownership
+  and current unsupported routes.
+- [x] Preserve typed Python exception category and `stage`/`solver`/`route`/
+  `native_kind` context for native StiffAPI preset capability failures.
+- [x] Do not clone/retain large native symbolic configurations in existing
+  direct solver wrappers just to enable StiffAPI; direct-wrapper construction
+  and memory use must remain unchanged when the StiffAPI is unused.
+- [x] Complete native time-segment forwarding for BDF, Backward Euler and
+  LSODE2 without flattening solver-specific state. Radau's explicit `y0` and
+  parameter-value call is a fresh solve over its configured interval, not a
+  continuation operation.
+- [x] Expose common fresh parameterized solve shortcuts on every direct stiff
+  wrapper and `PreparedStiffSolver`: keep the configured interval or provide a
+  new `(t0, y0, t_end)`. Preserve prepared resources, native typed failures and
+  detached solver-specific results; cover both forms across all four routes.
+- [x] Remove misleading Radau continuation aliases whose only behavior was to
+  start a fresh solve from an explicitly supplied `y0`. Align the Radau
+  lifecycle example and direct/facade guides with the fresh-solve terminology.
+- [x] Add typed StiffAPI restart dispatch for all four solver families,
+  retaining each prepared native route and returning the normal detached
+  solver result. Validate interval/state inputs and preserve restart error
+  context; Radau's restart updates its stored initial state natively.
+- [x] Expose solver-tagged StiffAPI telemetry snapshots with native metric
+  names and AOT details kept nested; Radau telemetry remains on its returned
+  `RadauSolution`, matching the native API's ownership model.
+- [x] Expose native status where the selected solver has one, and expose an
+  explicit owned-NumPy trajectory copy for BDF, Backward Euler and LSODE2.
+  Radau status/output stays on its returned `RadauSolution` because its native
+  prepared API has no retained-trajectory status/view contract.
+- [x] Forward the Rust `PostprocessPlan` builder for text/CSV/report/Plotters/
+  Gnuplot/terminal actions. Execute against retained BDF/BE/LSODE2 trajectories
+  and explicit Radau samples, returning action/status/path/message records;
+  preserve Radau's solution-owned sampling model.
+- [x] Add application-level examples for selecting among the four stiff
+  families, exporting through the shared plan, and restarting a prepared BDF
+  route; examples verify against an exact decay solution and are not presented
+  as performance evidence.
+- [x] Add direct-wrapper versus StiffAPI parity coverage for all four solver
+  families and both symbolic frontends, plus typed unsupported-route,
+  postprocessing, continuation and AOT missing-artifact context tests. This is
+  focused contract coverage, not a claim that every Cartesian product of
+  solver settings is independently enumerated.
+- [x] Forward Radau's native sampled-output policy and test that only requested
+  sample times are retained and available from its detached solution.
+- [x] Forward LSODE2's paired Python analytical callbacks through StiffAPI.
+  Keep them Lambdify-only, reject inferred band width without symbolic
+  equations, preserve callback failure context and the original Python
+  exception as `__cause__`, and document/test the supported route.
+- [x] Verify AOT failure context and typed native-kind preservation through
+  every Stiff request factory, not only through direct solver wrappers. The
+  regression uses unique compiler inputs so an artifact registered by another
+  test cannot make `require_prebuilt` pass accidentally.
+
+#### Deferred Until Before 0.1.6
+
+- [ ] Run clean installed-wheel checks for the StiffAPI surface on the
+  supported Windows and Linux publication targets, including the prepared
+  lifecycle and postprocessing APIs.
+- [ ] Measure Python-boundary overhead for request construction, validation,
+  dispatch, array conversion and result extraction on an installed wheel.
+  Keep native solver performance outside these measurements; it is covered by
+  Rust story tests, benches and performance gates.

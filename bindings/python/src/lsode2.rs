@@ -38,6 +38,7 @@ use crate::errors::{
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
+use crate::parameter_loop::{PyIvpParameterLoopPoint, run_parameter_loop};
 
 /// Adapt Python callbacks to LSODE2's `Send + Sync` Rust callback contract.
 ///
@@ -46,7 +47,7 @@ use crate::telemetry::write_report;
 /// force a safe numerical failure. `solve()` checks the recorded error first
 /// and exposes it as `CallbackError` instead of leaking a misleading linear
 /// algebra or convergence message.
-fn build_python_callbacks(
+pub(crate) fn build_python_callbacks(
     residual: Py<PyAny>,
     jacobian: Py<PyAny>,
     dimension: usize,
@@ -136,7 +137,7 @@ fn build_python_callbacks(
     })
 }
 
-fn finite_vector(values: &[f64], label: &str) -> PyResult<()> {
+pub(crate) fn finite_vector(values: &[f64], label: &str) -> PyResult<()> {
     if values.is_empty() {
         return Err(InvalidConfigurationError::new_err(format!(
             "{label} must not be empty"
@@ -150,7 +151,7 @@ fn finite_vector(values: &[f64], label: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn validate_scalar(value: f64, label: &str) -> PyResult<()> {
+pub(crate) fn validate_scalar(value: f64, label: &str) -> PyResult<()> {
     if !value.is_finite() {
         return Err(InvalidConfigurationError::new_err(format!(
             "{label} must be finite"
@@ -159,7 +160,7 @@ fn validate_scalar(value: f64, label: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn validate_names(names: &[String], label: &str) -> PyResult<()> {
+pub(crate) fn validate_names(names: &[String], label: &str) -> PyResult<()> {
     if names.is_empty() {
         return Err(InvalidConfigurationError::new_err(format!(
             "{label} must not be empty"
@@ -179,7 +180,7 @@ fn validate_names(names: &[String], label: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn merge_band_width(
+pub(crate) fn merge_band_width(
     explicit: Option<usize>,
     configured: Option<usize>,
     label: &str,
@@ -195,7 +196,7 @@ fn merge_band_width(
     }
 }
 
-fn validate_route(
+pub(crate) fn validate_route(
     options: &SolverOptions,
     band_lower: Option<usize>,
     band_upper: Option<usize>,
@@ -242,17 +243,14 @@ fn validate_route(
             }
             Lsode2LinearSystemStructure::Sparse
         }
-        "banded" => Lsode2LinearSystemStructure::Banded {
-            kl: band_lower.ok_or_else(|| {
-                InvalidConfigurationError::new_err(
-                    "banded LSODE2 requires band_lower and band_upper",
-                )
-            })?,
-            ku: band_upper.ok_or_else(|| {
-                InvalidConfigurationError::new_err(
-                    "banded LSODE2 requires band_lower and band_upper",
-                )
-            })?,
+        "banded" => match (band_lower, band_upper) {
+            (Some(kl), Some(ku)) => Lsode2LinearSystemStructure::Banded { kl, ku },
+            (None, None) => Lsode2LinearSystemStructure::BandedAuto,
+            _ => {
+                return Err(InvalidConfigurationError::new_err(
+                    "band_lower and band_upper must be provided together, or both omitted for symbolic bandwidth inference",
+                ));
+            }
         },
         _ => {
             return Err(UnsupportedOptionError::new_err(
@@ -287,7 +285,9 @@ fn validate_route(
 /// Translate the Python AOT vocabulary into the native generated-backend
 /// policy. Code generation stays entirely in the core crate; this adapter only
 /// validates and forwards the lifecycle choice and toolchain metadata.
-fn aot_backend_config(options: &SolverOptions) -> PyResult<SymbolicIvpGeneratedBackendConfig> {
+pub(crate) fn aot_backend_config(
+    options: &SolverOptions,
+) -> PyResult<SymbolicIvpGeneratedBackendConfig> {
     let profile = match options.aot_profile() {
         "debug" => AotBuildProfile::Debug,
         "release" => AotBuildProfile::Release,
@@ -324,7 +324,7 @@ fn aot_backend_config(options: &SolverOptions) -> PyResult<SymbolicIvpGeneratedB
     Ok(config)
 }
 
-fn validate_expression_symbols(
+pub(crate) fn validate_expression_symbols(
     expressions: &[PyExpr],
     state_variables: &[String],
     time_variable: &str,
@@ -352,7 +352,7 @@ fn validate_expression_symbols(
     Ok(())
 }
 
-fn map_lsode2_error(error: Lsode2Error) -> PyErr {
+pub(crate) fn map_lsode2_error(error: Lsode2Error) -> PyErr {
     let native_kind = crate::errors::native_variant(&error);
     crate::errors::annotate_native(
         match error {
@@ -434,7 +434,7 @@ pub struct Lsode2Solution {
 }
 
 impl Lsode2Solution {
-    fn from_solver(solver: &Lsode2Solver) -> Self {
+    pub(crate) fn from_solver(solver: &Lsode2Solver) -> Self {
         let summary = solver.summary();
         let (times, values) = solver.get_result();
         let statistics = summary.statistics;
@@ -873,7 +873,7 @@ impl Lsode2Solution {
 /// symbolic frontend, execution route, matrix layout and callback execution
 /// policy in [`SolverOptions`]. The adapter supports symbolic equations and
 /// optional native residual/Jacobian callbacks. `prepare()` builds the
-/// selected route without stepping; parameter continuation reuses it, while
+/// selected route without stepping; time-segment solves reuse it, while
 /// `restart()` changes the initial state and interval.
 #[pyclass(name = "Lsode2Solver", module = "rustedscithe", unsendable)]
 pub struct Lsode2PythonSolver {
@@ -1029,6 +1029,11 @@ impl Lsode2PythonSolver {
                 ));
             }
             (Some(residual), Some(jacobian)) => {
+                if structure == Lsode2LinearSystemStructure::BandedAuto {
+                    return Err(UnsupportedOptionError::new_err(
+                        "automatic banded layout requires symbolic expressions; numerical Python callbacks must provide band_lower and band_upper",
+                    ));
+                }
                 if !matches!(execution, Lsode2SymbolicExecutionMode::LambdifyExpr) {
                     return Err(UnsupportedOptionError::new_err(
                         "Python analytical callbacks require execution='lambdify'; use symbolic expressions for execution='aot'",
@@ -1171,6 +1176,44 @@ impl Lsode2PythonSolver {
             self.last_state = solution.final_state();
             Ok(solution)
         })
+    }
+
+    /// Start a fresh solve with new parameter values and initial state.
+    /// The configured interval and prepared callbacks are retained.
+    pub fn solve_with_parameter_values(
+        &mut self,
+        y0: Vec<f64>,
+        parameter_values: Vec<f64>,
+    ) -> PyResult<Lsode2Solution> {
+        solve_with_parameter_values_inner(self, None, y0, parameter_values)
+    }
+
+    /// Run independent solves in caller-specified parameter order. Every
+    /// point uses this same initial state and configured time interval.
+    pub fn solve_parameter_loop(
+        &mut self,
+        py: Python<'_>,
+        y0: Vec<f64>,
+        parameter_vectors: Vec<Vec<f64>>,
+    ) -> PyResult<Vec<Py<PyIvpParameterLoopPoint>>> {
+        finite_vector(&y0, "y0")?;
+        let route = format!("{}:{}:{}", self.frontend, self.execution, self.matrix_layout);
+        run_parameter_loop(py, "lsode2", &route, parameter_vectors, |parameters| {
+            let solution = self.solve_with_parameter_values(y0.clone(), parameters.to_vec())?;
+            Py::new(py, solution).map(Py::into_any)
+        })
+    }
+
+    /// Start a fresh solve with new parameters, initial state and interval.
+    /// The prepared symbolic/AOT route is retained.
+    pub fn solve_with_parameter_values_in_interval(
+        &mut self,
+        t0: f64,
+        y0: Vec<f64>,
+        t_end: f64,
+        parameter_values: Vec<f64>,
+    ) -> PyResult<Lsode2Solution> {
+        solve_with_parameter_values_inner(self, Some((t0, t_end)), y0, parameter_values)
     }
 
     /// Restart integration without repeating symbolic preparation.
@@ -1362,6 +1405,70 @@ impl Lsode2PythonSolver {
             self.aot_policy
         )
     }
+}
+
+fn solve_with_parameter_values_inner(
+    solver: &mut Lsode2PythonSolver,
+    interval: Option<(f64, f64)>,
+    y0: Vec<f64>,
+    parameter_values: Vec<f64>,
+) -> PyResult<Lsode2Solution> {
+    finite_vector(&y0, "y0")?;
+    finite_vector(&parameter_values, "parameter_values")?;
+    if parameter_values.len() != solver.parameter_count {
+        return Err(InvalidConfigurationError::new_err(format!(
+            "expected {} parameter values, got {}",
+            solver.parameter_count,
+            parameter_values.len()
+        )));
+    }
+    if let Some((t0, t_end)) = interval {
+        validate_scalar(t0, "t0")?;
+        validate_scalar(t_end, "t_end")?;
+    }
+    let route = format!(
+        "{}:{}:{}",
+        solver.frontend, solver.execution, solver.matrix_layout
+    );
+    let panic_state = solver.panic_state.clone();
+    panic_state.run("solve", "lsode2", &route, || {
+        if let Some(failure) = &solver.callback_failure {
+            failure.clear();
+        }
+        let result = match interval {
+            Some((t0, t_end)) => solver.solver.try_solve_with_parameter_values_in_interval(
+                t0,
+                DVector::from_vec(y0),
+                t_end,
+                DVector::from_vec(parameter_values),
+            ),
+            None => solver.solver.try_solve_with_parameter_values(
+                DVector::from_vec(y0),
+                DVector::from_vec(parameter_values),
+            ),
+        };
+        if let Err(error) = result {
+            if let Some(callback_error) = solver
+                .callback_failure
+                .as_ref()
+                .and_then(|failure| failure.take_pyerr("solve", "lsode2", &route))
+            {
+                return Err(callback_error);
+            }
+            return Err(map_lsode2_error(error));
+        }
+        if let Some(callback_error) = solver
+            .callback_failure
+            .as_ref()
+            .and_then(|failure| failure.take_pyerr("solve", "lsode2", &route))
+        {
+            return Err(callback_error);
+        }
+        let solution = Lsode2Solution::from_solver(&solver.solver);
+        solver.last_time = solution.final_time();
+        solver.last_state = solution.final_state();
+        Ok(solution)
+    })
 }
 
 #[cfg(test)]

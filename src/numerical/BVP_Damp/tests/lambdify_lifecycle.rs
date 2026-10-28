@@ -168,10 +168,10 @@ mod tests {
 
     fn prepare(solver: &mut NRBVP) {
         solver
-            .try_set_params(Some(&["alpha"]))
+            .try_set_parameter_names(Some(&["alpha"]))
             .expect("parameter name should be accepted");
         solver
-            .try_set_param_values(Some(vec![2.0]))
+            .try_set_parameter_values(Some(vec![2.0]))
             .expect("parameter value should be accepted");
         solver
             .try_eq_generate(None, None)
@@ -229,10 +229,10 @@ mod tests {
 
     fn prepare_frozen(solver: &mut FrozenNRBVP) {
         solver
-            .try_set_params(Some(&["alpha"]))
+            .try_set_parameter_names(Some(&["alpha"]))
             .expect("Frozen parameter name should be accepted");
         solver
-            .try_set_param_values(Some(vec![2.0]))
+            .try_set_parameter_values(Some(vec![2.0]))
             .expect("Frozen parameter value should be accepted");
         solver
             .try_eq_generate()
@@ -271,7 +271,7 @@ mod tests {
                     initial_stats.telemetry.counters.factorization_invalidations;
 
                 solver
-                    .try_set_param_values(Some(vec![5.0]))
+                    .try_set_parameter_values(Some(vec![5.0]))
                     .expect("numeric parameter rebind should be accepted");
                 solver
                     .try_solver_prepared()
@@ -285,11 +285,11 @@ mod tests {
                 );
 
                 solver
-                    .try_set_params(Some(&["beta"]))
+                    .try_set_parameter_names(Some(&["beta"]))
                     .expect("parameter-name mutation should be accepted");
                 expect_stale(&mut solver, "parameter names");
                 solver
-                    .try_set_params(Some(&["alpha"]))
+                    .try_set_parameter_names(Some(&["alpha"]))
                     .expect("restoring the declared parameter should be accepted");
                 solver
                     .try_eq_generate(None, None)
@@ -570,18 +570,18 @@ mod tests {
                     .expect("Frozen initial prepared solve should succeed");
 
                 solver
-                    .try_set_param_values(Some(vec![5.0]))
+                    .try_set_parameter_values(Some(vec![5.0]))
                     .expect("Frozen numeric rebind should be accepted");
                 solver
                     .try_solver_prepared()
                     .expect("Frozen numeric rebind must preserve callbacks");
 
                 solver
-                    .try_set_params(Some(&["beta"]))
+                    .try_set_parameter_names(Some(&["beta"]))
                     .expect("Frozen parameter-name mutation should be accepted");
                 expect_frozen_stale(&mut solver, "parameter names");
                 solver
-                    .try_set_params(Some(&["alpha"]))
+                    .try_set_parameter_names(Some(&["alpha"]))
                     .expect("restoring the Frozen parameter should be accepted");
                 solver
                     .try_eq_generate()
@@ -964,7 +964,7 @@ mod tests {
                 );
 
                 solver
-                    .try_set_param_values(Some(vec![3.0]))
+                    .try_set_parameter_values(Some(vec![3.0]))
                     .expect("numeric rebind should be accepted");
                 solver
                     .try_solver_prepared()
@@ -1125,7 +1125,7 @@ mod tests {
             let before = sparse_csc_snapshot(&mut solver);
 
             solver
-                .try_set_param_values(Some(vec![3.0]))
+                .try_set_parameter_values(Some(vec![3.0]))
                 .expect("numeric rebind should be accepted");
             solver
                 .try_eq_generate(None, None)
@@ -1192,7 +1192,7 @@ mod tests {
             prepare(&mut solver);
             let before = banded_slot_snapshot(&mut solver);
             solver
-                .try_set_param_values(Some(vec![3.0]))
+                .try_set_parameter_values(Some(vec![3.0]))
                 .expect("numeric rebind should be accepted");
             solver
                 .try_eq_generate(None, None)
@@ -1258,7 +1258,7 @@ mod tests {
             .expect("initial Banded solve should succeed");
         let before_rebind = solver.get_statistics().telemetry.counters;
         solver
-            .try_set_param_values(Some(vec![3.0]))
+            .try_set_parameter_values(Some(vec![3.0]))
             .expect("factor invalidation rebind should be accepted");
         let after_rebind = solver.get_statistics().telemetry.counters;
         assert!(

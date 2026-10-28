@@ -7,6 +7,13 @@
 //! symbolic variable projection. Controller-specific options remain explicit
 //! and unsupported shared options return a typed error.
 
+use crate::numerical::Nonlinear_systems::least_squares::{
+    LeastSquaresError, LeastSquaresTelemetryMode, LevenbergMarquardt,
+};
+use crate::numerical::Nonlinear_systems::symbolic::{
+    LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
+};
+use crate::numerical::SolverTelemetryMode;
 use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use crate::numerical::optimization::gavin_fitting::{GavinSymbolicFitResult, GavinSymbolicFitting};
 use crate::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
@@ -16,13 +23,6 @@ use crate::numerical::optimization::sym_fitting::{
 use crate::numerical::optimization::varpro::symbolic::{
     SymbolicVarProBuilder, SymbolicVarProError, SymbolicVarProFit,
 };
-use crate::numerical::Nonlinear_systems::least_squares::{
-    LeastSquaresError, LeastSquaresTelemetryMode, LevenbergMarquardt,
-};
-use crate::numerical::Nonlinear_systems::symbolic::{
-    LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
-};
-use crate::numerical::SolverTelemetryMode;
 use crate::symbolic::symbolic_engine::Expr;
 use log::Level;
 use nalgebra::DVector;

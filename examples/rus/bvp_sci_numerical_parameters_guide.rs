@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // получение p=1 при неизменном условии p-1=0. Подготовка frontend
             // переиспользуется, численная аппроксимация строится заново.
             // Меняется только численное состояние; подготовленный plan остаётся.
-            solver.set_parameters(vec![parameter])?;
+            solver.set_parameter_guess(vec![parameter])?;
         }
         let solution = solver.solve()?;
         let snapshot = solver.plan().telemetry_snapshot();

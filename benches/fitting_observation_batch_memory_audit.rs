@@ -18,11 +18,11 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use RustedSciThe::numerical::optimization::sym_fitting::{Fitting, FittingObservationPolicy};
 use RustedSciThe::numerical::Nonlinear_systems::least_squares::LeastSquaresTelemetryMode;
 use RustedSciThe::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
 };
+use RustedSciThe::numerical::optimization::sym_fitting::{Fitting, FittingObservationPolicy};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 
 struct AuditAllocator;
@@ -254,7 +254,9 @@ fn main() {
     println!(
         "Fitting observation-batch allocator audit; 5 samples/row; peak metric is additional live heap, not RSS; allocator-instrumented timings are diagnostic only"
     );
-    println!("workload | N | equations | params | frontend | policy | allocs median | allocated MiB median | peak extra live MiB median | deallocs median | deallocated MiB median | solve ms median* | iterations / residual / jacobian");
+    println!(
+        "workload | N | equations | params | frontend | policy | allocs median | allocated MiB median | peak extra live MiB median | deallocs median | deallocated MiB median | solve ms median* | iterations / residual / jacobian"
+    );
 
     for (workload, samples) in [
         (Workload::SingleResponse, 100_001),

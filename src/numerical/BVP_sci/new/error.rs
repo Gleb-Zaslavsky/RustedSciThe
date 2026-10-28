@@ -19,6 +19,8 @@ pub enum BvpSciStage {
     BoundaryCallback,
     NumericalCore,
     LinearBackend,
+    ParameterBinding,
+    Restart,
     Continuation,
     Output,
     AotPreparation,
@@ -67,6 +69,8 @@ impl BvpSciStatus {
 
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum BvpSciNewError {
+    #[error("solver logging setup failed: {0}")]
+    Logging(#[from] crate::numerical::logging::SolverLoggingError),
     #[error("invalid BVP configuration: {0}")]
     InvalidConfiguration(String),
     #[error("callback failed during {stage:?}: {message}")]
@@ -113,8 +117,8 @@ pub enum BvpSciNewError {
     AotRuntime { stage: BvpSciStage, message: String },
     #[error("AOT callback failed during {stage:?}: {message}")]
     AotCallback { stage: BvpSciStage, message: String },
-    #[error("prepared model is incompatible with the requested continuation state")]
-    ContinuationMismatch,
+    #[error("parameter binding has {actual} values; expected {expected}")]
+    ParameterBindingMismatch { expected: usize, actual: usize },
     #[error("dense output query is outside the solution domain")]
     OutputOutOfDomain,
     #[error("dense output is unavailable under the selected output policy")]

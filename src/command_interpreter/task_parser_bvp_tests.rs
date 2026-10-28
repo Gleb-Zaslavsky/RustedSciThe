@@ -17,6 +17,12 @@ fn bvp_adapter_keeps_typed_document_errors() {
 #[test]
 fn bvp_sci_task_categories_preserve_runtime_failure_taxonomy() {
     assert_eq!(
+        bvp_sci_error_category(&BvpSciNewError::Logging(
+            crate::numerical::logging::SolverLoggingError::LoggerAlreadyInstalled,
+        )),
+        "logging_setup"
+    );
+    assert_eq!(
         bvp_sci_error_category(&BvpSciNewError::MaxNodesExceeded { max_nodes: 16 }),
         "solver_exhaustion"
     );

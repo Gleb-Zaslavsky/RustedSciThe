@@ -1,5 +1,20 @@
 # LSODE2 Symbolic Runtime TODO
 
+## Independent IVP Parameter Loop
+
+- [x] Add `try_solve_parameter_loop(y0, parameter_vectors)` over the existing
+  prepared LSODE2 solver. Every point starts from the same `y0` and configured
+  interval; do not reuse the previous terminal state or call it continuation.
+- [x] Return each input vector with its own success trajectory (`x_mesh`,
+  time-by-state values) and native telemetry, or its typed `Lsode2Error` plus
+  the telemetry snapshot. A failed point must not stop later points.
+- [x] Test success/failure/success, fixed initial conditions, parity with
+  independent single solves, telemetry isolation, and malformed parameter
+  vectors. Add RU/EN guide notes and a runnable Rust example.
+- [x] Expose the loop in the direct Python solver with per-point typed failure
+  context, telemetry and NumPy trajectory arrays; add contract tests, RU/EN
+  guide updates and a runnable Python example.
+
 ## Release Corpus Infrastructure
 
 - [x] Add `benches/lsode2_workloads.rs`, a bounded Tabled matrix for both
@@ -2235,10 +2250,12 @@ reviving the old generated path unchanged.
   identity as the compact-Banded Jacobian. A debug BuildIfMissing followed by
   RequirePrebuilt gate proves that the second preparation performs no build
   and preserves residual values.
-- [x] Solver-level debug gates cover both Banded contracts: legacy
-  `Banded { kl: 0, ku: 0 }` sparse-value callbacks remain compatible, while
-  explicit `(kl, ku)` uses the compact slot callback. Native Jacobian tests
-  remain green (`17/17`).
+- [x] Banded symbolic storage now uses an explicit `BandedAuto` variant for
+  inferred bandwidth. `Banded { kl, ku }` always means the exact caller-
+  supplied widths, including `(0, 0)` for a diagonal matrix; the former
+  zero-width sentinel is no longer part of the public configuration contract.
+  A debug gate verifies that inferred and explicit diagonal storage remain
+  distinct.
 - [x] `RequirePrebuilt` now reconnects the process-local linked sparse,
   compact-Banded and residual runtimes from the durable resolver when a new
   process (or a cleared registry) opens an existing cdylib. The debug gate

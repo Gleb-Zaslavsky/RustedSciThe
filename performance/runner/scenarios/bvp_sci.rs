@@ -1,8 +1,9 @@
 use crate::error::RunnerError;
 use crate::registry::{NativeMetricScope, ScenarioOutput};
 use RustedSciThe::numerical::BVP_sci::new::{
-    BvpSciAssembly, BvpSciExecutionPolicy, BvpSciMatrixLayout, BvpSciOutputPolicy, BvpSciSolver,
-    BvpSciSolverBuilder, BvpSciStatus, BvpSciTelemetryMode,
+    BvpSciAssembly, BvpSciExecutionPolicy, BvpSciMatrixLayout, BvpSciOutputPolicy,
+    BvpSciParameterLoopReport, BvpSciSolver, BvpSciSolverBuilder, BvpSciStatus,
+    BvpSciTelemetryMode,
 };
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use RustedSciThe::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
@@ -96,6 +97,255 @@ pub fn run_exponential_dense() -> Result<ScenarioOutput, RunnerError> {
             ),
         ],
     })
+}
+
+const PARAMETER_LOOP_STATES: usize = 48;
+const PARAMETER_LOOP_NODES: usize = 129;
+const PARAMETER_LOOP_VALUES: [f64; 4] = [0.70, 0.80, 0.90, 1.00];
+
+fn run_external_parameter_loop(
+    telemetry: BvpSciTelemetryMode,
+) -> Result<ScenarioOutput, RunnerError> {
+    let full_started = Instant::now();
+    let mesh = (0..PARAMETER_LOOP_NODES)
+        .map(|index| index as f64 / (PARAMETER_LOOP_NODES - 1) as f64)
+        .collect::<Vec<_>>();
+    let states = (0..PARAMETER_LOOP_STATES)
+        .map(|index| format!("y{index}"))
+        .collect::<Vec<_>>();
+    let rates = (0..PARAMETER_LOOP_STATES)
+        .map(|index| 1.0 + index as f64 * 0.01)
+        .collect::<Vec<_>>();
+    let equations = rates
+        .iter()
+        .zip(&states)
+        .map(|(rate, state)| Expr::parse_expression(&format!("-rate * {rate} * {state}")))
+        .collect::<Vec<_>>();
+    let initial = vec![1.0; PARAMETER_LOOP_STATES];
+    let initial_state = mesh
+        .iter()
+        .flat_map(|x| rates.iter().map(move |rate| (-rate * 0.70 * x).exp()))
+        .collect::<Vec<_>>();
+    let mut builder = BvpSciSolverBuilder::new(equations, states)
+        .with_independent_variable("x")
+        .with_mesh_and_initial_state(mesh.clone(), initial_state)
+        .with_external_parameter_names(vec!["rate".into()])
+        .with_external_parameter_values(vec![PARAMETER_LOOP_VALUES[0]])
+        .with_frontend(BvpSciAssembly::AtomViewNative)
+        .with_matrix_layout(BvpSciMatrixLayout::BandedAuto)
+        .with_tolerance(2.0e-6)
+        .with_limits(512, 12, 6)
+        .with_output_policy(BvpSciOutputPolicy::MeshAndValues)
+        .with_telemetry(telemetry);
+    // The callback ABI exposes endpoint state and residual in the same order.
+    builder = builder.with_boundary_callback(move |left, _right, _parameters, residual| {
+        for index in 0..residual.len() {
+            residual[index] = left[index] - initial[index];
+        }
+        Ok(())
+    });
+
+    let setup_started = Instant::now();
+    let mut solver = builder
+        .build()
+        .map_err(|error| RunnerError::Scenario(format!("BVP_sci loop preparation: {error:?}")))?;
+    let setup_ms = setup_started.elapsed().as_secs_f64() * 1_000.0;
+
+    let loop_started = Instant::now();
+    let report = solver
+        .solve_parameter_loop(
+            &PARAMETER_LOOP_VALUES[1..]
+                .iter()
+                .map(|value| vec![*value])
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| RunnerError::Scenario(format!("BVP_sci parameter loop: {error:?}")))?;
+    let loop_ms = loop_started.elapsed().as_secs_f64() * 1_000.0;
+    let scenario_wall_ms = full_started.elapsed().as_secs_f64() * 1_000.0;
+    let BvpSciParameterLoopReport { points, stop_error } = report;
+    if let Some(error) = stop_error {
+        return Err(RunnerError::Scenario(format!(
+            "BVP_sci parameter loop stopped during checkpoint recovery: {error:?}"
+        )));
+    }
+    if points.len() != PARAMETER_LOOP_VALUES.len() - 1 {
+        return Err(RunnerError::Scenario(format!(
+            "BVP_sci returned {} loop points, expected {}",
+            points.len(),
+            PARAMETER_LOOP_VALUES.len() - 1
+        )));
+    }
+
+    let mut max_exact_error = 0.0_f64;
+    let mut final_nodes = 0;
+    let mut final_residual_norm = 0.0;
+    for point in &points {
+        let solution = point.result.as_ref().map_err(|error| {
+            RunnerError::Scenario(format!(
+                "BVP_sci parameter point {:?} failed: {error:?}",
+                point.external_parameters
+            ))
+        })?;
+        if solution.status != BvpSciStatus::Success {
+            return Err(RunnerError::Scenario(format!(
+                "BVP_sci parameter point returned {:?}",
+                solution.status
+            )));
+        }
+        let parameter = point.external_parameters[0];
+        for (node, x) in solution.x.iter().enumerate() {
+            for (state, rate) in rates.iter().enumerate() {
+                let expected = (-rate * parameter * x).exp();
+                let actual = solution.y[node * PARAMETER_LOOP_STATES + state];
+                max_exact_error = max_exact_error.max((actual - expected).abs());
+            }
+        }
+        final_nodes = solution.x.len();
+        final_residual_norm = solution.residual_norm;
+    }
+    if max_exact_error > 2.0e-4 {
+        return Err(RunnerError::Scenario(format!(
+            "BVP_sci parameter-loop exact solution check failed: max error={max_exact_error:e}"
+        )));
+    }
+    let telemetry = points
+        .last()
+        .expect("non-empty fixed loop")
+        .telemetry
+        .clone();
+    black_box((&points, &telemetry));
+
+    let mut metrics = vec![
+        ("scenario_wall_ms".into(), "ms/off".into(), scenario_wall_ms),
+        ("solver_setup_ms".into(), "ms/off".into(), setup_ms),
+        ("parameter_loop_ms".into(), "ms/off".into(), loop_ms),
+    ];
+    for (name, value) in [
+        ("stage_preparation_ms", telemetry.preparation_ms),
+        ("stage_callback_ms", telemetry.callback_ms),
+        (
+            "stage_residual_evaluation_ms",
+            telemetry.residual_evaluation_ms,
+        ),
+        (
+            "stage_jacobian_evaluation_ms",
+            telemetry.jacobian_evaluation_ms,
+        ),
+        ("stage_newton_ms", telemetry.newton_ms),
+        ("stage_factorization_ms", telemetry.factorization_ms),
+        ("stage_linear_solve_ms", telemetry.linear_solve_ms),
+        ("stage_full_solve_total_ms", telemetry.full_solve_total_ms),
+    ] {
+        if let Some(value) = value {
+            metrics.push((name.into(), "ms/detailed/loop".into(), value));
+        }
+    }
+
+    Ok(ScenarioOutput {
+        metrics,
+        native_scopes: Vec::new(),
+        counters: vec![
+            ("state_dimension".into(), PARAMETER_LOOP_STATES as u64),
+            ("loop_points".into(), points.len() as u64),
+            ("final_nodes".into(), final_nodes as u64),
+            ("parameter_rebinds".into(), telemetry.parameter_rebinds),
+            ("continuation_solves".into(), telemetry.continuation_solves),
+            ("rhs_calls_cumulative".into(), telemetry.rhs_calls),
+            ("jacobian_calls_cumulative".into(), telemetry.jacobian_calls),
+            (
+                "newton_iterations_cumulative".into(),
+                telemetry.newton_iterations,
+            ),
+            ("factorizations_cumulative".into(), telemetry.factorizations),
+            ("linear_solves_cumulative".into(), telemetry.linear_solves),
+            ("preparation_calls".into(), telemetry.preparation_calls),
+        ],
+        diagnostics: vec![
+            (
+                "max_exact_solution_abs_error".into(),
+                "absolute".into(),
+                max_exact_error,
+            ),
+            (
+                "final_residual_norm".into(),
+                "normalized".into(),
+                final_residual_norm,
+            ),
+        ],
+    })
+}
+
+pub fn run_external_parameter_loop_gate() -> Result<ScenarioOutput, RunnerError> {
+    run_external_parameter_loop(BvpSciTelemetryMode::Off)
+}
+
+pub fn diagnose_external_parameter_loop_gate(
+    _: &crate::registry::Scenario,
+) -> Result<ScenarioOutput, RunnerError> {
+    run_external_parameter_loop(BvpSciTelemetryMode::Detailed)
+}
+
+#[cfg(test)]
+mod parameter_loop_tests {
+    use super::{run_external_parameter_loop, run_external_parameter_loop_gate};
+    use RustedSciThe::numerical::BVP_sci::new::BvpSciTelemetryMode;
+
+    #[test]
+    fn large_external_parameter_loop_preserves_solution_and_reports_work() {
+        let output = run_external_parameter_loop_gate()
+            .expect("large BVP_sci fixed-input loop should converge");
+        assert!(
+            output
+                .metrics
+                .iter()
+                .any(|(name, _, value)| name == "scenario_wall_ms" && *value > 0.0)
+        );
+        assert!(
+            output
+                .diagnostics
+                .iter()
+                .any(|(name, _, value)| name == "max_exact_solution_abs_error" && *value < 2e-4)
+        );
+        assert!(
+            output
+                .counters
+                .iter()
+                .any(|(name, value)| name == "loop_points" && *value == 3)
+        );
+    }
+
+    #[test]
+    fn detailed_parameter_loop_reports_native_stages_and_cumulative_counters() {
+        let output = run_external_parameter_loop(BvpSciTelemetryMode::Detailed)
+            .expect("detailed loop diagnostic should converge");
+        for metric in [
+            "stage_callback_ms",
+            "stage_residual_evaluation_ms",
+            "stage_jacobian_evaluation_ms",
+            "stage_full_solve_total_ms",
+        ] {
+            assert!(
+                output
+                    .metrics
+                    .iter()
+                    .any(|(name, _, value)| name == metric && *value > 0.0),
+                "missing positive diagnostic timing {metric}"
+            );
+        }
+        for counter in [
+            "parameter_rebinds",
+            "continuation_solves",
+            "rhs_calls_cumulative",
+        ] {
+            assert!(
+                output
+                    .counters
+                    .iter()
+                    .any(|(name, value)| name == counter && *value > 0),
+                "missing positive cumulative counter {counter}"
+            );
+        }
+    }
 }
 
 const MATRIX_DENSE: u8 = 0;

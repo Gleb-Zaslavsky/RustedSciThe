@@ -67,7 +67,9 @@ plot: false
 
     let mut solver =
         build_bvp_solver_from_spec(&spec).expect("полная BVP-задача должна собираться");
-    solver.solve();
+    solver
+        .try_solve()
+        .expect("native BVP task solve should succeed");
     let full_matrix = solver
         .get_result()
         .expect("полный путь должен вернуть матрицу результата");
@@ -127,7 +129,9 @@ refinement_steps: 1
 
     let mut split_solver = build_bvp_solver_from_problem_and_settings(&problem, &settings)
         .expect("Rust problem + settings из task-doc должны собираться");
-    split_solver.solve();
+    split_solver
+        .try_solve()
+        .expect("native BVP task solve should succeed");
     let split_matrix = split_solver
         .get_result()
         .expect("разделённый путь должен вернуть матрицу результата");

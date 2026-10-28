@@ -44,6 +44,8 @@ pub enum BvpSciAotPlan {
         assembly: BvpSciAssembly,
         dimension: usize,
         parameter_count: usize,
+        external_parameter_count: usize,
+        runtime_parameter_count: usize,
         execution_policy: IvpLambdifyExecutionPolicy,
         telemetry: BvpSciTelemetry,
         updated_resolver: Option<AotResolver>,
@@ -58,6 +60,8 @@ pub enum BvpSciAotPlan {
         band_slots: Option<AtomAotBandedSlotMap>,
         dimension: usize,
         parameter_count: usize,
+        external_parameter_count: usize,
+        runtime_parameter_count: usize,
         execution_policy: IvpLambdifyExecutionPolicy,
         telemetry: BvpSciTelemetry,
         shared_telemetry: IvpTelemetry,
@@ -95,10 +99,38 @@ impl BvpSciAotPlan {
     /// Prepare an AOT route with the selected warm callback policy.
     pub fn prepare_with_policy(
         assembly: BvpSciAssembly,
-        layout: BvpSciMatrixLayout,
+        mut layout: BvpSciMatrixLayout,
         equations: Vec<Expr>,
         state_names: Vec<String>,
         parameter_names: Vec<String>,
+        independent_name: impl Into<String>,
+        mut config: SymbolicIvpGeneratedBackendConfig,
+        telemetry: BvpSciTelemetry,
+        execution_policy: BvpSciExecutionPolicy,
+    ) -> Result<Self, BvpSciNewError> {
+        Self::prepare_with_external_parameters_and_policy(
+            assembly,
+            layout,
+            equations,
+            state_names,
+            parameter_names,
+            &[],
+            independent_name,
+            config,
+            telemetry,
+            execution_policy,
+        )
+    }
+
+    /// Prepare an AOT route with fixed model inputs separate from the free
+    /// parameters that add columns to the global Newton system.
+    pub fn prepare_with_external_parameters_and_policy(
+        assembly: BvpSciAssembly,
+        mut layout: BvpSciMatrixLayout,
+        equations: Vec<Expr>,
+        state_names: Vec<String>,
+        parameter_names: Vec<String>,
+        external_parameter_names: &[String],
         independent_name: impl Into<String>,
         mut config: SymbolicIvpGeneratedBackendConfig,
         telemetry: BvpSciTelemetry,
@@ -112,7 +144,32 @@ impl BvpSciAotPlan {
                 actual: dimension,
             });
         }
+        if matches!(
+            layout,
+            BvpSciMatrixLayout::BandedAuto | BvpSciMatrixLayout::Banded { .. }
+        ) {
+            let inferred =
+                crate::symbolic::structural::infer_rowwise_bandwidth(&equations, &state_names)
+                    .map_err(BvpSciNewError::InvalidConfiguration)?;
+            match layout {
+                BvpSciMatrixLayout::BandedAuto => {
+                    layout = BvpSciMatrixLayout::Banded {
+                        lower: inferred.0,
+                        upper: inferred.1,
+                    };
+                }
+                BvpSciMatrixLayout::Banded { lower, upper } => {
+                    crate::symbolic::structural::validate_bandwidth_hint(inferred, (lower, upper))
+                        .map_err(BvpSciNewError::InvalidConfiguration)?;
+                }
+                _ => unreachable!("only banded layouts enter bandwidth validation"),
+            }
+        }
         let parameter_count = parameter_names.len();
+        let external_parameter_count = external_parameter_names.len();
+        let runtime_parameter_count = parameter_count + external_parameter_count;
+        let mut runtime_parameter_names = parameter_names.clone();
+        runtime_parameter_names.extend(external_parameter_names.iter().cloned());
         let independent_name = independent_name.into();
         hydrate_handoff_resolver(&mut config)?;
         let symbolic_backend = match assembly {
@@ -131,18 +188,19 @@ impl BvpSciAotPlan {
             BvpSciTelemetryMode::Detailed => IvpTelemetry::detailed(),
         };
         let execution_policy = to_ivp_policy(execution_policy);
-        let parameter_jacobian = BvpSciParameterJacobianPlan::prepare(
+        let parameter_jacobian = BvpSciParameterJacobianPlan::prepare_with_external_parameters(
             assembly,
             &equations,
             &state_names,
             &parameter_names,
+            external_parameter_names,
             &independent_name,
             telemetry.clone(),
         )?;
         let options = SymbolicIvpProblemOptions::new()
             .with_symbolic_assembly_backend(symbolic_backend)
-            .with_equation_parameters(parameter_names.clone())
-            .with_equation_parameter_values(DVector::from_element(parameter_count, 1.0))
+            .with_equation_parameters(runtime_parameter_names)
+            .with_equation_parameter_values(DVector::from_element(runtime_parameter_count, 1.0))
             .with_lambdify_execution_policy(execution_policy)
             .with_telemetry(ivp_telemetry.clone());
         let calibration_started = ivp_telemetry
@@ -181,6 +239,8 @@ impl BvpSciAotPlan {
                     assembly,
                     dimension,
                     parameter_count,
+                    external_parameter_count,
+                    runtime_parameter_count,
                     execution_policy,
                     telemetry,
                     updated_resolver,
@@ -202,6 +262,8 @@ impl BvpSciAotPlan {
                     BvpSciMatrixLayout::Sparse,
                     dimension,
                     parameter_count,
+                    external_parameter_count,
+                    runtime_parameter_count,
                     execution_policy,
                     telemetry,
                     None,
@@ -226,11 +288,19 @@ impl BvpSciAotPlan {
                     BvpSciMatrixLayout::Banded { lower, upper },
                     dimension,
                     parameter_count,
+                    external_parameter_count,
+                    runtime_parameter_count,
                     execution_policy,
                     telemetry,
                     Some(slot_map),
                     parameter_jacobian,
                 )
+            }
+            BvpSciMatrixLayout::BandedAuto => {
+                return Err(BvpSciNewError::InvalidConfiguration(
+                    "BandedAuto must be resolved from symbolic equations before AOT preparation"
+                        .into(),
+                ));
             }
         }?;
         ivp_telemetry.record_cold_stage(
@@ -247,6 +317,8 @@ impl BvpSciAotPlan {
         layout: BvpSciMatrixLayout,
         dimension: usize,
         parameter_count: usize,
+        external_parameter_count: usize,
+        runtime_parameter_count: usize,
         execution_policy: IvpLambdifyExecutionPolicy,
         telemetry: BvpSciTelemetry,
         band_slots: Option<AtomAotBandedSlotMap>,
@@ -278,6 +350,8 @@ impl BvpSciAotPlan {
             band_slots,
             dimension,
             parameter_count,
+            external_parameter_count,
+            runtime_parameter_count,
             execution_policy,
             telemetry,
             shared_telemetry: result.telemetry,
@@ -306,6 +380,32 @@ impl BvpSciAotPlan {
             | Self::Structured {
                 parameter_count, ..
             } => *parameter_count,
+        }
+    }
+
+    pub fn external_parameter_dimension(&self) -> usize {
+        match self {
+            Self::Dense {
+                external_parameter_count,
+                ..
+            }
+            | Self::Structured {
+                external_parameter_count,
+                ..
+            } => *external_parameter_count,
+        }
+    }
+
+    fn runtime_parameter_dimension(&self) -> usize {
+        match self {
+            Self::Dense {
+                runtime_parameter_count,
+                ..
+            }
+            | Self::Structured {
+                runtime_parameter_count,
+                ..
+            } => *runtime_parameter_count,
         }
     }
 
@@ -425,15 +525,15 @@ impl BvpSciAotPlan {
     ) -> Result<(), BvpSciNewError> {
         if !x.is_finite()
             || state.len() != self.dimension()
-            || parameters.len() != self.parameter_dimension()
+            || parameters.len() != self.runtime_parameter_dimension()
         {
             return Err(BvpSciNewError::ShapeMismatch {
                 stage: BvpSciStage::AotCallback,
-                expected: 1 + self.dimension() + self.parameter_dimension(),
+                expected: 1 + self.dimension() + self.runtime_parameter_dimension(),
                 actual: 1 + state.len() + parameters.len(),
             });
         }
-        let expected = 1 + self.parameter_dimension() + self.dimension();
+        let expected = 1 + self.runtime_parameter_dimension() + self.dimension();
         if arguments.len() != expected {
             return Err(BvpSciNewError::ShapeMismatch {
                 stage: BvpSciStage::ArgumentBuffer,
@@ -733,7 +833,7 @@ fn configure_chunking(
             config.sparse_jacobian_chunking_strategy =
                 SparseChunkingStrategy::ByTargetChunkCount { target_chunks };
         }
-        BvpSciMatrixLayout::Banded { .. } => {
+        BvpSciMatrixLayout::Banded { .. } | BvpSciMatrixLayout::BandedAuto => {
             let workers = std::thread::available_parallelism()
                 .map(|value| value.get())
                 .unwrap_or(1);

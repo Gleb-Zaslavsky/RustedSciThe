@@ -248,7 +248,8 @@ impl Lsode2NativeStepEngine {
             .set_matrix_backend(match config.linear_system_structure {
                 Lsode2LinearSystemStructure::Dense => IvpTelemetryMatrixBackend::Dense,
                 Lsode2LinearSystemStructure::Sparse => IvpTelemetryMatrixBackend::Sparse,
-                Lsode2LinearSystemStructure::Banded { .. } => IvpTelemetryMatrixBackend::Banded,
+                Lsode2LinearSystemStructure::BandedAuto
+                | Lsode2LinearSystemStructure::Banded { .. } => IvpTelemetryMatrixBackend::Banded,
             });
         config.telemetry.set_problem_shape(
             config.y0.len(),
@@ -355,7 +356,8 @@ impl Lsode2NativeStepEngine {
             .set_matrix_backend(match config.linear_system_structure {
                 Lsode2LinearSystemStructure::Dense => IvpTelemetryMatrixBackend::Dense,
                 Lsode2LinearSystemStructure::Sparse => IvpTelemetryMatrixBackend::Sparse,
-                Lsode2LinearSystemStructure::Banded { .. } => IvpTelemetryMatrixBackend::Banded,
+                Lsode2LinearSystemStructure::BandedAuto
+                | Lsode2LinearSystemStructure::Banded { .. } => IvpTelemetryMatrixBackend::Banded,
             });
         config.telemetry.set_problem_shape(
             config.y0.len(),
@@ -1625,7 +1627,7 @@ fn evaluate_finite_difference_residual(
 
 fn banded_jacobian_storage(config: &Lsode2ProblemConfig) -> NativeJacobianStorage {
     match config.linear_system_structure {
-        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 } => {
+        Lsode2LinearSystemStructure::BandedAuto => {
             NativeJacobianStorage::Banded { bandwidth: None }
         }
         Lsode2LinearSystemStructure::Banded { kl, ku } => NativeJacobianStorage::Banded {
@@ -1790,6 +1792,25 @@ mod tests {
             1e-6,
             1e-8,
         )
+    }
+
+    #[test]
+    fn auto_band_and_explicit_diagonal_band_have_distinct_native_storage() {
+        let inferred = exponential_decay_config().with_native_banded_faithful_backend();
+        assert_eq!(
+            banded_jacobian_storage(&inferred),
+            NativeJacobianStorage::Banded { bandwidth: None }
+        );
+
+        let explicit_diagonal = exponential_decay_config()
+            .with_native_banded_faithful_backend()
+            .with_linear_system_structure(Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 });
+        assert_eq!(
+            banded_jacobian_storage(&explicit_diagonal),
+            NativeJacobianStorage::Banded {
+                bandwidth: Some((0, 0))
+            }
+        );
     }
 
     #[test]

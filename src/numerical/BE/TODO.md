@@ -1,5 +1,19 @@
 # Backward Euler: Audit and Refactoring Plan
 
+## Independent IVP Parameter Loop
+
+- [x] Add `try_solve_parameter_loop(y0, parameter_vectors)` over the prepared
+  Backward Euler solver. Reuse symbolic callbacks, but start every point from
+  the same initial state and configured interval with fresh solve state.
+- [x] Store each point's parameters, time mesh, trajectory and native BE
+  telemetry/statistics, or its typed error. A failed parameter set is local to
+  that point and does not stop the loop; this is not continuation.
+- [x] Test independent-solve parity, fixed initial conditions,
+  success/failure/success recovery, telemetry and typed invalid inputs. Add
+  RU/EN guide notes and a Rust example.
+- [x] Expose the loop in Python with NumPy trajectories, per-point errors and
+  telemetry; add contract tests, both guide updates and a runnable example.
+
 Audit date: 2026-10-01. Scope: `mod.rs`, `NR_for_Euler.rs`, and their
 `ODE_api2` integration. Updated after the BE release test and first complete
 release benchmark baseline.

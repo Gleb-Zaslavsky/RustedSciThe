@@ -4,13 +4,14 @@
 //! `log` file sink; later solver scopes share that timestamped file while
 //! retaining independent thread-local level filters. This avoids console-only
 //! logging and keeps concurrent solver calls from changing each other's level.
+//! Runtime sink failures remain queryable through [`solver_log_status`].
 
 use std::cell::Cell;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use chrono::Local;
 use log::{Level, LevelFilter, Log, Metadata, Record};
@@ -31,17 +32,18 @@ thread_local! {
     static ACTIVE_SOLVER_LOG_LEVEL: Cell<SolverLogLevel> = const { Cell::new(SolverLogLevel::Off) };
 }
 
-static FILE_LOGGER: OnceLock<Result<PathBuf, SolverLoggingError>> = OnceLock::new();
+static FILE_LOGGER: OnceLock<Result<LogSink, SolverLoggingError>> = OnceLock::new();
 static LOGGER_FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
-static LOG_WRITE_FAILURE_REPORTED: AtomicBool = AtomicBool::new(false);
 
-/// Failure while preparing the persistent solver log sink.
+/// Failure while preparing or writing the persistent solver log sink.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SolverLoggingError {
     /// The configured log directory or timestamped file could not be created.
     FileCreation(String),
     /// Another component already owns the process-wide `log` facade.
     LoggerAlreadyInstalled,
+    /// Writing or flushing the active log file failed after setup.
+    WriteFailure { path: PathBuf, message: String },
 }
 
 impl std::fmt::Display for SolverLoggingError {
@@ -52,6 +54,9 @@ impl std::fmt::Display for SolverLoggingError {
                 f,
                 "cannot install the solver file logger because the process already has a global log logger"
             ),
+            Self::WriteFailure { path, message } => {
+                write!(f, "cannot write solver log '{}': {message}", path.display())
+            }
         }
     }
 }
@@ -104,14 +109,50 @@ impl SolverLogGuard {
 pub fn solver_log_path() -> Option<PathBuf> {
     FILE_LOGGER
         .get()
-        .and_then(|result| result.as_ref().ok().cloned())
+        .and_then(|result| result.as_ref().ok().map(|sink| sink.path.clone()))
+}
+
+/// Report whether the process-wide solver log sink is disabled, active or has
+/// encountered an I/O failure. A runtime failure remains observable after the
+/// numerical solve succeeds; it does not replace or discard that result.
+pub fn solver_log_status() -> Result<Option<PathBuf>, SolverLoggingError> {
+    sink_status(FILE_LOGGER.get())
+}
+
+fn sink_status(
+    result: Option<&Result<LogSink, SolverLoggingError>>,
+) -> Result<Option<PathBuf>, SolverLoggingError> {
+    let Some(result) = result else {
+        return Ok(None);
+    };
+    let sink = result.as_ref().map_err(Clone::clone)?;
+    active_sink_status(&sink.path, &sink.health)
+}
+
+fn active_sink_status(
+    path: &Path,
+    health: &LogSinkHealth,
+) -> Result<Option<PathBuf>, SolverLoggingError> {
+    match health.write_failure.lock() {
+        Ok(failure) => match failure.as_ref() {
+            Some(error) => Err(error.clone()),
+            None => Ok(Some(path.to_path_buf())),
+        },
+        Err(_) => Err(SolverLoggingError::WriteFailure {
+            path: path.to_path_buf(),
+            message: "log health state is poisoned".to_owned(),
+        }),
+    }
 }
 
 fn ensure_file_logger() -> Result<(), SolverLoggingError> {
     let result = FILE_LOGGER.get_or_init(|| {
         let (path, file) = create_log_file()?;
+        let health = Arc::new(LogSinkHealth::default());
         if log::set_boxed_logger(Box::new(SolverFileLogger {
-            file: Mutex::new(file),
+            path: path.clone(),
+            file: Mutex::new(Box::new(file)),
+            health: Arc::clone(&health),
         }))
         .is_err()
         {
@@ -119,7 +160,7 @@ fn ensure_file_logger() -> Result<(), SolverLoggingError> {
             return Err(SolverLoggingError::LoggerAlreadyInstalled);
         }
         log::set_max_level(LevelFilter::Debug);
-        Ok(path)
+        Ok(LogSink { path, health })
     });
 
     result.as_ref().map(|_| ()).map_err(Clone::clone)
@@ -156,8 +197,34 @@ fn create_log_file_in(directory: &Path) -> Result<(PathBuf, File), SolverLogging
     ))
 }
 
+struct LogSink {
+    path: PathBuf,
+    health: Arc<LogSinkHealth>,
+}
+
+#[derive(Default)]
+struct LogSinkHealth {
+    write_failure: Mutex<Option<SolverLoggingError>>,
+    failure_reported: AtomicBool,
+}
+
+impl LogSinkHealth {
+    fn record_write_failure(&self, error: SolverLoggingError) {
+        if let Ok(mut first_failure) = self.write_failure.lock()
+            && first_failure.is_none()
+        {
+            *first_failure = Some(error.clone());
+        }
+        if !self.failure_reported.swap(true, Ordering::Relaxed) {
+            eprintln!("RustedSciThe solver log write failed: {error}");
+        }
+    }
+}
+
 struct SolverFileLogger {
-    file: Mutex<File>,
+    path: PathBuf,
+    file: Mutex<Box<dyn Write + Send>>,
+    health: Arc<LogSinkHealth>,
 }
 
 impl Log for SolverFileLogger {
@@ -184,9 +251,11 @@ impl Log for SolverFileLogger {
             Err(_) => Err(std::io::Error::other("solver log file lock is poisoned")),
         };
         if let Err(error) = result {
-            if !LOG_WRITE_FAILURE_REPORTED.swap(true, Ordering::Relaxed) {
-                eprintln!("RustedSciThe solver log write failed: {error}");
-            }
+            self.health
+                .record_write_failure(SolverLoggingError::WriteFailure {
+                    path: self.path.clone(),
+                    message: error.to_string(),
+                });
         }
     }
 
@@ -197,9 +266,11 @@ impl Log for SolverFileLogger {
             .map_err(|_| std::io::Error::other("solver log file lock is poisoned"))
             .and_then(|mut file| file.flush());
         if let Err(error) = result {
-            if !LOG_WRITE_FAILURE_REPORTED.swap(true, Ordering::Relaxed) {
-                eprintln!("RustedSciThe solver log flush failed: {error}");
-            }
+            self.health
+                .record_write_failure(SolverLoggingError::WriteFailure {
+                    path: self.path.clone(),
+                    message: error.to_string(),
+                });
         }
     }
 }
@@ -298,7 +369,9 @@ mod tests {
         ));
         let (path, file) = create_log_file_in(&directory).unwrap();
         let logger = SolverFileLogger {
-            file: Mutex::new(file),
+            path: path.clone(),
+            file: Mutex::new(Box::new(file)),
+            health: Arc::new(LogSinkHealth::default()),
         };
         let target = concat!(env!("CARGO_PKG_NAME"), "::test");
         let record = Record::builder()
@@ -323,6 +396,68 @@ mod tests {
 
         drop(logger);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn runtime_sink_failure_is_retained_as_typed_health_without_solver_failure() {
+        struct FailingWriter;
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "injected sink failure",
+                ))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let path = PathBuf::from("injected-solver-log.txt");
+        let health = Arc::new(LogSinkHealth::default());
+        let logger = SolverFileLogger {
+            path: path.clone(),
+            file: Mutex::new(Box::new(FailingWriter)),
+            health: Arc::clone(&health),
+        };
+        assert_eq!(active_sink_status(&path, &health), Ok(Some(path.clone())));
+        let record = Record::builder()
+            .args(format_args!("this write fails"))
+            .level(Level::Info)
+            .target(concat!(env!("CARGO_PKG_NAME"), "::test"))
+            .build();
+
+        logger.log(&record);
+
+        let expected = SolverLoggingError::WriteFailure {
+            path: path.clone(),
+            message: "injected sink failure".to_owned(),
+        };
+        assert_eq!(
+            health.write_failure.lock().unwrap().as_ref(),
+            Some(&expected)
+        );
+        assert_eq!(active_sink_status(&path, &health), Err(expected));
+    }
+
+    #[test]
+    fn public_status_contract_distinguishes_disabled_setup_failure_and_active_sink() {
+        assert_eq!(sink_status(None), Ok(None));
+
+        let setup_failure = SolverLoggingError::FileCreation("permission denied".to_owned());
+        assert_eq!(
+            sink_status(Some(&Err(setup_failure.clone()))),
+            Err(setup_failure)
+        );
+
+        let path = PathBuf::from("healthy-solver-log.txt");
+        let sink = LogSink {
+            path: path.clone(),
+            health: Arc::new(LogSinkHealth::default()),
+        };
+        assert_eq!(sink_status(Some(&Ok(sink))), Ok(Some(path)));
     }
 
     #[test]

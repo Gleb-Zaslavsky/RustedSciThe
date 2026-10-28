@@ -184,7 +184,7 @@ fn changing_parameters_invalidates_owned_factor() {
             .expect("dense factor owner runtime"),
     );
 
-    solver.set_params(Some(&["alpha"]));
+    solver.set_parameter_names(Some(&["alpha"]));
     assert!(solver.factor_owner.borrow().is_none());
     assert!(solver.factor_owner.old_jac.is_none());
     assert!(solver.jac_recalc);
@@ -193,7 +193,7 @@ fn changing_parameters_invalidates_owned_factor() {
         prepare_factor_owner_runtime(&DMatrix::from_row_slice(1, 1, &[2.0]), (0, 0), None)
             .expect("dense factor owner runtime"),
     );
-    solver.set_param_values(Some(vec![1.0]));
+    solver.set_parameter_values(Some(vec![1.0]));
 
     assert!(solver.factor_owner.borrow().is_none());
     assert!(solver.factor_owner.old_jac.is_none());
@@ -1624,6 +1624,32 @@ fn prepared_frozen_solver_detects_direct_residual_callback_replacement() {
 }
 
 #[test]
+fn prepared_frozen_iterate_reuses_callbacks_and_rejects_invalid_shapes() {
+    let mut solver = sparse_surface_test_solver_with_naive_strategy();
+    solver
+        .try_eq_generate()
+        .expect("baseline Frozen preparation should succeed");
+
+    let bad_shape = solver
+        .try_set_prepared_iterate(DMatrix::zeros(2, 7))
+        .expect_err("prepared iterate must match the fixed mesh shape");
+    assert!(matches!(
+        bad_shape,
+        BvpBackendIntegrationError::InvalidProblem { field, .. }
+            if field == "prepared_iterate"
+    ));
+
+    solver
+        .try_set_prepared_iterate(DMatrix::from_element(2, 8, 0.75))
+        .expect("finite same-shape iterate should be accepted");
+    assert!(solver.prepared_runtime_revision.prepared_plan().is_some());
+    assert!(solver.jac_recalc, "numeric Jacobian must be recomputed");
+    solver
+        .try_solver_prepared()
+        .expect("prepared callbacks remain usable after replacing the iterate");
+}
+
+#[test]
 fn frozen_mesh_setter_invalidates_prepared_callbacks_and_rejects_one_point_mesh() {
     let mut solver = sparse_surface_test_solver_with_naive_strategy();
     solver
@@ -1685,8 +1711,8 @@ fn build_solver_request_carries_optional_aot_resolver() {
 #[test]
 fn build_solver_request_carries_parameter_names_and_values() {
     let mut solver = sparse_surface_test_solver_with_naive_strategy();
-    solver.set_params(Some(&["alpha", "beta"]));
-    solver.set_param_values(Some(vec![1.5, -0.25]));
+    solver.set_parameter_names(Some(&["alpha", "beta"]));
+    solver.set_parameter_values(Some(vec![1.5, -0.25]));
 
     let request = solver.build_solver_request();
     assert_eq!(
@@ -1700,8 +1726,8 @@ fn build_solver_request_carries_parameter_names_and_values() {
 #[should_panic(expected = "expected exactly 2 values for declared symbolic parameters")]
 fn solver_surface_rejects_parameter_value_length_mismatch() {
     let mut solver = sparse_surface_test_solver_with_naive_strategy();
-    solver.set_params(Some(&["alpha", "beta"]));
-    solver.set_param_values(Some(vec![1.5]));
+    solver.set_parameter_names(Some(&["alpha", "beta"]));
+    solver.set_parameter_values(Some(vec![1.5]));
 }
 
 #[test]

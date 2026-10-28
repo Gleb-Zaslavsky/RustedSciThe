@@ -35,7 +35,7 @@ pub fn workload_problem(
         RadauFrontend::AtomViewNative => None,
     };
     let mut problem = RadauProblem::new(workload.equations, variables, workload.time_variable)
-        .with_parameters(workload.parameter_names);
+        .with_parameter_names(workload.parameter_names);
     if let Some(jacobian) = jacobian {
         problem = problem.with_jacobian(jacobian);
     }

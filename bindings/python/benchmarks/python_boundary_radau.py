@@ -118,7 +118,7 @@ def run_symbolic(frontend: str, repeats: int, sweep: int, end_time: float):
         for index in range(sweep):
             current_rate = 0.55 + 0.1 * (index % 4)
             result, call_ms = measure(
-                lambda current_rate=current_rate: solver.continue_with_parameters(
+                lambda current_rate=current_rate: solver.solve_with_parameter_values(
                     y0, [current_rate]
                 )
             )
@@ -167,7 +167,7 @@ def run_python_callbacks(repeats: int, sweep: int, end_time: float):
         sweep_api_ms = 0.0
         for index in range(sweep):
             rate[0] = 0.55 + 0.1 * (index % 4)
-            result, call_ms = measure(lambda: solver.continue_with_initial_state(y0))
+            result, call_ms = measure(lambda: solver.solve(y0))
             sweep_api_ms += call_ms
             _check_solution(result, rate[0], end_time)
             max_error = max(
@@ -219,7 +219,7 @@ def main() -> None:
     report = "\n".join((
         "# Python Radau boundary benchmark", "",
         f"Matched problem: `y'=-rate*y`, `y(0)=1`; interval=[0,{args.segment_end:g}], repeats={args.repeats}, prepared parameter-sweep solves={args.sweep}.",
-        "The symbolic Radau route rebinds parameters and supplies a new `y0` for each configured-interval solve. The callback route changes a Python closure and calls `continue_with_initial_state`; these share the mathematical workload but are different lifecycle contracts.",
+        "The symbolic Radau route rebinds parameters and supplies a new `y0` for each configured-interval solve. The callback route changes a Python closure and solves from `y0`; these share the mathematical workload but are different lifecycle contracts.",
         "Times are median/MAD ms. Python wall time includes native execution; Rust stages are nested and non-additive. Python callback timings include GIL crossings and callback work, not pure dispatch-only overhead. `n/a` means that stage is not part of that route, not a zero measurement.", "",
         "| route | Expr build | NumPy input | construct | prepare wall | first solve wall | Rust residual | Rust Jacobian | Rust factor | Rust linear | residual calls | Jacobian calls | factors | linear solves | NumPy output | sweep API wall | sweep total wall | max exact error |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",

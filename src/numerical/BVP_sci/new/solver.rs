@@ -39,6 +39,9 @@ pub struct BvpSciSolver {
     y: Vec<f64>,
     /// Current runtime parameter values; symbolic structure is immutable.
     parameters: Vec<f64>,
+    /// Fixed model inputs appended only at callback boundaries, never to the
+    /// global Newton unknown vector.
+    external_parameters: Vec<f64>,
     /// Reusable collocation, callback and Jacobian assembly buffers.
     workspace: BvpSciCollocationWorkspace,
     /// Native linear backend selected for the current mesh.
@@ -49,8 +52,10 @@ pub struct BvpSciSolver {
     trial_parameters: Vec<f64>,
     /// Prepared pointwise SciPy singular-term correction, if configured.
     singular: Option<SingularTermRuntime>,
-    /// Set after a parameter rebind and consumed by the next solve.
+    /// Set by a value rebind only after a prior successful solve; consumed
+    /// when the next solve actually starts from that retained state.
     continuation_pending: bool,
+    has_successful_solve: bool,
 }
 
 /// Result of one SciPy-style Newton pass on the current mesh.
@@ -131,6 +136,45 @@ impl BvpSciSolver {
     where
         B: BvpSciBoundary + 'static,
     {
+        Self::new_with_external_parameters_and_sparse_factorization(
+            plan,
+            boundary,
+            x,
+            y,
+            parameters,
+            Vec::new(),
+            options,
+            sparse_factorization,
+        )
+    }
+
+    /// Construct with fixed model inputs separate from free Newton parameters.
+    pub fn new_with_external_parameters_and_sparse_factorization<B>(
+        plan: BvpSciLambdifyPlan,
+        boundary: B,
+        x: Vec<f64>,
+        mut y: Vec<f64>,
+        parameters: Vec<f64>,
+        external_parameters: Vec<f64>,
+        mut options: BvpSciOptions,
+        sparse_factorization: BvpSciSparseFactorization,
+    ) -> Result<Self, BvpSciNewError>
+    where
+        B: BvpSciBoundary + 'static,
+    {
+        if options.matrix_layout == BvpSciMatrixLayout::BandedAuto {
+            let (lower, upper) = plan.inferred_jacobian_bandwidth().ok_or_else(|| {
+                BvpSciNewError::UnsupportedRoute(
+                    "BandedAuto requires a prepared symbolic Jacobian; numerical callbacks must select Dense or provide an explicit pattern in a future API".into(),
+                )
+            })?;
+            options.matrix_layout = BvpSciMatrixLayout::Banded { lower, upper };
+        } else if let BvpSciMatrixLayout::Banded { lower, upper } = options.matrix_layout {
+            if let Some(inferred) = plan.inferred_jacobian_bandwidth() {
+                crate::symbolic::structural::validate_bandwidth_hint(inferred, (lower, upper))
+                    .map_err(BvpSciNewError::InvalidConfiguration)?;
+            }
+        }
         if matches!(options.execution, super::config::BvpSciExecution::Aot) != plan.is_aot() {
             return Err(BvpSciNewError::UnsupportedRoute(
                 "BVP execution selection does not match the prepared frontend plan".into(),
@@ -177,16 +221,30 @@ impl BvpSciSolver {
         }
         if parameters.len() != plan.parameter_dimension() {
             return Err(BvpSciNewError::ShapeMismatch {
-                stage: BvpSciStage::Continuation,
+                stage: BvpSciStage::ParameterBinding,
                 expected: plan.parameter_dimension(),
                 actual: parameters.len(),
             });
         }
-        if y.iter().any(|value| !value.is_finite())
-            || parameters.iter().any(|value| !value.is_finite())
-        {
+        if y.iter().any(|value| !value.is_finite()) {
             return Err(BvpSciNewError::NonFinite {
                 stage: BvpSciStage::NumericalCore,
+            });
+        }
+        if parameters.iter().any(|value| !value.is_finite()) {
+            return Err(BvpSciNewError::NonFinite {
+                stage: BvpSciStage::ParameterBinding,
+            });
+        }
+        if external_parameters.len() != plan.external_parameter_dimension() {
+            return Err(BvpSciNewError::ParameterBindingMismatch {
+                expected: plan.external_parameter_dimension(),
+                actual: external_parameters.len(),
+            });
+        }
+        if external_parameters.iter().any(|value| !value.is_finite()) {
+            return Err(BvpSciNewError::NonFinite {
+                stage: BvpSciStage::ParameterBinding,
             });
         }
         if !x.iter().all(|value| value.is_finite()) || !x.windows(2).all(|pair| pair[1] > pair[0]) {
@@ -249,6 +307,8 @@ impl BvpSciSolver {
             callback_jacobian_len,
             telemetry,
         )?;
+        let mut workspace = workspace;
+        workspace.set_runtime_parameter_dimension(plan.runtime_parameter_dimension(), telemetry);
         let total_dimension = n
             .checked_mul(m)
             .and_then(|state_dimension| state_dimension.checked_add(parameters.len()))
@@ -277,12 +337,14 @@ impl BvpSciSolver {
             x,
             y,
             parameters,
+            external_parameters,
             workspace,
             backend,
             trial_state,
             trial_parameters,
             singular,
             continuation_pending: false,
+            has_successful_solve: false,
         })
     }
 
@@ -291,25 +353,95 @@ impl BvpSciSolver {
         &self.plan
     }
 
-    /// Borrow the current mesh, node-major state and runtime parameters.
+    /// Borrow the current mesh, node-major state and free-parameter guesses.
     pub fn state(&self) -> (&[f64], &[f64], &[f64]) {
         (&self.x, &self.y, &self.parameters)
     }
 
-    /// Rebind parameter values without rebuilding symbolic structures.
-    pub fn set_parameters(&mut self, parameters: Vec<f64>) -> Result<(), BvpSciNewError> {
+    /// Borrow the currently bound fixed model inputs.
+    pub fn external_parameter_values(&self) -> &[f64] {
+        &self.external_parameters
+    }
+
+    /// Run an ordered fixed-parameter loop, continuing from the last success.
+    pub fn solve_parameter_loop(
+        &mut self,
+        parameter_vectors: &[Vec<f64>],
+    ) -> Result<super::parameter_loop::BvpSciParameterLoopReport, BvpSciNewError> {
+        super::parameter_loop::solve_ordered(self, parameter_vectors)
+    }
+
+    /// Set the initial guess for the free parameter unknowns.
+    ///
+    /// These values are part of the collocation Newton unknown vector and are
+    /// solved together with the state profile. This is not fixed-input rebinding.
+    pub fn set_parameter_guess(&mut self, parameters: Vec<f64>) -> Result<(), BvpSciNewError> {
         if parameters.len() != self.plan.parameter_dimension() {
-            return Err(BvpSciNewError::ContinuationMismatch);
+            return Err(BvpSciNewError::ParameterBindingMismatch {
+                expected: self.plan.parameter_dimension(),
+                actual: parameters.len(),
+            });
         }
         if parameters.iter().any(|value| !value.is_finite()) {
             return Err(BvpSciNewError::NonFinite {
-                stage: BvpSciStage::Continuation,
+                stage: BvpSciStage::ParameterBinding,
             });
         }
         self.parameters = parameters;
         self.plan.telemetry().record_parameter_rebind();
-        self.continuation_pending = true;
+        self.continuation_pending = self.has_successful_solve;
         Ok(())
+    }
+
+    /// Rebind fixed model inputs without changing the Newton unknown vector or
+    /// rebuilding the prepared symbolic evaluators.
+    pub fn set_external_parameter_values(
+        &mut self,
+        values: Vec<f64>,
+    ) -> Result<(), BvpSciNewError> {
+        if values.len() != self.plan.external_parameter_dimension() {
+            return Err(BvpSciNewError::ParameterBindingMismatch {
+                expected: self.plan.external_parameter_dimension(),
+                actual: values.len(),
+            });
+        }
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(BvpSciNewError::NonFinite {
+                stage: BvpSciStage::ParameterBinding,
+            });
+        }
+        self.external_parameters = values;
+        self.plan.telemetry().record_parameter_rebind();
+        self.continuation_pending = self.has_successful_solve;
+        Ok(())
+    }
+
+    pub(super) fn restore_parameter_loop_checkpoint(
+        &mut self,
+        mesh: Vec<f64>,
+        state: Vec<f64>,
+        free_parameters: Vec<f64>,
+        external_parameters: Vec<f64>,
+        has_successful_checkpoint: bool,
+    ) -> Result<(), BvpSciNewError> {
+        self.restart(mesh, state)?;
+        self.set_parameter_guess(free_parameters)?;
+        self.set_external_parameter_values(external_parameters)?;
+        self.has_successful_solve = has_successful_checkpoint;
+        self.continuation_pending = has_successful_checkpoint;
+        Ok(())
+    }
+
+    /// Legacy name for [`Self::set_parameter_guess`].
+    #[deprecated(note = "use set_parameter_guess; BVP_sci parameters are unknowns")]
+    pub fn set_parameter_values(&mut self, parameters: Vec<f64>) -> Result<(), BvpSciNewError> {
+        self.set_parameter_guess(parameters)
+    }
+
+    /// Legacy abbreviated name for [`Self::set_parameter_guess`].
+    #[deprecated(note = "use set_parameter_guess; BVP_sci parameters are unknowns")]
+    pub fn set_parameters(&mut self, parameters: Vec<f64>) -> Result<(), BvpSciNewError> {
+        self.set_parameter_guess(parameters)
     }
 
     /// Restart the prepared model from a new mesh and initial state.
@@ -326,7 +458,7 @@ impl BvpSciSolver {
         })?;
         if x.len() < 2 || y.len() != state_dimension {
             return Err(BvpSciNewError::ShapeMismatch {
-                stage: BvpSciStage::Continuation,
+                stage: BvpSciStage::Restart,
                 expected: state_dimension,
                 actual: y.len(),
             });
@@ -345,7 +477,7 @@ impl BvpSciSolver {
         }
         if y.iter().any(|value| !value.is_finite()) {
             return Err(BvpSciNewError::NonFinite {
-                stage: BvpSciStage::Continuation,
+                stage: BvpSciStage::Restart,
             });
         }
         if let Some(singular) = self.singular.as_ref() {
@@ -359,6 +491,10 @@ impl BvpSciSolver {
             let layout = self.backend.layout();
             self.workspace
                 .resize(n, x.len(), self.parameters.len(), self.plan.telemetry())?;
+            self.workspace.set_runtime_parameter_dimension(
+                self.plan.runtime_parameter_dimension(),
+                self.plan.telemetry(),
+            );
             let total_dimension = n
                 .checked_mul(x.len())
                 .and_then(|state_dimension| state_dimension.checked_add(self.parameters.len()))
@@ -381,6 +517,8 @@ impl BvpSciSolver {
         self.trial_state.resize(y.len(), 0.0);
         self.x = x;
         self.y = y;
+        self.continuation_pending = false;
+        self.has_successful_solve = false;
         self.plan.telemetry().record_restart();
         Ok(())
     }
@@ -392,7 +530,7 @@ impl BvpSciSolver {
     /// defect away from collocation points.  Refinement only replaces numeric
     /// storage; the prepared symbolic plan and its evaluators remain intact.
     pub fn solve(&mut self) -> Result<BvpSciSolution, BvpSciNewError> {
-        let _logging_scope = SolverLogGuard::enter(self.options.logging_level);
+        let _logging_scope = SolverLogGuard::try_enter(self.options.logging_level)?;
         let _full_solve_timer = self.plan.telemetry().start_full_solve();
         if self.continuation_pending {
             self.plan.telemetry().record_continuation_solve();
@@ -439,7 +577,10 @@ impl BvpSciSolver {
             let max_error = interval_errors.iter().copied().fold(0.0, f64::max);
             let boundary_error = max_abs(&self.workspace.boundary_residual);
             if max_error <= self.options.tolerance && boundary_error <= boundary_tolerance {
-                return self.solution(norm.max(max_error), total_iterations, interval_errors);
+                let solution =
+                    self.solution(norm.max(max_error), total_iterations, interval_errors)?;
+                self.has_successful_solve = true;
+                return Ok(solution);
             }
             // SciPy returns status 3 after ten outer solves when the defect is
             // already acceptable (so no mesh points are requested) but the
@@ -539,6 +680,7 @@ impl BvpSciSolver {
                     &self.x,
                     &self.y,
                     &self.parameters,
+                    &self.external_parameters,
                     self.singular.as_ref(),
                     &mut self.workspace,
                 )?;
@@ -646,6 +788,7 @@ impl BvpSciSolver {
                         &self.x,
                         &self.trial_state,
                         &self.trial_parameters,
+                        &self.external_parameters,
                         self.singular.as_ref(),
                         &mut self.workspace,
                     )?
@@ -914,7 +1057,7 @@ impl BvpSciSolver {
                 self.plan.evaluate_rhs(
                     x_probe,
                     &self.trial_state[..n],
-                    &self.parameters,
+                    &self.workspace.runtime_parameters,
                     &mut self.workspace.callback_arguments,
                     &mut self.workspace.callback_output,
                 )?;
@@ -953,8 +1096,8 @@ impl BvpSciSolver {
     }
 
     /// Insert two or three subintervals according to the defect estimator.
-    /// Cubic Hermite interpolation supplies a continuation-quality initial
-    /// guess, avoiding zero-filled states after refinement.
+    /// Cubic Hermite interpolation supplies a warm-start guess on the refined
+    /// grid; adaptive mesh refinement is not parameter continuation.
     fn refine_mesh(&mut self, errors: &[f64]) -> Result<usize, BvpSciNewError> {
         let started = self.plan.telemetry().start_timing();
         let old_nodes = self.x.len();
@@ -1026,6 +1169,10 @@ impl BvpSciSolver {
         let layout = self.backend.layout();
         self.workspace
             .resize(n, new_nodes, self.parameters.len(), self.plan.telemetry())?;
+        self.workspace.set_runtime_parameter_dimension(
+            self.plan.runtime_parameter_dimension(),
+            self.plan.telemetry(),
+        );
         let total_dimension = n
             .checked_mul(new_nodes)
             .and_then(|state_dimension| state_dimension.checked_add(self.parameters.len()))
@@ -1060,12 +1207,14 @@ impl BvpSciSolver {
         let x = &self.x;
         let y = &self.y;
         let parameters = &self.parameters;
+        let external_parameters = &self.external_parameters;
         evaluate_residual_buffers(
             plan,
             boundary,
             x,
             y,
             parameters,
+            external_parameters,
             self.singular.as_ref(),
             &mut self.workspace,
         )
@@ -1093,6 +1242,7 @@ impl BvpSciSolver {
             x: self.x.clone(),
             y: self.y.clone(),
             parameters: self.parameters.clone(),
+            external_parameters: self.external_parameters.clone(),
             residual_norm,
             interval_residuals,
             status: super::error::BvpSciStatus::Success,
@@ -1127,13 +1277,22 @@ fn evaluate_residual_buffers(
     x: &[f64],
     y: &[f64],
     parameters: &[f64],
+    external_parameters: &[f64],
     singular: Option<&SingularTermRuntime>,
     workspace: &mut BvpSciCollocationWorkspace,
 ) -> Result<f64, BvpSciNewError> {
     // The residual vector has the same ordering as the global Newton unknown:
     // collocation rows first, then boundary rows. Keeping this ordering in
     // one helper ensures initial, trial and rollback evaluations are identical.
-    evaluate_collocation(plan, x, y, parameters, singular, workspace)?;
+    evaluate_collocation(
+        plan,
+        x,
+        y,
+        parameters,
+        external_parameters,
+        singular,
+        workspace,
+    )?;
     let n = plan.dimension();
     let ya = &y[..n];
     let yb = &y[(x.len() - 1) * n..x.len() * n];
@@ -1144,7 +1303,7 @@ fn evaluate_residual_buffers(
         plan.telemetry(),
         ya,
         yb,
-        parameters,
+        &workspace.runtime_parameters,
         &mut workspace.boundary_residual,
     )?;
     let interval_residual_len = (x.len() - 1) * n;
@@ -1163,6 +1322,65 @@ mod tests {
         BvpSciOutputPolicy, BvpSciSingularTerm, BvpSciStatus, BvpSciTelemetry,
     };
     use crate::symbolic::symbolic_engine::Expr;
+
+    #[test]
+    fn external_parameter_loop_keeps_inputs_out_of_newton_unknowns_and_continues_after_failure() {
+        for assembly in [BvpSciAssembly::ExprLegacy, BvpSciAssembly::AtomViewNative] {
+            let mut solver =
+                BvpSciSolver::builder(vec![Expr::parse_expression("rate")], vec!["y".into()])
+                    .with_frontend(assembly)
+                    .with_external_parameter_names(vec!["rate".into()])
+                    .with_external_parameter_values(vec![2.0])
+                    .with_mesh_and_initial_state(vec![0.0, 0.5, 1.0], vec![0.0; 3])
+                    .with_boundary_callback(|ya, _yb, inputs, output| {
+                        if inputs[0] < 0.0 {
+                            return Err("deliberate loop-point failure".into());
+                        }
+                        output[0] = ya[0];
+                        Ok(())
+                    })
+                    .build()
+                    .expect("symbolic external-parameter solver should prepare");
+
+            assert_eq!(solver.plan().parameter_dimension(), 0);
+            assert_eq!(solver.plan().external_parameter_dimension(), 1);
+            assert!(matches!(
+                solver.solve_parameter_loop(&[vec![]]),
+                Err(BvpSciNewError::ParameterBindingMismatch {
+                    expected: 1,
+                    actual: 0
+                })
+            ));
+            assert!(matches!(
+                solver.solve_parameter_loop(&[vec![f64::NAN]]),
+                Err(BvpSciNewError::NonFinite {
+                    stage: BvpSciStage::ParameterBinding
+                })
+            ));
+            let report = solver
+                .solve_parameter_loop(&[vec![2.0], vec![-1.0], vec![3.0]])
+                .expect("valid ordered input should produce a report");
+            assert_eq!(report.points.len(), 3);
+            assert!(report.stop_error.is_none());
+            assert!(report.points[0].result.is_ok());
+            assert!(matches!(
+                report.points[1].result,
+                Err(BvpSciNewError::Callback {
+                    stage: BvpSciStage::BoundaryCallback,
+                    ..
+                })
+            ));
+            assert!(report.points[2].result.is_ok());
+            let first = report.points[0].result.as_ref().unwrap();
+            let last = report.points[2].result.as_ref().unwrap();
+            assert_eq!(first.parameters, Vec::<f64>::new());
+            assert_eq!(first.external_parameters, [2.0]);
+            assert_eq!(last.external_parameters, [3.0]);
+            assert!((first.y[2] - 2.0).abs() < 1e-8);
+            assert!((last.y[2] - 3.0).abs() < 1e-8);
+            assert_eq!(solver.external_parameter_values(), [3.0]);
+        }
+    }
 
     fn numerical_linear_plan(
         telemetry: BvpSciTelemetry,
@@ -1518,10 +1736,7 @@ mod tests {
 
     #[test]
     fn linear_bvp_converges_with_banded_backend() {
-        let mut solver = linear_problem(
-            BvpSciAssembly::ExprLegacy,
-            BvpSciMatrixLayout::Banded { lower: 5, upper: 5 },
-        );
+        let mut solver = linear_problem(BvpSciAssembly::ExprLegacy, BvpSciMatrixLayout::BandedAuto);
         let solution = solver.solve().unwrap();
         assert!(solution.residual_norm < 1e-10);
         assert!((solution.y[2] - 0.5).abs() < 1e-10);
@@ -1532,7 +1747,7 @@ mod tests {
         for layout in [
             BvpSciMatrixLayout::Dense,
             BvpSciMatrixLayout::Sparse,
-            BvpSciMatrixLayout::Banded { lower: 5, upper: 5 },
+            BvpSciMatrixLayout::BandedAuto,
         ] {
             let mut solver = linear_problem(BvpSciAssembly::AtomViewNative, layout);
             let solution = solver.solve().expect("AtomNative BVP should converge");
@@ -1634,7 +1849,7 @@ mod tests {
         assert!((first.y[first.y.len() - 1] - (1.0f64.exp() - 1.0)).abs() < 1e-10);
         target.store((2.0 * (1.0f64.exp() - 1.0)).to_bits(), Ordering::Relaxed);
         solver
-            .set_parameters(vec![2.0])
+            .set_parameter_values(vec![2.0])
             .expect("parameter rebind should preserve shape");
         let second = solver
             .solve()

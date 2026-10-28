@@ -1,19 +1,19 @@
-use crate::numerical::ivp_workloads::{build_workload, dense_coupled, WorkloadKind};
 use crate::numerical::BDF::BDF_api::{
-    with_bdf_dense_jacobian_scratch_reference_for_test, BdfSolverOptions, BdfTelemetryMode,
-    ODEsolver,
+    BdfSolverOptions, BdfTelemetryMode, ODEsolver,
+    with_bdf_dense_jacobian_scratch_reference_for_test,
 };
+use crate::numerical::ivp_workloads::{WorkloadKind, build_workload, dense_coupled};
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::ivp_telemetry::{
     IvpColdStage, IvpLambdifyExecutionPolicy, IvpTelemetry, IvpTelemetrySnapshot, IvpWarmStage,
 };
 use crate::symbolic::symbolic_ivp::{
-    prepare_symbolic_ivp_problem, with_expr_legacy_scalar_reference_for_test,
-    IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions,
+    IvpSymbolicAssemblyBackend, SymbolicIvpProblemOptions, prepare_symbolic_ivp_problem,
+    with_expr_legacy_scalar_reference_for_test,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    prepare_generated_symbolic_ivp_problem, SymbolicIvpAotBuildPolicy,
-    SymbolicIvpGeneratedBackendConfig,
+    SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
+    prepare_generated_symbolic_ivp_problem,
 };
 use nalgebra::DVector;
 use std::hint::black_box;

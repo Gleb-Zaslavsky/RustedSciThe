@@ -34,13 +34,13 @@ solver = RadauSolver(
 )
 solver.prepare()
 first = solver.solve([1.0], [0.7])
-continued = solver.continue_with_parameters([first.final_state[0]], [1.2])
+second = solver.solve_with_parameter_values([0.8], [1.2])
 ```
 
-Continuation reuses prepared symbolic callbacks but advances from the prior
-endpoint. Use `restart(t0, t_end)` plus a new `solve(y0, ...)` when a new
-initial condition or interval is intended. Do not interpret a parameter
-continuation as a fresh independent initial-value problem.
+Each call is a fresh solve over the configured interval. The caller supplies
+the initial state and parameter values explicitly; no state is inherited from
+the previous result. Use `solve_with_parameter_values_in_interval(t0, y0,
+t_end, values)` to change the interval as well.
 
 ## Frontend, execution and layout
 
@@ -49,6 +49,11 @@ select symbolic preparation; `lambdify` and `aot` select callback execution;
 `dense`, `sparse` and `banded` select the linear-system layout. Use
 `capabilities("radau5")` to inspect the installed contract. There is no
 universally fastest frontend or matrix layout.
+
+For symbolic Banded routes, Radau infers the half-bandwidth from the residual
+or supplied symbolic Jacobian. `SolverOptions.set_banded_width(lower, upper)`
+is optional; when supplied, the widths are checked against the symbolic pattern
+so an undersized band cannot silently drop derivatives.
 
 Structured layouts need a symbolic Jacobian. When no Jacobian is supplied,
 Radau's finite-difference fallback is Dense-only. The callback wrapper is a

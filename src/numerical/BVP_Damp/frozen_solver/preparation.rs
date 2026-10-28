@@ -810,8 +810,8 @@ impl NRBVP {
         }
     }
 
-    /// Fallible typed setter for symbolic parameter names.
-    pub fn try_set_params(
+    /// Fallible typed setter for the ordered symbolic parameter-name schema.
+    pub fn try_set_parameter_names(
         &mut self,
         params: Option<&[&str]>,
     ) -> Result<(), BvpBackendIntegrationError> {
@@ -840,16 +840,31 @@ impl NRBVP {
         Ok(())
     }
 
-    /// Compatibility wrapper for [`Self::try_set_params`].
-    pub fn set_params(&mut self, params: Option<&[&str]>) {
-        self.try_set_params(params)
+    /// Legacy name for [`Self::try_set_parameter_names`].
+    #[deprecated(note = "use try_set_parameter_names; this sets names, not values")]
+    pub fn try_set_params(
+        &mut self,
+        params: Option<&[&str]>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        self.try_set_parameter_names(params)
+    }
+
+    /// Set the ordered symbolic parameter-name schema.
+    pub fn set_parameter_names(&mut self, params: Option<&[&str]>) {
+        self.try_set_parameter_names(params)
             .unwrap_or_else(|error| panic!("invalid BVP parameter names: {error:?}"));
+    }
+
+    /// Legacy name for [`Self::set_parameter_names`].
+    #[deprecated(note = "use set_parameter_names; this sets names, not values")]
+    pub fn set_params(&mut self, params: Option<&[&str]>) {
+        self.set_parameter_names(params);
     }
 
     /// Fallible typed setter for the numeric values of symbolic parameters.
     /// Parameters are evaluator inputs, not Newton unknowns and are never
     /// included in the symbolic derivative layout.
-    pub fn try_set_param_values(
+    pub fn try_set_parameter_values(
         &mut self,
         values: Option<Vec<f64>>,
     ) -> Result<(), BvpBackendIntegrationError> {
@@ -882,10 +897,66 @@ impl NRBVP {
         Ok(())
     }
 
-    /// Compatibility wrapper for [`Self::try_set_param_values`].
-    pub fn set_param_values(&mut self, values: Option<Vec<f64>>) {
-        self.try_set_param_values(values)
+    /// Install a new fixed-grid Newton guess while retaining prepared
+    /// callbacks. The numeric Jacobian and any owned factor are invalidated.
+    pub fn try_set_prepared_iterate(
+        &mut self,
+        iterate: DMatrix<f64>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        if self.prepared_runtime_revision.prepared_plan().is_none() {
+            return Err(BvpBackendIntegrationError::PreparedRuntimeInvalidated {
+                reason: "a prepared Frozen iterate requires an existing prepared plan".into(),
+            });
+        }
+        let expected = (self.values.len(), self.n_steps);
+        if iterate.shape() != expected {
+            return Err(BvpBackendIntegrationError::InvalidProblem {
+                field: "prepared_iterate".into(),
+                message: format!(
+                    "expected shape {}x{}, got {}x{}",
+                    expected.0,
+                    expected.1,
+                    iterate.nrows(),
+                    iterate.ncols()
+                ),
+            });
+        }
+        if let Some(index) = iterate.iter().position(|value| !value.is_finite()) {
+            return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                stage: "prepared_iterate".into(),
+                index,
+            });
+        }
+
+        self.initial_guess = iterate;
+        self.result = None;
+        self.invalidate_linear_runtime();
+        let fingerprint = self.prepared_plan_fingerprint();
+        self.prepared_runtime_revision
+            .refresh_prepared_fingerprint(fingerprint);
+        self.factor_owner.refresh_prepared_binding(fingerprint);
+        Ok(())
+    }
+
+    /// Legacy abbreviated name for [`Self::try_set_parameter_values`].
+    #[deprecated(note = "use try_set_parameter_values")]
+    pub fn try_set_param_values(
+        &mut self,
+        values: Option<Vec<f64>>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        self.try_set_parameter_values(values)
+    }
+
+    /// Set numeric values for the already declared symbolic parameter schema.
+    pub fn set_parameter_values(&mut self, values: Option<Vec<f64>>) {
+        self.try_set_parameter_values(values)
             .unwrap_or_else(|error| panic!("invalid BVP parameter values: {error:?}"));
+    }
+
+    /// Legacy abbreviated name for [`Self::set_parameter_values`].
+    #[deprecated(note = "use set_parameter_values")]
+    pub fn set_param_values(&mut self, values: Option<Vec<f64>>) {
+        self.set_parameter_values(values);
     }
 
     /// Sets the symbolic assembly backend used before lambdify/AOT lowering.

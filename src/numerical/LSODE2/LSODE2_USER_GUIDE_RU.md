@@ -151,6 +151,7 @@ Adams   ←→   BDF
 pub enum Lsode2LinearSystemStructure {
     Dense,
     Sparse,
+    BandedAuto,
     Banded { kl: usize, ku: usize },
 }
 ```
@@ -161,7 +162,7 @@ Dense
 Sparse
 используется для разрежённых якобианов, где число ненулевых элементов существенно меньше полного размера матрицы. В этом случае активируется соответствующий sparse-бэкенд; в LSODE2 это означает использование возможностей крейта faer. Наконец,
 Banded { kl, ku }
-предназначен для полосчатых/ленточных матриц. Здесь необходимо явно указать число поддиагоналей (kl) и наддиагоналей (ku). Такие структуры часто возникают после дискретизации PDE, в задачах переноса или моделях с локальным взаимодействием соседних узлов сетки.
+предназначен для полосчатых/ленточных матриц с известной структурной подсказкой: числа поддиагоналей (kl) и наддиагоналей (ku) задаются явно. Для символьной задачи, когда ширина заранее неизвестна, используйте `BandedAuto`: LSODE2 определит её по структуре символьного якобиана. Нулевая явная ширина `Banded { kl: 0, ku: 0 }` означает именно диагональную матрицу, а не автоматический режим.
 Дальше вступает в силу политика выбора решателя СЛАУ. Обычно используется метод:
 
 ```rust
@@ -340,7 +341,8 @@ let config = Lsode2ProblemConfig::new(...)
 | AOT | `Symbolic + Aot { toolchain, profile }` | Дорогие невязки/якобианы, длинные расчёты, повторные запуски |
 | Dense | `Lsode2LinearSystemStructure::Dense` | Малые системы, отладка |
 | Sparse | `Lsode2LinearSystemStructure::Sparse` | Большие разреженные якобианы, production-маршрут |
-| Banded | `Lsode2LinearSystemStructure::Banded { kl, ku }` | Сеточные задачи, локальные взаимодействия, транспорт/диффузия |
+| Banded auto | `Lsode2LinearSystemStructure::BandedAuto` | Символьная задача с неизвестной заранее полосой; структура определяется автоматически |
+| Banded hint | `Lsode2LinearSystemStructure::Banded { kl, ku }` | Сеточные задачи, когда проверенная ширина уже известна |
 | Auto solver policy | `Lsode2LinearSolverPolicy::Auto` | Стандартный режим: бэкэнд выводится из структуры системы |
 | Forced backend | `Lsode2LinearSolverPolicy::Force(...)` | Исследовательские сравнения, parity, диагностика бэкэндов |
 
@@ -690,12 +692,13 @@ for k in [1.0, 2.0, 4.0] {
 
 Подготовленные символьные callbacks переиспользуются; в AOT также повторно
 используется готовый артефакт, поэтому для каждого значения не выполняются
-заново символьная подготовка или компиляция. Однако каждый вызов `solve()`
-начинает новую интеграцию с настроенных `t0` и `y0`: параметрическое
-продолжение не переносит предыдущую траекторию или историю интегратора.
+заново символьная подготовка или компиляция. Каждый `solve()` начинает новую
+интеграцию с настроенных `t0` и `y0`; переиспользуется только численная
+привязка параметров. Это rebind между fresh solve, а не продолжение с
+предыдущим решением в качестве начального приближения.
 Количество и порядок значений должны соответствовать объявленной схеме
-параметров. Запускаемые примеры: `lsode2_parameter_continuation_lambdify` и
-`lsode2_parameter_continuation_aot`.
+параметров. Запускаемые примеры: `lsode2_parameter_rebind_lambdify` и
+`lsode2_parameter_rebind_aot`.
 
 ## Параллелизм/чанкинг в AOT: как это связано с производительностью
 
@@ -848,7 +851,7 @@ plot: false
 
 ## Где смотреть дальше в репозитории
 
-За практическими примерами идите в `examples/lsode2_numerical_guide.rs`, `examples/lsode2_lambdify_guide.rs`, `examples/lsode2_aot_guide.rs`, `examples/lsode2_parameter_continuation_lambdify.rs`, `examples/lsode2_parameter_continuation_aot.rs`, `examples/lsode2_manual_bdf_guide.rs`, `examples/lsode2_manual_adams_guide.rs` и `examples/lsode2_task_shell_guide.rs`.
+За практическими примерами идите в `examples/lsode2_numerical_guide.rs`, `examples/lsode2_lambdify_guide.rs`, `examples/lsode2_aot_guide.rs`, `examples/lsode2_parameter_rebind_lambdify.rs`, `examples/lsode2_parameter_rebind_aot.rs`, `examples/lsode2_manual_bdf_guide.rs`, `examples/lsode2_manual_adams_guide.rs` и `examples/lsode2_task_shell_guide.rs`.
 
 Сценарные проверки корректности и производительности распределены по темам в
 `src/numerical/LSODE2/tests/` (например, `correctness_story_tests.rs`,

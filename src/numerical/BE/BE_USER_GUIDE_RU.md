@@ -42,10 +42,12 @@ cargo run --no-default-features --example rus_be_native_callbacks_guide
 через `set_parameter_values`. При изменении только значений подготовленные
 callbacks переиспользуются. `try_solve` начинает заново с исходных `(t0, y0)`.
 Для продолжения с последнего принятого `(t, y)` после смены параметров вызовите
-`try_continue_to(new_t_bound)`. Пример использует AtomViewNative и Lambdify:
+`try_continue_to(new_t_bound)`. Это продолжение по времени после смены
+параметра, а не повторное решение с предыдущим решением как начальным
+приближением. Пример использует AtomViewNative и Lambdify:
 
 ```powershell
-cargo run --no-default-features --example rus_be_symbolic_continuation_guide
+cargo run --no-default-features --example rus_be_time_segment_parameter_update_guide
 ```
 
 ## Сгенерированный AOT

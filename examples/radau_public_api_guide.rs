@@ -1,4 +1,4 @@
-//! Public Radau API: selectable Lambdify frontend, layout, continuation,
+//! Public Radau API: selectable Lambdify frontend, layout, parameter rebinding,
 //! telemetry, and dense output.
 
 use std::error::Error;
@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         vec!["y".to_owned()],
         "t",
     )
-    .with_parameters(vec!["a".to_owned()])
+    .with_parameter_names(vec!["a".to_owned()])
     .with_jacobian(vec![Expr::parse_expression("-a")]);
 
     let config = RadauConfig {
@@ -28,13 +28,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let mut solver = RadauSolver::prepare(problem, config)?;
 
-    let first = solver.solve_with_parameters(&[1.0], &[1.0])?;
-    let continued = solver.continue_with_parameters(&[1.0], &[2.0])?;
-    let midpoint = continued.sample(0.5)?;
+    let first = solver.try_solve_with_parameter_values(&[1.0], &[1.0])?;
+    let rebound = solver.try_solve_with_parameter_values(&[1.0], &[2.0])?;
+    let midpoint = rebound.sample(0.5)?;
 
     println!("first final y = {:?}", first.y);
-    println!("continued final y = {:?}", continued.y);
-    println!("continued y(0.5) = {:?}", midpoint);
-    println!("telemetry counters = {:?}", continued.telemetry().counters);
+    println!("rebound solve final y = {:?}", rebound.y);
+    println!("rebound solve y(0.5) = {:?}", midpoint);
+    println!("telemetry counters = {:?}", rebound.telemetry().counters);
     Ok(())
 }

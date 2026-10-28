@@ -57,13 +57,6 @@ fn invalid_configuration_is_classified_before_numerical_work() {
         ),
         (
             RadauConfig {
-                matrix_layout: RadauMatrixLayout::Banded { lower: 0, upper: 0 },
-                ..RadauConfig::default()
-            },
-            RadauConfigError::EmptyBandwidth,
-        ),
-        (
-            RadauConfig {
                 execution: RadauExecution::Native,
                 assembly: Some(super::super::new::config::RadauAssembly::ExprLegacy),
                 ..RadauConfig::default()

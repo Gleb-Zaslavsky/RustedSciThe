@@ -82,7 +82,7 @@ fn lambdify_telemetry_scope_and_applicability_contract_story() {
             let mut solver = RadauSolver::prepare(problem, config)
                 .unwrap_or_else(|error| panic!("telemetry prepare failed: {error}"));
             let solution = solver
-                .solve_with_parameters(&initial_state, &parameters)
+                .try_solve_with_parameter_values(&initial_state, &parameters)
                 .unwrap_or_else(|error| panic!("telemetry solve failed: {error}"));
             let report = solution.telemetry();
             let scopes = &report.timing_scopes;
@@ -175,7 +175,7 @@ fn aot_lifecycle_scope_relationships_are_consistent_story() {
         let mut solver = RadauSolver::prepare(problem, config)
             .unwrap_or_else(|error| panic!("AOT lifecycle prepare failed: {error}"));
         let solution = solver
-            .solve_with_parameters(&initial_state, &parameters)
+            .try_solve_with_parameter_values(&initial_state, &parameters)
             .unwrap_or_else(|error| panic!("AOT lifecycle solve failed: {error}"));
         let report = solution.telemetry();
 

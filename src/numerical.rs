@@ -10,7 +10,9 @@
 pub mod BDF;
 /// Shared opt-in logging policy and timestamped file sink for numerical solvers.
 pub mod logging;
-pub use logging::{SolverLogGuard, SolverLogLevel, SolverLoggingError, solver_log_path};
+pub use logging::{
+    SolverLogGuard, SolverLogLevel, SolverLoggingError, solver_log_path, solver_log_status,
+};
 
 /// Collection level shared by numerical solver telemetry APIs.
 ///
@@ -83,6 +85,8 @@ impl SolverTelemetryMode {
 ///          solver.plot_result();
 /// ```
 pub mod BE;
+/// Shared result/report types for independent parameter sweeps over prepared IVP solvers.
+pub mod ivp_parameter_loop;
 #[cfg(test)]
 pub(crate) mod ivp_test_support;
 pub mod ivp_workloads;
@@ -217,77 +221,19 @@ pub use BE::NR_for_Euler;
 ///       // println!("result = {:?}", solution);
 ///        nr.plot_result();
 ///    ```
-/// API for both solvers
-/// Example#3
-/// ```
-///  use nalgebra::DMatrix;
-///  use nalgebra::DVector;
-///      use std::collections::HashMap;
-/// use RustedSciThe::numerical::BVP_api::BVP;
-///     use  RustedSciThe::symbolic::symbolic_engine::Expr;
-///     let eq1 = Expr::parse_expression("y-z");
-///  let eq2 = Expr::parse_expression("-z^3");
-/// let eq_system = vec![eq1, eq2];
-///
-///
-/// let values = vec!["z".to_string(), "y".to_string()];
-/// let arg = "x".to_string();
-/// let tolerance = 1e-5;
-/// let max_iterations = 20;
-///
-/// let t0 = 0.0;
-/// let t_end = 1.0;
-/// let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
-///  let strategy =   "Damped".to_string();//
-///
-/// let  strategy_params =
-/// match strategy.as_str() {
-///     "Naive" => None,
-///     "Damped"=> Some(HashMap::from([("max_jac".to_string(),
-///     None,    ), ("maxDampIter".to_string(),
-///    None,    ), ("DampFacor".to_string(),
-///     None,    )   , ("adaptive".to_string(),
-///           None,    )
-///
-///    ])),
-///    "Frozen" => Some(HashMap::from([("every_m".to_string(),
-///   Some(Vec::from( [ 5 as f64]  ))
-///    )])),
-///     &_=>panic!("Invalid strategy!")
-///
-///
-/// };
-/// let scheme = "forward".to_string();
-/// let method =   "Sparse".to_string();// or  "Dense"
-/// let linear_sys_method = None;
-/// let ones = vec![0.0; values.len()*n_steps];
-/// let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
-/// let mut BorderConditions = HashMap::new();
-/// BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
-/// BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
-/// let Bounds = HashMap::from([  ("z".to_string(), (-10.0, 10.0),    ), ("y".to_string(), (-7.0, 7.0),    ) ]);
-/// let rel_tolerance =  HashMap::from([  ("z".to_string(), 1e-4    ), ("y".to_string(), 1e-4,    ) ]);
-/// assert_eq!(&eq_system.len(), &2);
-/// let mut nr =  BVP::new(eq_system,
-///      initial_guess,
-///      values,
-///      arg,
-///      BorderConditions, t0, t_end, n_steps, scheme, strategy, strategy_params, linear_sys_method, method, tolerance,
-///        max_iterations,  Some(rel_tolerance),Some(Bounds), None);
-///
-/// println!("solving system");
-/// nr.solve();
-/// nr.plot_result();
-/// nr.save_to_file(None);
-///    ```
+/// The old string/hash-map `BVP::new` example was removed with that API. Use
+/// [`BVP_api`] for typed solver selection or configure a native BVP solver
+/// directly when the task requires solver-specific settings.
 pub mod BVP_Damp;
 //
+#[path = "numerical/BVP_api/mod.rs"]
 pub mod BVP_api;
-/// Typed solver-discovery facade. Prefer this for quick cross-solver
-/// experiments; use the solver-specific modules for detailed configuration.
+/// Typed dispatcher over native BVP solver families. Pass each solver's
+/// complete options object; use the native solver handle for specialized
+/// lifecycle, telemetry and diagnostics not shared across families.
 pub use BVP_api::{
-    BvpApiError, BvpBoundaryCondition, BvpBoundarySide, BvpMatrixBackend, BvpProblem, BvpSolution,
-    BvpSolver, BvpSolverBuilder, BvpSolverKind, BvpSolverOptions,
+    BvpApiError, BvpBoundaryCondition, BvpBoundarySide, BvpNativeSolver, BvpProblem, BvpSolution,
+    BvpSolutionView, BvpSolver, BvpSolverConfig, BvpSolverTelemetrySnapshot,
 };
 /// BVP solver with collocation method
 /// rewritten in Rust from Python code from SciPy
@@ -335,6 +281,10 @@ pub mod Radau;
 pub mod Rosenbrock;
 /// shooting method for solving BVP
 pub mod ShootingBVP;
+/// Thin common configuration facade over production stiff IVP solvers.
+/// The initial implementation covers Radau and Backward Euler; BDF and
+/// LSODE2 remain direct-API routes until their contracts are audited.
+pub mod StiffAPI;
 pub mod data_processing;
 /// Shared interpolation and extrapolation algorithms.
 pub mod interpolation;

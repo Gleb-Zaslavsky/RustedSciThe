@@ -28,13 +28,13 @@ use crate::numerical::Nonlinear_systems::error::SolveError;
 use crate::numerical::Nonlinear_systems::problem::{JacobianProvider, NonlinearProblem};
 use crate::numerical::Nonlinear_systems::symbolic_atom::AtomNativeSymbolicBackend;
 use crate::numerical::Nonlinear_systems::symbolic_backend::{
-    select_symbolic_nonlinear_backend, SelectedSymbolicNonlinearBackendKind,
-    SymbolicBackendSelectionPolicy,
+    SelectedSymbolicNonlinearBackendKind, SymbolicBackendSelectionPolicy,
+    select_symbolic_nonlinear_backend,
 };
 use crate::numerical::Nonlinear_systems::symbolic_legacy::LegacyLambdifySymbolicBackend;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
-    resolve_linked_dense_backend, LinkedDenseAotBackend,
+    LinkedDenseAotBackend, resolve_linked_dense_backend,
 };
 use crate::symbolic::codegen::codegen_manifest::{
     GeneratedChunkManifest, GeneratedFunctionsManifest, PreparedJacobianLayout,
@@ -730,16 +730,31 @@ impl SymbolicProblemOptions {
         self
     }
 
-    /// Installs symbolic parameter names.
-    pub fn with_equation_parameters(mut self, parameters: Vec<String>) -> Self {
+    /// Declares the ordered symbolic parameter schema for this problem.
+    pub fn with_parameter_names(mut self, parameters: Vec<String>) -> Self {
         self.equation_parameters = Some(parameters);
         self
     }
 
-    /// Installs parameter values used when evaluating the symbolic system.
-    pub fn with_equation_parameter_values(mut self, values: DVector<f64>) -> Self {
+    /// Sets initial values for the declared parameters.
+    ///
+    /// These values do not change the parameter schema. After preparation,
+    /// callers can bind other values without repeating symbolic preparation.
+    pub fn with_parameter_values(mut self, values: DVector<f64>) -> Self {
         self.equation_parameter_values = Some(values);
         self
+    }
+
+    /// Legacy name for [`Self::with_parameter_names`].
+    #[deprecated(note = "use with_parameter_names; this declares names, not values")]
+    pub fn with_equation_parameters(self, parameters: Vec<String>) -> Self {
+        self.with_parameter_names(parameters)
+    }
+
+    /// Legacy name for [`Self::with_parameter_values`].
+    #[deprecated(note = "use with_parameter_values")]
+    pub fn with_equation_parameter_values(self, values: DVector<f64>) -> Self {
+        self.with_parameter_values(values)
     }
 
     /// Overrides the symbolic backend preparation mode.
@@ -1718,6 +1733,10 @@ impl PreparedSymbolicNonlinearProblem {
     }
 
     /// Validates raw values against the prepared schema and creates a bound view.
+    ///
+    /// This is value-only rebinding: the prepared symbolic frontend is reused.
+    /// It is not parameter continuation; the next solve's initial guess remains
+    /// an explicit input to the solver.
     pub fn bind_values(
         &self,
         values: DVector<f64>,
@@ -2818,12 +2837,12 @@ impl<'a> JacobianProvider for BoundSymbolicNonlinearProblem<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::numerical::Nonlinear_systems::engine::{NewtonMethod, SolveOptions, SolverEngine};
-    use crate::numerical::Nonlinear_systems::problem::Bounds;
-    use crate::numerical::Nonlinear_systems::trust_region::*;
     use crate::numerical::Nonlinear_systems::LM_Nielsen::NielsenLevenbergMarquardtMethod;
     use crate::numerical::Nonlinear_systems::LM_vanilla::LevenbergMarquardtMethod;
     use crate::numerical::Nonlinear_systems::NR_damped::DampedNewtonMethod;
+    use crate::numerical::Nonlinear_systems::engine::{NewtonMethod, SolveOptions, SolverEngine};
+    use crate::numerical::Nonlinear_systems::problem::Bounds;
+    use crate::numerical::Nonlinear_systems::trust_region::*;
     use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
     use approx::assert_relative_eq;
     use std::collections::HashMap;
@@ -2951,7 +2970,7 @@ mod tests {
             vec!["a*x-2".to_string(), "y-1".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string()]),
+                .with_parameter_names(vec!["a".to_string()]),
         )
         .expect("prepared problem should build");
 
@@ -2987,7 +3006,7 @@ mod tests {
             vec!["a*x^2+y-3".to_string(), "x-y".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string()]),
+                .with_parameter_names(vec!["a".to_string()]),
         )
         .expect("parameterized Lambdify problem should build");
         let bound = prepared
@@ -3034,7 +3053,7 @@ mod tests {
             vec!["a*x^2+y-3".to_string(), "x-y".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string()]),
+                .with_parameter_names(vec!["a".to_string()]),
         )
         .expect("parameterized Lambdify problem should build");
         let bound = prepared
@@ -3123,7 +3142,7 @@ mod tests {
             .collect::<Vec<_>>();
         let base_options = SymbolicProblemOptions::new()
             .with_variables(variables)
-            .with_equation_parameters(vec!["a".to_string()]);
+            .with_parameter_names(vec!["a".to_string()]);
         let sequential = PreparedSymbolicNonlinearProblem::from_strings(
             equations.clone(),
             base_options
@@ -3195,7 +3214,7 @@ mod tests {
         let options = |policy| {
             SymbolicProblemOptions::new()
                 .with_variables(variables.clone())
-                .with_equation_parameters(vec!["a".to_string()])
+                .with_parameter_names(vec!["a".to_string()])
                 .with_lambdify_execution_policy(policy)
         };
         let sequential_prepared = PreparedSymbolicNonlinearProblem::from_strings(
@@ -3530,7 +3549,7 @@ mod tests {
                 vec!["a*x-2".to_string(), "y-1".to_string()],
                 SymbolicProblemOptions::new()
                     .with_variables(vec!["x".to_string(), "y".to_string()])
-                    .with_equation_parameters(vec!["a".to_string()]),
+                    .with_parameter_names(vec!["a".to_string()]),
             )
             .expect("shared Lambdify problem should build"),
         );
@@ -3565,7 +3584,7 @@ mod tests {
             vec!["a*x-2".to_string(), "y-1".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string()]),
+                .with_parameter_names(vec!["a".to_string()]),
         )
         .expect("prepared problem should build");
         let options = SolveOptions {
@@ -3599,7 +3618,7 @@ mod tests {
             vec!["a*x-1".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string()])
-                .with_equation_parameters(vec!["a".to_string()]),
+                .with_parameter_names(vec!["a".to_string()]),
         )
         .expect("prepared problem should build");
         let other_schema = NonlinearParameterSchema::new(vec!["b".to_string()])
@@ -3626,7 +3645,7 @@ mod tests {
             vec!["a*x-1".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string()])
-                .with_equation_parameters(vec!["a".to_string()]),
+                .with_parameter_names(vec!["a".to_string()]),
             SymbolicBackendSelectionPolicy::PreferAotThenLambdify,
             Some(&resolver),
             SymbolicDenseAotOptions::default(),
@@ -3661,8 +3680,8 @@ mod tests {
             equations,
             SymbolicProblemOptions::new()
                 .with_variables(variables)
-                .with_equation_parameters(parameters)
-                .with_equation_parameter_values(values),
+                .with_parameter_names(parameters)
+                .with_parameter_values(values),
         )
         .expect("typed options constructor should succeed");
 
@@ -3746,8 +3765,8 @@ mod tests {
             vec![a.clone() * x.clone() + y.clone() - Expr::Const(3.0), x - y],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string()])
-                .with_equation_parameter_values(DVector::from_vec(vec![2.0])),
+                .with_parameter_names(vec!["a".to_string()])
+                .with_parameter_values(DVector::from_vec(vec![2.0])),
         )
         .expect("parameterized symbolic problem should build");
 
@@ -3787,8 +3806,8 @@ mod tests {
             vec!["a*x+y-3".to_string(), "x-y".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string()])
-                .with_equation_parameter_values(DVector::from_vec(vec![2.0])),
+                .with_parameter_names(vec!["a".to_string()])
+                .with_parameter_values(DVector::from_vec(vec![2.0])),
         )
         .expect("parameterized problem");
         let x = DVector::from_vec(vec![1.0, 1.0]);
@@ -3833,8 +3852,8 @@ mod tests {
             vec!["a*x+y-3".to_string(), "x-y".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string()])
-                .with_equation_parameter_values(DVector::from_vec(vec![2.0])),
+                .with_parameter_names(vec!["a".to_string()])
+                .with_parameter_values(DVector::from_vec(vec![2.0])),
         )
         .expect("parameterized problem");
 
@@ -3876,8 +3895,8 @@ mod tests {
             vec!["a".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["a".to_string()])
-                .with_equation_parameters(vec!["a".to_string()])
-                .with_equation_parameter_values(DVector::from_vec(vec![1.0])),
+                .with_parameter_names(vec!["a".to_string()])
+                .with_parameter_values(DVector::from_vec(vec![1.0])),
         )
         .err()
         .expect("variable/parameter collision should fail");
@@ -3887,7 +3906,7 @@ mod tests {
             vec!["x".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string()])
-                .with_equation_parameter_values(DVector::from_vec(vec![1.0])),
+                .with_parameter_values(DVector::from_vec(vec![1.0])),
         )
         .err()
         .expect("values without schema should fail");
@@ -3897,7 +3916,7 @@ mod tests {
             vec!["a*x".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string()])
-                .with_equation_parameters(vec!["a".to_string()]),
+                .with_parameter_names(vec!["a".to_string()]),
         )
         .expect("a parameterized problem may be prepared before binding");
         let unbound_error = unbound
@@ -3950,8 +3969,8 @@ mod tests {
         let problem = SymbolicNonlinearProblem::from_strings_with_options(
             vec!["a*x+y-3".to_string(), "x-y".to_string()],
             SymbolicProblemOptions::new()
-                .with_equation_parameters(vec!["a".to_string()])
-                .with_equation_parameter_values(DVector::from_vec(vec![2.0])),
+                .with_parameter_names(vec!["a".to_string()])
+                .with_parameter_values(DVector::from_vec(vec![2.0])),
         )
         .expect("parameterized problem with inferred variables");
 
@@ -3991,8 +4010,8 @@ mod tests {
             vec!["a*sin(x)+exp(b*y)-c".to_string(), "x*y+a*x^2-b".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string(), "b".to_string(), "c".to_string()])
-                .with_equation_parameter_values(DVector::from_vec(vec![1.3, -0.4, 0.7])),
+                .with_parameter_names(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+                .with_parameter_values(DVector::from_vec(vec![1.3, -0.4, 0.7])),
         )
         .expect("parameterized nonlinear problem");
 
@@ -4057,8 +4076,8 @@ mod tests {
             vec![a.clone() * x.clone() + y.clone() - Expr::Const(3.0), x - y],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string()])
-                .with_equation_parameter_values(DVector::from_vec(vec![2.0])),
+                .with_parameter_names(vec!["a".to_string()])
+                .with_parameter_values(DVector::from_vec(vec![2.0])),
         )
         .expect("parameterized symbolic problem should build");
 

@@ -28,6 +28,8 @@ pub struct BvpSciSolverBuilder {
     equations: Vec<Expr>,
     state_names: Vec<String>,
     parameter_names: Vec<String>,
+    external_parameter_names: Vec<String>,
+    external_parameter_values: Vec<f64>,
     independent_name: String,
     boundary_callback: Option<BoundaryCallback>,
     boundary_jacobian: Option<BoundaryJacobianCallback>,
@@ -53,6 +55,8 @@ impl BvpSciSolverBuilder {
             equations,
             state_names,
             parameter_names: Vec::new(),
+            external_parameter_names: Vec::new(),
+            external_parameter_values: Vec::new(),
             independent_name: "x".into(),
             boundary_callback: None,
             boundary_jacobian: None,
@@ -64,6 +68,16 @@ impl BvpSciSolverBuilder {
             aot_config: None,
             numerical_plan: None,
         }
+    }
+
+    /// Replace every solver policy with a complete native options value.
+    ///
+    /// This is intended for higher-level typed facades which must forward the
+    /// native configuration losslessly rather than rebuilding it field by
+    /// field and accidentally dropping a policy.
+    pub fn with_options(mut self, options: BvpSciOptions) -> Self {
+        self.options = options;
+        self
     }
 
     /// Select `ExprLegacy` or `AtomViewNative` for Lambdify preparation.
@@ -94,17 +108,44 @@ impl BvpSciSolverBuilder {
         self
     }
 
-    /// Set symbolic parameter names. Values can be supplied with
-    /// [`Self::with_parameters`]; omitted values default to zero.
+    /// Declare free parameter unknowns solved jointly with the state profile.
+    /// Their initial Newton guesses can be supplied with
+    /// [`Self::with_parameter_guess`]; omitted guesses default to zero.
     pub fn with_parameter_names(mut self, names: Vec<String>) -> Self {
         self.parameter_names = names;
         self
     }
 
-    /// Set the initial parameter values for the first solve.
-    pub fn with_parameters(mut self, parameters: Vec<f64>) -> Self {
+    /// Declare fixed model inputs, distinct from free Newton unknowns.
+    /// Expressions may reference these names, but they add no Newton columns.
+    pub fn with_external_parameter_names(mut self, names: Vec<String>) -> Self {
+        self.external_parameter_names = names;
+        self
+    }
+
+    /// Set initial values for fixed model inputs. Values may be rebound between
+    /// solves without rebuilding symbolic evaluators.
+    pub fn with_external_parameter_values(mut self, values: Vec<f64>) -> Self {
+        self.external_parameter_values = values;
+        self
+    }
+
+    /// Set initial guesses for the declared free parameter unknowns.
+    pub fn with_parameter_guess(mut self, parameters: Vec<f64>) -> Self {
         self.parameters = parameters;
         self
+    }
+
+    /// Legacy name for [`Self::with_parameter_guess`].
+    #[deprecated(note = "use with_parameter_guess; BVP_sci parameters are unknowns")]
+    pub fn with_parameter_values(self, parameters: Vec<f64>) -> Self {
+        self.with_parameter_guess(parameters)
+    }
+
+    /// Legacy alias retained for source migration.
+    #[deprecated(note = "use with_parameter_guess; BVP_sci parameters are unknowns")]
+    pub fn with_parameters(self, parameters: Vec<f64>) -> Self {
+        self.with_parameter_guess(parameters)
     }
 
     /// Supply boundary residuals. The output dimension is inferred as
@@ -265,11 +306,13 @@ impl BvpSciSolverBuilder {
 
     /// Prepare callbacks and construct the numerical solver.
     pub fn build(self) -> Result<BvpSciSolver, BvpSciNewError> {
-        let _logging_scope = SolverLogGuard::enter(self.options.logging_level);
+        let _logging_scope = SolverLogGuard::try_enter(self.options.logging_level)?;
         let Self {
             equations,
             state_names,
             parameter_names,
+            external_parameter_names,
+            external_parameter_values,
             independent_name,
             boundary_callback,
             boundary_jacobian,
@@ -290,6 +333,20 @@ impl BvpSciSolverBuilder {
         let boundary_callback = boundary_callback.ok_or_else(|| {
             BvpSciNewError::InvalidConfiguration("BVP builder requires boundary callbacks".into())
         })?;
+        if external_parameter_values.len() != external_parameter_names.len() {
+            return Err(BvpSciNewError::ParameterBindingMismatch {
+                expected: external_parameter_names.len(),
+                actual: external_parameter_values.len(),
+            });
+        }
+        if external_parameter_values
+            .iter()
+            .any(|value| !value.is_finite())
+        {
+            return Err(BvpSciNewError::NonFinite {
+                stage: super::BvpSciStage::ParameterBinding,
+            });
+        }
         let telemetry = match options.telemetry {
             BvpSciTelemetryMode::Off => BvpSciTelemetry::disabled(),
             BvpSciTelemetryMode::Counters => BvpSciTelemetry::counters(),
@@ -300,8 +357,34 @@ impl BvpSciSolverBuilder {
             .assembly
             .unwrap_or(super::BvpSciAssembly::ExprLegacy);
         options.assembly = Some(assembly);
+        if matches!(
+            options.matrix_layout,
+            BvpSciMatrixLayout::BandedAuto | BvpSciMatrixLayout::Banded { .. }
+        ) {
+            let inferred =
+                crate::symbolic::structural::infer_rowwise_bandwidth(&equations, &state_names)
+                    .map_err(BvpSciNewError::InvalidConfiguration)?;
+            match options.matrix_layout {
+                BvpSciMatrixLayout::BandedAuto => {
+                    options.matrix_layout = BvpSciMatrixLayout::Banded {
+                        lower: inferred.0,
+                        upper: inferred.1,
+                    };
+                }
+                BvpSciMatrixLayout::Banded { lower, upper } => {
+                    crate::symbolic::structural::validate_bandwidth_hint(inferred, (lower, upper))
+                        .map_err(BvpSciNewError::InvalidConfiguration)?;
+                }
+                _ => unreachable!("only banded layouts enter bandwidth validation"),
+            }
+        }
         let plan = match (options.execution, assembly, numerical_plan, aot_config) {
             (BvpSciExecution::Numerical, super::BvpSciAssembly::Numerical, Some(plan), None) => {
+                if !external_parameter_names.is_empty() || !external_parameter_values.is_empty() {
+                    return Err(BvpSciNewError::UnsupportedRoute(
+                        "fixed external parameters are currently supported only by symbolic BVP_sci frontends".into(),
+                    ));
+                }
                 if plan.dimension() != state_names.len()
                     || plan.parameter_dimension() != parameter_names.len()
                 {
@@ -343,12 +426,13 @@ impl BvpSciSolverBuilder {
                 ));
             }
             (BvpSciExecution::Aot, _, None, Some(config)) => {
-                BvpSciLambdifyPlan::prepare_aot_with_policy(
+                BvpSciLambdifyPlan::prepare_aot_with_external_parameters_and_policy(
                     assembly,
                     options.matrix_layout,
                     equations.clone(),
                     state_names.clone(),
                     parameter_names.clone(),
+                    &external_parameter_names,
                     independent_name.clone(),
                     config,
                     telemetry.clone(),
@@ -365,11 +449,12 @@ impl BvpSciSolverBuilder {
                     "generated backend configuration requires AOT execution".into(),
                 ));
             }
-            (_, _, None, None) => BvpSciLambdifyPlan::prepare(
+            (_, _, None, None) => BvpSciLambdifyPlan::prepare_with_external_parameters(
                 assembly,
                 &equations,
                 &state_names,
                 &parameter_names,
+                &external_parameter_names,
                 independent_name,
                 telemetry.clone(),
             )?,
@@ -384,12 +469,13 @@ impl BvpSciSolverBuilder {
             ),
             None => BvpSciBoundaryCallbacks::new(boundary_dimension, boundary_callback, telemetry),
         };
-        BvpSciSolver::new_with_sparse_factorization(
+        BvpSciSolver::new_with_external_parameters_and_sparse_factorization(
             plan,
             boundary,
             mesh,
             initial_state,
             parameters,
+            external_parameter_values,
             options,
             sparse_factorization,
         )

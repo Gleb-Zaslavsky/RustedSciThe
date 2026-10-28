@@ -1,4 +1,4 @@
-//! Dense AtomView AOT BDF through C/tcc, including parameter continuation.
+//! Dense AtomView AOT BDF through C/tcc, including a time-segment parameter change.
 //! Run: `cargo run --no-default-features --example bdf_aot_guide` (requires tcc).
 
 use RustedSciThe::numerical::BDF::prelude::{
@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The generated residual/Jacobian and loaded artifact stay prepared. Only
     // parameter values and numerical BDF history change for the next segment.
-    solver.try_continue_with_parameter_values(DVector::from_vec(vec![2.0]), 1.0)?;
+    solver.try_continue_in_time_with_parameter_values(DVector::from_vec(vec![2.0]), 1.0)?;
     solver.try_solve()?;
     assert_eq!(solver.status_kind(), BdfStatus::Finished);
 
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exact = (-1.5_f64).exp();
     assert!((final_value - exact).abs() < 2e-8);
 
-    println!("dense BDF AtomView AOT continuation guide");
+    println!("dense BDF AtomView AOT time-segment parameter update guide");
     println!(
         "continued segment samples={}, y(1)={final_value:.10e}, exact={exact:.10e}",
         times.len()

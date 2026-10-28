@@ -36,27 +36,54 @@ impl BvpSciLambdifyPlan {
         independent_name: impl Into<String>,
         telemetry: BvpSciTelemetry,
     ) -> Result<Self, BvpSciNewError> {
+        Self::prepare_with_external_parameters(
+            assembly,
+            equations,
+            state_names,
+            parameter_names,
+            &[],
+            independent_name,
+            telemetry,
+        )
+    }
+
+    /// Prepare a symbolic frontend with separate free Newton parameters and
+    /// fixed model inputs. The callback ABI includes both groups; only free
+    /// parameters contribute columns to the global collocation Jacobian.
+    pub fn prepare_with_external_parameters(
+        assembly: BvpSciAssembly,
+        equations: &[Expr],
+        state_names: &[String],
+        parameter_names: &[String],
+        external_parameter_names: &[String],
+        independent_name: impl Into<String>,
+        telemetry: BvpSciTelemetry,
+    ) -> Result<Self, BvpSciNewError> {
         let independent_name = independent_name.into();
         match assembly {
             BvpSciAssembly::Numerical => Err(BvpSciNewError::UnsupportedRoute(
                 "symbolic preparation cannot use the Numerical assembly".into(),
             )),
-            BvpSciAssembly::ExprLegacy => Ok(Self::ExprLegacy(ExprLegacyLambdifyPlan::prepare(
-                equations,
-                state_names,
-                parameter_names,
-                independent_name,
-                telemetry,
-            )?)),
-            BvpSciAssembly::AtomViewNative => {
-                Ok(Self::AtomViewNative(AtomViewNativeLambdifyPlan::prepare(
+            BvpSciAssembly::ExprLegacy => Ok(Self::ExprLegacy(
+                ExprLegacyLambdifyPlan::prepare_with_external_parameters(
                     equations,
                     state_names,
                     parameter_names,
+                    external_parameter_names,
                     independent_name,
                     telemetry,
-                )?))
-            }
+                )?,
+            )),
+            BvpSciAssembly::AtomViewNative => Ok(Self::AtomViewNative(
+                AtomViewNativeLambdifyPlan::prepare_with_external_parameters(
+                    equations,
+                    state_names,
+                    parameter_names,
+                    external_parameter_names,
+                    independent_name,
+                    telemetry,
+                )?,
+            )),
         }
     }
 
@@ -75,16 +102,46 @@ impl BvpSciLambdifyPlan {
         config: crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig,
         telemetry: BvpSciTelemetry,
     ) -> Result<Self, BvpSciNewError> {
-        Ok(Self::Aot(BvpSciAotPlan::prepare(
+        Self::prepare_aot_with_external_parameters(
             assembly,
             layout,
             equations,
             state_names,
             parameter_names,
+            &[],
             independent_name,
             config,
             telemetry,
-        )?))
+        )
+    }
+
+    /// Prepare generated callbacks with fixed runtime inputs distinct from
+    /// free BVP unknown parameters.
+    pub fn prepare_aot_with_external_parameters(
+        assembly: BvpSciAssembly,
+        layout: super::config::BvpSciMatrixLayout,
+        equations: Vec<Expr>,
+        state_names: Vec<String>,
+        parameter_names: Vec<String>,
+        external_parameter_names: &[String],
+        independent_name: impl Into<String>,
+        config: crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig,
+        telemetry: BvpSciTelemetry,
+    ) -> Result<Self, BvpSciNewError> {
+        Ok(Self::Aot(
+            BvpSciAotPlan::prepare_with_external_parameters_and_policy(
+                assembly,
+                layout,
+                equations,
+                state_names,
+                parameter_names,
+                external_parameter_names,
+                independent_name,
+                config,
+                telemetry,
+                BvpSciExecutionPolicy::Sequential,
+            )?,
+        ))
     }
 
     /// AOT preparation variant with an explicit callback execution policy.
@@ -99,17 +156,47 @@ impl BvpSciLambdifyPlan {
         telemetry: BvpSciTelemetry,
         policy: BvpSciExecutionPolicy,
     ) -> Result<Self, BvpSciNewError> {
-        Ok(Self::Aot(BvpSciAotPlan::prepare_with_policy(
+        Self::prepare_aot_with_external_parameters_and_policy(
             assembly,
             layout,
             equations,
             state_names,
             parameter_names,
+            &[],
             independent_name,
             config,
             telemetry,
             policy,
-        )?))
+        )
+    }
+
+    /// AOT variant with explicit free and external parameter schemas.
+    pub fn prepare_aot_with_external_parameters_and_policy(
+        assembly: BvpSciAssembly,
+        layout: super::config::BvpSciMatrixLayout,
+        equations: Vec<Expr>,
+        state_names: Vec<String>,
+        parameter_names: Vec<String>,
+        external_parameter_names: &[String],
+        independent_name: impl Into<String>,
+        config: crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig,
+        telemetry: BvpSciTelemetry,
+        policy: BvpSciExecutionPolicy,
+    ) -> Result<Self, BvpSciNewError> {
+        Ok(Self::Aot(
+            BvpSciAotPlan::prepare_with_external_parameters_and_policy(
+                assembly,
+                layout,
+                equations,
+                state_names,
+                parameter_names,
+                external_parameter_names,
+                independent_name,
+                config,
+                telemetry,
+                policy,
+            )?,
+        ))
     }
 
     /// Wrap a numerical callback plan in the shared collocation lifecycle.
@@ -174,6 +261,21 @@ impl BvpSciLambdifyPlan {
         }
     }
 
+    /// Number of fixed model inputs accepted in addition to free Newton
+    /// parameters. Numerical callback plans currently support none.
+    pub fn external_parameter_dimension(&self) -> usize {
+        match self {
+            Self::Numerical(_) => 0,
+            Self::ExprLegacy(plan) => plan.external_parameter_dimension(),
+            Self::AtomViewNative(plan) => plan.external_parameter_dimension(),
+            Self::Aot(plan) => plan.external_parameter_dimension(),
+        }
+    }
+
+    pub fn runtime_parameter_dimension(&self) -> usize {
+        self.parameter_dimension() + self.external_parameter_dimension()
+    }
+
     /// Return the fixed pointwise Jacobian structural nonzero count.
     pub fn jacobian_nnz(&self) -> usize {
         match self {
@@ -182,6 +284,27 @@ impl BvpSciLambdifyPlan {
             Self::AtomViewNative(plan) => plan.jacobian_nnz(),
             Self::Aot(plan) => plan.jacobian_nnz(),
         }
+    }
+
+    /// Infer the pointwise state-Jacobian bandwidth from the prepared symbolic
+    /// pattern. Numerical callback plans intentionally have no symbolic band.
+    pub fn inferred_jacobian_bandwidth(&self) -> Option<(usize, usize)> {
+        let pattern = match self {
+            Self::Numerical(_) => return None,
+            Self::ExprLegacy(plan) => plan.jacobian_pattern().collect::<Vec<_>>(),
+            Self::AtomViewNative(plan) => plan.jacobian_pattern().collect::<Vec<_>>(),
+            Self::Aot(plan) => plan.jacobian_pattern(),
+        };
+        let mut lower = 0usize;
+        let mut upper = 0usize;
+        for (row, column) in pattern {
+            if row >= column {
+                lower = lower.max(row - column);
+            } else {
+                upper = upper.max(column - row);
+            }
+        }
+        Some((lower, upper))
     }
 
     /// Number of prepared symbolic/numerical `df/dp` entries, when available.

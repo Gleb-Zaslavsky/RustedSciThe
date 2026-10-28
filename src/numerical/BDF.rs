@@ -1,5 +1,7 @@
 /// api for BDF solver
 pub mod BDF_api;
+/// Independent parameter sweeps over a prepared BDF model.
+pub mod parameter_loop;
 /// Stable convenience imports for applications using the dense BDF solver.
 ///
 /// The prelude intentionally contains only the high-level solver API, typed

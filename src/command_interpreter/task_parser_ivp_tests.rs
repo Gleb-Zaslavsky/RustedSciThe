@@ -1548,10 +1548,7 @@ lsode2_native_execution: faithful_bdf_solve
             execution: Lsode2SymbolicExecutionMode::LambdifyExpr,
         }
     );
-    assert_eq!(
-        resolved.structure,
-        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
-    );
+    assert_eq!(resolved.structure, Lsode2LinearSystemStructure::BandedAuto);
     assert_eq!(
         resolved.linear_solver,
         Lsode2LinearSolverChoice::LapackFaithfulBandedLu
@@ -1964,6 +1961,25 @@ solver_options
         }
         _ => panic!("expected Radau solver"),
     }
+
+    let auto_banded_radau = parse_ivp_task_from_str(&base(
+        "Radau5",
+        "symbolic_frontend: ExprLegacy\nsymbolic_execution: Lambdify\nmatrix_layout: banded",
+    ))
+    .expect("omitted symbolic band widths should request automatic inference");
+    assert_eq!(
+        auto_banded_radau.solver_options.matrix_layout,
+        Some(Lsode2LinearSystemStructure::BandedAuto)
+    );
+
+    let partial_band = parse_ivp_task_from_str(&base(
+        "Radau5",
+        "symbolic_frontend: ExprLegacy\nsymbolic_execution: Lambdify\nmatrix_layout: banded\nbanded_lower: 1",
+    ));
+    assert!(
+        partial_band.is_err(),
+        "band hints must be supplied as a pair"
+    );
 
     let be = parse_ivp_task_from_str(&base(
         "BackwardEuler",

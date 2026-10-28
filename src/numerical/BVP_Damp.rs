@@ -92,6 +92,12 @@ mod test_validation;
 pub use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
 pub use NR_Damp_solver_damped::BvpDerivativeScheme;
 pub use NR_Damp_solver_damped::DampedCallbackRuntime;
+pub use NR_Damp_solver_damped::{
+    DampedParameterLoopOutcome, DampedParameterLoopPoint, DampedParameterLoopReport,
+};
+pub use NR_Damp_solver_frozen::{
+    FrozenParameterLoopOutcome, FrozenParameterLoopPoint, FrozenParameterLoopReport,
+};
 /// module for basic adaptive grid for NR method
 pub mod adaptive_grid_basic;
 /// module for more advanced adaptive grid for NR method

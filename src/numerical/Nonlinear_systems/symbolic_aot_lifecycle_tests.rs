@@ -60,7 +60,7 @@ fn parameterized_problem() -> SymbolicNonlinearProblem {
         vec![a.clone() * x.clone() + y.clone() - Expr::Const(3.0), x - y],
         SymbolicProblemOptions::new()
             .with_variables(vec!["x".to_string(), "y".to_string()])
-            .with_equation_parameters(vec!["a".to_string()]),
+            .with_parameter_names(vec!["a".to_string()]),
     )
     .expect("parameterized problem should build")
 }
@@ -369,7 +369,7 @@ fn parameterized_dense_nonlinear_aot_dynamic_load_and_solver_cycle() {
     let equations = source_problem.equations().to_vec();
     let options = SymbolicProblemOptions::new()
         .with_variables(vec!["x".to_string(), "y".to_string()])
-        .with_equation_parameters(vec!["a".to_string()]);
+        .with_parameter_names(vec!["a".to_string()]);
     let temp = tempdir().expect("tempdir should exist");
 
     let cold = SymbolicNonlinearProblem::from_expressions_with_generated_backend(
@@ -440,7 +440,7 @@ fn parameterized_dense_aot_vs_lambdify_warm_stage_story() {
     let equations = source_problem.equations().to_vec();
     let options = SymbolicProblemOptions::new()
         .with_variables(vec!["x".to_string(), "y".to_string()])
-        .with_equation_parameters(vec!["a".to_string()]);
+        .with_parameter_names(vec!["a".to_string()]);
     let temp = tempdir().expect("temporary AOT directory should exist");
 
     // Cold preparation/build is deliberately outside the warm numerical sample.

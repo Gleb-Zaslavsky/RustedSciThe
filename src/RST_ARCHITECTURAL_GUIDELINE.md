@@ -10,6 +10,137 @@ The Radau release infrastructure is the current reference implementation for
 these rules. Existing solvers may migrate incrementally, but new solver work
 should follow this guideline from the beginning.
 
+## Cross-Cutting Design Policies
+
+### Symbolic Jacobian Structure And Banded Width
+
+For a symbolic model, discovering Jacobian structure and band width is the
+symbolic frontend's responsibility, not a prerequisite users must perform by
+hand. Selecting a Banded linear-algebra route must not require the caller to
+differentiate the equations or calculate `lower/upper` merely to make the
+solver usable. The normal symbolic API should infer a conservative structural
+pattern and derive the band width during preparation.
+
+The preferred preparation order is:
+
+1. Inspect symbolic dependencies (or an equivalent native symbolic graph) to
+   derive a conservative set of potentially nonzero Jacobian coordinates.
+   Do not use pointwise numerical probes as proof of structural zeros: a
+   derivative can happen to evaluate to zero at the sampled state.
+2. Derive lower and upper bandwidth from that pattern, then build the compact
+   Banded representation and differentiate/evaluate only the required entries
+   where the frontend supports that optimization.
+3. If a route requires bandwidth before it can build its symbolic plan, add a
+   dependency-analysis pass first. Do not make a user-supplied width the only
+   way to reach the Banded solver.
+4. Keep the resulting Jacobian compact throughout callback and linear-solve
+   work. Automatic inference is not permission to materialize a Dense matrix
+   in order to discover or store the band.
+
+An explicit bandwidth remains an optional advanced hint for users who already
+know their model structure or need to avoid an inference pass. It is a
+constraint that must be checked against the symbolic dependency pattern before
+any derivative can be omitted. A too-narrow declaration must produce a typed
+configuration/structure error; it must never silently drop an out-of-band
+derivative. Conservative overestimation is valid, though it may cost more
+storage and work than the minimal band.
+
+This policy does not require Dense/Sparse/Banded backend selection itself to
+be automatic. A caller or higher-level solver policy may choose the desired
+linear-algebra family; once Banded is selected, symbolic bandwidth inference
+is the default. For numerical callbacks with no symbolic model, the solver
+cannot infer mathematical dependencies: such APIs may require an explicit
+structure/bandwidth contract or a separately documented safe route. They must
+not pretend that symbolic inference took place.
+
+Represent inferred and explicitly declared widths as distinct policy states;
+do not overload values such as `(0, 0)` as an undocumented "infer" sentinel.
+Where inference is unavailable today, record a migration debt and reject an
+automatic request explicitly. Solver telemetry/provenance should identify
+whether structure was inferred or declared and report the resolved width when
+that information is available.
+
+Decision recorded 2026-10-26: this is the repository-wide target contract for
+symbolic Dense/Sparse/Banded Jacobian preparation, including IVP, BVP and
+nonlinear solver frontends. Existing solver APIs that require caller-provided
+bandwidth are compatibility/implementation gaps to migrate, not a reason to
+make manual bandwidth discovery the permanent user contract.
+
+### Parameter Binding And Parameter Continuation
+
+Treat runtime parameter binding and parameter continuation as two distinct
+solver capabilities. A solver may support the first without implementing the
+second.
+
+#### Parameter Binding / Rebinding
+
+A parameterized prepared model has a declared, ordered parameter schema and a
+current vector of numeric values. Binding supplies values for that schema;
+rebinding replaces those values while keeping the symbolic model unchanged.
+This is the general runtime API for evaluating or solving the same prepared
+problem at new parameter values. It applies, where supported, to IVP, BVP and
+nonlinear-system solvers.
+
+Value-only rebinding must:
+
+1. Validate parameter count, ordering contract and finiteness before mutation.
+   A rejected update must leave the previous binding and prepared solver state
+   usable.
+2. Reuse the prepared symbolic graph, Lambdified closures and AOT artifacts
+   when the declared schema is unchanged. Runtime values must not enter an AOT
+   artifact key or trigger compilation when they are evaluator inputs.
+3. Invalidate numeric state that depends on the previous values, such as
+   Jacobian values, Newton factors or an IVP's integration history, according
+   to the native solver contract. Preserving symbolic preparation does not
+   imply preserving numeric caches.
+4. Leave initial-condition/initial-guess policy explicit. Rebinding values
+   does not, by itself, promise to use the previous solve's result as the next
+   initial state.
+
+Changing the parameter schema is not value-only rebinding. Adding, removing,
+renaming or reordering declared parameter symbols changes the symbolic
+interface and requires rebuilding the affected symbolic preparation and
+generated artifacts. Solver-specific numeric state must also be invalidated.
+If a route deliberately specializes parameter values as compile-time
+constants, changing those constants is a structural rebuild, not a rebind.
+
+The preferred public vocabulary is set_parameter_values or rebind_parameters
+for value-only updates. Initial values may be supplied at construction; the
+same operation can then update them repeatedly. Do not call this operation
+continuation unless it also carries numerical solution state.
+
+#### Parameter Continuation
+
+Parameter continuation is a narrower numerical strategy over a sequence of
+parameter vectors. The solution at one point in the sequence is used as the
+initial guess or state for the next point. This warm-start relationship is the
+defining behavior; merely changing parameters and solving again from an
+independent initial condition is a parameter sweep, not parameter continuation.
+
+Expose continuation separately from binding. Its contract must state which
+previous state is reused (for example, a nonlinear root/BVP solution or an
+accepted IVP (t, y)), how failed steps affect the last valid solution, and
+whether step adaptation/backtracking is solver-managed or caller-managed.
+Continuation may call the value-binding operation internally, but must not
+conflate the two APIs or telemetry events.
+
+For IVP solvers, distinguish parameter rebinding followed by a fresh solve
+from accepted-state continuation to a later time interval. For BVP solvers,
+distinguish user-requested solution-seeded parameter continuation from
+solver-managed adaptive mesh refinement inside an ordinary solve. Mesh
+refinement is not parameter continuation.
+
+Use the term continuation in public method names and documentation only when
+the solver actually reuses a prior numerical solution/state as the next
+initial condition. If a method only rebinds values and runs with a supplied
+initial state, name it for binding or parameterized solve instead.
+
+Decision recorded 2026-10-27: parameter binding/rebinding is the general
+prepared-model capability for IVP, BVP and nonlinear systems; parameter
+continuation is an explicit solution/state-seeded strategy. A parameter-schema
+change requires symbolic re-preparation and must not be presented as a
+value-only rebind.
+
 ## Testing And Benchmarking
 
 ### 1. Telemetry Is Part Of The Solver Contract
@@ -93,6 +224,15 @@ that process log rather than each creating a competing global logger. Its
 location must be discoverable by the caller. If logging is configured but
 the file cannot be created, report that setup failure rather than silently
 discarding the requested log.
+
+After sink setup, `log::Log` cannot return write or flush errors to the solver.
+The file backend must retain the first runtime I/O failure in a typed,
+process-wide health status, report it once to `stderr`, and expose it through
+`solver_log_status()`. A runtime logging failure does not replace or discard a
+successful numerical result; callers can inspect the health status to determine
+whether the persistent log is complete. Log setup failures remain typed
+operation errors because no solver work should begin without the requested
+destination.
 
 For complex solvers, `Info` or a more verbose mode may include a concise
 `tabled` or `prettytable-rs` summary at selected iterations or at solve

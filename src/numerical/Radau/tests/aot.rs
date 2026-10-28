@@ -60,7 +60,7 @@ fn parameterized_decay_problem() -> RadauProblem {
         vec!["y".to_owned(), "z".to_owned()],
         "t",
     )
-    .with_parameters(vec!["rate".to_owned()])
+    .with_parameter_names(vec!["rate".to_owned()])
 }
 
 fn parameterized_decay_jacobian() -> Vec<Expr> {
@@ -81,7 +81,7 @@ fn renamed_parameterized_decay_problem() -> RadauProblem {
         vec!["y".to_owned(), "z".to_owned()],
         "t",
     )
-    .with_parameters(vec!["gain".to_owned()])
+    .with_parameter_names(vec!["gain".to_owned()])
 }
 
 fn invalidation_producer_problem() -> RadauProblem {
@@ -93,7 +93,7 @@ fn invalidation_producer_problem() -> RadauProblem {
         vec!["y".to_owned(), "z".to_owned()],
         "t",
     )
-    .with_parameters(vec!["handoff_rate".to_owned()])
+    .with_parameter_names(vec!["handoff_rate".to_owned()])
 }
 
 fn invalidation_schema_mismatch_problem() -> RadauProblem {
@@ -105,7 +105,7 @@ fn invalidation_schema_mismatch_problem() -> RadauProblem {
         vec!["y".to_owned(), "z".to_owned()],
         "t",
     )
-    .with_parameters(vec!["handoff_gain".to_owned()])
+    .with_parameter_names(vec!["handoff_gain".to_owned()])
 }
 
 fn aot_config(output_dir: PathBuf) -> RadauAotConfig {
@@ -125,7 +125,7 @@ fn workload_problem(kind: WorkloadKind, dimension: usize) -> (RadauProblem, Vec<
         workload.variables,
         workload.time_variable,
     )
-    .with_parameters(workload.parameter_names);
+    .with_parameter_names(workload.parameter_names);
     (
         problem,
         workload.initial_state.as_slice().to_vec(),
@@ -239,7 +239,7 @@ fn aot_frontend_layout_matrix_solves_and_reports_provenance() {
             panic!("AOT preparation failed for {frontend:?}/{matrix_layout:?}: {error}")
         });
         let first = solver
-            .solve_with_parameters(&[1.0, 1.0], &[2.0])
+            .try_solve_with_parameter_values(&[1.0, 1.0], &[2.0])
             .unwrap_or_else(|error| {
                 panic!("AOT solve failed for {frontend:?}/{matrix_layout:?}: {error}")
             });
@@ -261,7 +261,7 @@ fn aot_frontend_layout_matrix_solves_and_reports_provenance() {
         assert!(!first.telemetry().aot_artifact_keys.is_empty());
 
         let continued = solver
-            .continue_with_parameters(&[1.0, 1.0], &[1.0])
+            .try_solve_with_parameter_values(&[1.0, 1.0], &[1.0])
             .unwrap_or_else(|error| {
                 panic!("AOT continuation failed for {frontend:?}/{matrix_layout:?}: {error}")
             });
@@ -320,10 +320,10 @@ fn aot_execution_policy_matrix_preserves_values_and_continuation() {
             let mut solver = RadauSolver::prepare(parameterized_decay_problem(), config)
                 .unwrap_or_else(|error| panic!("AOT policy preparation failed: {error}"));
             let first = solver
-                .solve_with_parameters(&[1.0, 1.0], &[2.0])
+                .try_solve_with_parameter_values(&[1.0, 1.0], &[2.0])
                 .expect("AOT policy solve");
             let continued = solver
-                .continue_with_parameters(&[1.0, 1.0], &[1.0])
+                .try_solve_with_parameter_values(&[1.0, 1.0], &[1.0])
                 .expect("AOT policy continuation");
             assert!((first.y[0] - (-0.4_f64).exp()).abs() < 2.0e-6);
             assert!((continued.y[0] - (-0.2_f64).exp()).abs() < 2.0e-6);
@@ -403,7 +403,7 @@ fn aot_build_require_prebuilt_rebuild_always_lifecycle_is_consistent() {
     .expect("RequirePrebuilt consumer must reconnect published artifact");
     let mut consumer = consumer;
     let consumer_result = consumer
-        .solve_with_parameters(&[1.0, 1.0], &[2.0])
+        .try_solve_with_parameter_values(&[1.0, 1.0], &[2.0])
         .expect("RequirePrebuilt consumer solve");
     let consumer_counters = &consumer_result.telemetry().counters;
     assert_eq!(consumer_counters["aot_build_attempts"], 0);
@@ -433,7 +433,7 @@ fn aot_build_require_prebuilt_rebuild_always_lifecycle_is_consistent() {
     )
     .expect("RebuildAlways preparation");
     let rebuilt_result = rebuilt
-        .solve_with_parameters(&[1.0, 1.0], &[2.0])
+        .try_solve_with_parameter_values(&[1.0, 1.0], &[2.0])
         .expect("RebuildAlways solve");
     let rebuilt_counters = &rebuilt_result.telemetry().counters;
     assert_eq!(rebuilt_counters["aot_build_attempts"], 1);
@@ -622,7 +622,7 @@ fn aot_matches_lambdify_on_shared_workload_endpoints() {
                 RadauFrontend::AtomViewNative => None,
             };
             let problem = RadauProblem::new(data.equations, data.variables, data.time_variable)
-                .with_parameters(data.parameter_names.clone());
+                .with_parameter_names(data.parameter_names.clone());
             let problem = jacobian
                 .map(|jacobian| problem.clone().with_jacobian(jacobian))
                 .unwrap_or(problem);
@@ -668,13 +668,13 @@ fn aot_matches_lambdify_on_shared_workload_endpoints() {
                 lambdify.solve(&initial_state).expect("Lambdify solve")
             } else {
                 lambdify
-                    .solve_with_parameters(&initial_state, &parameters)
+                    .try_solve_with_parameter_values(&initial_state, &parameters)
                     .expect("Lambdify solve")
             };
             let aot_result = if parameters.is_empty() {
                 aot.solve(&initial_state).expect("AOT solve")
             } else {
-                aot.solve_with_parameters(&initial_state, &parameters)
+                aot.try_solve_with_parameter_values(&initial_state, &parameters)
                     .expect("AOT solve")
             };
             let max_diff = lambdify_result
@@ -736,10 +736,10 @@ fn aot_dense_output_samples_match_lambdify_for_both_frontends() {
         )
         .expect("AOT output preparation");
         let lambdify_solution = lambdify
-            .solve_with_parameters(&[1.0, 1.0], &[2.0])
+            .try_solve_with_parameter_values(&[1.0, 1.0], &[2.0])
             .expect("Lambdify output solve");
         let aot_solution = aot
-            .solve_with_parameters(&[1.0, 1.0], &[2.0])
+            .try_solve_with_parameter_values(&[1.0, 1.0], &[2.0])
             .expect("AOT output solve");
         let lambdify_samples = lambdify_solution
             .sample_many(&sample_times)
@@ -805,7 +805,7 @@ fn aot_stage_breakdown_workload_matrix_reports_cold_warm_and_continuation() {
                 solver.solve(&initial_state).expect("AOT stage solve")
             } else {
                 solver
-                    .solve_with_parameters(&initial_state, &parameters)
+                    .try_solve_with_parameter_values(&initial_state, &parameters)
                     .expect("AOT stage solve")
             };
             let updated_parameters = if parameters.is_empty() {
@@ -819,7 +819,7 @@ fn aot_stage_breakdown_workload_matrix_reports_cold_warm_and_continuation() {
                 solver.solve(&initial_state).expect("AOT repeated solve")
             } else {
                 solver
-                    .continue_with_parameters(&initial_state, &updated_parameters)
+                    .try_solve_with_parameter_values(&initial_state, &updated_parameters)
                     .expect("AOT continuation")
             };
             let first_timings = &first.telemetry().timings_ms;

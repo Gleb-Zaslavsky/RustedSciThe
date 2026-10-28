@@ -2,7 +2,7 @@
 
 Status: Windows Debug contract suite passes; targeted Windows Release baseline
 comparisons have passed for selected workloads, 2026-10-21. The registry
-contains 196 scenarios, including full supported-route matrices for Radau (24
+contains 197 scenarios, including full supported-route matrices for Radau (24
 cells), BDF (8 cells), LSODE2 (30 cells), BVP_Damp (66 cells), BVP_sci (30
 cells), BE (4 cells), Nonlinear_systems (6 cells), optimisation (14 cells),
 plus standalone and large-workload scenarios. The previous Windows calibration
@@ -144,6 +144,13 @@ stages are included only where the native telemetry type reports them.
 These larger suites can be selected independently with `--group nonlinear-large`
 and `--group optimization-large` when recording or comparing baselines.
 
+The fixed-input BVP_sci parameter-loop route has its own isolated group and
+large workload (48 states, 129 nodes, three successive input updates). It keeps
+the symbolic plan prepared once, checks every result against the exact solution,
+and reports cumulative native telemetry in a separate Detailed diagnostic pass.
+It is deliberately separate from BVP_sci free Newton-parameter scenarios and
+from the general BVP_sci route matrix.
+
 The primary wall-clock gate must use telemetry Off. Every telemetry-Off
 warmup and gate sample is collected before instrumented diagnostics begin.
 Metric records preserve whether a value came from the gate or a diagnostic
@@ -266,6 +273,22 @@ cell. Backward Euler runs both its matrix and larger diffusion-chain workload:
 .\scripts\perf_gates_first_tier.ps1 -Solver bvp-sci -Action Record -Machine windows-dev -Runs 101
 .\scripts\perf_gates_first_tier.ps1 -Solver optimisation -Action Compare -Machine windows-dev -Runs 101
 ```
+
+The BVP_sci fixed-input loop can be checked and calibrated independently of
+the full BVP_sci release and performance matrices:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bvp_sci_parameter_loop_release_matrix.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bvp_sci_parameter_loop_perf_gates.ps1 `
+  -Action Record -Machine windows-dev -Warmups 20 -Runs 101
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bvp_sci_parameter_loop_perf_gates.ps1 `
+  -Action Compare -Machine windows-dev -Warmups 20 -Runs 101
+```
+
+The performance helper selects only `bvp-sci-parameter-loop`. Record requires
+a clean committed source tree; after the initial baseline, use `-Force` only
+for an intentional refresh. Baselines remain local to the registered
+machine/environment, like all other perf-gates references.
 
 Supported `-Solver` values are `bdf`, `radau`, `lsode2`, `be`, `bvp-sci`,
 `bvp-damp`, `nonlinear-systems` and `optimisation`. The helper maps each to
@@ -465,3 +488,32 @@ STORY_TESTS.
 Before the symbolic refactor, complete the minimal runner and record reviewed
 release baselines from an identified source revision. Debug builds suffice for
 runner logic and numerical validation; performance evidence requires release.
+# IVP Parameter-Loop Gate
+
+The isolated `ivp-parameter-loop` group measures 512 independent scalar IVP
+solves through each first-tier stiff solver (BDF, Backward Euler, LSODE2 and
+Radau). Symbolic preparation is outside the timed region; each point rebinds a
+new scalar parameter and starts from the same initial state. This gate tracks
+the production parameter-loop lifecycle and is separate from the solver route
+matrices. It is not a claim about the numerical core's maximum throughput.
+
+Run or compare only this group:
+
+```powershell
+.\scripts\ivp_parameter_loop_perf_gates.ps1 -Action RecordCompare -Machine windows-dev
+```
+
+Use `-Action Record -Force` only when intentionally replacing reviewed local
+baselines. `-AllowDirtySource` is available for explicitly local experiments;
+clean-source baselines remain preferable for shared comparisons.
+
+The focused native Release contract matrix is separate from measurement and
+does not run benchmarks:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\ivp_parameter_loop_release_matrix.ps1
+```
+
+It runs only the BDF, Backward Euler, LSODE2, Radau and StiffAPI parameter-loop
+tests, retaining technical logs and a compact summary under
+`test_reports/IVP_parameter_loop_release/`.

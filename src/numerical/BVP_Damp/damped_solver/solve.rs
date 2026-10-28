@@ -263,9 +263,7 @@ impl NRBVP {
         // step0 points out of the allowed domain. In this case, the Newton
         // algorithm fails, so return an error condition.
         if fbound < 1e-10 {
-            warn!(
-                "\n  No damped step can be taken without violating solution component bounds."
-            );
+            warn!("\n  No damped step can be taken without violating solution component bounds.");
             return Ok((-3, None));
         }
 
@@ -489,7 +487,7 @@ impl NRBVP {
             let y: Vec<f64> = y.iter().cloned().collect();
             let y: DVector<f64> = DVector::from_vec(y);
             self.result = Some(y.clone()); // save into result in case the very first iteration
-                                           // with the current n_steps will go wrong and we shall need grid refinement
+            // with the current n_steps will go wrong and we shall need grid refinement
             self.y = Vectors_type_casting(&y.clone(), self.effective_runtime_method());
         } else {
         }
@@ -557,7 +555,7 @@ impl NRBVP {
                 let resid_norm = residual_result?;
                 info!("residual norm of the solution = {}", resid_norm);
                 let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
-                                                                // before refining in case it will go wrong
+                // before refining in case it will go wrong
                 self.result = result.clone();
                 info!(
                     "\n \n solution found for the current grid {}",
@@ -852,13 +850,12 @@ impl NRBVP {
     ///
     /// # Returns
     /// Solution vector if successful, None if failed
-    /// Fallible solve path without logging setup.
-    ///
-    /// This is the preferred entrypoint for internal/runtime callers that want
-    /// typed backend and execution errors but do not need the higher-level
-    /// logging wrapper provided by [`NRBVP::try_solve`].
+    /// Fallible solve path with typed backend, execution, and logging setup
+    /// errors. Enabled logging must initialize its persistent file sink before
+    /// numerical work begins.
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
-        let _logging_scope = SolverLogGuard::enter(self.effective_logging_level()?);
+        let _logging_scope = SolverLogGuard::try_enter(self.effective_logging_level()?)
+            .map_err(|source| BvpBackendIntegrationError::LogSetupFailed { source })?;
         self.telemetry_counters.begin_solve();
         self.custom_timer.start();
         let begin = Instant::now();
@@ -898,7 +895,8 @@ impl NRBVP {
     pub fn try_solver_prepared(
         &mut self,
     ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
-        let _logging_scope = SolverLogGuard::enter(self.effective_logging_level()?);
+        let _logging_scope = SolverLogGuard::try_enter(self.effective_logging_level()?)
+            .map_err(|source| BvpBackendIntegrationError::LogSetupFailed { source })?;
         let prepared_fingerprint = self.prepared_plan_fingerprint();
         if !self
             .prepared_runtime_revision

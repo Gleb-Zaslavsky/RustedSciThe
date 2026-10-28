@@ -9,6 +9,33 @@ use crate::numerical::ivp_workloads::{WorkloadKind, build_workload};
 use crate::symbolic::symbolic_engine::Expr;
 
 #[test]
+fn banded_auto_infers_structural_widths_and_resolves_public_config() {
+    let problem = RadauProblem::new(
+        vec![
+            Expr::parse_expression("-2*y0 + y1"),
+            Expr::parse_expression("y0 - 2*y1 + y2"),
+            Expr::parse_expression("y1 - 2*y2"),
+        ],
+        vec!["y0".into(), "y1".into(), "y2".into()],
+        "t",
+    );
+    let mut solver = RadauSolver::prepare(
+        problem,
+        RadauConfig {
+            matrix_layout: RadauMatrixLayout::BandedAuto,
+            ..RadauConfig::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        solver.config().matrix_layout,
+        RadauMatrixLayout::Banded { lower: 1, upper: 1 }
+    );
+    let solution = solver.solve(&[1.0, 0.5, 0.25]).unwrap();
+    assert!(solution.y.iter().all(|value| value.is_finite()));
+}
+
+#[test]
 fn public_solver_exposes_frontend_continuation_output_and_telemetry() {
     for frontend in [RadauFrontend::ExprLegacy, RadauFrontend::AtomViewNative] {
         let problem = RadauProblem::new(
@@ -16,7 +43,7 @@ fn public_solver_exposes_frontend_continuation_output_and_telemetry() {
             vec!["y".to_owned()],
             "t",
         )
-        .with_parameters(vec!["a".to_owned()]);
+        .with_parameter_names(vec!["a".to_owned()]);
         let problem = if frontend == RadauFrontend::ExprLegacy {
             problem.with_jacobian(vec![Expr::parse_expression("-a")])
         } else {
@@ -33,7 +60,9 @@ fn public_solver_exposes_frontend_continuation_output_and_telemetry() {
             ..RadauConfig::default()
         };
         let mut solver = RadauSolver::prepare(problem, config).unwrap();
-        let solution = solver.solve_with_parameters(&[1.0], &[1.0]).unwrap();
+        let solution = solver
+            .try_solve_with_parameter_values(&[1.0], &[1.0])
+            .unwrap();
         assert!((solution.y[0] - (-1.0f64).exp()).abs() < 2.0e-4);
         let midpoint = solution.sample(0.5).unwrap();
         assert!((midpoint[0] - (-0.5f64).exp()).abs() < 2.0e-4);
@@ -45,7 +74,9 @@ fn public_solver_exposes_frontend_continuation_output_and_telemetry() {
             "public telemetry must retain the cold preparation event"
         );
 
-        let continued = solver.continue_with_parameters(&[1.0], &[2.0]).unwrap();
+        let continued = solver
+            .try_solve_with_parameter_values(&[1.0], &[2.0])
+            .unwrap();
         assert!((continued.y[0] - (-2.0f64).exp()).abs() < 3.0e-4);
     }
 }
@@ -77,7 +108,7 @@ fn expr_legacy_derives_compact_analytic_jacobian_when_omitted() {
                 workload.variables.clone(),
                 workload.time_variable.clone(),
             )
-            .with_parameters(workload.parameter_names.clone())
+            .with_parameter_names(workload.parameter_names.clone())
         };
         let config = RadauConfig {
             t_bound: 0.002,
@@ -95,10 +126,10 @@ fn expr_legacy_derives_compact_analytic_jacobian_when_omitted() {
         .unwrap();
 
         let derived_solution = derived
-            .solve_with_parameters(&initial, &parameters)
+            .try_solve_with_parameter_values(&initial, &parameters)
             .unwrap();
         let explicit_solution = explicit
-            .solve_with_parameters(&initial, &parameters)
+            .try_solve_with_parameter_values(&initial, &parameters)
             .unwrap();
         let max_state_diff = derived_solution
             .y
@@ -134,7 +165,7 @@ fn expr_finite_difference_remains_explicit_when_selected() {
         vec!["y".to_owned()],
         "t",
     )
-    .with_parameters(vec!["a".to_owned()]);
+    .with_parameter_names(vec!["a".to_owned()]);
     let mut solver = RadauSolver::prepare(
         problem,
         RadauConfig {
@@ -147,7 +178,9 @@ fn expr_finite_difference_remains_explicit_when_selected() {
         },
     )
     .unwrap();
-    let solution = solver.solve_with_parameters(&[1.0], &[1.0]).unwrap();
+    let solution = solver
+        .try_solve_with_parameter_values(&[1.0], &[1.0])
+        .unwrap();
 
     assert!((solution.y[0] - (-0.1_f64).exp()).abs() < 3.0e-5);
     assert!(solution.telemetry().counters["finite_difference_probes"] > 0);
@@ -166,7 +199,7 @@ fn public_solver_telemetry_modes_obey_four_mode_contract() {
             vec!["y".to_owned()],
             "t",
         )
-        .with_parameters(vec!["a".to_owned()])
+        .with_parameter_names(vec!["a".to_owned()])
         .with_jacobian(vec![Expr::parse_expression("-a")]);
         let config = RadauConfig {
             t_bound: 0.1,
@@ -176,7 +209,9 @@ fn public_solver_telemetry_modes_obey_four_mode_contract() {
             ..RadauConfig::default()
         };
         let mut solver = RadauSolver::prepare(problem, config).unwrap();
-        let solution = solver.solve_with_parameters(&[1.0], &[1.0]).unwrap();
+        let solution = solver
+            .try_solve_with_parameter_values(&[1.0], &[1.0])
+            .unwrap();
         let report = solution.telemetry();
 
         assert_eq!(report.mode, mode);

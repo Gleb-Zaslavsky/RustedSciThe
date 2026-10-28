@@ -1934,3 +1934,71 @@ not justify a major symbolic-preparation rewrite.
 - [ ] Promote only candidates with stable full-solve benefit on large tasks,
   then complete the BVP_sci Release correctness matrix, performance gates and
   story/benchmark matrix before marking the old path legacy.
+
+### Free-Parameter Guess Terminology And Facade Parity
+
+- [x] Add `with_parameter_guess` and `set_parameter_guess` as the canonical
+  names. These values initialize free Newton unknowns; they are not fixed model
+  inputs. Keep the older `*_parameter_values` spellings as deprecated aliases
+  during the migration.
+- [x] Update Rust/Python guides and examples to explain that BVP_sci solves
+  for the parameter together with the state profile, and that changing its
+  guess while reusing the prior mesh/profile is caller-managed continuation.
+- [ ] Rename the telemetry counter `parameter_rebinds` to a name describing
+  free-parameter guess updates, and migrate snapshots, story reports, Python
+  telemetry, and contract tests together. Preserve or explicitly version the
+  old report contract; do not silently relabel historical measurements.
+- [ ] Extend `BVP_api`'s typed problem/request model with free BVP_sci unknowns,
+  parameter-dependent boundary residuals and their Jacobians. Do not route
+  these through the fixed-input binding API used by BVP_Damp.
+- [ ] After the facade model is extended, add direct-native parity tests for
+  parameter guesses, solve/restart behavior, telemetry, and typed failures;
+  then expose that distinct contract in Python stubs, guides and examples.
+
+### Ordered fixed-parameter loop
+
+- [x] Keep BVP_sci free Newton unknowns distinct from fixed model inputs:
+  `parameter_names`/`with_parameter_guess` add Newton columns, while
+  `external_parameter_names`/`with_external_parameter_values` only extend the
+  prepared callback input vector.
+- [x] Add ordered external-parameter solves with per-point typed results and
+  cumulative telemetry snapshots. On a failed point, restore the last
+  successful mesh, profile and free-parameter solution (or the original state
+  before the first success) and continue to the next vector.
+  - [x] Verify ExprLegacy and AtomViewNative success/failure/success behavior in
+    Debug, including unchanged Newton parameter dimension and checkpoint recovery.
+  - [x] Verify the AtomViewNative route in Debug and generated Atom AOT through
+    the Python contract, including external-input dimensions and
+    success/failure/success checkpoint recovery. Numerical callbacks remain
+    explicitly unsupported for named external inputs because their callback
+    ABI has no separate fixed-input channel.
+  - [x] Expose the distinct external-input schema and ordered loop in the Rust
+    and Python APIs, with per-point typed results and cumulative telemetry;
+    document the ordering and recovery policy and add Rust/Python examples.
+  - [x] Complete the Python contract suite, type-stub check and example smoke
+    run. Windows Debug verification: BVP_sci native suite 83 passed/27 ignored;
+    Python contract 353 passed/2 skipped; mypy consumer clean.
+- [ ] Run the BVP_sci release matrix, benchmark/story matrix and relevant
+  performance gates before promoting any route behavior beyond the current
+  solver API.
+
+#### Focused external-parameter-loop release and performance checks
+
+- [x] Add a standalone Release test matrix at
+  `scripts/bvp_sci_parameter_loop_release_matrix.ps1` for the external-parameter loop
+  lifecycle: prepared schema, repeated rebind-and-solve, last-successful-profile
+  reuse, success/failure/success recovery, telemetry snapshots and typed input
+  validation. Keep this selectable independently from the full BVP_sci release
+  matrix and all other solver suites.
+- [x] Add a dedicated `bvp-sci-parameter-loop` performance-gate scenario using
+  representative large BVP_sci workloads and repeated external-parameter
+  values. Require a substantial per-scenario runtime (target at least tens of
+  milliseconds); the baseline still needs stable repeated measurement. Do not
+  register compact correctness fixtures as baselines.
+- [x] Verify that `perf-gates record/compare --group
+  bvp-sci-parameter-loop` selects only these scenarios and leaves the existing
+  BVP_sci and other-solver baseline groups untouched; it contains one dedicated
+  scenario.
+- [x] Add focused Release-test and performance-gate scripts so the loop checks
+  can run without repeating the full BVP_sci or all-solver campaigns.
+- [ ] Record and compare a stable baseline for the dedicated large loop gate.

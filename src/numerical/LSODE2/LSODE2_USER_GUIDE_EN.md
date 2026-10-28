@@ -215,12 +215,12 @@ for k in [1.0, 2.0, 4.0] {
 
 This reuses the prepared symbolic callbacks; the AOT route also reuses its
 prepared artifact instead of repeating symbolic preparation or compilation
-for each value. Each `solve()` is nevertheless a new integration initialized
-from the configured `t0` and `y0`: parameter continuation does not carry the
-previous trajectory or integrator history forward. Parameter count and order
-must match the declared schema. See the runnable examples
-`lsode2_parameter_continuation_lambdify` and
-`lsode2_parameter_continuation_aot`.
+for each value. Each `solve()` is a fresh integration initialized from the
+configured `t0` and `y0`; only the numeric parameter binding is reused. This is
+parameter rebinding across fresh solves, not solution-seeded parameter
+continuation. Parameter count and order must match the declared schema. See
+the runnable examples `lsode2_parameter_rebind_lambdify` and
+`lsode2_parameter_rebind_aot`.
 
 ## AOT parallelism/chunking and performance
 
@@ -427,9 +427,19 @@ let config = Lsode2ProblemConfig::new(/* ... */)
 
 The same logic applies to Dense and Banded. Structure selection changes linear algebra backend, while symbolic execution and chunking control callback-evaluation behavior.
 
+## Independent Parameter Sweeps
+
+`Lsode2Solver::try_solve_parameter_loop(y0, vectors)` retains prepared
+symbolic/AOT callbacks and independently integrates each ordered parameter
+vector. The initial state and configured interval stay fixed. Each point
+stores its own trajectory and native telemetry, or the original typed
+`Lsode2Error`; one failure does not abort later points. See
+`examples/lsode2_parameter_loop.rs` and the shared
+[`IVP parameter-loop guide`](../IVP_PARAMETER_LOOP_GUIDE_EN.md).
+
 ## Where to continue in this repository
 
-Hands-on examples are in `examples/lsode2_numerical_guide.rs`, `examples/lsode2_lambdify_guide.rs`, `examples/lsode2_aot_guide.rs`, `examples/lsode2_parameter_continuation_lambdify.rs`, `examples/lsode2_parameter_continuation_aot.rs`, `examples/lsode2_manual_bdf_guide.rs`, `examples/lsode2_manual_adams_guide.rs`, and `examples/lsode2_task_shell_guide.rs`.
+Hands-on examples are in `examples/lsode2_numerical_guide.rs`, `examples/lsode2_lambdify_guide.rs`, `examples/lsode2_aot_guide.rs`, `examples/lsode2_parameter_rebind_lambdify.rs`, `examples/lsode2_parameter_rebind_aot.rs`, `examples/lsode2_manual_bdf_guide.rs`, `examples/lsode2_manual_adams_guide.rs`, and `examples/lsode2_task_shell_guide.rs`.
 
 Scenario-level correctness and performance tests are organized by topic under
 `src/numerical/LSODE2/tests/` (for example, `correctness_story_tests.rs`,

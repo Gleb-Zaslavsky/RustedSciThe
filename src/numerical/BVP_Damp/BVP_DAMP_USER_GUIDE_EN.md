@@ -820,3 +820,42 @@ are ignored, so detailed explanations can stay beside the task. Reference
 documents are kept under `examples/task_docs/`. The shared grammar, typed
 diagnostics, and batch-runner conventions are documented in
 [`TASK_DOCS_GUIDE_EN.md`](../../command_interpreter/TASK_DOCS_GUIDE_EN.md).
+
+## Ordered fixed-parameter loop (Frozen/Naive)
+
+`NRBVP::try_solve_parameter_loop(&[Vec<f64>])` runs fixed model-parameter
+vectors in the supplied order. Declare the parameter names once with
+`try_set_parameter_names`; each row must have the same dimension and finite
+values. The first point starts from the configured initial guess. After a
+successful point, its profile becomes the next guess. A failed/non-converged
+point is recorded and skipped, and never replaces that checkpoint. If no point
+has succeeded yet, later attempts reuse the original guess.
+
+Frozen/Naive has a fixed mesh, so the checkpoint is unambiguous. Each point
+retains its own mesh, public mesh-by-state values and native telemetry snapshot.
+Telemetry collection is not enabled by the loop; snapshots use the solver's
+configured mode and preserve native cumulative counter semantics. Typed native
+solve errors remain attached to the failed point. A `stop_error` indicates a
+configuration or recovery failure that prevented safe continuation; completed
+point outcomes remain available in the report.
+
+```rust,no_run
+let report = solver.try_solve_parameter_loop(&[
+    vec![1.0, 0.1],
+    vec![1.2, 0.15],
+    vec![1.4, 0.2],
+])?;
+for point in report.points {
+    // Match Converged / NotConverged / Failed and keep the point index.
+}
+```
+
+Frozen/Naive uses a fixed mesh. Damped uses the same ordered outcome contract,
+but checkpoints the refined mesh and its converged profile as one unit. A
+later point starts from that pair; if it refines again, the mesh-dependent
+symbolic/numeric plan is rebuilt on the new mesh. Each point gets a fresh
+refinement budget. Failed points never replace the checkpoint. See the
+runnable [`bvp_frozen_parameter_loop`](../../../examples/bvp_frozen_parameter_loop.rs)
+and [`bvp_damped_parameter_loop`](../../../examples/bvp_damped_parameter_loop.rs)
+examples. BVP_sci's current parameters are free Newton unknowns, not fixed
+model inputs, so they are not accepted by this loop.

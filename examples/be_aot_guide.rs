@@ -1,4 +1,4 @@
-//! Dense AtomViewNative AOT route through C/tcc with parameter continuation.
+//! Dense AtomViewNative AOT route through C/tcc with fresh solves after rebinding.
 //! Run: `cargo run --no-default-features --example be_aot_guide` (requires tcc).
 
 use RustedSciThe::numerical::BE::{BE, BeSolverOptions, BeStatus, BeSymbolicAssemblyBackend};

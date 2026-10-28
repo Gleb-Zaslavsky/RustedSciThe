@@ -10,19 +10,21 @@ use std::collections::HashMap;
 use nalgebra::DMatrix;
 use pyo3::prelude::*;
 
-use rustedscithe_core::numerical::BVP_Damp::BvpLambdifyTelemetryMode;
-use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_damped::{
-    AdaptiveGridConfig, DampedSolverOptions, NRBVP, SolverParams,
-};
-use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_frozen::{
-    FrozenSolverOptions, NRBVP as FrozenNRBVP,
-};
 use rustedscithe_core::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
 };
 use rustedscithe_core::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use rustedscithe_core::numerical::BVP_Damp::telemetry::{
     BvpCallbackStage, BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode, BvpTelemetrySnapshot,
+};
+use rustedscithe_core::numerical::BVP_Damp::BvpLambdifyTelemetryMode;
+use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_damped::{
+    AdaptiveGridConfig, DampedParameterLoopOutcome, DampedParameterLoopReport, DampedSolverOptions,
+    SolverParams, NRBVP,
+};
+use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_frozen::{
+    FrozenParameterLoopOutcome, FrozenParameterLoopReport, FrozenSolverOptions,
+    NRBVP as FrozenNRBVP,
 };
 use rustedscithe_core::somelinalg::banded::{
     FallbackPolicy, LinearSolverConfig, LinearSolverPolicy,
@@ -39,8 +41,9 @@ use rustedscithe_core::symbolic::codegen::codegen_provider_api::MatrixBackend;
 
 use crate::contract::SolverOptions;
 use crate::errors::{
-    ExhaustionError, InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
-    UnsupportedOptionError, annotate_native, catch_panic, native_variant,
+    annotate, annotate_native, catch_panic, native_variant, ExhaustionError,
+    InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
+    UnsupportedOptionError,
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
@@ -69,7 +72,7 @@ fn validate_names(names: &[String], label: &str, allow_empty: bool) -> PyResult<
     Ok(())
 }
 
-fn map_native_error(error: BvpBackendIntegrationError) -> PyErr {
+pub(crate) fn map_native_error(error: BvpBackendIntegrationError) -> PyErr {
     let native_kind = native_variant(&error);
     let message = error.to_string();
     annotate_native(
@@ -222,7 +225,7 @@ fn grid_method(value: &str, parameters: &[f64]) -> PyResult<GridRefinementMethod
     }
 }
 
-fn strategy_params(
+pub(crate) fn strategy_params(
     max_jacobian_refreshes: Option<usize>,
     max_damping_iterations: Option<usize>,
     damping_factor: Option<f64>,
@@ -327,7 +330,7 @@ fn linear_solver_config(
     }))
 }
 
-fn backend_config(
+pub(crate) fn backend_config(
     options: &SolverOptions,
     logging_mode: BvpLoggingMode,
     logging_max_events: usize,
@@ -390,7 +393,7 @@ fn backend_config(
     Ok(config)
 }
 
-fn options_for_solver(
+pub(crate) fn options_for_solver(
     options: &SolverOptions,
     scheme: &str,
     tolerance: f64,
@@ -467,6 +470,12 @@ fn flatten_node_major(
         }
     }
     Ok(matrix)
+}
+
+fn matrix_to_node_major(matrix: &DMatrix<f64>) -> Vec<f64> {
+    (0..matrix.ncols())
+        .flat_map(|node| (0..matrix.nrows()).map(move |state| matrix[(state, node)]))
+        .collect()
 }
 
 /// Copy the core's `[state, node]` matrix back to detached Python
@@ -835,6 +844,355 @@ pub struct BvpDampSolution {
     callback_timings_ms: HashMap<String, f64>,
     preparation_timings_ms: HashMap<String, f64>,
     storage_estimated: Option<bool>,
+}
+
+/// One attempted fixed-parameter point in a BVP_Damp parameter loop.
+///
+/// A point failure is data rather than an exception from `solve_parameter_loop`,
+/// so later parameter vectors can still be attempted. `error`, when present,
+/// is the original typed Rust failure mapped to the regular Python exception
+/// hierarchy with its solver/stage/route/native-kind context intact.
+#[pyclass(
+    name = "BvpDampParameterLoopPoint",
+    module = "rustedscithe",
+    unsendable
+)]
+pub struct BvpDampParameterLoopPoint {
+    index: usize,
+    parameters: Vec<f64>,
+    status: String,
+    solution: Option<BvpDampSolution>,
+    error: Option<Py<PyAny>>,
+    counters: HashMap<String, u64>,
+    timings_ms: HashMap<String, f64>,
+    scope_timings_ms: HashMap<String, f64>,
+    scope_events: HashMap<String, u64>,
+    storage_bytes: HashMap<String, u64>,
+    callback_counters: HashMap<String, u64>,
+    callback_timings_ms: HashMap<String, f64>,
+    preparation_timings_ms: HashMap<String, f64>,
+    storage_estimated: Option<bool>,
+}
+
+#[pymethods]
+impl BvpDampParameterLoopPoint {
+    /// Zero-based position in the requested parameter sequence.
+    #[getter]
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Fixed parameter values attempted at this position.
+    #[getter]
+    pub fn parameters(&self) -> Vec<f64> {
+        self.parameters.clone()
+    }
+
+    /// `converged`, `not_converged`, or `failed`.
+    #[getter]
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    /// Detached solution on success; otherwise `None`.
+    #[getter]
+    pub fn solution(&self) -> Option<BvpDampSolution> {
+        self.solution.clone()
+    }
+
+    /// Typed native Python exception for a failed point; otherwise `None`.
+    #[getter]
+    pub fn error<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
+        self.error.as_ref().map(|error| error.bind(py).clone())
+    }
+
+    /// Native counters for this solve attempt; empty when counters were off.
+    pub fn telemetry_counters(&self) -> HashMap<String, u64> {
+        self.counters.clone()
+    }
+
+    /// Native timings for this solve attempt; empty when timings were off.
+    pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
+        self.timings_ms.clone()
+    }
+
+    /// Inclusive and nested native timing scopes for this solve attempt.
+    pub fn telemetry_scope_timings_ms(&self) -> HashMap<String, f64> {
+        self.scope_timings_ms.clone()
+    }
+
+    /// Event counts keyed by native telemetry scope.
+    pub fn telemetry_scope_events(&self) -> HashMap<String, u64> {
+        self.scope_events.clone()
+    }
+
+    /// Estimated retained native storage by category, when reported.
+    pub fn telemetry_storage_bytes(&self) -> HashMap<String, u64> {
+        self.storage_bytes.clone()
+    }
+
+    /// Discrete callback counts for this solve attempt.
+    pub fn telemetry_callback_counters(&self) -> HashMap<String, u64> {
+        self.callback_counters.clone()
+    }
+
+    /// Callback timing totals for this solve attempt.
+    pub fn telemetry_callback_timings_ms(&self) -> HashMap<String, f64> {
+        self.callback_timings_ms.clone()
+    }
+
+    /// Native preparation-stage timings for this solve attempt.
+    pub fn telemetry_preparation_timings_ms(&self) -> HashMap<String, f64> {
+        self.preparation_timings_ms.clone()
+    }
+
+    /// Whether storage telemetry values are estimates rather than exact sizes.
+    pub fn telemetry_storage_is_estimated(&self) -> Option<bool> {
+        self.storage_estimated
+    }
+}
+
+/// Results from an ordered BVP_Damp fixed-parameter loop.
+#[pyclass(
+    name = "BvpDampParameterLoopReport",
+    module = "rustedscithe",
+    unsendable
+)]
+pub struct BvpDampParameterLoopReport {
+    points: Vec<Py<BvpDampParameterLoopPoint>>,
+    stop_error: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl BvpDampParameterLoopReport {
+    /// All requested points in input order, including per-point failures.
+    #[getter]
+    pub fn points(&self, py: Python<'_>) -> Vec<Py<BvpDampParameterLoopPoint>> {
+        self.points
+            .iter()
+            .map(|point| point.clone_ref(py))
+            .collect()
+    }
+
+    /// Typed exception if an unrecoverable loop-level problem stopped execution.
+    #[getter]
+    pub fn stop_error<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
+        self.stop_error.as_ref().map(|error| error.bind(py).clone())
+    }
+
+    /// Number of attempted parameter vectors represented by this report.
+    pub fn completed_count(&self) -> usize {
+        self.points.len()
+    }
+}
+
+fn parameter_loop_point(
+    py: Python<'_>,
+    solver_name: &str,
+    route: &str,
+    index: usize,
+    parameters: Vec<f64>,
+    outcome: FrozenParameterLoopOutcome,
+) -> PyResult<BvpDampParameterLoopPoint> {
+    let (status, solution, error, telemetry) = match outcome {
+        FrozenParameterLoopOutcome::Converged {
+            mesh,
+            values,
+            telemetry,
+        } => {
+            let state_major = values.transpose();
+            let (counters, timings_ms) = snapshot_maps(&telemetry, None);
+            let (scope_timings_ms, scope_events, storage_bytes) = snapshot_detail_maps(&telemetry);
+            let (callback_counters, callback_timings_ms) = snapshot_callback_maps(&telemetry);
+            let preparation_timings_ms = snapshot_preparation_timings(&telemetry);
+            let storage_estimated =
+                (!storage_bytes.is_empty()).then_some(telemetry.storage.estimated);
+            let solution = BvpDampSolution {
+                solver_name: solver_name.to_owned(),
+                mesh: mesh.iter().copied().collect(),
+                values: (0..state_major.nrows())
+                    .map(|state| {
+                        (0..state_major.ncols())
+                            .map(|node| state_major[(state, node)])
+                            .collect()
+                    })
+                    .collect(),
+                parameters: parameters.clone(),
+                status: "finished".to_owned(),
+                telemetry_mode: telemetry_mode_name(telemetry.telemetry_mode).to_owned(),
+                counters,
+                timings_ms,
+                scope_timings_ms,
+                scope_events,
+                storage_bytes,
+                callback_counters,
+                callback_timings_ms,
+                preparation_timings_ms,
+                storage_estimated,
+            };
+            ("converged", Some(solution), None, telemetry)
+        }
+        FrozenParameterLoopOutcome::NotConverged { telemetry } => {
+            ("not_converged", None, None, telemetry)
+        }
+        FrozenParameterLoopOutcome::Failed { error, telemetry } => {
+            let exception = annotate(map_native_error(error), "solve", solver_name, route)
+                .value(py)
+                .clone()
+                .unbind()
+                .into_any();
+            ("failed", None, Some(exception), telemetry)
+        }
+    };
+    let (counters, timings_ms) = snapshot_maps(&telemetry, None);
+    let (scope_timings_ms, scope_events, storage_bytes) = snapshot_detail_maps(&telemetry);
+    let (callback_counters, callback_timings_ms) = snapshot_callback_maps(&telemetry);
+    let preparation_timings_ms = snapshot_preparation_timings(&telemetry);
+    let storage_estimated = (!storage_bytes.is_empty()).then_some(telemetry.storage.estimated);
+    Ok(BvpDampParameterLoopPoint {
+        index,
+        parameters,
+        status: status.to_owned(),
+        solution,
+        error,
+        counters,
+        timings_ms,
+        scope_timings_ms,
+        scope_events,
+        storage_bytes,
+        callback_counters,
+        callback_timings_ms,
+        preparation_timings_ms,
+        storage_estimated,
+    })
+}
+
+pub(crate) fn parameter_loop_report(
+    py: Python<'_>,
+    solver_name: &str,
+    route: &str,
+    report: FrozenParameterLoopReport,
+) -> PyResult<BvpDampParameterLoopReport> {
+    let mut points = Vec::with_capacity(report.points.len());
+    for point in report.points {
+        points.push(Py::new(
+            py,
+            parameter_loop_point(
+                py,
+                solver_name,
+                route,
+                point.index,
+                point.parameters,
+                point.outcome,
+            )?,
+        )?);
+    }
+    let stop_error = report.stop_error.map(|error| {
+        annotate(
+            map_native_error(error),
+            "parameter_loop",
+            solver_name,
+            route,
+        )
+        .value(py)
+        .clone()
+        .unbind()
+        .into_any()
+    });
+    Ok(BvpDampParameterLoopReport { points, stop_error })
+}
+
+pub(crate) fn damped_parameter_loop_report(
+    py: Python<'_>,
+    route: &str,
+    report: DampedParameterLoopReport,
+) -> PyResult<BvpDampParameterLoopReport> {
+    let mut points = Vec::with_capacity(report.points.len());
+    for point in report.points {
+        let (status, solution, error, telemetry) = match point.outcome {
+            DampedParameterLoopOutcome::Converged {
+                mesh,
+                values,
+                telemetry,
+            } => {
+                let state_major = values.transpose();
+                let (counters, timings_ms) = snapshot_maps(&telemetry, None);
+                let (scope_timings_ms, scope_events, storage_bytes) =
+                    snapshot_detail_maps(&telemetry);
+                let (callback_counters, callback_timings_ms) = snapshot_callback_maps(&telemetry);
+                let preparation_timings_ms = snapshot_preparation_timings(&telemetry);
+                let storage_estimated =
+                    (!storage_bytes.is_empty()).then_some(telemetry.storage.estimated);
+                let solution = BvpDampSolution {
+                    solver_name: "bvp_damp".to_owned(),
+                    mesh: mesh.iter().copied().collect(),
+                    values: (0..state_major.nrows())
+                        .map(|state| {
+                            (0..state_major.ncols())
+                                .map(|node| state_major[(state, node)])
+                                .collect()
+                        })
+                        .collect(),
+                    parameters: point.parameters.clone(),
+                    status: "finished".to_owned(),
+                    telemetry_mode: telemetry_mode_name(telemetry.telemetry_mode).to_owned(),
+                    counters,
+                    timings_ms,
+                    scope_timings_ms,
+                    scope_events,
+                    storage_bytes,
+                    callback_counters,
+                    callback_timings_ms,
+                    preparation_timings_ms,
+                    storage_estimated,
+                };
+                ("converged", Some(solution), None, telemetry)
+            }
+            DampedParameterLoopOutcome::NotConverged { telemetry } => {
+                ("not_converged", None, None, telemetry)
+            }
+            DampedParameterLoopOutcome::Failed { error, telemetry } => {
+                let exception = annotate(map_native_error(error), "solve", "bvp_damp", route)
+                    .value(py)
+                    .clone()
+                    .unbind()
+                    .into_any();
+                ("failed", None, Some(exception), telemetry)
+            }
+        };
+        let (counters, timings_ms) = snapshot_maps(&telemetry, None);
+        let (scope_timings_ms, scope_events, storage_bytes) = snapshot_detail_maps(&telemetry);
+        let (callback_counters, callback_timings_ms) = snapshot_callback_maps(&telemetry);
+        let preparation_timings_ms = snapshot_preparation_timings(&telemetry);
+        let storage_estimated = (!storage_bytes.is_empty()).then_some(telemetry.storage.estimated);
+        points.push(Py::new(
+            py,
+            BvpDampParameterLoopPoint {
+                index: point.index,
+                parameters: point.parameters,
+                status: status.to_owned(),
+                solution,
+                error,
+                counters,
+                timings_ms,
+                scope_timings_ms,
+                scope_events,
+                storage_bytes,
+                callback_counters,
+                callback_timings_ms,
+                preparation_timings_ms,
+                storage_estimated,
+            },
+        )?);
+    }
+    let stop_error = report.stop_error.map(|error| {
+        annotate(map_native_error(error), "parameter_loop", "bvp_damp", route)
+            .value(py)
+            .clone()
+            .unbind()
+            .into_any()
+    });
+    Ok(BvpDampParameterLoopReport { points, stop_error })
 }
 
 #[pymethods]
@@ -1329,10 +1687,10 @@ impl BvpDampSolver {
             if !parameters.is_empty() {
                 let parameter_refs = parameters.iter().map(String::as_str).collect::<Vec<_>>();
                 solver
-                    .try_set_params(Some(parameter_refs.as_slice()))
+                    .try_set_parameter_names(Some(parameter_refs.as_slice()))
                     .map_err(map_native_error)?;
                 solver
-                    .try_set_param_values(Some(parameter_values))
+                    .try_set_parameter_values(Some(parameter_values))
                     .map_err(map_native_error)?;
             }
             Ok(solver)
@@ -1394,8 +1752,39 @@ impl BvpDampSolver {
         })
     }
 
-    /// Replace numeric parameter values while retaining the prepared graph.
-    pub fn set_parameters(&mut self, values: Vec<f64>) -> PyResult<()> {
+    /// Solve fixed parameter vectors in order, carrying the last successful
+    /// profile and its adaptively refined mesh into the next attempt. Point
+    /// failures remain in the report and do not replace the checkpoint.
+    pub fn solve_parameter_loop(
+        &mut self,
+        py: Python<'_>,
+        parameter_vectors: Vec<Vec<f64>>,
+    ) -> PyResult<BvpDampParameterLoopReport> {
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        let report = panic_state.run("parameter_loop", "bvp_damp", &route, || {
+            self.solver
+                .try_solve_parameter_loop(&parameter_vectors)
+                .map_err(map_native_error)
+        })?;
+        self.prepared |= !report.points.is_empty();
+        damped_parameter_loop_report(py, &route, report)
+    }
+
+    /// Re-solve with new fixed inputs, warm-starting from the current Damped iterate.
+    pub fn solve_with_parameter_values(&mut self, values: Vec<f64>) -> PyResult<BvpDampSolution> {
+        self.set_parameter_values(values)?;
+        if !self.prepared {
+            self.prepare()?;
+        }
+        self.solve_prepared()
+    }
+
+    /// Replace fixed numeric inputs while retaining the prepared graph.
+    pub fn set_parameter_values(&mut self, values: Vec<f64>) -> PyResult<()> {
         finite_values(&values, "parameter_values")?;
         if values.len() != self.solver.param_names.len() {
             return Err(InvalidConfigurationError::new_err(format!(
@@ -1409,11 +1798,17 @@ impl BvpDampSolver {
             self.frontend, self.execution, self.matrix_layout
         );
         let panic_state = self.panic_state.clone();
-        panic_state.run("continuation", "bvp_damp", &route, || {
+        panic_state.run("parameter_binding", "bvp_damp", &route, || {
             self.solver
-                .try_set_param_values(Some(values))
+                .try_set_parameter_values(Some(values))
                 .map_err(map_native_error)
         })
+    }
+
+    /// Deprecated ambiguous alias for [`Self::set_parameter_values`].
+    #[pyo3(name = "set_parameters")]
+    pub fn set_parameters_legacy(&mut self, values: Vec<f64>) -> PyResult<()> {
+        self.set_parameter_values(values)
     }
 
     /// Reset the Newton initial guess while retaining prepared callbacks.
@@ -1560,6 +1955,7 @@ pub struct BvpDampNaiveSolver {
     execution: String,
     matrix_layout: String,
     prepared: bool,
+    has_successful_solution: bool,
     panic_state: SolverPanicState,
 }
 
@@ -1750,10 +2146,10 @@ impl BvpDampNaiveSolver {
             if !parameters.is_empty() {
                 let parameter_refs = parameters.iter().map(String::as_str).collect::<Vec<_>>();
                 solver
-                    .try_set_params(Some(parameter_refs.as_slice()))
+                    .try_set_parameter_names(Some(parameter_refs.as_slice()))
                     .map_err(map_native_error)?;
                 solver
-                    .try_set_param_values(Some(parameter_values))
+                    .try_set_parameter_values(Some(parameter_values))
                     .map_err(map_native_error)?;
             }
             Ok(solver)
@@ -1765,6 +2161,7 @@ impl BvpDampNaiveSolver {
             execution: options.execution().to_owned(),
             matrix_layout: options.matrix_layout().to_owned(),
             prepared: false,
+            has_successful_solution: false,
             panic_state: SolverPanicState::default(),
         })
     }
@@ -1785,9 +2182,12 @@ impl BvpDampNaiveSolver {
         let route = self.route();
         let panic_state = self.panic_state.clone();
         panic_state.run("solve", "bvp_damp_naive", &route, || {
+            self.has_successful_solution = false;
             let result = self.solver.try_solver().map_err(map_native_error)?;
             self.prepared = true;
-            self.finish_solution(result, "bvp_damp_naive")
+            let solution = self.finish_solution(result, "bvp_damp_naive")?;
+            self.has_successful_solution = true;
+            Ok(solution)
         })
     }
 
@@ -1796,6 +2196,7 @@ impl BvpDampNaiveSolver {
         let route = self.route();
         let panic_state = self.panic_state.clone();
         panic_state.run("solve", "bvp_damp_naive", &route, || {
+            self.has_successful_solution = false;
             if !self.prepared {
                 return Err(SolverError::new_err(
                     "BVP_Damp Naive has no prepared plan; call prepare() first",
@@ -1805,12 +2206,55 @@ impl BvpDampNaiveSolver {
                 .solver
                 .try_solver_prepared()
                 .map_err(map_native_error)?;
-            self.finish_solution(result, "bvp_damp_naive")
+            let solution = self.finish_solution(result, "bvp_damp_naive")?;
+            self.has_successful_solution = true;
+            Ok(solution)
         })
     }
 
-    /// Rebind numeric parameters without rebuilding the symbolic plan.
-    pub fn set_parameters(&mut self, values: Vec<f64>) -> PyResult<()> {
+    /// Solve an ordered fixed-parameter sweep, carrying only successful
+    /// profiles forward as guesses and retaining point failures in the report.
+    pub fn solve_parameter_loop(
+        &mut self,
+        py: Python<'_>,
+        parameter_vectors: Vec<Vec<f64>>,
+    ) -> PyResult<BvpDampParameterLoopReport> {
+        let route = self.route();
+        let panic_state = self.panic_state.clone();
+        let report = panic_state.run("parameter_loop", "bvp_damp_naive", &route, || {
+            self.solver
+                .try_solve_parameter_loop(&parameter_vectors)
+                .map_err(map_native_error)
+        })?;
+        self.prepared = true;
+        if report
+            .points
+            .iter()
+            .any(|point| matches!(&point.outcome, FrozenParameterLoopOutcome::Converged { .. }))
+        {
+            self.has_successful_solution = true;
+        }
+        parameter_loop_report(py, "bvp_damp_naive", &route, report)
+    }
+
+    /// Re-solve with new fixed inputs, seeding from the last successful profile.
+    pub fn solve_with_parameter_values(&mut self, values: Vec<f64>) -> PyResult<BvpDampSolution> {
+        let previous = self
+            .has_successful_solution
+            .then(|| self.solver.get_result())
+            .flatten()
+            .map(|result| result.transpose());
+        self.set_parameter_values(values)?;
+        if let Some(previous) = previous {
+            self.set_prepared_iterate(matrix_to_node_major(&previous))?;
+        } else if !self.prepared {
+            self.prepare()?;
+        }
+        self.solve_prepared()
+    }
+
+    /// Rebind fixed numeric inputs without rebuilding the symbolic plan.
+    pub fn set_parameter_values(&mut self, values: Vec<f64>) -> PyResult<()> {
         finite_values(&values, "parameter_values")?;
         if values.len() != self.solver.param_names.len() {
             return Err(InvalidConfigurationError::new_err(format!(
@@ -1821,9 +2265,33 @@ impl BvpDampNaiveSolver {
         }
         let route = self.route();
         let panic_state = self.panic_state.clone();
-        panic_state.run("continuation", "bvp_damp_naive", &route, || {
+        panic_state.run("parameter_binding", "bvp_damp_naive", &route, || {
             self.solver
-                .try_set_param_values(Some(values))
+                .try_set_parameter_values(Some(values))
+                .map_err(map_native_error)
+        })
+    }
+
+    /// Deprecated ambiguous alias for [`Self::set_parameter_values`].
+    #[pyo3(name = "set_parameters")]
+    pub fn set_parameters_legacy(&mut self, values: Vec<f64>) -> PyResult<()> {
+        self.set_parameter_values(values)
+    }
+
+    /// Replace the fixed-mesh Newton guess while keeping prepared callbacks.
+    pub fn set_prepared_iterate(&mut self, initial_state: Vec<f64>) -> PyResult<()> {
+        if !self.prepared {
+            return Err(SolverError::new_err(
+                "BVP_Damp Naive has no prepared plan; call prepare() first",
+            ));
+        }
+        let iterate =
+            flatten_node_major(initial_state, self.solver.n_steps, self.solver.values.len())?;
+        let route = self.route();
+        let panic_state = self.panic_state.clone();
+        panic_state.run("initial_guess", "bvp_damp_naive", &route, || {
+            self.solver
+                .try_set_prepared_iterate(iterate)
                 .map_err(map_native_error)
         })
     }
@@ -2017,9 +2485,12 @@ impl BvpDampFrozenSolver {
         let route = self.inner.route();
         let panic_state = self.inner.panic_state.clone();
         panic_state.run("solve", "bvp_damp_frozen", &route, || {
+            self.inner.has_successful_solution = false;
             let result = self.inner.solver.try_solver().map_err(map_native_error)?;
             self.inner.prepared = true;
-            self.inner.finish_solution(result, "bvp_damp_frozen")
+            let solution = self.inner.finish_solution(result, "bvp_damp_frozen")?;
+            self.inner.has_successful_solution = true;
+            Ok(solution)
         })
     }
 
@@ -2028,6 +2499,7 @@ impl BvpDampFrozenSolver {
         let route = self.inner.route();
         let panic_state = self.inner.panic_state.clone();
         panic_state.run("solve", "bvp_damp_frozen", &route, || {
+            self.inner.has_successful_solution = false;
             if !self.inner.prepared {
                 return Err(SolverError::new_err(
                     "BVP_Damp Frozen has no prepared plan; call prepare() first",
@@ -2038,12 +2510,58 @@ impl BvpDampFrozenSolver {
                 .solver
                 .try_solver_prepared()
                 .map_err(map_native_error)?;
-            self.inner.finish_solution(result, "bvp_damp_frozen")
+            let solution = self.inner.finish_solution(result, "bvp_damp_frozen")?;
+            self.inner.has_successful_solution = true;
+            Ok(solution)
         })
     }
 
-    /// Rebind numeric parameters while retaining the symbolic prepared plan.
-    pub fn set_parameters(&mut self, values: Vec<f64>) -> PyResult<()> {
+    /// Solve parameter vectors in order, warm-starting each point from the
+    /// latest successful profile. Numerical point failures are kept in the
+    /// returned report and do not prevent later points from running.
+    pub fn solve_parameter_loop(
+        &mut self,
+        py: Python<'_>,
+        parameter_vectors: Vec<Vec<f64>>,
+    ) -> PyResult<BvpDampParameterLoopReport> {
+        let route = self.inner.route();
+        let panic_state = self.inner.panic_state.clone();
+        let report = panic_state.run("parameter_loop", "bvp_damp_frozen", &route, || {
+            self.inner
+                .solver
+                .try_solve_parameter_loop(&parameter_vectors)
+                .map_err(map_native_error)
+        })?;
+        self.inner.prepared = true;
+        if report
+            .points
+            .iter()
+            .any(|point| matches!(&point.outcome, FrozenParameterLoopOutcome::Converged { .. }))
+        {
+            self.inner.has_successful_solution = true;
+        }
+        parameter_loop_report(py, "bvp_damp_frozen", &route, report)
+    }
+
+    /// Re-solve with new fixed inputs, seeding from the last successful profile.
+    pub fn solve_with_parameter_values(&mut self, values: Vec<f64>) -> PyResult<BvpDampSolution> {
+        let previous = self
+            .inner
+            .has_successful_solution
+            .then(|| self.inner.solver.get_result())
+            .flatten()
+            .map(|result| result.transpose());
+        self.set_parameter_values(values)?;
+        if let Some(previous) = previous {
+            self.set_prepared_iterate(matrix_to_node_major(&previous))?;
+        } else if !self.inner.prepared {
+            self.prepare()?;
+        }
+        self.solve_prepared()
+    }
+
+    /// Rebind fixed numeric inputs while retaining the symbolic prepared plan.
+    pub fn set_parameter_values(&mut self, values: Vec<f64>) -> PyResult<()> {
         finite_values(&values, "parameter_values")?;
         if values.len() != self.inner.solver.param_names.len() {
             return Err(InvalidConfigurationError::new_err(format!(
@@ -2054,10 +2572,38 @@ impl BvpDampFrozenSolver {
         }
         let route = self.inner.route();
         let panic_state = self.inner.panic_state.clone();
-        panic_state.run("continuation", "bvp_damp_frozen", &route, || {
+        panic_state.run("parameter_binding", "bvp_damp_frozen", &route, || {
             self.inner
                 .solver
-                .try_set_param_values(Some(values))
+                .try_set_parameter_values(Some(values))
+                .map_err(map_native_error)
+        })
+    }
+
+    /// Deprecated ambiguous alias for [`Self::set_parameter_values`].
+    #[pyo3(name = "set_parameters")]
+    pub fn set_parameters_legacy(&mut self, values: Vec<f64>) -> PyResult<()> {
+        self.set_parameter_values(values)
+    }
+
+    /// Replace the fixed-mesh Newton guess while keeping prepared callbacks.
+    pub fn set_prepared_iterate(&mut self, initial_state: Vec<f64>) -> PyResult<()> {
+        if !self.inner.prepared {
+            return Err(SolverError::new_err(
+                "BVP_Damp Frozen has no prepared plan; call prepare() first",
+            ));
+        }
+        let iterate = flatten_node_major(
+            initial_state,
+            self.inner.solver.n_steps,
+            self.inner.solver.values.len(),
+        )?;
+        let route = self.inner.route();
+        let panic_state = self.inner.panic_state.clone();
+        panic_state.run("initial_guess", "bvp_damp_frozen", &route, || {
+            self.inner
+                .solver
+                .try_set_prepared_iterate(iterate)
                 .map_err(map_native_error)
         })
     }

@@ -5,7 +5,6 @@ use crate::symbolic::symbolic_engine::Expr;
 
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{NRBVP as NRBDVPd, SolverParams};
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP;
-use crate::numerical::BVP_api::BVP;
 use crate::numerical::Examples_and_utils::NonlinEquation;
 
 use nalgebra::{DMatrix, DVector};
@@ -475,25 +474,7 @@ pub fn bvp_examples(example: usize) {
             let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
             let strategy = "Damped".to_string(); //
 
-            let strategy_params = match strategy.as_str() {
-                "Naive" => None,
-                "Damped" => Some(HashMap::from([
-                    ("max_jac".to_string(), None),
-                    ("maxDampIter".to_string(), None),
-                    ("DampFacor".to_string(), None),
-                    (
-                        "adaptive".to_string(),
-                        Some(vec![1.0, 5.0]), //  None
-                    ),
-                    //  ("pearson".to_string(), Some(vec![0.2] ) )
-                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 2.0])),
-                ])),
-                "Frozen" => Some(HashMap::from([(
-                    "every_m".to_string(),
-                    Some(Vec::from([5 as f64])),
-                )])),
-                &_ => panic!("Invalid strategy!"),
-            };
+            let strategy_params = Some(SolverParams::default());
 
             let scheme = "trapezoid".to_string();
             let method = "Dense".to_string(); // or  "Dense"
@@ -514,7 +495,7 @@ pub fn bvp_examples(example: usize) {
             let rel_tolerance = HashMap::from([("z".to_string(), 1e-4), ("y".to_string(), 1e-4)]);
             assert_eq!(&eq_system.len(), &2);
             // let strategy_params = Some(SolverParams::default());
-            let mut nr = BVP::new(
+            let mut nr = NRBDVPd::new(
                 eq_system,
                 initial_guess,
                 values,
@@ -529,8 +510,8 @@ pub fn bvp_examples(example: usize) {
                 linear_sys_method,
                 method,
                 tolerance,
-                max_iterations,
                 Some(rel_tolerance),
+                max_iterations,
                 Some(Bounds),
                 Some("warn".to_string()),
             );
@@ -605,14 +586,9 @@ pub fn bvp_examples(example: usize) {
             let BorderConditions = ne.boundary_conditions();
             let Bounds = ne.Bounds();
             let rel_tolerance = ne.rel_tolerance();
-            let strategy_params = Some(HashMap::from([
-                ("max_jac".to_string(), None),
-                ("maxDampIter".to_string(), None),
-                ("DampFacor".to_string(), None),
-                ("adaptive".to_string(), None),
-            ]));
+            let strategy_params = Some(SolverParams::default());
 
-            let mut nr = BVP::new(
+            let mut nr = NRBDVPd::new(
                 eq_system,
                 initial_guess,
                 values,
@@ -627,8 +603,8 @@ pub fn bvp_examples(example: usize) {
                 linear_sys_method,
                 method,
                 tolerance,
-                max_iterations,
                 Some(rel_tolerance),
+                max_iterations,
                 Some(Bounds),
                 Some("off".to_string()),
             );
@@ -652,26 +628,6 @@ pub fn bvp_examples(example: usize) {
             let n_steps = 50; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
             let strategy = "Damped".to_string(); //
 
-            let _strategy_params = match strategy.as_str() {
-                "Naive" => None,
-                "Damped" => Some(HashMap::from([
-                    ("max_jac".to_string(), None),
-                    ("maxDampIter".to_string(), None),
-                    ("DampFacor".to_string(), None),
-                    (
-                        "adaptive".to_string(),
-                        Some(vec![1.0, 5.0]), //  None
-                    ),
-                    //  ("pearson".to_string(), Some(vec![0.2] ) )
-                    ("grcar_smooke".to_string(), Some(vec![0.2, 0.5, 2.0])),
-                ])),
-                "Frozen" => Some(HashMap::from([(
-                    "every_m".to_string(),
-                    Some(Vec::from([5 as f64])),
-                )])),
-                &_ => panic!("Invalid strategy!"),
-            };
-
             let scheme = "trapezoid".to_string();
             let method = "Dense".to_string(); // or  "Dense"
             let linear_sys_method = None;
@@ -690,13 +646,8 @@ pub fn bvp_examples(example: usize) {
             ]);
             let rel_tolerance = HashMap::from([("z".to_string(), 1e-4), ("y".to_string(), 1e-4)]);
             assert_eq!(&eq_system.len(), &2);
-            let strategy_params = Some(HashMap::from([
-                ("max_jac".to_string(), None),
-                ("maxDampIter".to_string(), None),
-                ("DampFacor".to_string(), None),
-                ("adaptive".to_string(), None),
-            ]));
-            let mut nr = BVP::new(
+            let strategy_params = Some(SolverParams::default());
+            let mut nr = NRBDVPd::new(
                 eq_system,
                 initial_guess,
                 values,
@@ -711,8 +662,8 @@ pub fn bvp_examples(example: usize) {
                 linear_sys_method,
                 method,
                 tolerance,
-                max_iterations,
                 Some(rel_tolerance),
+                max_iterations,
                 Some(Bounds),
                 Some("off".to_string()),
             );

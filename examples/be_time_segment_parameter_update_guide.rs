@@ -1,5 +1,6 @@
-//! Символьный AtomViewNative + Lambdify: смена параметра и продолжение решения.
-//! Запуск: `cargo run --no-default-features --example rus_be_symbolic_continuation_guide`.
+//! Symbolic AtomViewNative + Lambdify; change a parameter at the accepted state
+//! and continue integration in time.
+//! Run: `cargo run --no-default-features --example be_time_segment_parameter_update_guide`.
 
 use RustedSciThe::numerical::BE::{BE, BeSolverOptions, BeStatus, BeSymbolicAssemblyBackend};
 use RustedSciThe::symbolic::symbolic_engine::Expr;
@@ -25,19 +26,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(solver.status(), BeStatus::Finished);
 
     let (_, first_segment) = solver.get_result();
-    let y_half = first_segment.expect("первая часть решения").column(0)[500];
+    let y_half = first_segment.expect("first segment").column(0)[500];
     solver.set_parameter_values(DVector::from_vec(vec![2.0]))?;
     solver.try_continue_to(1.0)?;
 
     let (times, states) = solver.get_result();
-    let times = times.expect("временные отсчёты");
-    let states = states.expect("состояния");
+    let times = times.expect("time samples");
+    let states = states.expect("state samples");
     let y_end = states[(states.nrows() - 1, 0)];
     let continued_exact = y_half * (-2.0_f64 * 0.5).exp();
     assert!((y_end - continued_exact).abs() < 2e-3);
-    println!("продолжение из t=0.5, y={y_half:.8}; y(1)={y_end:.8}");
+    println!("continued from t=0.5, y={y_half:.8}; y(1)={y_end:.8}");
     println!(
-        "отсчётов={}, конечное время={:.3}",
+        "samples={}, final_time={:.3}",
         times.len(),
         times[times.len() - 1]
     );

@@ -31,7 +31,7 @@ result = solver.solve()
 print(result.final_state_array())
 ```
 
-## Controls and continuation
+## Controls and repeated solves
 
 `rtol` and `atol` set error tolerances; `first_step`, `max_step`,
 `max_bdf_order` and `max_steps` control the integration. The native default
@@ -39,10 +39,13 @@ order ceiling is appropriate for ordinary use; lower it only for a justified
 problem-specific reason. Always check the returned status/diagnostics rather
 than inferring success from a finite endpoint alone.
 
-`continue_with_parameters(values, t_end)` reuses the prepared symbolic route
-and the previous successful endpoint. `restart(t0, y0, t_end)` begins from a
-new state and interval while retaining prepared symbolic callbacks. Use a new
-solver when the equation structure or dimensions change.
+`solve_with_parameter_values(y0, values)` starts a fresh solve with a new
+initial state and parameter values on the configured interval;
+`solve_with_parameter_values_in_interval(t0, y0, t_end, values)` also changes
+the interval. Both reuse the prepared symbolic route. `continue_with_parameters`
+is different: it advances a time segment from BDF's last accepted state.
+`restart(t0, y0, t_end)` starts a fresh segment without rebinding parameters.
+Use a new solver when the equation structure or dimensions change.
 
 ## AOT, telemetry and errors
 

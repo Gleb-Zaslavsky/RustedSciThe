@@ -13,7 +13,7 @@ the maintained fixed-order Radau route with symbolic Lambdify, ExprLegacy, and
 dense storage. It is useful when one facade must switch between several
 solvers and no Radau-specific policy is needed.
 
-For frontend, layout, continuation, output, telemetry, execution policy, or
+For frontend, layout, parameter rebinding, output, telemetry, execution policy, or
 AOT control, use the direct API:
 
 If you deliberately use the universal facade, its production Radau route keeps
@@ -34,7 +34,7 @@ let problem = RadauProblem::new(
     vec!["y".to_owned()],
     "t",
 )
-.with_parameters(vec!["k".to_owned()])
+.with_parameter_names(vec!["k".to_owned()])
 .with_jacobian(vec![Expr::parse_expression("-k")]);
 
 let config = RadauConfig {
@@ -46,7 +46,7 @@ let config = RadauConfig {
 };
 
 let mut solver = RadauSolver::prepare(problem, config)?;
-let solution = solver.solve_with_parameters(&[1.0], &[2.0])?;
+let solution = solver.try_solve_with_parameter_values(&[1.0], &[2.0])?;
 println!("t={} y={:?}", solution.t, solution.y);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -80,11 +80,12 @@ Choose the layout once during preparation:
 ```rust
 let dense = RadauMatrixLayout::Dense;
 let sparse = RadauMatrixLayout::Sparse;
-let banded = RadauMatrixLayout::Banded { lower: 1, upper: 1 };
+let banded = RadauMatrixLayout::BandedAuto;
 ```
 
-Use `Dense` for fully coupled Jacobians and small or medium systems. Use
-`Banded` when the Jacobian has a stable narrow bandwidth. Use `Sparse` when a
+Use `Dense` for fully coupled Jacobians and small or medium systems. `BandedAuto`
+infers the band from symbolic dependencies; explicit `Banded { lower, upper }`
+remains an optional hint. Use `Sparse` when a
 stable sparse pattern is available and the system is large enough for sparse
 storage to amortize its bookkeeping.
 
@@ -109,7 +110,7 @@ let problem = RadauProblem::new(
     vec!["y".to_owned()],
     "t",
 )
-.with_parameters(vec!["k".to_owned()])
+.with_parameter_names(vec!["k".to_owned()])
 .with_jacobian(vec![Expr::parse_expression("-k")]);
 ```
 
@@ -190,7 +191,7 @@ default initial-step estimate is inappropriate. Increasing Newton or retry
 budgets can hide a bad Jacobian or poor scaling, so inspect telemetry before
 raising them.
 
-## 6. Single Solve And Continuation
+## 6. Repeated Solves With Rebound Parameters
 
 For a parameter-free model:
 
@@ -198,30 +199,32 @@ For a parameter-free model:
 let solution = solver.solve(&[1.0])?;
 ```
 
-For a model declared with `with_parameters`, bind values explicitly:
+For a model declared with `with_parameter_names`, bind values explicitly:
 
 ```rust
 for k in [0.5, 1.0, 2.0, 4.0] {
-    let solution = solver.continue_with_parameters(&[1.0], &[k])?;
+    let solution = solver.try_solve_with_parameter_values(&[1.0], &[k])?;
     println!("k={k}: y(1)={:.9e}", solution.y[0]);
 }
 ```
 
-Continuation reuses the prepared symbolic model. It does not repeat symbolic
+Each call reuses the prepared symbolic model and does not repeat symbolic
 differentiation or frontend preparation merely because parameter values
-changed. The first solve pays preparation cost; later solves are the relevant
-warm path. For a fair benchmark report the first preparation separately from
-the repeated continuation solves.
+changed. These are independent solves because each receives an explicit `y0`;
+parameter continuation would instead seed the next solve from a previous
+solution. The first solve pays preparation cost, so report it separately from
+subsequent solves when benchmarking.
 
 To reuse the prepared callbacks on a new interval:
 
 ```rust
 solver.restart(0.0, 2.0)?;
-let solution = solver.continue_with_parameters(&[1.0], &[2.0])?;
+let solution = solver.try_solve_with_parameter_values(&[1.0], &[2.0])?;
 ```
 
-`restart` changes the interval, not the prepared model. Supply a new initial
-state explicitly to the following solve.
+`restart` changes the interval, not the prepared model. Supply the initial
+state explicitly to the following solve; changing bounds alone is not
+parameter continuation.
 
 ## 7. Output And Post-Processing
 
@@ -319,11 +322,11 @@ budget exhaustion, and output-range errors are distinct failure classes.
 Runnable examples in this repository:
 
 - `examples/radau_lambdify_single.rs`: one parameterized Lambdify solve;
-- `examples/radau_lambdify_continuation.rs`: prepared-model continuation;
+- `examples/radau_lambdify_continuation.rs`: prepared-model parameter re-solves;
 - `examples/radau_public_api_guide.rs`: AtomView, counters, and dense output;
 - `examples/radau_backends_guide.rs`: frontend/layout comparison;
-- `examples/radau_aot_single.rs` and `examples/radau_aot_continuation.rs`:
-  explicit AOT lifecycle examples;
+- `examples/radau_aot_single.rs` and `examples/radau_aot_parameter_sweep.rs`:
+  explicit AOT lifecycle and repeated parameter-value binding examples;
 - `examples/universal_ode_example.rs`: the compact universal facade.
 
 Validate correctness on the same workload before comparing performance. Keep
@@ -434,6 +437,17 @@ These are intentional lifecycle/backend/API differences, not unreviewed
 changes to the numerical method. The detailed ledger and compact test tables
 are in `src/numerical/ivp_scipy_reference/TODO.md` and
 `src/numerical/Radau/RADAU_STORY_TESTS.md`.
+
+## Independent Parameter Sweeps
+
+`RadauSolver::try_solve_parameter_loop(y0, vectors)` reuses the prepared model
+and performs a fresh solve for every ordered parameter vector from the same
+initial state and configured interval. It does not use a previous terminal
+state as a guess. Each point contains output selected by the configured
+policy (`Dense`, `Sampled` or `FinalOnly`) and that solve's native telemetry;
+typed `RadauError`s are retained without aborting later points. See
+`examples/radau_parameter_loop.rs` and the shared
+[`IVP parameter-loop guide`](../IVP_PARAMETER_LOOP_GUIDE_EN.md).
 
 ### Numerical-Core Timing Snapshot
 

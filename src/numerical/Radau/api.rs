@@ -1,7 +1,7 @@
 //! Stable public API for the second-generation Radau implementation.
 //!
 //! Preparation is explicit and separate from solving.  This makes frontend,
-//! matrix layout, parameter continuation, output retention, and telemetry
+//! matrix layout, parameter-value rebinding, output retention, and telemetry
 //! visible policy choices instead of implicit legacy behavior.
 
 use std::collections::BTreeMap;
@@ -73,7 +73,13 @@ pub enum RadauExecution {
 pub enum RadauMatrixLayout {
     Dense,
     Sparse,
-    Banded { lower: usize, upper: usize },
+    /// Infer the compact band from symbolic state dependencies at preparation.
+    BandedAuto,
+    /// Use a caller-provided band as a validated structural hint.
+    Banded {
+        lower: usize,
+        upper: usize,
+    },
 }
 
 /// Jacobian source policy reserved by the numerical contract.
@@ -292,14 +298,28 @@ impl RadauProblem {
         self
     }
 
-    /// Declare ordered value-only continuation parameters.
-    pub fn with_parameters(mut self, parameters: Vec<String>) -> Self {
+    /// Declare the ordered names of runtime-bound symbolic parameters.
+    pub fn with_parameter_names(mut self, parameters: Vec<String>) -> Self {
         self.parameters = parameters;
         self
     }
 
+    /// Legacy name for [`Self::with_parameter_names`].
+    #[deprecated(note = "use with_parameter_names; this declares names, not values")]
+    pub fn with_parameters(self, parameters: Vec<String>) -> Self {
+        self.with_parameter_names(parameters)
+    }
+
     pub fn dimension(&self) -> usize {
         self.residual.len()
+    }
+
+    /// Number of state variables declared by this problem.
+    ///
+    /// This is distinct from [`Self::dimension`], which reports the number of
+    /// residual equations. Valid square systems normally have equal counts.
+    pub fn state_dimension(&self) -> usize {
+        self.variables.len()
     }
 }
 
@@ -688,6 +708,39 @@ impl RadauSolution {
             .sample_many(times, self.y.len())
             .map_err(Into::into)
     }
+
+    /// Return the output points retained by this solve as a time-by-state
+    /// matrix. Dense output returns accepted-step boundaries; sampled output
+    /// returns its requested times; `FinalOnly` returns the terminal sample.
+    pub fn output_trajectory(&self) -> Result<(DVector<f64>, DMatrix<f64>), RadauError> {
+        let times = match &self.output {
+            RadauOutput::FinalOnly => vec![self.t],
+            RadauOutput::Sampled { times, .. } => times.clone(),
+            RadauOutput::Dense(history) => {
+                let Some(first) = history.segments().first() else {
+                    return Ok((
+                        DVector::from_vec(vec![self.t]),
+                        DMatrix::from_row_slice(1, self.y.len(), &self.y),
+                    ));
+                };
+                let mut times = Vec::with_capacity(history.segments().len() + 1);
+                times.push(first.interval().0);
+                times.extend(
+                    history
+                        .segments()
+                        .iter()
+                        .map(|segment| segment.interval().1),
+                );
+                times
+            }
+        };
+        let flattened = match &self.output {
+            RadauOutput::FinalOnly => self.y.clone(),
+            RadauOutput::Dense(_) | RadauOutput::Sampled { .. } => self.sample_many(&times)?,
+        };
+        let values = DMatrix::from_row_slice(times.len(), self.y.len(), &flattened);
+        Ok((DVector::from_vec(times), values))
+    }
 }
 
 /// Prepared, reusable symbolic Radau model.
@@ -697,6 +750,7 @@ pub struct RadauSolver {
     aot: Option<RadauAotConfig>,
     parameter_count: usize,
     preparation_telemetry: RadauTelemetry,
+    last_solve_telemetry: Option<RadauTelemetryReport>,
 }
 
 /// Prepared native-callback Radau model.
@@ -791,7 +845,8 @@ impl RadauNativeSolver {
         })
     }
 
-    /// Reuse the callback model for a new parameter-free initial state.
+    /// Legacy alias for solving the same callback model from a supplied state.
+    #[deprecated(note = "this is a fresh solve from y0, not continuation; use solve")]
     pub fn continue_with_initial_state(&mut self, y0: &[f64]) -> Result<RadauSolution, RadauError> {
         self.solve(y0)
     }
@@ -815,6 +870,11 @@ impl RadauNativeSolver {
         };
         config
     }
+
+    /// Return the active telemetry mode without cloning the full configuration.
+    pub fn telemetry_mode(&self) -> RadauTelemetryMode {
+        self.config.telemetry.into_public()
+    }
 }
 
 enum NativeJacobianAdapter {
@@ -832,9 +892,52 @@ impl super::new::callbacks::DenseJacobianCallback for NativeJacobianAdapter {
 }
 
 impl RadauSolver {
-    /// Prepare symbolic callbacks once. Subsequent continuation solves reuse
-    /// the prepared frontend and do not repeat symbolic construction.
-    pub fn prepare(problem: RadauProblem, config: RadauConfig) -> Result<Self, RadauError> {
+    /// Prepare symbolic callbacks once. Subsequent solves with newly bound
+    /// parameter values reuse the prepared frontend and do not repeat symbolic
+    /// construction. Each solve starts from its explicitly supplied initial
+    /// state; it is not solution-seeded continuation.
+    pub fn prepare(problem: RadauProblem, mut config: RadauConfig) -> Result<Self, RadauError> {
+        let symbolic_bandwidth = if matches!(
+            config.matrix_layout,
+            RadauMatrixLayout::BandedAuto | RadauMatrixLayout::Banded { .. }
+        ) {
+            Some(
+                if let Some(jacobian) = problem.jacobian.as_deref() {
+                    crate::symbolic::structural::infer_jacobian_bandwidth(
+                        jacobian,
+                        problem.dimension(),
+                        &problem.variables,
+                    )
+                } else {
+                    crate::symbolic::structural::infer_rowwise_bandwidth(
+                        &problem.residual,
+                        &problem.variables,
+                    )
+                }
+                .map_err(|message| RadauError {
+                    kind: RadauErrorKind::Configuration,
+                    message,
+                })?,
+            )
+        } else {
+            None
+        };
+        if config.matrix_layout == RadauMatrixLayout::BandedAuto {
+            let inferred = symbolic_bandwidth.expect("auto layout computed symbolic structure");
+            config.matrix_layout = RadauMatrixLayout::Banded {
+                lower: inferred.0,
+                upper: inferred.1,
+            };
+        } else if let RadauMatrixLayout::Banded { lower, upper } = config.matrix_layout {
+            crate::symbolic::structural::validate_bandwidth_hint(
+                symbolic_bandwidth.expect("explicit band computed symbolic structure"),
+                (lower, upper),
+            )
+            .map_err(|message| RadauError {
+                kind: RadauErrorKind::Configuration,
+                message,
+            })?;
+        }
         let internal = config.to_internal();
         internal.validate().map_err(RadauError::from)?;
         let assembly = internal.assembly.ok_or_else(|| RadauError {
@@ -939,6 +1042,7 @@ impl RadauSolver {
             aot: stored_aot,
             parameter_count,
             preparation_telemetry,
+            last_solve_telemetry: None,
         })
     }
 
@@ -948,17 +1052,35 @@ impl RadauSolver {
         config
     }
 
+    /// Return the active telemetry mode without cloning the full configuration.
+    pub fn telemetry_mode(&self) -> RadauTelemetryMode {
+        self.config.telemetry.into_public()
+    }
+
+    /// Return the native report for the most recent solve attempt, including
+    /// a failed attempt when runtime telemetry was produced before the error.
+    pub fn last_solve_telemetry(&self) -> Option<&RadauTelemetryReport> {
+        self.last_solve_telemetry.as_ref()
+    }
+
     /// Solve with no parameters. Parameterized problems should use the
     /// explicit value-taking method so accidental zero bindings are visible.
     pub fn solve(&mut self, y0: &[f64]) -> Result<RadauSolution, RadauError> {
-        self.solve_with_parameters(y0, &[])
+        self.try_solve_with_parameter_values(y0, &[])
     }
 
-    pub fn solve_with_parameters(
+    /// Solve from `y0` after binding the ordered parameter values.
+    ///
+    /// The prepared symbolic callbacks are reused and exactly the supplied
+    /// `y0` is used. For caller-managed parameter continuation, pass the
+    /// previous solution's terminal state as the next `y0`; this solver does
+    /// not retain or advance that state implicitly.
+    pub fn try_solve_with_parameter_values(
         &mut self,
         y0: &[f64],
         parameters: &[f64],
     ) -> Result<RadauSolution, RadauError> {
+        self.last_solve_telemetry = None;
         if parameters.len() != self.parameter_count {
             return Err(RadauError {
                 kind: RadauErrorKind::Shape,
@@ -974,19 +1096,58 @@ impl RadauSolver {
         session
             .rebind_parameters(parameters)
             .map_err(RadauError::from)?;
-        let (result, output) = try_solve_symbolic_dense_with_output(&self.config, &mut session, y0)
-            .map_err(RadauError::from)?;
+        let solve_result = try_solve_symbolic_dense_with_output(&self.config, &mut session, y0)
+            .map_err(RadauError::from);
         session.absorb_runtime_telemetry();
-        Ok(self.solution(result, output, &session.telemetry()))
+        let telemetry = RadauTelemetryReport::from_internal_pair(
+            &self.preparation_telemetry,
+            &session.telemetry(),
+        );
+        self.last_solve_telemetry = Some(telemetry.clone());
+        solve_result.map(|(result, output)| self.solution(result, output, telemetry))
     }
 
-    /// Value-only continuation on the same prepared symbolic model.
+    /// Starts a fresh solve over the configured time interval after binding
+    /// new parameter values. The supplied initial state is always used.
+    pub fn try_solve_with_parameter_values_in_interval(
+        &mut self,
+        t0: f64,
+        y0: &[f64],
+        t_bound: f64,
+        parameters: &[f64],
+    ) -> Result<RadauSolution, RadauError> {
+        self.restart(t0, t_bound)?;
+        self.try_solve_with_parameter_values(y0, parameters)
+    }
+
+    /// Compatibility alias for [`Self::try_solve_with_parameter_values`].
+    #[deprecated(note = "use try_solve_with_parameter_values")]
+    pub fn solve_with_parameter_values(
+        &mut self,
+        y0: &[f64],
+        parameters: &[f64],
+    ) -> Result<RadauSolution, RadauError> {
+        self.try_solve_with_parameter_values(y0, parameters)
+    }
+
+    /// Legacy alias for [`Self::solve_with_parameter_values`].
+    #[deprecated(note = "use solve_with_parameter_values; this binds values and starts from y0")]
+    pub fn solve_with_parameters(
+        &mut self,
+        y0: &[f64],
+        parameters: &[f64],
+    ) -> Result<RadauSolution, RadauError> {
+        self.try_solve_with_parameter_values(y0, parameters)
+    }
+
+    /// Legacy alias for [`Self::solve_with_parameter_values`].
+    #[deprecated(note = "this starts from the supplied y0; use solve_with_parameter_values")]
     pub fn continue_with_parameters(
         &mut self,
         y0: &[f64],
         parameters: &[f64],
     ) -> Result<RadauSolution, RadauError> {
-        self.solve_with_parameters(y0, parameters)
+        self.try_solve_with_parameter_values(y0, parameters)
     }
 
     /// Change the integration interval while retaining prepared callbacks.
@@ -1000,7 +1161,7 @@ impl RadauSolver {
         &self,
         result: RadauSolveResult,
         output: RadauOutput,
-        telemetry: &RadauTelemetry,
+        telemetry: RadauTelemetryReport,
     ) -> RadauSolution {
         RadauSolution {
             t: result.t,
@@ -1009,10 +1170,7 @@ impl RadauSolver {
             accepted_steps: result.accepted_steps,
             rejected_steps: result.rejected_steps,
             output,
-            telemetry: RadauTelemetryReport::from_internal_pair(
-                &self.preparation_telemetry,
-                telemetry,
-            ),
+            telemetry,
         }
     }
 }
@@ -1103,6 +1261,7 @@ impl RadauMatrixLayout {
         match self {
             Self::Dense => InternalLayout::Dense,
             Self::Sparse => InternalLayout::Sparse,
+            Self::BandedAuto => unreachable!("auto layout is resolved before internal config"),
             Self::Banded { lower, upper } => InternalLayout::Banded { lower, upper },
         }
     }

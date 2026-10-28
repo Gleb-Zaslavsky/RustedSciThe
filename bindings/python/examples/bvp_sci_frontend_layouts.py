@@ -27,10 +27,6 @@ for frontend in ("expr_legacy", "atom_native"):
             frontend=frontend, execution="lambdify",
             matrix_layout=layout, telemetry="counters",
         )
-        if layout == "banded":
-            # This first-order equation has only nearest-neighbor collocation
-            # coupling; the declared half-bandwidth is intentionally narrow.
-            options.set_banded_width(1, 1)
         result = solve_bvp(
             "bvp_sci", equations, ["y"], boundary, mesh, initial_guess,
             options=options,

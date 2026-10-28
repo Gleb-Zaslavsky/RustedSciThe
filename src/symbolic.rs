@@ -108,6 +108,7 @@ pub mod parse_expr;
 ///  println!("norm = {}, res = {}", norm, res);
 /// ```
 pub mod symbolic_engine;
+pub(crate) mod structural;
 /// basic functionality for analytical differentiation of symbolic expressions
 pub mod symbolic_engine_derivatives;
 

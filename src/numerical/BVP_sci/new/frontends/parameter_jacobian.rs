@@ -33,6 +33,7 @@ enum SymbolicEntries {
 pub struct BvpSciParameterJacobianPlan {
     dimension: usize,
     parameter_count: usize,
+    external_parameter_count: usize,
     entries: Entries,
     telemetry: BvpSciTelemetry,
 }
@@ -46,8 +47,31 @@ impl BvpSciParameterJacobianPlan {
         independent_name: &str,
         telemetry: BvpSciTelemetry,
     ) -> Result<Self, BvpSciNewError> {
+        Self::prepare_with_external_parameters(
+            assembly,
+            equations,
+            state_names,
+            parameter_names,
+            &[],
+            independent_name,
+            telemetry,
+        )
+    }
+
+    /// Prepare `df/dp` for free parameters while retaining fixed model inputs
+    /// in the callback ABI. External inputs are arguments, not Newton columns.
+    pub fn prepare_with_external_parameters(
+        assembly: BvpSciAssembly,
+        equations: &[Expr],
+        state_names: &[String],
+        parameter_names: &[String],
+        external_parameter_names: &[String],
+        independent_name: &str,
+        telemetry: BvpSciTelemetry,
+    ) -> Result<Self, BvpSciNewError> {
         let n = equations.len();
         let k = parameter_names.len();
+        let runtime_parameter_count = k + external_parameter_names.len();
         if !matches!(
             assembly,
             BvpSciAssembly::ExprLegacy | BvpSciAssembly::AtomViewNative
@@ -66,9 +90,11 @@ impl BvpSciParameterJacobianPlan {
 
         // Keep argument order identical to generated AOT callbacks so the
         // caller-owned AOT argument buffer can be reused without shuffling.
-        let mut argument_names = Vec::with_capacity(1 + k + n);
+        let mut all_parameter_names = parameter_names.to_vec();
+        all_parameter_names.extend(external_parameter_names.iter().cloned());
+        let mut argument_names = Vec::with_capacity(1 + runtime_parameter_count + n);
         argument_names.push(independent_name.to_owned());
-        argument_names.extend(parameter_names.iter().cloned());
+        argument_names.extend(all_parameter_names.iter().cloned());
         argument_names.extend(state_names.iter().cloned());
         let unique_names = argument_names
             .iter()
@@ -173,6 +199,7 @@ impl BvpSciParameterJacobianPlan {
         Ok(Self {
             dimension: n,
             parameter_count: k,
+            external_parameter_count: external_parameter_names.len(),
             entries,
             telemetry,
         })
@@ -191,7 +218,8 @@ impl BvpSciParameterJacobianPlan {
         arguments: &mut [f64],
         output: &mut [f64],
     ) -> Result<(), BvpSciNewError> {
-        let expected_args = 1 + self.parameter_count + self.dimension;
+        let expected_args =
+            1 + self.parameter_count + self.external_parameter_count + self.dimension;
         if arguments.len() != expected_args {
             return Err(BvpSciNewError::ShapeMismatch {
                 stage: BvpSciStage::ArgumentBuffer,

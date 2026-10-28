@@ -1,5 +1,6 @@
-//! Dense AtomView + Lambdify BDF with prepared parameter continuation.
-//! Run: `cargo run --no-default-features --example bdf_symbolic_continuation_guide`.
+//! Dense AtomView + Lambdify BDF: change a parameter at an accepted state and
+//! continue integration in time with prepared callbacks.
+//! Run: `cargo run --no-default-features --example bdf_time_segment_parameter_update_guide`.
 
 use RustedSciThe::numerical::BDF::prelude::{
     BdfSolverOptions, BdfStatus, BdfTelemetryMode, IvpSymbolicAssemblyBackend, ODEsolver,
@@ -37,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // This updates the shared parameter slot and restarts only numerical BDF
     // history. Prepared residual/Jacobian callbacks are retained.
-    solver.try_continue_with_parameter_values(DVector::from_vec(vec![2.0]), 1.0)?;
+    solver.try_continue_in_time_with_parameter_values(DVector::from_vec(vec![2.0]), 1.0)?;
     solver.try_solve()?;
     assert_eq!(solver.status_kind(), BdfStatus::Finished);
 
@@ -46,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exact = (-0.5_f64 - 2.0 * 0.5).exp();
     assert!((final_value - exact).abs() < 2e-8);
 
-    println!("dense BDF AtomView/Lambdify continuation guide");
+    println!("dense BDF AtomView/Lambdify time-segment parameter update");
     println!("first segment y(0.5)={first_end:.10e}");
     println!(
         "continued segment samples={}, y(1)={final_value:.10e}, exact={exact:.10e}",

@@ -83,7 +83,7 @@ fn lambdify_policy_full_solve_and_callback_break_even_story() {
                 for _ in 0..repetitions {
                     last = Some(
                         solver
-                            .solve_with_parameters(&initial_state, &parameters)
+                            .try_solve_with_parameter_values(&initial_state, &parameters)
                             .unwrap_or_else(|error| panic!("Lambdify solve failed: {error}")),
                     );
                 }
@@ -160,7 +160,7 @@ fn aot_policy_full_solve_and_callback_break_even_story() {
                 .unwrap_or_else(|error| panic!("AOT policy prepare failed: {error}"));
             let start = Instant::now();
             let solution = solver
-                .solve_with_parameters(&initial_state, &parameters)
+                .try_solve_with_parameter_values(&initial_state, &parameters)
                 .unwrap_or_else(|error| panic!("AOT policy solve failed: {error}"));
             let elapsed_ms = start.elapsed().as_secs_f64() * 1.0e3;
             let counters = &solution.telemetry().counters;

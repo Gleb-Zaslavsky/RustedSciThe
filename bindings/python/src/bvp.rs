@@ -25,9 +25,9 @@ use rustedscithe_core::numerical::BVP_sci::new::{
 
 use crate::contract::SolverOptions;
 use crate::errors::{
-    CallbackError, CallbackFailureState, ExhaustionError, InvalidConfigurationError,
-    PreparationError, SolverError, SolverPanicState, UnsupportedOptionError, annotate_native,
-    catch_panic, native_variant,
+    annotate_native, catch_panic, native_variant, CallbackError, CallbackFailureState,
+    ExhaustionError, InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
+    UnsupportedOptionError,
 };
 use crate::expr::PyExpr;
 use crate::lambdify::LambdifiedExpr;
@@ -146,7 +146,7 @@ fn compile_expressions(
         .collect()
 }
 
-fn map_policy(value: &str) -> PyResult<BvpSciExecutionPolicy> {
+pub(crate) fn map_policy(value: &str) -> PyResult<BvpSciExecutionPolicy> {
     match value {
         "sequential" => Ok(BvpSciExecutionPolicy::Sequential),
         "parallel" => Ok(BvpSciExecutionPolicy::Parallel { min_work: 1 }),
@@ -157,7 +157,7 @@ fn map_policy(value: &str) -> PyResult<BvpSciExecutionPolicy> {
     }
 }
 
-fn map_telemetry(value: &str) -> PyResult<BvpSciTelemetryMode> {
+pub(crate) fn map_telemetry(value: &str) -> PyResult<BvpSciTelemetryMode> {
     match value {
         "off" => Ok(BvpSciTelemetryMode::Off),
         "counters" => Ok(BvpSciTelemetryMode::Counters),
@@ -169,7 +169,7 @@ fn map_telemetry(value: &str) -> PyResult<BvpSciTelemetryMode> {
     }
 }
 
-fn map_output(value: &str) -> PyResult<BvpSciOutputPolicy> {
+pub(crate) fn map_output(value: &str) -> PyResult<BvpSciOutputPolicy> {
     match value {
         "final" | "final_only" => Ok(BvpSciOutputPolicy::FinalOnly),
         "mesh" | "mesh_and_values" => Ok(BvpSciOutputPolicy::MeshAndValues),
@@ -180,29 +180,26 @@ fn map_output(value: &str) -> PyResult<BvpSciOutputPolicy> {
     }
 }
 
-fn map_layout(options: &SolverOptions) -> PyResult<BvpSciMatrixLayout> {
+pub(crate) fn map_layout(options: &SolverOptions) -> PyResult<BvpSciMatrixLayout> {
     match options.matrix_layout() {
         "dense" => Ok(BvpSciMatrixLayout::Dense),
         "sparse" => Ok(BvpSciMatrixLayout::Sparse),
-        "banded" => Ok(BvpSciMatrixLayout::Banded {
-            lower: options.band_lower().ok_or_else(|| {
-                InvalidConfigurationError::new_err(
-                    "Banded BVP_sci requires options.set_banded_width(lower, upper)",
-                )
-            })?,
-            upper: options.band_upper().ok_or_else(|| {
-                InvalidConfigurationError::new_err(
-                    "Banded BVP_sci requires options.set_banded_width(lower, upper)",
-                )
-            })?,
-        }),
+        "banded" => match (options.band_lower(), options.band_upper()) {
+            (Some(lower), Some(upper)) => Ok(BvpSciMatrixLayout::Banded { lower, upper }),
+            (None, None) => Ok(BvpSciMatrixLayout::BandedAuto),
+            _ => Err(InvalidConfigurationError::new_err(
+                "band_lower and band_upper must be configured together",
+            )),
+        },
         other => Err(UnsupportedOptionError::new_err(format!(
             "unsupported BVP matrix layout '{other}'"
         ))),
     }
 }
 
-fn map_sparse_factorization(options: &SolverOptions) -> PyResult<BvpSciSparseFactorization> {
+pub(crate) fn map_sparse_factorization(
+    options: &SolverOptions,
+) -> PyResult<BvpSciSparseFactorization> {
     match options.sparse_factorization() {
         "standard_faer" => Ok(BvpSciSparseFactorization::StandardFaer),
         "reusable_faer_experimental" => Ok(BvpSciSparseFactorization::ReusableFaerExperimental),
@@ -216,12 +213,18 @@ fn map_sparse_factorization(options: &SolverOptions) -> PyResult<BvpSciSparseFac
     }
 }
 
-fn map_error(error: BvpSciNewError) -> PyErr {
+pub(crate) fn map_error(error: BvpSciNewError) -> PyErr {
     let native_kind = native_variant(&error);
+    let stage = if matches!(&error, BvpSciNewError::Logging(_)) {
+        "logging_setup"
+    } else {
+        "solve"
+    };
     let message = error.to_string();
     annotate_native(
         match error {
-            BvpSciNewError::InvalidConfiguration(_) | BvpSciNewError::ContinuationMismatch => {
+            BvpSciNewError::InvalidConfiguration(_)
+            | BvpSciNewError::ParameterBindingMismatch { .. } => {
                 InvalidConfigurationError::new_err(message)
             }
             BvpSciNewError::UnsupportedRoute(_) => UnsupportedOptionError::new_err(message),
@@ -240,11 +243,12 @@ fn map_error(error: BvpSciNewError) -> PyErr {
             | BvpSciNewError::LinearBackend { .. }
             | BvpSciNewError::LinearFactorization { .. }
             | BvpSciNewError::LinearSolve { .. }
+            | BvpSciNewError::Logging(_)
             | BvpSciNewError::AotRuntime { .. }
             | BvpSciNewError::OutputOutOfDomain
             | BvpSciNewError::OutputUnavailable => SolverError::new_err(message),
         },
-        "solve",
+        stage,
         "bvp_sci",
         "native",
         &native_kind,
@@ -255,7 +259,7 @@ fn default_options() -> PyResult<SolverOptions> {
     SolverOptions::new(None, None, None, None, None, None, None, None, None)
 }
 
-fn snapshot_maps(
+pub(crate) fn snapshot_maps(
     snapshot: &rustedscithe_core::numerical::BVP_sci::new::BvpSciTelemetrySnapshot,
 ) -> (String, HashMap<String, u64>, HashMap<String, f64>) {
     let mode = format!("{:?}", snapshot.mode).to_ascii_lowercase();
@@ -1005,6 +1009,7 @@ pub struct BvpSciSolution {
     mesh: Vec<f64>,
     values: Vec<f64>,
     parameters: Vec<f64>,
+    external_parameters: Vec<f64>,
     residual_norm: f64,
     interval_residuals: Vec<f64>,
     status: String,
@@ -1028,7 +1033,7 @@ pub struct BvpSciSolution {
 }
 
 impl BvpSciSolution {
-    fn from_native(
+    pub(crate) fn from_native(
         native: CoreSolution,
         snapshot: rustedscithe_core::numerical::BVP_sci::new::BvpSciTelemetrySnapshot,
     ) -> Self {
@@ -1046,6 +1051,7 @@ impl BvpSciSolution {
             mesh: native.x,
             values: native.y,
             parameters: native.parameters,
+            external_parameters: native.external_parameters,
             residual_norm: native.residual_norm,
             interval_residuals: native.interval_residuals,
             status: format!("{:?}", native.status).to_ascii_lowercase(),
@@ -1067,6 +1073,149 @@ impl BvpSciSolution {
             newton_trace: snapshot.newton_residual_history,
             timing_scopes: snapshot.timing_scopes,
         }
+    }
+}
+
+/// One result from `BvpSciSolver.solve_parameter_loop`.
+#[pyclass(name = "BvpSciParameterLoopPoint", module = "rustedscithe")]
+#[derive(Clone)]
+pub struct BvpSciParameterLoopPoint {
+    external_parameters: Vec<f64>,
+    solution: Option<BvpSciSolution>,
+    error: Option<BvpSciNewError>,
+    callback_failure: CallbackFailureState,
+    telemetry_mode: String,
+    telemetry_counters: HashMap<String, u64>,
+    telemetry_timings_ms: HashMap<String, f64>,
+}
+
+#[pymethods]
+impl BvpSciParameterLoopPoint {
+    /// Fixed external-input values attempted for this loop point, in schema order.
+    #[getter]
+    pub fn external_parameters(&self) -> Vec<f64> {
+        self.external_parameters.clone()
+    }
+
+    /// Whether this point produced a solution instead of a typed solve error.
+    #[getter]
+    pub fn succeeded(&self) -> bool {
+        self.solution.is_some()
+    }
+
+    /// Detached native solution for this point, or `None` after a solve failure.
+    #[getter]
+    pub fn solution(&self) -> Option<BvpSciSolution> {
+        self.solution.clone()
+    }
+
+    /// Human-readable form of the typed native failure, or `None` on success.
+    #[getter]
+    pub fn error_message(&self) -> Option<String> {
+        self.error.as_ref().map(ToString::to_string)
+    }
+
+    /// Stable Rust error-variant name for the point failure, or `None` on success.
+    #[getter]
+    pub fn native_kind(&self) -> Option<String> {
+        self.error.as_ref().map(native_variant)
+    }
+
+    /// Telemetry collection mode used for this point (`off`, `counters`, etc.).
+    #[getter]
+    pub fn telemetry_mode(&self) -> &str {
+        &self.telemetry_mode
+    }
+
+    /// Cumulative discrete native telemetry through this point; empty if counters were disabled.
+    #[getter]
+    pub fn telemetry_counters(&self) -> HashMap<String, u64> {
+        self.telemetry_counters.clone()
+    }
+
+    /// Cumulative native stage timings through this point; empty if timings were disabled.
+    #[getter]
+    pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
+        self.telemetry_timings_ms.clone()
+    }
+
+    /// Raise this point's original typed Rust failure, if it failed.
+    pub fn raise_if_failed(&self) -> PyResult<()> {
+        match &self.error {
+            Some(error) => Err(self.callback_failure.attach_cause(map_error(error.clone()))),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Ordered BVP_sci loop results, including per-point failures and telemetry.
+#[pyclass(name = "BvpSciParameterLoopReport", module = "rustedscithe")]
+#[derive(Clone)]
+pub struct BvpSciParameterLoopReport {
+    points: Vec<BvpSciParameterLoopPoint>,
+    stop_error: Option<BvpSciNewError>,
+}
+
+#[pymethods]
+impl BvpSciParameterLoopReport {
+    /// Results in input order, including failed points that did not abort the loop.
+    #[getter]
+    pub fn points(&self) -> Vec<BvpSciParameterLoopPoint> {
+        self.points.clone()
+    }
+
+    /// Whether checkpoint restoration failed and prevented later points from running.
+    #[getter]
+    pub fn stopped_early(&self) -> bool {
+        self.stop_error.is_some()
+    }
+
+    /// Human-readable checkpoint restoration error, or `None` if the loop completed.
+    #[getter]
+    pub fn stop_error_message(&self) -> Option<String> {
+        self.stop_error.as_ref().map(ToString::to_string)
+    }
+
+    /// Raise the typed checkpoint-restoration failure, if the loop stopped.
+    pub fn raise_if_stopped(&self) -> PyResult<()> {
+        match &self.stop_error {
+            Some(error) => Err(map_error(error.clone())),
+            None => Ok(()),
+        }
+    }
+}
+
+pub(crate) fn parameter_loop_report_from_native(
+    native: rustedscithe_core::numerical::BVP_sci::new::BvpSciParameterLoopReport,
+    callback_failure: CallbackFailureState,
+) -> BvpSciParameterLoopReport {
+    let points = native
+        .points
+        .into_iter()
+        .map(|point| {
+            let (telemetry_mode, telemetry_counters, telemetry_timings_ms) =
+                snapshot_maps(&point.telemetry);
+            let (solution, error) = match point.result {
+                Ok(solution) => (
+                    Some(BvpSciSolution::from_native(solution, point.telemetry)),
+                    None,
+                ),
+                Err(error) => (None, Some(error)),
+            };
+            BvpSciParameterLoopPoint {
+                external_parameters: point.external_parameters,
+                solution,
+                error,
+                callback_failure: callback_failure.clone(),
+                telemetry_mode,
+                telemetry_counters,
+                telemetry_timings_ms,
+            }
+        })
+        .collect();
+    BvpSciParameterLoopReport {
+        points,
+        stop_error: native.stop_error,
     }
 }
 
@@ -1105,6 +1254,12 @@ impl BvpSciSolution {
     /// Bound parameter values used for this detached BVP solution.
     pub fn parameters(&self) -> Vec<f64> {
         self.parameters.clone()
+    }
+
+    #[getter]
+    /// Fixed model inputs used by the detached BVP result.
+    pub fn external_parameters(&self) -> Vec<f64> {
+        self.external_parameters.clone()
     }
 
     #[getter]
@@ -1263,8 +1418,9 @@ impl BvpSciSolution {
 /// Prepared symbolic BVP_sci solver.
 ///
 /// The constructor prepares RHS and boundary expressions once. Use
-/// `set_parameters` followed by `solve` for continuation, or `restart` to
-/// supply a new mesh and initial state without rebuilding the symbolic plan.
+/// `set_parameter_guess` followed by `solve` to update the free-parameter
+/// Newton guess while retaining the current mesh/profile, or `restart` to
+/// supply a new mesh and state guess without rebuilding the symbolic plan.
 #[pyclass(name = "BvpSciSolver", module = "rustedscithe", unsendable)]
 pub struct BvpSciSolver {
     solver: CoreSolver,
@@ -1280,8 +1436,9 @@ impl BvpSciSolver {
     /// `boundary_expressions` contains the endpoint residual equations.
     /// `mesh` must be strictly increasing; `initial_state` is a flat vector in
     /// node-major order, representing shape `(mesh_nodes, state_dimension)`.
-    /// Optional parameter symbols and
-    /// values enable continuation. Symbolic RHS expressions use ExprLegacy or
+    /// `parameters` names free unknowns solved jointly with the state profile;
+    /// `parameter_guess` supplies their initial Newton estimates. The older
+    /// `parameter_values` keyword remains as a deprecated alias. Symbolic RHS expressions use ExprLegacy or
     /// AtomView with Lambdify/AOT. For an already-numerical RHS, pass an empty
     /// `expressions` list, select `frontend="numerical"` and
     /// `execution="numerical"`, then provide `rhs_callback`. That callback
@@ -1292,7 +1449,7 @@ impl BvpSciSolver {
     /// output retention. Boundary callbacks may replace the symbolic boundary
     /// route; singular-term inputs must be supplied as a compatible pair.
     #[new]
-    #[pyo3(signature=(expressions, state_variables, boundary_expressions, mesh, initial_state, *, parameters=None, parameter_values=None, independent_variable="x", options=None, tolerance=1e-3, boundary_tolerance=None, max_nodes=1000, max_newton_iterations=8, max_mesh_refinements=10, max_backtracking_steps=4, output="mesh", boundary_jacobian="symbolic", singular_term_a=None, singular_term_matrix=None, rhs_callback=None, rhs_jacobian_callback=None, rhs_parameter_jacobian_callback=None, boundary_callback=None, boundary_jacobian_callback=None))]
+    #[pyo3(signature=(expressions, state_variables, boundary_expressions, mesh, initial_state, *, parameters=None, parameter_guess=None, parameter_values=None, external_parameters=None, external_parameter_values=None, independent_variable="x", options=None, tolerance=1e-3, boundary_tolerance=None, max_nodes=1000, max_newton_iterations=8, max_mesh_refinements=10, max_backtracking_steps=4, output="mesh", boundary_jacobian="symbolic", singular_term_a=None, singular_term_matrix=None, rhs_callback=None, rhs_jacobian_callback=None, rhs_parameter_jacobian_callback=None, boundary_callback=None, boundary_jacobian_callback=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         expressions: Vec<PyExpr>,
@@ -1301,7 +1458,10 @@ impl BvpSciSolver {
         mesh: Vec<f64>,
         initial_state: Vec<f64>,
         parameters: Option<Vec<String>>,
+        parameter_guess: Option<Vec<f64>>,
         parameter_values: Option<Vec<f64>>,
+        external_parameters: Option<Vec<String>>,
+        external_parameter_values: Option<Vec<f64>>,
         independent_variable: &str,
         options: Option<PyRef<'_, SolverOptions>>,
         tolerance: f64,
@@ -1328,10 +1488,28 @@ impl BvpSciSolver {
         }
         let parameters = parameters.unwrap_or_default();
         validate_names(&parameters, "parameters", true)?;
+        let external_parameters = external_parameters.unwrap_or_default();
+        validate_names(&external_parameters, "external_parameters", true)?;
+        let mut all_parameter_names = parameters.clone();
+        all_parameter_names.extend(external_parameters.iter().cloned());
+        validate_names(&all_parameter_names, "combined parameter names", true)?;
+        let external_parameter_values =
+            external_parameter_values.unwrap_or_else(|| vec![0.0; external_parameters.len()]);
+        if external_parameter_values.len() != external_parameters.len() {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "external_parameter_values must contain {} values, got {}",
+                external_parameters.len(),
+                external_parameter_values.len()
+            )));
+        }
+        finite_values(&external_parameter_values, "external_parameter_values")?;
         if state_variables
             .iter()
             .any(|name| name == independent_variable)
             || parameters.iter().any(|name| name == independent_variable)
+            || external_parameters
+                .iter()
+                .any(|name| name == independent_variable)
         {
             return Err(InvalidConfigurationError::new_err(
                 "independent_variable must not collide with state_variables or parameters",
@@ -1352,7 +1530,7 @@ impl BvpSciSolver {
         }
         let rhs_allowed = std::iter::once(independent_variable.to_owned())
             .chain(state_variables.iter().cloned())
-            .chain(parameters.iter().cloned())
+            .chain(all_parameter_names.iter().cloned())
             .collect::<Vec<_>>();
         if !numerical_rhs {
             validate_expression_symbols(&expressions, &rhs_allowed, "RHS")?;
@@ -1391,12 +1569,18 @@ impl BvpSciSolver {
                 boundary_expressions.len()
             )));
         }
-        let boundary_variables = boundary_variables(&state_variables, &parameters);
+        let boundary_variables = boundary_variables(&state_variables, &all_parameter_names);
         if !callback_boundary {
             validate_expression_symbols(&boundary_expressions, &boundary_variables, "boundary")?;
         }
         if let Some(callback) = &boundary_callback {
             validate_python_callback(callback, "boundary_callback")?;
+        }
+
+        if numerical_rhs && !external_parameters.is_empty() {
+            return Err(UnsupportedOptionError::new_err(
+                "external_parameters are currently supported only for symbolic BVP_sci RHS routes",
+            ));
         }
         if let Some(callback) = &boundary_jacobian_callback {
             validate_python_callback(callback, "boundary_jacobian_callback")?;
@@ -1458,15 +1642,22 @@ impl BvpSciSolver {
                 initial_state.len()
             )));
         }
-        let parameter_values = parameter_values.unwrap_or_else(|| vec![0.0; parameters.len()]);
-        if parameter_values.len() != parameters.len() {
+        if parameter_guess.is_some() && parameter_values.is_some() {
+            return Err(InvalidConfigurationError::new_err(
+                "pass only parameter_guess; parameter_values is a deprecated alias",
+            ));
+        }
+        let parameter_guess = parameter_guess
+            .or(parameter_values)
+            .unwrap_or_else(|| vec![0.0; parameters.len()]);
+        if parameter_guess.len() != parameters.len() {
             return Err(InvalidConfigurationError::new_err(format!(
-                "parameter_values must contain {} values, got {}",
+                "parameter_guess must contain {} values, got {}",
                 parameters.len(),
-                parameter_values.len()
+                parameter_guess.len()
             )));
         }
-        finite_values(&parameter_values, "parameter_values")?;
+        finite_values(&parameter_guess, "parameter_guess")?;
         if !tolerance.is_finite() || tolerance <= 0.0 {
             return Err(InvalidConfigurationError::new_err(
                 "tolerance must be finite and greater than zero",
@@ -1549,7 +1740,9 @@ impl BvpSciSolver {
             .with_frontend(assembly)
             .with_independent_variable(independent_variable)
             .with_parameter_names(parameters.clone())
-            .with_parameters(parameter_values)
+            .with_parameter_guess(parameter_guess)
+            .with_external_parameter_names(external_parameters.clone())
+            .with_external_parameter_values(external_parameter_values)
             .with_mesh_and_initial_state(mesh, initial_state)
             .with_matrix_layout(layout)
             .with_tolerance(tolerance)
@@ -1815,15 +2008,38 @@ impl BvpSciSolver {
         })
     }
 
-    /// Rebind numeric parameters while retaining the prepared symbolic plan.
-    /// Call `solve()` afterward to solve the updated BVP.
-    pub fn set_parameters(&mut self, values: Vec<f64>) -> PyResult<()> {
-        finite_values(&values, "parameter values")?;
+    /// Set the Newton initial guess for BVP_sci's free parameter unknowns.
+    ///
+    /// These are not fixed model inputs: the collocation solve may change
+    /// them while satisfying the extra boundary residuals. After a successful
+    /// solve, the state profile and mesh are already retained as the next
+    /// solve's initial guess.
+    pub fn set_parameter_guess(&mut self, values: Vec<f64>) -> PyResult<()> {
+        finite_values(&values, "parameter guess")?;
         let route = self.frontend();
         let panic_state = self.panic_state.clone();
-        panic_state.run("continuation", "bvp_sci", &route, || {
-            self.solver.set_parameters(values).map_err(map_error)
+        panic_state.run("parameter_guess", "bvp_sci", &route, || {
+            self.solver.set_parameter_guess(values).map_err(map_error)
         })
+    }
+
+    /// Rebind fixed model inputs without changing free Newton unknowns or
+    /// rebuilding the symbolic callback plan.
+    pub fn set_external_parameter_values(&mut self, values: Vec<f64>) -> PyResult<()> {
+        finite_values(&values, "external parameter values")?;
+        let route = self.frontend();
+        let panic_state = self.panic_state.clone();
+        panic_state.run("external_parameter_values", "bvp_sci", &route, || {
+            self.solver
+                .set_external_parameter_values(values)
+                .map_err(map_error)
+        })
+    }
+
+    /// Deprecated ambiguous alias for [`Self::set_parameter_guess`].
+    #[pyo3(name = "set_parameters")]
+    pub fn set_parameters_legacy(&mut self, values: Vec<f64>) -> PyResult<()> {
+        self.set_parameter_guess(values)
     }
 
     /// Replace the mesh and flat node-major initial guess without rebuilding
@@ -1859,14 +2075,74 @@ impl BvpSciSolver {
         })
     }
 
+    /// Solve ordered fixed-input vectors. A point failure is retained in the
+    /// report and does not stop later points unless checkpoint recovery fails.
+    pub fn solve_parameter_loop(
+        &mut self,
+        parameter_vectors: Vec<Vec<f64>>,
+    ) -> PyResult<BvpSciParameterLoopReport> {
+        for (index, values) in parameter_vectors.iter().enumerate() {
+            finite_values(values, &format!("parameter_vectors[{index}]"))?;
+        }
+        let route = self.frontend();
+        let panic_state = self.panic_state.clone();
+        let callback_failure = self.callback_failure.clone();
+        panic_state.run("parameter_loop", "bvp_sci", &route, || {
+            callback_failure.clear();
+            let native = self
+                .solver
+                .solve_parameter_loop(&parameter_vectors)
+                .map_err(map_error)?;
+            let points = native
+                .points
+                .into_iter()
+                .map(|point| {
+                    let (telemetry_mode, telemetry_counters, telemetry_timings_ms) =
+                        snapshot_maps(&point.telemetry);
+                    let (solution, error) = match point.result {
+                        Ok(solution) => (
+                            Some(BvpSciSolution::from_native(solution, point.telemetry)),
+                            None,
+                        ),
+                        Err(error) => (None, Some(error)),
+                    };
+                    BvpSciParameterLoopPoint {
+                        external_parameters: point.external_parameters,
+                        solution,
+                        error,
+                        callback_failure: callback_failure.clone(),
+                        telemetry_mode,
+                        telemetry_counters,
+                        telemetry_timings_ms,
+                    }
+                })
+                .collect();
+            Ok(BvpSciParameterLoopReport {
+                points,
+                stop_error: native.stop_error,
+            })
+        })
+    }
+
     /// Return the current mesh, including any adaptive refinement.
     pub fn mesh(&self) -> Vec<f64> {
         self.solver.state().0.to_vec()
     }
 
-    /// Return the currently bound parameter values.
-    pub fn parameters(&self) -> Vec<f64> {
+    /// Return the current Newton guesses for BVP_sci's free parameter unknowns.
+    pub fn parameter_guess(&self) -> Vec<f64> {
         self.solver.state().2.to_vec()
+    }
+
+    /// Current fixed model inputs, separate from the free Newton guess.
+    pub fn external_parameter_values(&self) -> Vec<f64> {
+        self.solver.external_parameter_values().to_vec()
+    }
+
+    /// Deprecated ambiguous alias for [`Self::parameter_guess`].
+    #[pyo3(name = "parameters")]
+    pub fn parameters_legacy(&self) -> Vec<f64> {
+        self.parameter_guess()
     }
 
     #[getter]
@@ -1887,6 +2163,7 @@ impl BvpSciSolver {
             BvpSciMatrixLayout::Dense => "dense".to_owned(),
             BvpSciMatrixLayout::Sparse => "sparse".to_owned(),
             BvpSciMatrixLayout::Banded { .. } => "banded".to_owned(),
+            BvpSciMatrixLayout::BandedAuto => "banded".to_owned(),
         }
     }
 

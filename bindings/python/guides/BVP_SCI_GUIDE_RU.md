@@ -51,12 +51,14 @@ print(solution.sample(1.0), "точно:", np.exp(-1.0))
 | Output | `output="final"`, `"mesh"`, `"dense"` | Итог, значения на mesh или непрерывный интерполянт |
 | Boundary Jacobian | `boundary_jacobian="symbolic"` или `"finite_difference"` | Для символьных boundary expressions |
 | Singular term | `singular_term_a`, `singular_term_matrix` | Передаются парой, `a` — левый конец интервала |
-| Параметры | `parameters`, `parameter_values`, `set_parameters(...)` | Численный rebind без изменения структуры модели |
+| Неизвестные параметры | `parameters`, `parameter_guess`, `set_parameter_guess(...)` | Начальные приближения Newton для неизвестных, решаемых вместе с профилем; `parameter_values` оставлен как legacy alias конструктора |
 | Restart | `restart(mesh, initial_state)` | Заменяет сетку и численное начальное приближение |
 
-Для Banded задайте через `SolverOptions.set_banded_width(lower, upper)`
-реальную полуширину полосы collocation Jacobian. Не делайте вывод о layout
-по неудачному решению с неверно заданной узкой полосой.
+Для символьных маршрутов ExprLegacy/AtomView ширина Banded выводится из
+зависимостей якобиана автоматически. `set_banded_width(lower, upper)` остается
+необязательной структурной подсказкой и не должна обрезать реальный шаблон.
+Численные callbacks не содержат символьной структуры, поэтому вывести полосу
+для них автоматически невозможно.
 
 Структурированному layout нужна информация о якобиане, совместимая с маршрутом.
 Проверяйте `capabilities("bvp_sci")`; не считайте, что callback fallback
@@ -66,13 +68,42 @@ fallback/provenance и не считайте такие времена свид�
 
 ## Параметры, restart и singular terms
 
-Прямой wrapper поддерживает параметры и `set_parameters`, restart с новой
-сеткой/начальным приближением, управление mesh refinement, dense output и
-singular-term пару `(singular_term_a, singular_term_matrix)` в стиле SciPy.
-Изменение параметров не означает повторную символьную подготовку. Restart
-сбрасывает численное состояние траектории, сохраняя подготовленный маршрут,
-если это поддержано. Граничные невязки и singular terms выбирают из модели,
-а не для подгонки под backend.
+В BVP_sci объявленные `parameters` — это неизвестные, а не фиксированные входы
+модели. Солвер вычисляет их совместно с профилем и требует на одно дополнительное
+граничное условие на каждый параметр. `parameter_guess` и
+`set_parameter_guess(...)` задают только начальное приближение Newton для этих
+неизвестных; текущее значение можно посмотреть через `parameter_guess()`. Keyword
+`parameter_values` оставлен как deprecated alias и не может передаваться
+одновременно с `parameter_guess`. После
+успешного решения сетка и профиль сохраняются и используются при следующем solve.
+Это отличается от rebind фиксированных параметров в
+BVP_Damp. `restart(mesh, initial_state)` явно заменяет сетку и начальный профиль,
+сохраняя символьную подготовку там, где это поддерживается; схема параметров не
+меняется. Управление mesh refinement, dense output и singular-term пару
+`(singular_term_a, singular_term_matrix)` выбирайте по математической задаче.
+
+### Цикл по фиксированным внешним параметрам
+
+Используйте `external_parameters=[...]` для фиксированных входов модели,
+которые встречаются в RHS или символьных граничных выражениях, но не являются
+неизвестными Newton. Начальные значения задаются через
+`external_parameter_values=[...]`. Callback получает единый вектор сначала со
+свободными параметрами, затем с внешними; внешние значения не добавляют столбцы
+в Якобиан или граничные условия.
+
+`solve_parameter_loop([[...], [...]])` последовательно решает задачу для каждого
+вектора, повторно используя подготовленный символьный план. Каждый
+`BvpSciParameterLoopPoint` содержит входной вектор, либо detached-решение, либо
+типизированную native-ошибку, а также snapshot телеметрии после этой точки.
+Snapshot-ы накопительные с момента подготовки плана, а не дельты отдельной
+точки. Обычный отказ solve
+не останавливает цикл: следующая точка стартует с последней успешной сетки,
+профиля и решения для свободных параметров (либо с исходного состояния, если
+успехов ещё не было). Цикл останавливается только если не удалось восстановить
+checkpoint; проверьте `report.stopped_early` и при необходимости вызовите
+`report.raise_if_stopped()`. Маршрут численного RHS-callback пока не поддерживает
+именованные внешние параметры. Пример success/failure/success находится в
+`examples/bvp_sci_external_parameter_loop.py`.
 
 ## Телеметрия и ошибки
 
@@ -116,7 +147,8 @@ solver = BvpSciSolver(
 print(solver.solve().sample(1.0))
 ```
 
-`examples/bvp_sci_sparse.py` показывает базовый маршрут,
+`examples/bvp_sci_unknown_parameter_guess.py` показывает свободный параметр-
+неизвестную и обновление её начального приближения. `examples/bvp_sci_sparse.py` показывает базовый маршрут,
 `examples/bvp_sci_frontend_layouts.py` — matched-матрицу точной линейной BVP.
 `examples/bvp_sci_aot.py` сравнивает Lambdify и AOT на одной Sparse/AtomNative
 задаче; для компиляции требуется `tcc` или `gcc` в `PATH`.

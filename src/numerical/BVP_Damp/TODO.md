@@ -3121,3 +3121,90 @@ optimizations. ExprLegacy and AtomView remain independent supported frontends.
   (MAD 0.3444 ms). Baseline:
   `performance/baselines/windows-dev/windows-x86-64-release-3be3b406e86e4f83/bvp_damp_combustion3000_expr_lambdify_sparse.toml`;
   run report: `performance/runs/1792882557593-19792`.
+
+### Fixed-Input Rebinding And Warm Re-solve
+
+- [x] Add a prepared-iterate replacement boundary for Frozen/Naive. Validate
+  the fixed-mesh shape and finite values, preserve prepared callbacks, and
+  invalidate numeric runtime state that depends on the iterate.
+- [x] Cover accepted prepared-iterate replacement and typed rejection of an
+  invalid shape in a Debug unit test.
+- [ ] Keep fixed-input rebinding (`set_parameter_values`) distinct from a
+  warm re-solve (`solve_with_parameter_values`): the latter also seeds the
+  nonlinear solve from the last successful profile. Document mesh-refinement
+  behavior explicitly, since changed mesh dimensions may require rebuilding
+  numeric state while retaining an interpolated prior profile.
+- [ ] Add route-by-route lifecycle/telemetry coverage for Damped, Frozen and
+  Naive, including failed solves and whether a failed result may seed a later
+  solve. Do not describe fixed-input rebinding alone as parameter continuation.
+
+### Ordered Fixed-Parameter Loop (Solver-Specific Pilot)
+
+Add a solver-native loop over an explicit sequence of fixed model-parameter
+vectors, for example `[[a1, b1], [a2, b2], ...]`. The input order defines the
+path. This is parameter continuation using the last successful BVP profile as
+the next initial guess; it is not merely `set_parameter_values`, automatic
+mesh refinement, or BVP_sci's free-parameter Newton solve. Keep the fixed
+parameter schema unchanged throughout a loop.
+
+Start with **Frozen/Naive** as the pilot because its mesh is fixed and it has
+no adaptive refinement to complicate recovery. Then add **Damped**, where a
+successful adaptive solve may change the mesh and the profile/mesh must be
+checkpointed and restored together. Do not implement BVP_sci in this stage:
+its current `parameters` are unknowns solved as part of the BVP. A later
+BVP_sci loop requires a distinct native API for fixed external model inputs,
+kept separate from free Newton parameters and callback-captured values.
+
+- [x] Define a native, solver-specific loop result containing one ordered
+  outcome per requested parameter vector. A success retains its parameter
+  vector, mesh, solution matrix and optional native telemetry snapshot; a
+  point failure retains its index, parameter vector and typed native error or
+  non-convergence status. Preserve route-specific diagnostics rather than
+  flattening them into an untyped message.
+- [x] Validate the full input before solving: non-empty loop, consistent
+  parameter-vector dimensions, finite values and compatibility with the
+  already-bound schema. Invalid loop configuration is a top-level error, not
+  a failed point in an otherwise valid sweep.
+- [x] Define and test guess ownership: the first point uses the configured
+  initial mesh and guess; after the first success, each next point uses the
+  most recent successful profile and its associated mesh. A failed point
+  never becomes the next guess. If no point has succeeded yet, later attempts
+  continue from the original guess.
+- [x] Define failure recovery before implementing the loop. Frozen/Naive must
+  restore the last successful iterate and parameter values after a failed
+  attempt. A per-point numerical failure is recorded and the loop advances;
+  schema/setup errors or unrecoverable state-restoration failures stop
+  execution and return a typed top-level error with the completed partial
+  report. Never continue with solver state whose validity is unknown.
+- [x] Pilot Frozen/Naive with Debug tests for success-success,
+  success-failure-success, failure before the first success, malformed input
+  and all-points-fail cases. Compare successful points with independently
+  initialized native solves; verify guess provenance, mesh association and
+  that failed attempts do not contaminate later solutions.
+- [x] Preserve the solver's configured telemetry mode; do not enable telemetry
+  implicitly. Capture each attempt's native snapshot when available and test
+  counters, timings and typed failures against direct solver calls.
+- [x] Add a documented Rust example and RU/EN guide notes explaining ordered
+  parameter paths, last-successful-guess behavior, recoverable point failures
+  and telemetry. Expose the fixed-mesh pilot in Python Naive and Frozen wrappers
+  and the adaptive route in `BvpDampSolver`, with ordered point records,
+  detached success solutions, full telemetry snapshots and typed per-point/stop
+  errors. Python contract tests cover success-failure-success and preflight
+  validation; examples are `bindings/python/examples/bvp_damp_frozen_parameter_loop.py`
+  and `bindings/python/examples/bvp_damp_parameter_loop.py`.
+- [x] Implement and test Damped recovery separately. Preserve each successful
+  refined `(mesh, profile)` checkpoint; after a failed point restore it using
+  the native mesh/iterate lifecycle. Reuse the prepared plan when the mesh is
+  unchanged; invalidate and regenerate mesh-sized symbolic/numeric work when
+  restoring a different mesh. Reset the adaptive-refinement budget per point.
+  Debug coverage exercises adaptive success-failure-success, retained telemetry,
+  the successful final solver state, and malformed-input rejection before any
+  preparation or mutation. Rust and Python examples/guides are provided.
+- [ ] Extract shared loop orchestration only after Frozen/Naive and Damped
+  independently prove the same ordering, checkpoint and failure semantics.
+  Keep mesh policy, recovery, telemetry and native error types solver-specific;
+  do not build a generic framework prematurely.
+- [ ] Design BVP_sci fixed external parameters separately from its free Newton
+  unknowns. Implement and test its native loop only after that distinction is
+  represented in the model/evaluator API; then forward the stable
+  solver-specific contracts through `BVP_api` and Python bindings.

@@ -7,21 +7,21 @@ use std::collections::HashMap;
 
 use pyo3::prelude::*;
 
+use rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresTelemetryMode;
+use rustedscithe_core::numerical::Nonlinear_systems::symbolic::{
+    LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
+};
+use rustedscithe_core::numerical::SolverTelemetryMode;
 use rustedscithe_core::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
 use rustedscithe_core::numerical::optimization::sym_fitting::FittingObservationPolicy;
 use rustedscithe_core::numerical::optimization::universal_fitting::{
     Method, UniversalFitting, UniversalFittingError, UniversalFittingResult,
 };
 use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
-use rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresTelemetryMode;
-use rustedscithe_core::numerical::Nonlinear_systems::symbolic::{
-    LambdifyExecutionPolicy, SymbolicLambdifyFrontend,
-};
-use rustedscithe_core::numerical::SolverTelemetryMode;
 
 use crate::errors::{
-    annotate_native, native_variant, ExhaustionError, InvalidConfigurationError,
-    InvalidExpressionError, SolverError, SolverPanicState, UnsupportedOptionError,
+    ExhaustionError, InvalidConfigurationError, InvalidExpressionError, SolverError,
+    SolverPanicState, UnsupportedOptionError, annotate_native, native_variant,
 };
 use crate::expr::PyExpr;
 

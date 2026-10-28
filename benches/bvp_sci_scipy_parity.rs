@@ -473,6 +473,7 @@ fn layout_name(layout: BvpSciMatrixLayout) -> &'static str {
         BvpSciMatrixLayout::Dense => "Dense/nalgebra",
         BvpSciMatrixLayout::Sparse => "Sparse/faer",
         BvpSciMatrixLayout::Banded { .. } => "Banded",
+        BvpSciMatrixLayout::BandedAuto => "Banded/auto",
     }
 }
 

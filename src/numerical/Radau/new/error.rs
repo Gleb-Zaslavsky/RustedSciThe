@@ -31,8 +31,6 @@ pub(crate) enum RadauConfigError {
     InvalidFirstStep,
     #[error("step, Newton, and retry budgets must be non-zero")]
     EmptyIterationBudget,
-    #[error("banded layout must have a non-zero bandwidth")]
-    EmptyBandwidth,
     #[error("native execution cannot select a symbolic assembly")]
     NativeWithSymbolicAssembly,
     #[error("symbolic execution requires an assembly frontend")]

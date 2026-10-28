@@ -17,6 +17,7 @@ pub(crate) fn evaluate_collocation(
     x: &[f64],
     y: &[f64],
     parameters: &[f64],
+    external_parameters: &[f64],
     singular: Option<&SingularTermRuntime>,
     workspace: &mut BvpSciCollocationWorkspace,
 ) -> Result<(), BvpSciNewError> {
@@ -25,11 +26,15 @@ pub(crate) fn evaluate_collocation(
     let state_len = n.checked_mul(m).ok_or_else(|| {
         BvpSciNewError::InvalidConfiguration("collocation state size overflows usize".into())
     })?;
-    if m < 2 || y.len() != state_len || parameters.len() != plan.parameter_dimension() {
+    if m < 2
+        || y.len() != state_len
+        || parameters.len() != plan.parameter_dimension()
+        || external_parameters.len() != plan.external_parameter_dimension()
+    {
         return Err(BvpSciNewError::ShapeMismatch {
             stage: BvpSciStage::NumericalCore,
-            expected: state_len + plan.parameter_dimension(),
-            actual: y.len() + parameters.len(),
+            expected: state_len + plan.parameter_dimension() + plan.external_parameter_dimension(),
+            actual: y.len() + parameters.len() + external_parameters.len(),
         });
     }
     if workspace.n != n || workspace.m != m || workspace.k != parameters.len() {
@@ -37,6 +42,9 @@ pub(crate) fn evaluate_collocation(
             "collocation workspace does not match the prepared problem".into(),
         ));
     }
+    let free_count = parameters.len();
+    workspace.runtime_parameters[..free_count].copy_from_slice(parameters);
+    workspace.runtime_parameters[free_count..].copy_from_slice(external_parameters);
     for (interval, pair) in x.windows(2).enumerate() {
         if !pair[0].is_finite() || !pair[1].is_finite() || pair[1] <= pair[0] {
             return Err(BvpSciNewError::InvalidConfiguration(
@@ -54,7 +62,7 @@ pub(crate) fn evaluate_collocation(
         plan.evaluate_rhs(
             x[node],
             state,
-            parameters,
+            &workspace.runtime_parameters,
             &mut workspace.callback_arguments,
             output,
         )?;
@@ -79,7 +87,7 @@ pub(crate) fn evaluate_collocation(
         plan.evaluate_rhs(
             workspace.x_mid[interval],
             midpoint,
-            parameters,
+            &workspace.runtime_parameters,
             &mut workspace.callback_arguments,
             output,
         )?;
@@ -150,6 +158,7 @@ mod tests {
             &plan,
             &[0.0, 0.5, 1.0],
             &[0.0, 0.5, 1.0],
+            &[],
             &[],
             None,
             &mut workspace,

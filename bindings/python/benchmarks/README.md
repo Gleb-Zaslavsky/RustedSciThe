@@ -137,7 +137,7 @@ symbolic ExprLegacy/AtomNative routes and its separate Python callback route.
 Its repeated symbolic calls use Radau's prepared parameter-rebind API with an
 explicit `y0`; this is a parameter sweep over the configured interval, not a
 time-advancing continuation series. The callback row changes a Python closure
-and calls `continue_with_initial_state`, so it shares the mathematical fixture
+and solves from the supplied initial state, so it shares the mathematical fixture
 but has a distinct lifecycle. The report includes native residual, Jacobian,
 factorization and linear stages/counters alongside Python wall times, with
 exact-solution gates on the initial solve and every repeated result.

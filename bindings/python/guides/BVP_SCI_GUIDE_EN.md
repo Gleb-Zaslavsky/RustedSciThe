@@ -51,12 +51,14 @@ than hiding them behind a lowest-common-denominator options object:
 | Output | `output="final"`, `"mesh"`, `"dense"` | Retain final values, mesh values or continuous interpolant |
 | Boundary Jacobian | `boundary_jacobian="symbolic"` or `"finite_difference"` | Applies to symbolic boundary expressions |
 | Singular term | `singular_term_a`, `singular_term_matrix` | Supplied as a pair; `a` is the left endpoint |
-| Parameter series | `parameters`, `parameter_values`, `set_parameters(...)` | Rebind numeric values without changing equation structure |
+| Free parameter unknowns | `parameters`, `parameter_guess`, `set_parameter_guess(...)` | Newton initial guesses for unknowns solved jointly with the state profile; `parameter_values` is a legacy constructor alias |
 | Restart | `restart(mesh, initial_state)` | Replaces discretization and numerical initial iterate |
 
-For Banded, configure `SolverOptions.set_banded_width(lower, upper)` with the
-collocation Jacobian's actual half-bandwidth. Do not guess a narrow band and
-interpret a failed solve as evidence against the layout.
+For symbolic ExprLegacy/AtomView routes, Banded infers the state-Jacobian
+structure automatically; no width is needed. `set_banded_width(lower, upper)`
+remains an optional structural hint for advanced callers and must not truncate
+the true symbolic pattern. Numerical callbacks have no symbolic structure to
+inspect, so automatic inference is unavailable there.
 
 Structured layouts need Jacobian information compatible with the selected
 route. Inspect `capabilities("bvp_sci")` and reject unsupported combinations
@@ -67,11 +69,39 @@ fallback/provenance before treating timings as SuperLU evidence.
 
 ## Parameters, restart and singular terms
 
-The direct wrapper supports parameter binding, `set_parameters`, restart with
-a new mesh/initial guess, mesh refinement controls, dense output, and SciPy-
-style singular-term inputs `(singular_term_a, singular_term_matrix)`. A
-parameter change does not imply a new symbolic model. Restart resets the
-numerical trajectory state while retaining the prepared route where supported.
+In BVP_sci, declared `parameters` are free unknowns, not fixed model inputs.
+The solver determines them together with the state profile and requires the
+boundary residual dimension to include one extra condition per parameter.
+`parameter_guess` (or `set_parameter_guess(...)`) sets only the initial Newton
+guess for those unknowns; `parameter_guess()` inspects the current guess vector.
+The constructor keyword `parameter_values` remains a deprecated alias and
+cannot be supplied together with `parameter_guess`.
+After a successful solve, the existing mesh and
+profile are already retained for the next solve. This is distinct from fixed
+parameter rebinding in BVP_Damp. `restart(mesh, initial_state)` explicitly
+replaces the numerical discretization and state guess while retaining symbolic
+preparation where supported; it does not change the parameter schema.
+
+### Fixed external-parameter loops
+
+Use `external_parameters=[...]` for fixed model inputs that appear in the RHS
+or symbolic boundary expressions but are not Newton unknowns. Set their
+initial values with `external_parameter_values=[...]`; the callback argument
+vector is ordered as free parameters first, then external parameters. The
+external values do not add Jacobian columns or boundary conditions.
+
+`solve_parameter_loop([[...], [...]])` solves each external-input vector in
+order using the same prepared symbolic plan. Each `BvpSciParameterLoopPoint`
+contains its input vector, either a detached solution or a typed native error,
+and a telemetry snapshot taken after that point. These snapshots are cumulative
+since plan preparation, not per-point deltas. An ordinary solve failure does not abort
+the loop: the next point starts from the last successful mesh, profile and
+free-parameter solution (or the original initial state if none succeeded).
+Only a failure to restore that checkpoint stops the loop; inspect
+`report.stopped_early` and call `report.raise_if_stopped()` when that must be
+fatal. Numerical RHS callback routes currently reject named external inputs.
+The example `examples/bvp_sci_external_parameter_loop.py` demonstrates a
+success/failure/success sequence.
 Choose boundary residuals and singular terms from the mathematical model, not
 to force a particular linear layout.
 
@@ -122,7 +152,8 @@ print(solution.sample(1.0))
 analytical-Jacobian contract. Use the symbolic wrapper whenever an `Expr` RHS
 is available so Rust can prepare exact derivatives and select other layouts.
 
-See `examples/bvp_sci_sparse.py` for the basic route and
+See `examples/bvp_sci_unknown_parameter_guess.py` for the free-parameter
+unknown/initial-guess lifecycle. `examples/bvp_sci_sparse.py` shows the basic route and
 `examples/bvp_sci_frontend_layouts.py` for a matched exact linear BVP matrix.
 `examples/bvp_sci_aot.py` compares Lambdify and AOT on the same Sparse,
 AtomNative problem and requires `tcc` or `gcc` on `PATH`.

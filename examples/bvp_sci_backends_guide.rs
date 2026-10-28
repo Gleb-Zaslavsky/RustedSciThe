@@ -60,7 +60,7 @@ fn main() {
     println!("layout | y(1) | residual_norm | linear_assembly_ms | factorization_ms | solves");
     run(BvpSciMatrixLayout::Dense);
     run(BvpSciMatrixLayout::Sparse);
-    run(BvpSciMatrixLayout::Banded { lower: 5, upper: 5 });
+    run(BvpSciMatrixLayout::BandedAuto);
 }
 
 // Optional SuperLU Sparse route

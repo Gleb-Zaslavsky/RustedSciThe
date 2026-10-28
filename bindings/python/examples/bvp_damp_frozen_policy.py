@@ -1,8 +1,9 @@
-"""Frozen-Jacobian Newton with a periodic refresh policy.
+"""Frozen-Jacobian Newton and fixed-parameter rebinding.
 
 The scalar problem y' = rate with y(0) = 0 has the exact solution
-y(x) = rate*x. The mesh and prepared symbolic problem are reused while the
-numeric parameter changes; ``every_m`` refreshes the Jacobian periodically.
+y(x) = rate*x. The mesh and prepared symbolic problem are reused while a
+fixed numeric input changes. The prior profile seeds each subsequent solve;
+``every_m`` refreshes the Jacobian periodically.
 """
 
 from rustedscithe import BvpDampFrozenSolver, Expr, SolverOptions
@@ -31,8 +32,7 @@ solver = BvpDampFrozenSolver(
 
 solver.prepare()
 for rate in (1.0, 2.0, 0.5):
-    solver.set_parameters([rate])
-    solution = solver.solve_prepared()
+    solution = solver.solve_with_parameter_values([rate])
     endpoint = solution.values()[0][-1]
     counters = solution.telemetry_counters()
     if abs(endpoint - rate) > 1e-8:

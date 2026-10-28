@@ -109,10 +109,10 @@ mod tests {
             for route in [Route::Dense, Route::Sparse, Route::Banded] {
                 let mut solver = build_solver(route, frontend);
                 solver
-                    .try_set_params(Some(&["alpha"]))
+                    .try_set_parameter_names(Some(&["alpha"]))
                     .expect("parameter name should be accepted");
                 solver
-                    .try_set_param_values(Some(vec![2.0]))
+                    .try_set_parameter_values(Some(vec![2.0]))
                     .expect("initial numeric parameter should be accepted");
                 solver.try_eq_generate(None, None).unwrap_or_else(|error| {
                     panic!("{} preparation failed: {error:?}", route.name())
@@ -142,7 +142,7 @@ mod tests {
                 let first_stats = solver.get_statistics();
 
                 solver
-                    .try_set_param_values(Some(vec![5.0]))
+                    .try_set_parameter_values(Some(vec![5.0]))
                     .expect("numeric rebind should be accepted");
                 assert_eq!(
                     prepared_fun_address,

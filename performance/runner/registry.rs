@@ -630,6 +630,22 @@ static CORE_SCENARIOS: &[Scenario] = &[
         diagnose: None,
     },
     Scenario {
+        id: "bvp_sci_atom_banded_external_parameter_loop_48x129",
+        solver: "bvp-sci",
+        groups: &["bvp", "bvp-sci-parameter-loop", "bvp-sci-large"],
+        workload: "48-state decoupled exponential BVP, nodes=129, three ordered fixed-input solves",
+        frontend: "AtomViewNative",
+        execution: "Lambdify",
+        linear_algebra: "BandedAuto",
+        parallel_policy: "Sequential",
+        telemetry: "off wall gate + Detailed per-point diagnostic",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "Large BVP_sci external-parameter loop with prepared symbolic callbacks, exact-solution checks and last-successful-profile reuse",
+        run: crate::scenarios::bvp_sci::run_external_parameter_loop_gate,
+        diagnose: Some(crate::scenarios::bvp_sci::diagnose_external_parameter_loop_gate),
+    },
+    Scenario {
         id: "be_diffusion_chain_128",
         solver: "be",
         groups: &["ivp", "stiff", "large-system"],
@@ -643,6 +659,70 @@ static CORE_SCENARIOS: &[Scenario] = &[
         gate_metrics: &["scenario_wall_ms"],
         description: "Backward Euler native diffusion solve with an extended horizon for stable performance measurement",
         run: crate::scenarios::be::run_diffusion_chain,
+        diagnose: None,
+    },
+    Scenario {
+        id: "bdf_scalar_parameter_loop_512",
+        solver: "bdf",
+        groups: &["ivp", "ivp-parameter-loop"],
+        workload: "512 independent scalar decay solves, ExprLegacy/Lambdify, t=[0,0.5]",
+        frontend: "ExprLegacy",
+        execution: "Lambdify",
+        linear_algebra: "Dense",
+        parallel_policy: "sequential",
+        telemetry: "off",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "Prepared BDF parameter-loop wall time with fixed y0 and fresh integration state per point",
+        run: crate::scenarios::ivp_parameter_loop::bdf,
+        diagnose: None,
+    },
+    Scenario {
+        id: "be_scalar_parameter_loop_512",
+        solver: "be",
+        groups: &["ivp", "ivp-parameter-loop"],
+        workload: "512 independent scalar decay solves, ExprLegacy/Lambdify, t=[0,0.5]",
+        frontend: "ExprLegacy",
+        execution: "Lambdify",
+        linear_algebra: "Dense",
+        parallel_policy: "sequential",
+        telemetry: "off",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "Prepared Backward Euler parameter-loop wall time with fixed y0 and fresh integration state per point",
+        run: crate::scenarios::ivp_parameter_loop::backward_euler,
+        diagnose: None,
+    },
+    Scenario {
+        id: "lsode2_scalar_parameter_loop_512",
+        solver: "lsode2",
+        groups: &["ivp", "ivp-parameter-loop"],
+        workload: "512 independent scalar decay solves, ExprLegacy/Lambdify Bridge, t=[0,0.5]",
+        frontend: "ExprLegacy",
+        execution: "Lambdify/Bridge",
+        linear_algebra: "Dense",
+        parallel_policy: "sequential",
+        telemetry: "off",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "Prepared LSODE2 parameter-loop wall time with fixed y0 and fresh integration state per point",
+        run: crate::scenarios::ivp_parameter_loop::lsode2,
+        diagnose: None,
+    },
+    Scenario {
+        id: "radau_scalar_parameter_loop_512",
+        solver: "radau",
+        groups: &["ivp", "ivp-parameter-loop"],
+        workload: "512 independent scalar decay solves, ExprLegacy/Lambdify, t=[0,0.5]",
+        frontend: "ExprLegacy",
+        execution: "Lambdify",
+        linear_algebra: "Dense",
+        parallel_policy: "sequential",
+        telemetry: "off",
+        version: 1,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "Prepared Radau parameter-loop wall time with fixed y0 and fresh integration state per point",
+        run: crate::scenarios::ivp_parameter_loop::radau,
         diagnose: None,
     },
     Scenario {
@@ -770,6 +850,20 @@ mod tests {
             }),
             Err(RunnerError::UnknownSelection(_))
         ));
+    }
+
+    #[test]
+    fn bvp_sci_parameter_loop_group_selects_only_its_large_route() {
+        let selected = select(&Selector {
+            group: Some("bvp-sci-parameter-loop".into()),
+            ..Selector::default()
+        })
+        .expect("focused BVP_sci loop group should be selectable");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0].id,
+            "bvp_sci_atom_banded_external_parameter_loop_48x129"
+        );
     }
 
     #[test]
@@ -1178,5 +1272,31 @@ mod tests {
             2,
             "VarPro is represented by its standalone API and universal facade"
         );
+    }
+
+    #[test]
+    fn ivp_parameter_loop_group_has_one_stable_scenario_per_first_tier_solver() {
+        let scenarios = SCENARIOS
+            .iter()
+            .filter(|scenario| scenario.groups.contains(&"ivp-parameter-loop"))
+            .collect::<Vec<_>>();
+        assert_eq!(scenarios.len(), 4);
+        for solver in ["bdf", "be", "lsode2", "radau"] {
+            assert_eq!(
+                scenarios
+                    .iter()
+                    .filter(|scenario| scenario.solver == solver)
+                    .count(),
+                1,
+                "expected one independent parameter-loop gate for {solver}"
+            );
+        }
+        assert!(scenarios.iter().all(|scenario| {
+            scenario.gate_metrics == ["scenario_wall_ms"]
+                && scenario.telemetry == "off"
+                && scenario
+                    .workload
+                    .contains("512 independent scalar decay solves")
+        }));
     }
 }

@@ -113,6 +113,12 @@ include!("damped_solver/preparation.rs");
 include!("damped_solver/solve.rs");
 include!("damped_solver/postprocess.rs");
 
+#[path = "damped_solver/parameter_loop.rs"]
+mod parameter_loop;
+pub use parameter_loop::{
+    DampedParameterLoopOutcome, DampedParameterLoopPoint, DampedParameterLoopReport,
+};
+
 #[cfg(test)]
 #[path = "tests/damped_solver_unit.rs"]
 mod tests;

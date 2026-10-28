@@ -44,7 +44,13 @@ pub enum BvpSciAssembly {
 pub enum BvpSciMatrixLayout {
     Dense,
     Sparse,
-    Banded { lower: usize, upper: usize },
+    /// Infer a conservative state-Jacobian band from symbolic dependencies.
+    BandedAuto,
+    /// Optional explicit structural hint, retained for compatibility.
+    Banded {
+        lower: usize,
+        upper: usize,
+    },
 }
 
 /// Sparse factorization policy, separate from matrix layout.

@@ -216,18 +216,17 @@ impl NRBVP {
         }
         Ok(None)
     }
-    /// Fallible solve path without logging setup.
-    ///
-    /// This is the preferred entrypoint for internal/runtime callers that want
-    /// typed backend and execution errors but do not need the higher-level
-    /// logging wrapper provided by [`NRBVP::try_solve`].
+    /// Fallible solve path with typed backend, execution, and logging setup
+    /// errors. Enabled logging must initialize its persistent file sink before
+    /// numerical work begins.
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         let log_level = match self.telemetry_counters.logging_mode() {
             BvpLoggingMode::Off => SolverLogLevel::Off,
             BvpLoggingMode::Warnings => SolverLogLevel::Warn,
             BvpLoggingMode::Detailed => SolverLogLevel::Info,
         };
-        let _logging_scope = SolverLogGuard::enter(log_level);
+        let _logging_scope = SolverLogGuard::try_enter(log_level)
+            .map_err(|source| BvpBackendIntegrationError::LogSetupFailed { source })?;
         // TODO! СЃСЂР°РІРЅРёС‚СЊ СЏРІРЅС‹Р№ РјСЌС€ СЃ РЅРµСЏРІРЅС‹Рј
         // let test_mesh = Some((0..100).map(|x| 0.01 * x as f64).collect::<Vec<f64>>());
         self.telemetry_counters.begin_solve();
@@ -267,7 +266,8 @@ impl NRBVP {
             BvpLoggingMode::Warnings => SolverLogLevel::Warn,
             BvpLoggingMode::Detailed => SolverLogLevel::Info,
         };
-        let _logging_scope = SolverLogGuard::enter(log_level);
+        let _logging_scope = SolverLogGuard::try_enter(log_level)
+            .map_err(|source| BvpBackendIntegrationError::LogSetupFailed { source })?;
         let prepared_fingerprint = self.prepared_plan_fingerprint();
         if !self
             .prepared_runtime_revision

@@ -40,6 +40,7 @@ pub struct AtomViewNativeLambdifyPlan {
     independent_name: String,
     state_names: Vec<String>,
     parameter_names: Vec<String>,
+    external_parameter_names: Vec<String>,
     // PreparedEvaluator owns its execution plan. Keep it behind Arc so that
     // cloning a prepared frontend remains cheap for continuation/restart
     // users, as it was with the previous callback closures.
@@ -66,8 +67,31 @@ impl AtomViewNativeLambdifyPlan {
         independent_name: impl Into<String>,
         telemetry: BvpSciTelemetry,
     ) -> Result<Self, BvpSciNewError> {
+        Self::prepare_with_external_parameters(
+            equations,
+            state_names,
+            parameter_names,
+            &[],
+            independent_name,
+            telemetry,
+        )
+    }
+
+    /// Prepare callbacks for free Newton parameters and fixed model inputs.
+    /// Both are runtime callback arguments; only free parameters are
+    /// differentiated into the global Newton Jacobian.
+    pub fn prepare_with_external_parameters(
+        equations: &[Expr],
+        state_names: &[String],
+        parameter_names: &[String],
+        external_parameter_names: &[String],
+        independent_name: impl Into<String>,
+        telemetry: BvpSciTelemetry,
+    ) -> Result<Self, BvpSciNewError> {
         let independent_name = independent_name.into();
-        validate_names(&independent_name, state_names, parameter_names)?;
+        let mut all_parameter_names = parameter_names.to_vec();
+        all_parameter_names.extend(external_parameter_names.iter().cloned());
+        validate_names(&independent_name, state_names, &all_parameter_names)?;
         if equations.is_empty() || equations.len() != state_names.len() {
             return Err(BvpSciNewError::ShapeMismatch {
                 stage: BvpSciStage::SymbolicPreparation,
@@ -119,10 +143,13 @@ impl AtomViewNativeLambdifyPlan {
         );
         telemetry.record_pattern_elapsed(pattern_elapsed, symbolic_entries.len() as u64);
 
-        let mut argument_names = Vec::with_capacity(1 + state_names.len() + parameter_names.len());
+        let mut argument_names = Vec::with_capacity(
+            1 + state_names.len() + parameter_names.len() + external_parameter_names.len(),
+        );
         argument_names.push(independent_name.clone());
         argument_names.extend(state_names.iter().cloned());
         argument_names.extend(parameter_names.iter().cloned());
+        argument_names.extend(external_parameter_names.iter().cloned());
         let symbols = argument_names
             .iter()
             .map(|name| Symbol::new(crate::wrap_symbol!(name.as_str())))
@@ -133,7 +160,8 @@ impl AtomViewNativeLambdifyPlan {
         // Keep parameter differentiation on packed Atoms as well. In
         // particular, do not convert residuals back to Expr just to obtain
         // `df/dp`; these evaluators share the same runtime argument ABI.
-        let parameter_symbols = &symbols[1 + state_names.len()..];
+        let parameter_symbols =
+            &symbols[1 + state_names.len()..1 + state_names.len() + parameter_names.len()];
         let parameter_symbolic_started = telemetry.start_timing();
         let mut parameter_entries = Vec::new();
         for (row, atom) in prepared.atoms().iter().enumerate() {
@@ -240,6 +268,7 @@ impl AtomViewNativeLambdifyPlan {
             independent_name,
             state_names: state_names.to_vec(),
             parameter_names: parameter_names.to_vec(),
+            external_parameter_names: external_parameter_names.to_vec(),
             residuals,
             linear_residual,
             linear_jacobian,
@@ -266,6 +295,10 @@ impl AtomViewNativeLambdifyPlan {
     /// Return the number of runtime parameters accepted by the packed plan.
     pub fn parameter_dimension(&self) -> usize {
         self.parameter_names.len()
+    }
+
+    pub fn external_parameter_dimension(&self) -> usize {
+        self.external_parameter_names.len()
     }
 
     pub fn independent_name(&self) -> &str {
@@ -651,10 +684,12 @@ impl AtomViewNativeLambdifyPlan {
                 stage: BvpSciStage::CallbackInput,
             });
         }
-        if state.len() != self.dimension() || parameters.len() != self.parameter_dimension() {
+        let runtime_parameter_dimension =
+            self.parameter_dimension() + self.external_parameter_dimension();
+        if state.len() != self.dimension() || parameters.len() != runtime_parameter_dimension {
             return Err(BvpSciNewError::ShapeMismatch {
                 stage: BvpSciStage::CallbackInput,
-                expected: 1 + self.dimension() + self.parameter_dimension(),
+                expected: 1 + self.dimension() + runtime_parameter_dimension,
                 actual: 1 + state.len() + parameters.len(),
             });
         }

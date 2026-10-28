@@ -45,7 +45,7 @@ fn main() {
     run(BvpSciMatrixLayout::Sparse);
     // Для двух state-компонент ширина 1/1 достаточна; 5/5 была бы слишком
     // широкой для этого маленького учебного Jacobian.
-    run(BvpSciMatrixLayout::Banded { lower: 1, upper: 1 });
+    run(BvpSciMatrixLayout::BandedAuto);
 }
 
 // Необязательный sparse-маршрут SuperLU

@@ -2764,7 +2764,6 @@ pub mod generated_bvp_huge_fixture {
         out[157] = t131;
         out[158] = t0;
     }
-
 }
 
 pub mod generated_bvp_huge_fixture_bindings {
@@ -2783,5 +2782,4 @@ pub mod generated_bvp_huge_fixture_bindings {
         generated_bvp_huge_fixture::fixture_bvp128_sparse_values_chunk_2,
         generated_bvp_huge_fixture::fixture_bvp128_sparse_values_chunk_3,
     ];
-
 }

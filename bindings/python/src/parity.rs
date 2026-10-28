@@ -188,7 +188,7 @@ fn radau_wrapper_matches_native_dense_expr_legacy_solution_and_counters() {
         .with_jacobian(vec![jacobian.inner.clone()]);
     let mut native = NativeRadauSolver::prepare(problem, config).expect("native preparation");
     let native_result = native
-        .solve_with_parameters(&[1.0], &[])
+        .try_solve_with_parameter_values(&[1.0], &[])
         .expect("native solve");
 
     assert_close(wrapper_result.final_time(), native_result.t, 1e-12);
@@ -316,6 +316,7 @@ fn bvp_sci_wrapper_matches_native_dense_expr_legacy_solution_and_counters() {
             vec![boundary],
             mesh.clone(),
             initial_state.clone(),
+            None,
             None,
             None,
             "x",

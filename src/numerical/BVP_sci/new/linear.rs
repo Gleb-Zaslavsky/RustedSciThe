@@ -67,6 +67,11 @@ impl NativeLinearBackend {
             BvpSciMatrixLayout::Banded { lower, upper } => {
                 Self::Banded(BandedBackend::new(dimension, lower, upper)?)
             }
+            BvpSciMatrixLayout::BandedAuto => {
+                return Err(BvpSciNewError::InvalidConfiguration(
+                    "BandedAuto must be resolved from symbolic dependencies before backend creation".into(),
+                ));
+            }
         })
     }
 
@@ -105,6 +110,11 @@ impl NativeLinearBackend {
                     parameter_dimension,
                     telemetry,
                 )?)
+            }
+            BvpSciMatrixLayout::BandedAuto => {
+                return Err(BvpSciNewError::InvalidConfiguration(
+                    "BandedAuto must be resolved from symbolic dependencies before backend creation".into(),
+                ));
             }
         })
     }

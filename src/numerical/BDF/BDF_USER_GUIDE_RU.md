@@ -31,19 +31,20 @@ cargo run --no-default-features --example rus_bdf_native_dense_guide
 включает счетчики телеметрии, использует типизированный `try_solve` и
 сравнивает результат с точным решением.
 
-## Символьное продолжение по параметру
+## Смена параметра между временными сегментами
 
-`examples/rus/bdf_symbolic_continuation_guide.rs` показывает AtomView вместе с
-Lambdify. Подготовленные residual и Jacobian переиспользуются, меняются только
-значение параметра и численная история BDF:
+`examples/rus/bdf_time_segment_parameter_update_guide.rs` показывает AtomView
+вместе с Lambdify. Подготовленные residual и Jacobian переиспользуются при
+смене параметра на принятом состоянии и продолжении интегрирования по времени:
 
 ```text
-cargo run --no-default-features --example rus_bdf_symbolic_continuation_guide
+cargo run --no-default-features --example rus_bdf_time_segment_parameter_update_guide
 ```
 
-Продолжение безопасно, пока символьная структура не меняется. Изменение формы
-уравнений, размерности состояния, layout якобиана или политики бэкенда требует
-новой подготовленной сборки.
+Это смена параметра на принятом состоянии с дальнейшим интегрированием по
+времени, а не fresh solve от исходного начального условия и не solution-seeded
+продолжение по параметру. Изменение формы уравнений, размерности состояния,
+layout якобиана или политики бэкенда требует новой подготовленной сборки.
 
 ## AOT и toolchain
 

@@ -16,11 +16,13 @@ arg: x
 unknowns: y
 rhs: -rate*y
 parameters: rate
-parameter_values: 1.0
+# Initial guess for the free BVP_sci parameter unknown, not a fixed input.
+parameter_values: 0.7
 
 # BVP_sci validates the complete scalar boundary-condition set early.
 boundary_conditions
 y_left: 1.0
+y_right: 0.36787944117144233
 
 # n_steps is the initial collocation mesh size.
 mesh
@@ -36,6 +38,7 @@ y: 0.0
 # and additionally reuse the prepared symbolic plan.
 continuation
 parameter: rate
+# These are successive initial guesses; the boundary conditions determine p.
 values: 0.5, 1.0
 # `fresh` prepares each segment independently; warm/prepared retain the plan.
 mode: fresh

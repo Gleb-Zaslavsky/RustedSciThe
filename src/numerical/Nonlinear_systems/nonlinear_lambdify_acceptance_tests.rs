@@ -35,7 +35,7 @@ mod tests {
     fn options(policy: LambdifyExecutionPolicy) -> SymbolicProblemOptions {
         SymbolicProblemOptions::new()
             .with_variables(vec!["x".to_string(), "y".to_string()])
-            .with_equation_parameters(vec!["a".to_string()])
+            .with_parameter_names(vec!["a".to_string()])
             .with_lambdify_execution_policy(policy)
     }
 
@@ -201,7 +201,7 @@ mod tests {
             equations,
             SymbolicProblemOptions::new()
                 .with_variables(variables)
-                .with_equation_parameters(parameters.clone())
+                .with_parameter_names(parameters.clone())
                 .with_lambdify_execution_policy(LambdifyExecutionPolicy::Parallel { min_work: 1 }),
         )
         .expect("many-parameter Lambdify preparation should succeed");
@@ -311,7 +311,7 @@ mod tests {
                     equations.clone(),
                     SymbolicProblemOptions::new()
                         .with_variables(variables.clone())
-                        .with_equation_parameters(parameters.clone())
+                        .with_parameter_names(parameters.clone())
                         .with_lambdify_execution_policy(policy),
                 )
                 .expect("parameter hot-path preparation should succeed")

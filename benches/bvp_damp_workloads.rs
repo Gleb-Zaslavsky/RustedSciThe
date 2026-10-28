@@ -395,10 +395,10 @@ fn run_one(config: RunConfig) -> Result<DashboardRow, String> {
         SolverFamily::Damped => {
             let mut solver = build_damped(config);
             solver
-                .try_set_params(Some(&["alpha"]))
+                .try_set_parameter_names(Some(&["alpha"]))
                 .map_err(|error| format!("parameter declaration: {error:?}"))?;
             solver
-                .try_set_param_values(Some(vec![1.0]))
+                .try_set_parameter_values(Some(vec![1.0]))
                 .map_err(|error| format!("parameter binding: {error:?}"))?;
             let preparation = Instant::now();
             solver
@@ -414,7 +414,7 @@ fn run_one(config: RunConfig) -> Result<DashboardRow, String> {
             let continuation_started = Instant::now();
             for index in 1..config.continuation {
                 solver
-                    .try_set_param_values(Some(vec![1.0 + index as f64 * 0.1]))
+                    .try_set_parameter_values(Some(vec![1.0 + index as f64 * 0.1]))
                     .map_err(|error| format!("continuation bind: {error:?}"))?;
                 solver
                     .try_solver_prepared()
@@ -453,10 +453,10 @@ fn run_one(config: RunConfig) -> Result<DashboardRow, String> {
         SolverFamily::Frozen => {
             let mut solver = build_frozen(config);
             solver
-                .try_set_params(Some(&["alpha"]))
+                .try_set_parameter_names(Some(&["alpha"]))
                 .map_err(|error| format!("parameter declaration: {error:?}"))?;
             solver
-                .try_set_param_values(Some(vec![1.0]))
+                .try_set_parameter_values(Some(vec![1.0]))
                 .map_err(|error| format!("parameter binding: {error:?}"))?;
             let preparation = Instant::now();
             solver
@@ -472,7 +472,7 @@ fn run_one(config: RunConfig) -> Result<DashboardRow, String> {
             let continuation_started = Instant::now();
             for index in 1..config.continuation {
                 solver
-                    .try_set_param_values(Some(vec![1.0 + index as f64 * 0.1]))
+                    .try_set_parameter_values(Some(vec![1.0 + index as f64 * 0.1]))
                     .map_err(|error| format!("continuation bind: {error:?}"))?;
                 solver
                     .try_solver_prepared()

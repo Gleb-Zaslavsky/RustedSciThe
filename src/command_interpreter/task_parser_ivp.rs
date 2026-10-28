@@ -496,7 +496,7 @@ impl IvpTaskSolver {
                         .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Bdf(error)))?;
                 } else {
                     solver
-                        .try_continue_with_parameter_values(values, initial.t_end)
+                        .try_continue_in_time_with_parameter_values(values, initial.t_end)
                         .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Bdf(error)))?;
                 }
                 solver
@@ -540,7 +540,7 @@ impl IvpTaskSolver {
                     .restart(initial.t0, initial.t_end)
                     .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Radau(error)))?;
                 let solution = solver
-                    .continue_with_parameters(y0.as_slice(), parameters)
+                    .try_solve_with_parameter_values(y0.as_slice(), parameters)
                     .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Radau(error)))?;
                 *last_solution = Some(solution);
                 Ok(())
@@ -605,7 +605,7 @@ impl IvpTaskSolver {
                 last_solution,
             } => {
                 let solution = solver
-                    .solve_with_parameters(y0.as_slice(), parameters)
+                    .try_solve_with_parameter_values(y0.as_slice(), parameters)
                     .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Radau(error)))?;
                 *last_solution = Some(solution);
                 Ok(())
@@ -1193,6 +1193,7 @@ fn validate_solver_options(
                 matches!(
                     options.matrix_layout,
                     Some(Lsode2LinearSystemStructure::Sparse { .. })
+                        | Some(Lsode2LinearSystemStructure::BandedAuto)
                         | Some(Lsode2LinearSystemStructure::Banded { .. })
                 ),
                 "matrix_layout",
@@ -1654,7 +1655,8 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                         Box::new(FaerSparseBdfLinearBackend::default())
                     });
                 }
-                Lsode2LinearSystemStructure::Banded { .. } => {
+                Lsode2LinearSystemStructure::BandedAuto
+                | Lsode2LinearSystemStructure::Banded { .. } => {
                     solver.set_bdf_linear_backend_factory(|| {
                         Box::new(FaithfulBandedBdfLinearBackend::default())
                     });
@@ -1757,6 +1759,7 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                 config.matrix_layout = match layout {
                     Lsode2LinearSystemStructure::Dense => RadauMatrixLayout::Dense,
                     Lsode2LinearSystemStructure::Sparse => RadauMatrixLayout::Sparse,
+                    Lsode2LinearSystemStructure::BandedAuto => RadauMatrixLayout::BandedAuto,
                     Lsode2LinearSystemStructure::Banded { kl, ku } => RadauMatrixLayout::Banded {
                         lower: kl,
                         upper: ku,
@@ -1802,7 +1805,7 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                 spec.equations.arg.clone(),
             )
             .with_jacobian(jacobian)
-            .with_parameters(spec.equations.parameter_names.clone());
+            .with_parameter_names(spec.equations.parameter_names.clone());
             let solver = RadauSolver::prepare(problem, config)
                 .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Radau(error)))?;
             Ok(IvpTaskSolver::Radau {
@@ -2610,14 +2613,23 @@ fn parse_common_matrix_layout(
     match raw.trim().to_ascii_lowercase().as_str() {
         "dense" => Ok(Some(Lsode2LinearSystemStructure::Dense)),
         "sparse" => Ok(Some(Lsode2LinearSystemStructure::Sparse)),
-        "banded" => Ok(Some(Lsode2LinearSystemStructure::Banded {
-            kl: get_optional_usize(section, "banded_lower")?
-                .or(get_optional_usize(section, "banded_kl")?)
-                .unwrap_or(1),
-            ku: get_optional_usize(section, "banded_upper")?
-                .or(get_optional_usize(section, "banded_ku")?)
-                .unwrap_or(1),
-        })),
+        "banded" => {
+            let kl = get_optional_usize(section, "banded_lower")?
+                .or(get_optional_usize(section, "banded_kl")?);
+            let ku = get_optional_usize(section, "banded_upper")?
+                .or(get_optional_usize(section, "banded_ku")?);
+            match (kl, ku) {
+                (None, None) => Ok(Some(Lsode2LinearSystemStructure::BandedAuto)),
+                (Some(kl), Some(ku)) => {
+                    Ok(Some(Lsode2LinearSystemStructure::Banded { kl, ku }))
+                }
+                _ => Err(IvpTaskError::InvalidField {
+                    section: "solver_options".to_string(),
+                    field: "banded_lower/banded_upper".to_string(),
+                    message: "provide both banded half-widths, or omit both to infer them from the symbolic Jacobian".to_string(),
+                }),
+            }
+        }
         other => Err(IvpTaskError::InvalidField {
             section: "solver_options".to_string(),
             field: "matrix_layout".to_string(),
@@ -2888,9 +2900,19 @@ fn parse_lsode2_linear_structure(
         "dense" => Ok(Some(Lsode2LinearSystemStructure::Dense)),
         "sparse" => Ok(Some(Lsode2LinearSystemStructure::Sparse)),
         "banded" => {
-            let kl = get_optional_usize(section, "lsode2_banded_kl")?.unwrap_or(0);
-            let ku = get_optional_usize(section, "lsode2_banded_ku")?.unwrap_or(0);
-            Ok(Some(Lsode2LinearSystemStructure::Banded { kl, ku }))
+            let kl = get_optional_usize(section, "lsode2_banded_kl")?;
+            let ku = get_optional_usize(section, "lsode2_banded_ku")?;
+            match (kl, ku) {
+                (None, None) => Ok(Some(Lsode2LinearSystemStructure::BandedAuto)),
+                (Some(kl), Some(ku)) => {
+                    Ok(Some(Lsode2LinearSystemStructure::Banded { kl, ku }))
+                }
+                _ => Err(IvpTaskError::InvalidField {
+                    section: "solver_options".to_string(),
+                    field: "lsode2_banded_kl/lsode2_banded_ku".to_string(),
+                    message: "provide both LSODE2 band widths, or omit both to infer them from the symbolic Jacobian".to_string(),
+                }),
+            }
         }
         other => Err(IvpTaskError::InvalidField {
             section: "solver_options".to_string(),

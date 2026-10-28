@@ -1,6 +1,6 @@
-//! Reuse one AtomView-AOT artifact while sweeping a numeric model parameter.
+//! Reuse one AtomView-AOT artifact across fresh solves with new parameter values.
 //!
-//! Run with `cargo run --no-default-features --example lsode2_parameter_continuation_aot`.
+//! Run with `cargo run --no-default-features --example lsode2_parameter_rebind_aot`.
 //! Requires `tcc` on PATH. Each solve starts again from the configured `t0/y0`.
 
 use RustedSciThe::numerical::LSODE2::{
@@ -22,7 +22,7 @@ fn command_available(command: &str) -> bool {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !command_available("tcc") {
-        println!("Skipping AOT continuation example: `tcc` is not on PATH.");
+        println!("Skipping AOT parameter-rebind example: `tcc` is not on PATH.");
         return Ok(());
     }
 

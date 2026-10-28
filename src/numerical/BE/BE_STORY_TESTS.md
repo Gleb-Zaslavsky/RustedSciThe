@@ -222,7 +222,8 @@ Keep expensive cold lifecycle work separate from native correctness stories.
 The public usage guides are [`BE_USER_GUIDE_EN.md`](BE_USER_GUIDE_EN.md) and
 [`BE_USER_GUIDE_RU.md`](BE_USER_GUIDE_RU.md). Runnable route examples are
 registered in `Cargo.toml`: `be_native_callbacks_guide`,
-`be_symbolic_continuation_guide`, and `be_aot_guide`, with `rus_be_*` counterparts.
+`be_time_segment_parameter_update_guide`, and `be_aot_guide`, with matching
+`rus_be_*` counterparts.
 The older task-shell example remains a separate command-interpreter example;
 it is not the recommended direct Rust API pattern.
 
@@ -230,10 +231,10 @@ Compile all six direct-API examples:
 
 ```powershell
 cargo check --no-default-features --example be_native_callbacks_guide
-cargo check --no-default-features --example be_symbolic_continuation_guide
+cargo check --no-default-features --example be_time_segment_parameter_update_guide
 cargo check --no-default-features --example be_aot_guide
 cargo check --no-default-features --example rus_be_native_callbacks_guide
-cargo check --no-default-features --example rus_be_symbolic_continuation_guide
+cargo check --no-default-features --example rus_be_time_segment_parameter_update_guide
 cargo check --no-default-features --example rus_be_aot_guide
 ```
 

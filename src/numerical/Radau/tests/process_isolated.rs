@@ -39,6 +39,7 @@ fn layout_label(layout: RadauMatrixLayout) -> &'static str {
     match layout {
         RadauMatrixLayout::Dense => "dense",
         RadauMatrixLayout::Sparse => "sparse",
+        RadauMatrixLayout::BandedAuto => "banded-auto",
         RadauMatrixLayout::Banded { .. } => "banded",
     }
 }
@@ -243,10 +244,10 @@ fn radau_aot_process_child() {
             let target =
                 parameter_continuation_target(&nalgebra::DVector::from_vec(parameters.clone()), 1);
             let first = solver
-                .solve_with_parameters(&initial_state, &parameters)
+                .try_solve_with_parameter_values(&initial_state, &parameters)
                 .expect("Radau consumer solve");
             let continued = solver
-                .continue_with_parameters(&initial_state, target.as_slice())
+                .try_solve_with_parameter_values(&initial_state, target.as_slice())
                 .expect("Radau consumer continuation");
             let (reference_problem, _, _) =
                 workload_problem(WorkloadKind::DiffusionChain, 16, frontend);
@@ -261,10 +262,10 @@ fn radau_aot_process_child() {
             let mut reference = RadauSolver::prepare(reference_problem, reference_config)
                 .expect("Radau process reference preparation");
             let reference_first = reference
-                .solve_with_parameters(&initial_state, &parameters)
+                .try_solve_with_parameter_values(&initial_state, &parameters)
                 .expect("Radau process reference solve");
             let reference_continued = reference
-                .continue_with_parameters(&initial_state, target.as_slice())
+                .try_solve_with_parameter_values(&initial_state, target.as_slice())
                 .expect("Radau process reference continuation");
             let counters = &continued.telemetry().counters;
             assert_eq!(counters["aot_build_attempts"], 0);

@@ -45,19 +45,20 @@ It installs a native residual and a constant dense analytic Jacobian, enables
 counter telemetry, uses typed `try_solve`, and checks the result against the
 closed-form solution.
 
-## Symbolic Parameter Continuation
+## Time-Segment Parameter Changes
 
-`examples/bdf_symbolic_continuation_guide.rs` demonstrates AtomView plus
-Lambdify. A prepared residual/Jacobian is reused while only the parameter value
-and numerical BDF history are changed:
+`examples/bdf_time_segment_parameter_update_guide.rs` demonstrates AtomView plus
+Lambdify. A prepared residual/Jacobian is reused while the parameter value
+changes at the current accepted state and integration continues in time:
 
 ```text
-cargo run --no-default-features --example bdf_symbolic_continuation_guide
+cargo run --no-default-features --example bdf_time_segment_parameter_update_guide
 ```
 
-Use continuation when the symbolic structure is unchanged. A changed equation
-shape, state dimension, Jacobian layout, or backend policy requires a new
-prepared assembly.
+This is a parameter switch between time segments, not a fresh solve from the
+original initial condition and not solution-seeded parameter continuation.
+A changed equation shape, state dimension, Jacobian layout, or backend policy
+requires a new prepared assembly.
 
 For a new initial state or a new interval with the same prepared model, use
 `try_restart_with_initial_state(t0, y0, t_bound)`. It resets BDF history,
@@ -119,6 +120,16 @@ The standalone solver stores dense Jacobians and uses dense linear algebra.
 Do not pass a dense `jac_sparsity` promise expecting sparse execution. For large
 diffusion or banded systems, LSODE2 is the supported route and provides the
 structured matrix backends and their corresponding telemetry and story tests.
+
+## Independent Parameter Sweeps
+
+`ODEsolver::try_solve_parameter_loop(y0, vectors)` reuses one prepared BDF
+model and starts a fresh solve for each ordered parameter vector. Every point
+uses the same `y0` and configured interval; the previous terminal state is
+never reused. Each point retains its time-by-state trajectory and native
+telemetry, or its typed `BdfSolveError`. A failed point does not stop later
+points. See `examples/bdf_parameter_loop.rs` and the shared
+[`IVP parameter-loop guide`](../IVP_PARAMETER_LOOP_GUIDE_EN.md).
 
 ## Numerical-Core Parity With SciPy
 

@@ -375,9 +375,10 @@ def solve_ivp(
 
     Arguments have the same meaning as :func:`create_ivp`. This helper is for
     one-shot solves; use ``create_ivp`` when you need explicit preparation,
-    continuation or restart. For Radau, ``y0`` is passed to ``solve`` because
-    the native solver binds its initial state at execution time. For other
-    families it is retained by the constructed solver.
+    fresh parameterized solves, time-segment continuation or restart. For
+    Radau, ``y0`` is passed to ``solve`` because the native solver binds its
+    initial state at execution time. For other families it is retained by the
+    constructed solver.
 
     Returns
     -------

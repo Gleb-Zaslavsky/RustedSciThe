@@ -125,11 +125,11 @@
 //! - Automatic step size reduction for difficult regions
 //! - Clear error messages for debugging
 
-use crate::numerical::logging::SolverLogLevel;
 use crate::numerical::BDF::BDF_solver::{
-    BdfConfigurationError, BdfJacobian, BdfLinearBackend, BdfOperationCounters, BdfStepError, BDF,
+    BDF, BdfConfigurationError, BdfJacobian, BdfLinearBackend, BdfOperationCounters, BdfStepError,
 };
 pub use crate::numerical::BDF::BDF_solver::{BdfJacobianCallbackError, BdfJacobianSource};
+use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::ivp_telemetry::{
     IvpLambdifyExecutionPolicy, IvpTelemetry, IvpTelemetrySnapshot,
@@ -140,13 +140,13 @@ use crate::symbolic::symbolic_ivp::{
     SymbolicIvpProblemOptions,
 };
 use crate::symbolic::symbolic_ivp_generated::{
-    prepare_generated_symbolic_ivp_problem, prepare_generated_symbolic_ivp_residual_problem,
     DenseIvpGeneratedBackendMode, IvpBackendStatistics, SymbolicIvpAotBuildPolicy,
-    SymbolicIvpGeneratedBackendConfig,
+    SymbolicIvpGeneratedBackendConfig, prepare_generated_symbolic_ivp_problem,
+    prepare_generated_symbolic_ivp_residual_problem,
 };
 extern crate nalgebra as na;
-use crate::numerical::BDF::common::NumberOrVec;
 use crate::Utils::plots::plots_ref;
+use crate::numerical::BDF::common::NumberOrVec;
 use na::{DMatrix, DVector};
 
 use csv::Writer;
@@ -1365,7 +1365,7 @@ impl ODEsolver {
 
     /// Updates numeric values of symbolic equation parameters without recompiling
     /// already prepared closures. This only changes the shared parameter slot;
-    /// use [`Self::try_continue_with_parameter_values`] to restart solver history
+    /// use [`Self::try_continue_in_time_with_parameter_values`] to restart solver history
     /// at a segment boundary before integrating with the new values.
     pub fn set_parameter_values(&mut self, values: DVector<f64>) -> Result<(), IvpBackendError> {
         if let Some(parameters) = self.equation_parameters.as_ref() {
@@ -1392,10 +1392,14 @@ impl ODEsolver {
         Ok(())
     }
 
-    /// Starts a new parameter segment at the current accepted `(t, y)` state.
-    /// The prepared numerical callbacks and generated artifact are reused; only
-    /// the BDF history, Jacobian and factorization are reinitialized.
-    pub fn try_continue_with_parameter_values(
+    /// Changes parameters at the current accepted `(t, y)` and continues
+    /// integration in time to `t_bound`.
+    ///
+    /// Prepared callbacks and generated artifacts are reused, while the BDF
+    /// history, Jacobian and factorization are reinitialized. This is a
+    /// time-segment parameter switch, not a fresh solve from the original
+    /// `t0/y0` and not solution-seeded parameter continuation.
+    pub fn try_continue_in_time_with_parameter_values(
         &mut self,
         values: DVector<f64>,
         t_bound: f64,
@@ -1419,6 +1423,18 @@ impl ODEsolver {
         self.t_bound = t_bound;
 
         self.try_restart_prepared_runtime()
+    }
+
+    /// Legacy name for [`Self::try_continue_in_time_with_parameter_values`].
+    #[deprecated(
+        note = "this continues integration in time; use try_continue_in_time_with_parameter_values"
+    )]
+    pub fn try_continue_with_parameter_values(
+        &mut self,
+        values: DVector<f64>,
+        t_bound: f64,
+    ) -> Result<(), BdfSolveError> {
+        self.try_continue_in_time_with_parameter_values(values, t_bound)
     }
 
     /// Restarts a prepared model with a new initial state and integration
@@ -1463,6 +1479,34 @@ impl ODEsolver {
         self.y0 = y0;
         self.t_bound = t_bound;
         self.try_restart_prepared_runtime()
+    }
+
+    /// Starts a fresh solve with new parameters and initial state while using
+    /// the currently configured time interval. Prepared symbolic callbacks and
+    /// generated artifacts are retained; BDF's numerical history is reset.
+    pub fn try_solve_with_parameter_values(
+        &mut self,
+        y0: DVector<f64>,
+        values: DVector<f64>,
+    ) -> Result<(), BdfSolveError> {
+        let t0 = self.t0;
+        let t_bound = self.t_bound;
+        self.try_solve_with_parameter_values_in_interval(t0, y0, t_bound, values)
+    }
+
+    /// Starts a fresh solve with new parameters, initial state and time
+    /// interval, reusing the already prepared symbolic/AOT backend.
+    pub fn try_solve_with_parameter_values_in_interval(
+        &mut self,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        values: DVector<f64>,
+    ) -> Result<(), BdfSolveError> {
+        self.set_parameter_values(values)
+            .map_err(BdfSolveError::Backend)?;
+        self.try_restart_with_initial_state(t0, y0, t_bound)?;
+        self.try_solve()
     }
 
     fn try_restart_prepared_runtime(&mut self) -> Result<(), BdfSolveError> {
@@ -2551,7 +2595,7 @@ mod tests {
         assert_eq!(counters.jacobian_evaluations, 1);
 
         solver
-            .try_continue_with_parameter_values(DVector::from_element(1, 2.0), 0.4)
+            .try_continue_in_time_with_parameter_values(DVector::from_element(1, 2.0), 0.4)
             .unwrap();
         let continuation_counters = solver.Solver_instance.operation_counters();
         assert_eq!(continuation_counters.rhs_evaluations, 1);
@@ -3218,7 +3262,7 @@ mod tests_generated_backend_heavy_dense_aot {
     use crate::symbolic::symbolic_ivp_generated::{
         DenseIvpGeneratedBackendMode, SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
     };
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

@@ -4,6 +4,7 @@ pub mod be;
 pub mod bvp_damp;
 pub mod bvp_large;
 pub mod bvp_sci;
+pub mod ivp_parameter_loop;
 pub mod lsode2;
 pub mod nonlinear;
 pub mod nonlinear_matrix;

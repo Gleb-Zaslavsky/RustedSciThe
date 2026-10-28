@@ -45,10 +45,6 @@ for frontend in ("expr_legacy", "atom_native"):
             matrix_layout=layout,
             telemetry="counters",
         )
-        if layout == "banded":
-            # The Jacobian's exact lower/upper half-bandwidths in the chosen
-            # state ordering are 1 and 2; narrower values would truncate it.
-            options.set_banded_width(1, 2)
         solution = solve_ivp(
             "radau5",
             rhs,

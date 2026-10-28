@@ -48,5 +48,5 @@ fn main() {
     run(BvpSciMatrixLayout::Sparse);
     // Для двух state-компонент ширина 1/1 уже покрывает соседние coupling-и;
     // ширина 5/5 была бы некорректна для такого маленького учебного примера.
-    run(BvpSciMatrixLayout::Banded { lower: 1, upper: 1 });
+    run(BvpSciMatrixLayout::BandedAuto);
 }

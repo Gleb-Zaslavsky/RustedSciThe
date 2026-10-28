@@ -26,13 +26,16 @@ equations
 arg: x
 unknowns: y
 rhs: -rate*y
+# BVP_sci parameters are free Newton unknowns, not fixed inputs. This is their
+# initial guess; one extra boundary residual is required for this unknown.
 parameters: rate
-parameter_values: 1.0
+parameter_values: 0.7
 
 boundary_conditions
 # A BVP_sci task needs a complete scalar boundary-condition set: normally one
 # condition per state, distributed between left and right endpoints.
 y_left: 1.0
+y_right: 0.36787944117144233
 
 mesh
 t0: 0.0
@@ -157,4 +160,21 @@ collection, `Counters` records discrete work without reading the clock, and
 `Timings` records durations without collecting discrete counts. `Detailed`
 combines both and retains the per-mesh/Newton trace. Timing scopes may overlap;
 do not add parent and child durations together.
+
+## Ordered fixed-parameter solves
+
+`parameter_names` declares unknowns that BVP_sci solves together with the
+state profile. Fixed model inputs use the separate
+`with_external_parameter_names` / `with_external_parameter_values` schema.
+They are callback inputs, not additional Newton columns. The prepared
+ExprLegacy, AtomViewNative or AOT evaluator is reused while values change.
+
+Call `solve_parameter_loop(&[vec![...], ...])` to process points in order. A
+successful point becomes the next initial mesh/profile and free-parameter
+guess. A failed point retains its typed error and telemetry snapshot; the
+solver restores the last successful checkpoint (or its original state if the
+first point fails) and continues. Each telemetry snapshot is cumulative for
+the solver at that point, not a per-point delta. Named external inputs are not
+currently supported for numerical callbacks because those callback APIs do
+not yet define a separate fixed-input channel.
 

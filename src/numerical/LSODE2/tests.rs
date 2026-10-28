@@ -1006,7 +1006,7 @@ fn run_prelinked_sparse_or_banded_aot_case(
     probe_backend.build_policy = SymbolicIvpAotBuildPolicy::UseIfAvailable;
     let prepared_sparse = if assembly == Lsode2SymbolicAssemblyBackend::AtomView {
         match structure {
-            Lsode2LinearSystemStructure::Banded { kl, ku } if kl + ku > 0 => {
+            Lsode2LinearSystemStructure::Banded { kl, ku } => {
                 prepare_generated_symbolic_ivp_banded_backend(
                     config.eq_system.clone(),
                     config.values.clone(),
@@ -1016,9 +1016,10 @@ fn run_prelinked_sparse_or_banded_aot_case(
                     probe_backend,
                 )
             }
-            Lsode2LinearSystemStructure::Banded { .. } => {
-                // A zero-width band is normalized to the sparse route by
-                // LSODE2, so the prelinked probe must use the same key.
+            Lsode2LinearSystemStructure::BandedAuto => {
+                // AtomView-generated LSODE2 callbacks share a sparse artifact
+                // for inferred bands; only an explicit width selects the
+                // compact banded artifact ABI.
                 prepare_generated_symbolic_ivp_sparse_backend(
                     config.eq_system.clone(),
                     config.values.clone(),
@@ -1253,10 +1254,7 @@ fn lsode2_resolved_plan_analytical_banded_forced_faithful_is_visible() {
         .resolve_plan();
 
     assert_eq!(plan.source, Lsode2ResidualJacobianSource::Analytical);
-    assert_eq!(
-        plan.structure,
-        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 }
-    );
+    assert_eq!(plan.structure, Lsode2LinearSystemStructure::BandedAuto);
     assert_eq!(
         plan.linear_solver,
         Lsode2LinearSolverChoice::LapackFaithfulBandedLu
@@ -1357,7 +1355,7 @@ fn lsode2_exprlegacy_and_atomview_native_solver_traces_match_in_debug() {
 
     for structure in [
         Lsode2LinearSystemStructure::Sparse,
-        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
+        Lsode2LinearSystemStructure::BandedAuto,
     ] {
         let legacy = run_trace(Lsode2SymbolicAssemblyBackend::ExprLegacy, structure);
         let native = run_trace(Lsode2SymbolicAssemblyBackend::AtomView, structure);
@@ -4012,7 +4010,7 @@ fn lsode2_backend_parity_checklist_lambdify_and_aot_exprlegacy_and_atomview() {
     let structures = [
         Lsode2LinearSystemStructure::Dense,
         Lsode2LinearSystemStructure::Sparse,
-        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
+        Lsode2LinearSystemStructure::BandedAuto,
     ];
 
     // Lambdify parity surface: all assembly/structure combinations should solve.
@@ -4045,7 +4043,7 @@ fn lsode2_backend_parity_checklist_lambdify_and_aot_exprlegacy_and_atomview() {
         );
         run_prelinked_sparse_or_banded_aot_case(
             assembly,
-            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
+            Lsode2LinearSystemStructure::BandedAuto,
             &format!("{session_tag}_{assembly_tag}_banded"),
         );
     }

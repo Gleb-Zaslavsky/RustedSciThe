@@ -364,22 +364,6 @@ fn build_ivp_task_template(config: &IvpTemplateConfig) -> String {
         ));
         if config.method != IvpTemplateMethod::BackwardEuler {
             template.push_str(&format!(
-                "banded_lower: {}\n",
-                if matches!(config.linear_structure, IvpLinearStructure::Banded) {
-                    1
-                } else {
-                    0
-                }
-            ));
-            template.push_str(&format!(
-                "banded_upper: {}\n",
-                if matches!(config.linear_structure, IvpLinearStructure::Banded) {
-                    1
-                } else {
-                    0
-                }
-            ));
-            template.push_str(&format!(
                 "execution_policy: {}\n",
                 config.execution_policy.task_value()
             ));
@@ -779,7 +763,7 @@ mod tests {
         );
         assert_eq!(
             lsode2.linear_system_structure,
-            Some(Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 })
+            Some(Lsode2LinearSystemStructure::BandedAuto)
         );
         assert_eq!(
             lsode2.linear_solver_policy,

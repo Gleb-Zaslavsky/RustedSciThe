@@ -8,8 +8,10 @@
 //! `cargo run --example legacy_main_compat -- 0`
 
 use RustedSciThe::numerical::BE::BE;
+use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_damped::{
+    DampedSolverOptions, NRBVP as DampedNRBVP, SolverParams,
+};
 use RustedSciThe::numerical::BVP_Damp::NR_Damp_solver_frozen::NRBVP as FrozenNRBVP;
-use RustedSciThe::numerical::BVP_api::BVP;
 use RustedSciThe::numerical::LSODE2::{
     Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure, Lsode2ProblemConfig,
     Lsode2ResidualJacobianSource, Lsode2SymbolicAssemblyBackend, Lsode2SymbolicExecutionMode,
@@ -307,34 +309,32 @@ fn case_19_bvp_solver_sparse() {
         ("z".to_string(), (-10.0, 10.0)),
         ("y".to_string(), (-10.0, 10.0)),
     ]);
-    let strategy_params = Some(HashMap::from([
-        ("max_jac".to_string(), None),
-        ("maxDampIter".to_string(), None),
-        ("DampFacor".to_string(), None),
-        ("adaptive".to_string(), None),
-    ]));
-
-    let mut solver = BVP::new(
+    let options = DampedSolverOptions::new(
+        "trapezoid".into(),
+        "Damped".into(),
+        Some(SolverParams::default()),
+        None,
+        "Sparse".into(),
+        1e-5,
+        Some(rel_tol),
+        8,
+        Some(bounds),
+        Some("off".into()),
+    );
+    let mut solver = DampedNRBVP::new_with_options(
         equations,
         initial_guess,
         values,
-        "x".to_string(),
+        "x".into(),
         bc,
         0.0,
         1.0,
         n_steps,
-        "trapezoid".to_string(),
-        "Damped".to_string(),
-        strategy_params,
-        None,
-        "Sparse".to_string(),
-        1e-5,
-        8,
-        Some(rel_tol),
-        Some(bounds),
-        Some("off".to_string()),
+        options,
     );
-    solver.solve();
+    solver
+        .try_solver()
+        .expect("Damped BVP execution should succeed");
     let result = solver.get_result().expect("BVP solution should exist");
     println!("BVP solved, rows   = {}", result.nrows());
     println!("BVP solved, cols   = {}", result.ncols());

@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec!["y".to_owned()],
         "t",
     )
-    .with_parameters(vec!["k".to_owned()])
+    .with_parameter_names(vec!["k".to_owned()])
     .with_jacobian(vec![Expr::parse_expression("-k")]);
     let config = RadauConfig {
         frontend: RadauFrontend::ExprLegacy,
@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..RadauConfig::default()
     };
     let mut solver = RadauSolver::prepare(problem, config)?;
-    let solution = solver.solve_with_parameters(&[1.0], &[2.0])?;
+    let solution = solver.try_solve_with_parameter_values(&[1.0], &[2.0])?;
     println!(
         "Lambdify single solve: t={:.6} y={:?}",
         solution.t, solution.y

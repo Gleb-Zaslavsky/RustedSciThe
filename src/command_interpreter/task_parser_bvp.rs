@@ -32,10 +32,15 @@ use crate::command_interpreter::task_parser_common::{
     ContinuationMode, ContinuationSpec, SharedEquationParseError, parse_continuation_spec,
     parse_symbolic_equation_system,
 };
+use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
+    DampedSolverOptions, NRBVP as DampedBvpSolver, SolverParams,
+};
+use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::{
+    FrozenSolverOptions, NRBVP as FrozenBvpSolver,
+};
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
 };
-use crate::numerical::BVP_api::BVP;
 use crate::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciExecutionPolicy, BvpSciMatrixLayout, BvpSciNewError,
     BvpSciOptions, BvpSciOutputPolicy, BvpSciSingularTerm, BvpSciSolver, BvpSciSparseFactorization,
@@ -829,6 +834,7 @@ impl std::error::Error for BvpTaskError {
 /// text; this projection is only for compact tables and process policies.
 fn bvp_sci_error_category(error: &BvpSciNewError) -> &'static str {
     match error {
+        BvpSciNewError::Logging(_) => "logging_setup",
         BvpSciNewError::InvalidConfiguration(_) => "configuration",
         BvpSciNewError::Callback { .. }
         | BvpSciNewError::ShapeMismatch { .. }
@@ -861,7 +867,7 @@ fn bvp_sci_error_category(error: &BvpSciNewError) -> &'static str {
         },
         BvpSciNewError::AotHandoff { .. } => "aot_handoff",
         BvpSciNewError::AotRuntime { .. } => "aot_runtime",
-        BvpSciNewError::ContinuationMismatch => "continuation",
+        BvpSciNewError::ParameterBindingMismatch { .. } => "parameter_binding",
         BvpSciNewError::OutputOutOfDomain | BvpSciNewError::OutputUnavailable => "postprocess",
     }
 }
@@ -1081,8 +1087,134 @@ pub fn parse_bvp_task_from_document(document: &DocumentMap) -> Result<BvpTaskSpe
     Ok(spec)
 }
 
-/// Build a [`BVP`] solver from a full task specification.
-pub fn build_bvp_solver_from_spec(spec: &BvpTaskSpec) -> Result<BVP, BvpTaskError> {
+/// Native BVP_Damp solver selected by a task document.
+///
+/// This enum belongs to the task runner: it keeps document execution separate
+/// from the application-facing `BVP_api` facade while preserving each native
+/// solver object and its state.
+pub enum BvpDampTaskSolver {
+    Damped(DampedBvpSolver),
+    Frozen(FrozenBvpSolver),
+}
+
+impl BvpDampTaskSolver {
+    pub fn try_solve(&mut self) -> Result<(), BvpBackendIntegrationError> {
+        match self {
+            Self::Damped(solver) => solver.try_solve().map(|_| ()),
+            Self::Frozen(solver) => solver.try_solve().map(|_| ()),
+        }
+    }
+
+    pub fn get_result(&self) -> Option<DMatrix<f64>> {
+        match self {
+            Self::Damped(solver) => solver.get_result(),
+            Self::Frozen(solver) => solver.get_result(),
+        }
+    }
+
+    fn execute_postprocessing(
+        &self,
+        plan: &PostprocessPlan,
+    ) -> Result<crate::Utils::postprocessing::PostprocessReport, PostprocessError> {
+        match self {
+            Self::Damped(solver) => solver.execute_postprocessing(plan),
+            Self::Frozen(solver) => solver.execute_postprocessing(plan),
+        }
+    }
+
+    fn plot_result(&self) {
+        match self {
+            Self::Damped(solver) => solver.plot_result(),
+            Self::Frozen(solver) => solver.plot_result(),
+        }
+    }
+
+    fn damped_only_error(&self, operation: &str) -> BvpBackendIntegrationError {
+        let strategy = match self {
+            Self::Damped(_) => "Damped",
+            Self::Frozen(solver) => solver.strategy.as_str(),
+        };
+        BvpBackendIntegrationError::InvalidSolverConfiguration {
+            field: "strategy".to_string(),
+            value: strategy.to_string(),
+            message: format!("{operation} is currently supported only by the Damped route"),
+        }
+    }
+
+    fn try_set_parameter_binding(
+        &mut self,
+        names: &[String],
+        values: Vec<f64>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        match self {
+            Self::Damped(solver) => {
+                solver.try_set_parameter_names(Some(&names))?;
+                solver.try_set_parameter_values(Some(values))
+            }
+            Self::Frozen(solver) => {
+                solver.try_set_parameter_names(Some(&names))?;
+                solver.try_set_parameter_values(Some(values))
+            }
+        }
+    }
+
+    fn try_set_damped_mesh(
+        &mut self,
+        t0: f64,
+        t_end: f64,
+        n_steps: usize,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        match self {
+            Self::Damped(solver) => solver.try_set_mesh(t0, t_end, n_steps),
+            Self::Frozen(_) => Err(self.damped_only_error("mesh continuation")),
+        }
+    }
+
+    fn try_set_damped_initial_guess(
+        &mut self,
+        guess: DMatrix<f64>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        match self {
+            Self::Damped(solver) => solver.try_set_initial_guess(guess),
+            Self::Frozen(_) => Err(self.damped_only_error("initial-guess reset")),
+        }
+    }
+
+    fn try_set_damped_prepared_iterate(
+        &mut self,
+        iterate: DMatrix<f64>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        match self {
+            Self::Damped(solver) => solver.try_set_prepared_iterate(iterate),
+            Self::Frozen(_) => Err(self.damped_only_error("prepared-iterate reset")),
+        }
+    }
+
+    fn try_solve_damped(&mut self, prepared: bool) -> Result<(), BvpBackendIntegrationError> {
+        match self {
+            Self::Damped(solver) => {
+                if prepared {
+                    solver.try_solver_prepared()?;
+                } else {
+                    solver.try_solver()?;
+                }
+                Ok(())
+            }
+            Self::Frozen(_) => Err(self.damped_only_error("prepared continuation")),
+        }
+    }
+
+    fn try_prepare_damped(&mut self) -> Result<(), BvpBackendIntegrationError> {
+        match self {
+            Self::Damped(solver) => solver.try_eq_generate(None, None),
+            Self::Frozen(_) => Err(self.damped_only_error("prepared continuation")),
+        }
+    }
+}
+
+/// Build a native BVP_Damp solver from a full task specification.
+pub fn build_bvp_solver_from_spec(spec: &BvpTaskSpec) -> Result<BvpDampTaskSolver, BvpTaskError> {
     validate_bvp_task_spec(spec)?;
     if spec.solver.family != BvpSolverFamilySpec::Damp {
         return Err(BvpTaskError::UnsupportedRoute(
@@ -1093,16 +1225,17 @@ pub fn build_bvp_solver_from_spec(spec: &BvpTaskSpec) -> Result<BVP, BvpTaskErro
     build_bvp_solver_from_problem_and_settings(&spec.problem_spec(), &spec.solver_settings_spec())
 }
 
-/// Build a [`BVP`] solver from the Rust-side problem spec plus task-doc solver settings.
+/// Build a native BVP_Damp solver from a Rust-side problem and task settings.
 pub fn build_bvp_solver_from_problem_and_settings(
     problem: &BvpProblemSpec,
     settings: &BvpSolverSettingsSpec,
-) -> Result<BVP, BvpTaskError> {
+) -> Result<BvpDampTaskSolver, BvpTaskError> {
     validate_bvp_problem_spec(problem)?;
     validate_bvp_solver_options(&settings.solver_options)?;
     if settings.solver.family != BvpSolverFamilySpec::Damp {
         return Err(BvpTaskError::UnsupportedRoute(
-            "the legacy BVP facade cannot build BVP_sci settings".to_string(),
+            "the task builder accepts BVP_Damp settings only; use run_bvp_task for BVP_sci"
+                .to_string(),
         ));
     }
     build_bvp_solver_core(
@@ -1122,7 +1255,7 @@ fn build_bvp_solver_core(
     initial_guess_spec: &BvpInitialGuessSpec,
     solver_selection: &BvpSolverSelectionSpec,
     solver_options: &BvpSolverOptionsSpec,
-) -> Result<BVP, BvpTaskError> {
+) -> Result<BvpDampTaskSolver, BvpTaskError> {
     let dimension = equations.unknowns.len();
     if initial_guess_spec.values.len() != dimension {
         return Err(BvpTaskError::Semantic(format!(
@@ -1138,76 +1271,6 @@ fn build_bvp_solver_core(
 
     let tolerance = solver_options.tolerance.unwrap_or(1e-5);
     let max_iterations = solver_options.max_iterations.unwrap_or(50);
-    let (strategy_params, rel_tolerance, bounds) = match solver_selection.strategy {
-        BvpStrategySpec::Damped => {
-            let rel_tolerance = Some(HashMap::from_iter(
-                equations
-                    .unknowns
-                    .iter()
-                    .cloned()
-                    .map(|name| (name, 1e-4_f64)),
-            ));
-            let bounds = Some(HashMap::from_iter(
-                equations
-                    .unknowns
-                    .iter()
-                    .cloned()
-                    .map(|name| (name, (-1.0e6_f64, 1.0e6_f64))),
-            ));
-            (
-                Some(HashMap::from([
-                    ("max_jac".to_string(), None),
-                    ("maxDampIter".to_string(), None),
-                    ("DampFacor".to_string(), None),
-                    ("adaptive".to_string(), None),
-                ])),
-                rel_tolerance,
-                bounds,
-            )
-        }
-        BvpStrategySpec::Frozen | BvpStrategySpec::Naive => (None, None, None),
-    };
-
-    let mut bvp = BVP::new(
-        equations.rhs.clone(),
-        initial_guess,
-        equations.unknowns.clone(),
-        equations.arg.clone(),
-        boundary_conditions.conditions.clone(),
-        mesh.t0,
-        mesh.t_end,
-        mesh.n_steps,
-        solver_selection.scheme.clone(),
-        solver_selection.strategy.as_solver_string(),
-        strategy_params,
-        solver_options.linear_sys_method.clone(),
-        solver_selection.backend.as_solver_string(),
-        tolerance,
-        max_iterations,
-        rel_tolerance,
-        bounds,
-        solver_options.loglevel.clone(),
-    );
-
-    if !equations.parameter_names.is_empty() {
-        let parameter_values = equations
-            .parameter_names
-            .iter()
-            .map(|name| {
-                equations
-                    .parameter_values
-                    .get(name)
-                    .copied()
-                    .ok_or_else(|| BvpTaskError::InvalidConfiguration {
-                        field: format!("parameters.{name}"),
-                        message: "missing initial numeric value".to_string(),
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        bvp.try_set_damped_parameter_binding(&equations.parameter_names, parameter_values)
-            .map_err(BvpTaskError::BvpDamp)?;
-    }
-
     let mut generated_config = generated_backend_config_from_spec(
         &solver_options.generated_backend,
         &solver_selection.backend,
@@ -1236,19 +1299,106 @@ fn build_bvp_solver_core(
     ) {
         return Err(BvpTaskError::Semantic(
             "BVP task documents are symbolic inputs and cannot provide Rust numeric_rhs closures; \
-             use lambdify/AOT backend policies in task docs, or the damped NRBVP Rust API with \
+             use lambdify/AOT backend policies in task docs, or the native damped NRBVP API with \
              set_numeric_rhs/with_numeric_rhs for pure numeric BVP solving"
                 .to_string(),
         ));
     }
-    if let Some(structure_damp) = &mut bvp.structure_damp {
-        structure_damp.set_generated_backend_config(generated_config.clone());
-    }
-    if let Some(structure) = &mut bvp.structure {
-        structure.set_generated_backend_config(generated_config);
-    }
 
-    Ok(bvp)
+    let solver = match solver_selection.strategy {
+        BvpStrategySpec::Damped => {
+            let mut options = DampedSolverOptions::default();
+            options.scheme = solver_selection.scheme.clone();
+            options.strategy = "Damped".to_string();
+            options.linear_sys_method = solver_options.linear_sys_method.clone();
+            options.method = solver_selection.backend.as_solver_string();
+            options.abs_tolerance = tolerance;
+            options.max_iterations = max_iterations;
+            options.strategy_params = Some(SolverParams {
+                max_jac: None,
+                max_damp_iter: None,
+                damp_factor: None,
+                adaptive: None,
+            });
+            options.rel_tolerance = Some(
+                equations
+                    .unknowns
+                    .iter()
+                    .cloned()
+                    .map(|name| (name, 1e-4_f64))
+                    .collect(),
+            );
+            options.bounds = Some(
+                equations
+                    .unknowns
+                    .iter()
+                    .cloned()
+                    .map(|name| (name, (-1.0e6_f64, 1.0e6_f64)))
+                    .collect(),
+            );
+            options.loglevel = solver_options.loglevel.clone();
+            options.generated_backend_config = generated_config;
+            BvpDampTaskSolver::Damped(DampedBvpSolver::new_with_options(
+                equations.rhs.clone(),
+                initial_guess,
+                equations.unknowns.clone(),
+                equations.arg.clone(),
+                boundary_conditions.conditions.clone(),
+                mesh.t0,
+                mesh.t_end,
+                mesh.n_steps,
+                options,
+            ))
+        }
+        BvpStrategySpec::Frozen | BvpStrategySpec::Naive => {
+            let mut options = FrozenSolverOptions::new(
+                solver_selection.strategy.as_solver_string(),
+                None,
+                solver_options.linear_sys_method.clone(),
+                solver_selection.backend.as_solver_string(),
+                tolerance,
+                max_iterations,
+            )
+            .with_scheme_name(solver_selection.scheme.clone())
+            .with_generated_backend_config(generated_config);
+            options.strategy = solver_selection.strategy.as_solver_string();
+            BvpDampTaskSolver::Frozen(FrozenBvpSolver::new_with_options(
+                equations.rhs.clone(),
+                initial_guess,
+                equations.unknowns.clone(),
+                equations.arg.clone(),
+                boundary_conditions.conditions.clone(),
+                mesh.t0,
+                mesh.t_end,
+                mesh.n_steps,
+                options,
+            ))
+        }
+    };
+
+    if !equations.parameter_names.is_empty() {
+        let parameter_values = equations
+            .parameter_names
+            .iter()
+            .map(|name| {
+                equations
+                    .parameter_values
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| BvpTaskError::InvalidConfiguration {
+                        field: format!("parameters.{name}"),
+                        message: "missing initial numeric value".to_string(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut solver = solver;
+        solver
+            .try_set_parameter_binding(&equations.parameter_names, parameter_values)
+            .map_err(BvpTaskError::BvpDamp)?;
+        Ok(solver)
+    } else {
+        Ok(solver)
+    }
 }
 
 /// Parse and run a full BVP task document in one step.
@@ -1279,16 +1429,9 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
     let mut executed = Vec::with_capacity(segments.len());
     let mut continuation_telemetry = BvpTaskContinuationTelemetry::default();
     for (index, values) in segments.iter().enumerate() {
-        let mut segment_spec = bind_continuation_segment(&spec, values)?;
-        // Task execution is batch-friendly by default. The historical BVP
-        // facade otherwise installs a terminal logger whenever `loglevel` is
-        // absent, flooding callers with solver internals. An explicit task
-        // `loglevel` still overrides this quiet default.
-        if segment_spec.solver_options.loglevel.is_none() {
-            segment_spec.solver_options.loglevel = Some("off".to_string());
-        }
+        let segment_spec = bind_continuation_segment(&spec, values)?;
         let mut solver = build_bvp_solver_from_spec(&segment_spec)?;
-        solver.solve();
+        solver.try_solve().map_err(BvpTaskError::BvpDamp)?;
         let plan = segment_spec.postprocessing.to_plan("bvp_result.csv");
         if !plan.actions.is_empty() {
             solver
@@ -1301,7 +1444,11 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
         let result = solver.get_result().ok_or(BvpTaskError::SolverResult(
             BvpSolverResultFailure::NoResult { solver: "BVP_Damp" },
         ))?;
-        let mesh = uniform_bvp_mesh(solver.t0, solver.t_end, solver.n_steps);
+        let mesh = uniform_bvp_mesh(
+            segment_spec.mesh.t0,
+            segment_spec.mesh.t_end,
+            segment_spec.mesh.n_steps,
+        );
         continuation_telemetry.segments += 1;
         continuation_telemetry.fresh_preparations += 1;
         continuation_telemetry.peak_result_elements = continuation_telemetry
@@ -1350,6 +1497,12 @@ fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResul
     let mut prepared_spec = spec.clone();
     prepared_spec.continuation = None;
     let mut solver = build_bvp_solver_from_spec(&prepared_spec)?;
+    if !matches!(&solver, BvpDampTaskSolver::Damped(_)) {
+        return Err(BvpTaskError::UnsupportedRoute(
+            "warm/prepared BVP_Damp continuation currently requires the Damped native solver"
+                .to_string(),
+        ));
+    }
     let mut executed = Vec::with_capacity(rows.len());
     let mut telemetry = BvpTaskContinuationTelemetry::default();
     let mut prepared = false;
@@ -1358,7 +1511,7 @@ fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResul
     for (index, row) in rows.iter().enumerate() {
         let parameters = bvp_parameter_values(&spec, continuation, row)?;
         solver
-            .try_set_damped_parameter_binding(&spec.equations.parameter_names, parameters)
+            .try_set_parameter_binding(&spec.equations.parameter_names, parameters)
             .map_err(BvpTaskError::BvpDamp)?;
 
         let restart = continuation_needs_restart(continuation, index);
@@ -1454,7 +1607,7 @@ fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResul
         let result = solver.get_result().ok_or(BvpTaskError::SolverResult(
             BvpSolverResultFailure::NoResult { solver: "BVP_Damp" },
         ))?;
-        let mesh = uniform_bvp_mesh(solver.t0, solver.t_end, solver.n_steps);
+        let mesh = uniform_bvp_mesh(spec.mesh.t0, spec.mesh.t_end, spec.mesh.n_steps);
         telemetry.peak_result_elements = telemetry.peak_result_elements.max(result.len());
         let plan = spec.postprocessing.to_plan("bvp_result.csv");
         if !plan.actions.is_empty() {
@@ -2011,7 +2164,7 @@ fn run_bvp_sci_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResult
                 })?
                 .clone_from(&parameters);
             solver
-                .set_parameters(parameters)
+                .set_parameter_guess(parameters)
                 .map_err(BvpTaskError::BvpSci)?;
         }
 
@@ -2328,7 +2481,7 @@ fn build_bvp_sci_solver_with_parameter_targets(
             .with_telemetry(options.telemetry)
             .with_output_policy(options.output_policy)
             .with_parameter_names(parameter_names.clone())
-            .with_parameters(initial_parameters);
+            .with_parameter_guess(initial_parameters);
     builder = match spec.solver.frontend.unwrap_or(BvpFrontendSpec::ExprLegacy) {
         BvpFrontendSpec::ExprLegacy => builder.with_expr_legacy(),
         BvpFrontendSpec::AtomViewNative => builder.with_atom_native(),

@@ -1,6 +1,6 @@
-//! Reuse a prepared Lambdify solver while sweeping a numeric model parameter.
+//! Reuse prepared Lambdify callbacks across fresh solves with new parameter values.
 //!
-//! Run with `cargo run --no-default-features --example lsode2_parameter_continuation_lambdify`.
+//! Run with `cargo run --no-default-features --example lsode2_parameter_rebind_lambdify`.
 
 use RustedSciThe::numerical::LSODE2::{
     Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure, Lsode2ProblemConfig,

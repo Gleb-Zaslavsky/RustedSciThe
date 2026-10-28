@@ -128,11 +128,6 @@ impl RadauConfig {
         if self.max_steps == 0 || self.max_newton_iterations == 0 || self.max_retries == 0 {
             return Err(RadauConfigError::EmptyIterationBudget.into());
         }
-        if let RadauMatrixLayout::Banded { lower, upper } = self.matrix_layout {
-            if lower == 0 && upper == 0 {
-                return Err(RadauConfigError::EmptyBandwidth.into());
-            }
-        }
         if self.execution == RadauExecution::Native && self.assembly.is_some() {
             return Err(RadauConfigError::NativeWithSymbolicAssembly.into());
         }

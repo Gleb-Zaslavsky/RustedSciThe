@@ -843,7 +843,7 @@ impl PreparedAotBenchmark {
                 .expect("Radau AOT warm solve")
         } else {
             self.solver
-                .solve_with_parameters(&self.initial_state, &self.parameters)
+                .try_solve_with_parameter_values(&self.initial_state, &self.parameters)
                 .expect("Radau AOT warm solve")
         };
         solution.y.iter().map(|value| value.abs()).sum()
@@ -868,7 +868,7 @@ impl PreparedAotBenchmark {
                     .expect("Radau AOT continuation")
             } else {
                 self.solver
-                    .continue_with_parameters(&self.initial_state, &parameters)
+                    .try_solve_with_parameter_values(&self.initial_state, &parameters)
                     .expect("Radau AOT continuation")
             };
             checksum += solution.y.iter().map(|value| value.abs()).sum::<f64>();
@@ -883,7 +883,7 @@ fn aot_workload_problem(
 ) -> (RadauProblem, Vec<f64>, Vec<f64>) {
     let data = RustedSciThe::numerical::ivp_workloads::build_workload(workload, dimension);
     let problem = RadauProblem::new(data.equations, data.variables, data.time_variable)
-        .with_parameters(data.parameter_names);
+        .with_parameter_names(data.parameter_names);
     (
         problem,
         data.initial_state.as_slice().to_vec(),
@@ -980,6 +980,9 @@ fn benchmark_radau_aot(c: &mut Criterion) {
                         RadauMatrixLayout::Banded { lower, upper } => {
                             format!("banded-{lower}-{upper}")
                         }
+                        RadauMatrixLayout::BandedAuto => {
+                            unreachable!("benchmark workloads specify resolved Radau layouts")
+                        }
                     };
                     let policy_label = match execution_policy {
                         RadauExecutionPolicy::Sequential => "sequential",
@@ -1045,6 +1048,9 @@ fn benchmark_radau_aot(c: &mut Criterion) {
                             RadauMatrixLayout::Sparse => BenchmarkLayout::Sparse,
                             RadauMatrixLayout::Banded { lower, upper } => {
                                 BenchmarkLayout::Banded { lower, upper }
+                            }
+                            RadauMatrixLayout::BandedAuto => {
+                                unreachable!("benchmark workloads specify resolved Radau layouts")
                             }
                         },
                         match execution_policy {

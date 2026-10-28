@@ -483,8 +483,8 @@ fn damped_numeric_callbacks_invalidate_owned_factor() {
 #[test]
 fn damped_parameter_rebind_invalidates_owned_factor() {
     let mut solver = sparse_surface_test_solver();
-    solver.set_params(Some(&["alpha"]));
-    solver.set_param_values(Some(vec![1.0]));
+    solver.set_parameter_names(Some(&["alpha"]));
+    solver.set_parameter_values(Some(vec![1.0]));
 
     let size = solver.values.len() * solver.n_steps;
     let matrix = DMatrix::<f64>::identity(size, size);
@@ -492,7 +492,7 @@ fn damped_parameter_rebind_invalidates_owned_factor() {
         .expect("dense matrix should produce an owned factor runtime");
     solver.factor_owner.old_jac = Some(Box::new(matrix));
     *solver.factor_owner.borrow_mut() = Some(owner);
-    solver.set_param_values(Some(vec![2.0]));
+    solver.set_parameter_values(Some(vec![2.0]));
 
     assert!(solver.factor_owner.old_jac.is_none());
     assert!(solver.factor_owner.borrow().is_none());
@@ -1059,10 +1059,10 @@ fn prepared_solver_detects_direct_jacobian_callback_replacement() {
 fn typed_parameter_binding_rejects_wrong_arity_without_panic() {
     let mut solver = sparse_surface_test_solver_with_tolerances();
     solver
-        .try_set_params(Some(&["alpha", "beta"]))
+        .try_set_parameter_names(Some(&["alpha", "beta"]))
         .expect("parameter names should be accepted");
     let error = solver
-        .try_set_param_values(Some(vec![1.0]))
+        .try_set_parameter_values(Some(vec![1.0]))
         .expect_err("wrong parameter arity must be a typed error");
     assert!(matches!(
         error,
@@ -1169,8 +1169,8 @@ fn build_solver_request_carries_optional_aot_resolver() {
 #[test]
 fn build_solver_request_carries_parameter_names_and_values() {
     let mut solver = sparse_surface_test_solver_with_tolerances();
-    solver.set_params(Some(&["alpha", "beta"]));
-    solver.set_param_values(Some(vec![1.5, -0.25]));
+    solver.set_parameter_names(Some(&["alpha", "beta"]));
+    solver.set_parameter_values(Some(vec![1.5, -0.25]));
 
     let request = solver.build_solver_request(None, None);
     assert_eq!(
@@ -1184,8 +1184,8 @@ fn build_solver_request_carries_parameter_names_and_values() {
 #[should_panic(expected = "expected exactly 2 values for declared symbolic parameters")]
 fn solver_surface_rejects_parameter_value_length_mismatch() {
     let mut solver = sparse_surface_test_solver_with_tolerances();
-    solver.set_params(Some(&["alpha", "beta"]));
-    solver.set_param_values(Some(vec![1.5]));
+    solver.set_parameter_names(Some(&["alpha", "beta"]));
+    solver.set_parameter_values(Some(vec![1.5]));
 }
 
 #[test]

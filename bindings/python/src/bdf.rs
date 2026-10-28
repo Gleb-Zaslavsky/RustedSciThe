@@ -21,6 +21,7 @@ use crate::errors::{
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
+use crate::parameter_loop::{PyIvpParameterLoopPoint, run_parameter_loop};
 use rustedscithe_core::numerical::BDF::BDF_api::{
     BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver,
 };
@@ -183,7 +184,7 @@ fn validate_scalar(value: f64, label: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn validate_route(
+pub(crate) fn validate_route(
     options: &SolverOptions,
 ) -> PyResult<(BdfTelemetryMode, IvpLambdifyExecutionPolicy)> {
     options.validate_aot_options()?;
@@ -225,7 +226,7 @@ fn validate_route(
     Ok((telemetry, policy))
 }
 
-fn map_bdf_error(error: BdfSolveError) -> PyErr {
+pub(crate) fn map_bdf_error(error: BdfSolveError) -> PyErr {
     let native_kind = crate::errors::native_variant(&error);
     crate::errors::annotate_native(
         match error {
@@ -271,7 +272,7 @@ pub struct BdfSolution {
 }
 
 impl BdfSolution {
-    fn from_solver(solver: &ODEsolver) -> Self {
+    pub(crate) fn from_solver(solver: &ODEsolver) -> Self {
         let (times, values) = solver.get_result_ref();
         let statistics = solver.get_statistics();
         let preparation = solver.preparation_timings();
@@ -832,6 +833,95 @@ impl BdfSolver {
         panic_state.run("solve", "bdf", &route, || self.solve_inner())
     }
 
+    /// Start a fresh solve with new parameter values and initial state.
+    ///
+    /// The configured time interval is retained; prepared callbacks and AOT
+    /// artifacts are reused. This is a new initial-value solve, not a
+    /// time-segment continuation.
+    pub fn solve_with_parameter_values(
+        &mut self,
+        y0: Vec<f64>,
+        parameter_values: Vec<f64>,
+    ) -> PyResult<BdfSolution> {
+        finite_vector(&y0, "y0")?;
+        finite_vector(&parameter_values, "parameter_values")?;
+        if parameter_values.len() != self.parameter_count {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "expected {} parameter values, got {}",
+                self.parameter_count,
+                parameter_values.len()
+            )));
+        }
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.execution_policy
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "bdf", &route, || {
+            self.solver
+                .try_solve_with_parameter_values(
+                    DVector::from_vec(y0),
+                    DVector::from_vec(parameter_values),
+                )
+                .map_err(map_bdf_error)?;
+            Ok(BdfSolution::from_solver(&self.solver))
+        })
+    }
+
+    /// Run independent solves in caller-specified parameter order. Every
+    /// point uses this same initial state and configured time interval.
+    pub fn solve_parameter_loop(
+        &mut self,
+        py: Python<'_>,
+        y0: Vec<f64>,
+        parameter_vectors: Vec<Vec<f64>>,
+    ) -> PyResult<Vec<Py<PyIvpParameterLoopPoint>>> {
+        finite_vector(&y0, "y0")?;
+        let route = format!("{}:{}:{}", self.frontend, self.execution, self.execution_policy);
+        run_parameter_loop(py, "bdf", &route, parameter_vectors, |parameters| {
+            let solution = self.solve_with_parameter_values(y0.clone(), parameters.to_vec())?;
+            Py::new(py, solution).map(Py::into_any)
+        })
+    }
+
+    /// Start a fresh solve with new parameters, initial state and interval.
+    /// The prepared symbolic/AOT backend is retained.
+    pub fn solve_with_parameter_values_in_interval(
+        &mut self,
+        t0: f64,
+        y0: Vec<f64>,
+        t_end: f64,
+        parameter_values: Vec<f64>,
+    ) -> PyResult<BdfSolution> {
+        finite_vector(&y0, "y0")?;
+        finite_vector(&parameter_values, "parameter_values")?;
+        if parameter_values.len() != self.parameter_count {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "expected {} parameter values, got {}",
+                self.parameter_count,
+                parameter_values.len()
+            )));
+        }
+        validate_scalar(t0, "t0")?;
+        validate_scalar(t_end, "t_end")?;
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.execution_policy
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "bdf", &route, || {
+            self.solver
+                .try_solve_with_parameter_values_in_interval(
+                    t0,
+                    DVector::from_vec(y0),
+                    t_end,
+                    DVector::from_vec(parameter_values),
+                )
+                .map_err(map_bdf_error)?;
+            Ok(BdfSolution::from_solver(&self.solver))
+        })
+    }
+
     /// Restart a prepared model with a new initial state and interval.
     ///
     /// The native symbolic callbacks remain prepared; only the numerical
@@ -883,7 +973,10 @@ impl BdfSolver {
         let panic_state = self.panic_state.clone();
         panic_state.run("continuation", "bdf", &route, || {
             self.solver
-                .try_continue_with_parameter_values(DVector::from_vec(parameter_values), t_end)
+                .try_continue_in_time_with_parameter_values(
+                    DVector::from_vec(parameter_values),
+                    t_end,
+                )
                 .map_err(map_bdf_error)?;
             self.solve_inner()
         })

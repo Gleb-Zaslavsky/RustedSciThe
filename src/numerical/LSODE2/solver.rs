@@ -120,7 +120,14 @@ impl fmt::Display for Lsode2Error {
     }
 }
 
-impl std::error::Error for Lsode2Error {}
+impl std::error::Error for Lsode2Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::GeneratedBackend(error) => Some(error),
+            Self::UnsupportedBackend(_) | Self::InvalidConfig(_) | Self::NativeStep(_) => None,
+        }
+    }
+}
 
 impl From<IvpBackendError> for Lsode2Error {
     fn from(value: IvpBackendError) -> Self {
@@ -672,6 +679,11 @@ impl Lsode2Solver {
     pub fn get_result(&self) -> (DVector<f64>, DMatrix<f64>) {
         let (times, values) = self.result_ref();
         (times.clone(), values.clone())
+    }
+
+    /// Borrow the retained time-by-state result without cloning large arrays.
+    pub fn get_result_ref(&self) -> (&DVector<f64>, &DMatrix<f64>) {
+        self.result_ref()
     }
 
     fn result_ref(&self) -> (&DVector<f64>, &DMatrix<f64>) {
@@ -1259,6 +1271,33 @@ impl Lsode2Solver {
         Ok(())
     }
 
+    /// Starts a fresh solve from a new initial state using the configured time
+    /// interval. Prepared symbolic callbacks and generated artifacts are reused.
+    pub fn try_solve_with_parameter_values(
+        &mut self,
+        y0: DVector<f64>,
+        values: DVector<f64>,
+    ) -> Result<Lsode2SolveSummary, Lsode2Error> {
+        let t0 = self.config.t0;
+        let t_bound = self.config.t_bound;
+        self.try_solve_with_parameter_values_in_interval(t0, y0, t_bound, values)
+    }
+
+    /// Starts a fresh solve from a new initial state and interval while
+    /// retaining the prepared symbolic/AOT route.
+    pub fn try_solve_with_parameter_values_in_interval(
+        &mut self,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        values: DVector<f64>,
+    ) -> Result<Lsode2SolveSummary, Lsode2Error> {
+        self.set_parameter_values(values)?;
+        self.try_restart_with_initial_state(t0, y0, t_bound)?;
+        self.solve()?;
+        Ok(self.summary())
+    }
+
     fn run_native_step_probe(
         &mut self,
     ) -> Result<Option<Lsode2NativeStepProbeSummary>, Lsode2Error> {
@@ -1611,7 +1650,7 @@ fn install_native_jacobian_factory(inner: &mut BdfOdeSolver, config: &Lsode2Prob
         Lsode2LinearSolverBackend::Dense => return,
         Lsode2LinearSolverBackend::SparseFaer => NativeJacobianStorage::SparseTriplets,
         Lsode2LinearSolverBackend::BandedFaithful => match config.linear_system_structure {
-            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 } => {
+            Lsode2LinearSystemStructure::BandedAuto => {
                 NativeJacobianStorage::Banded { bandwidth: None }
             }
             Lsode2LinearSystemStructure::Banded { kl, ku } => NativeJacobianStorage::Banded {

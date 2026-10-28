@@ -556,7 +556,7 @@ release-file policy](https://blog.pypi.org/posts/2026-07-22-releases-now-reject-
 ## TestPyPI and production handoff
 
 The Windows `0.1.2` upload commands below are retained as release history.
-`0.1.4` is the latest published release. For `0.1.5`, build and validate all
+`0.1.5` is the latest published release. For a later release, build and validate all
 intended platform wheels from the same committed source before uploading the
 sdist and complete wheel set. Linux source installation is not considered
 validated merely because an sdist is available.
@@ -569,12 +569,12 @@ tracked file.
 
 ### Windows upload commands
 
-#### Windows TestPyPI candidate 0.1.5
+#### Windows 0.1.5 TestPyPI and production verification
 
-Use this section for the current candidate; the `0.1.2` commands below are
-historical. Build and validate artifacts from the committed release source,
-then upload the exact sdist and wheel from the output directory. Do not upload
-until the clean installed-wheel contract suite passes.
+This section records the `0.1.5` procedure; the `0.1.2` commands below are
+historical. For a new version, build and validate artifacts from the committed
+release source, then upload the exact sdist and wheel from the output
+directory. Do not upload until the clean installed-wheel contract suite passes.
 
 ```powershell
 $ErrorActionPreference = "Stop"
@@ -622,6 +622,22 @@ $smokePython = Join-Path $smoke "Scripts\python.exe"
 & $smokePython -c "import importlib.metadata as m, numpy, pathlib, sys, rustedscithe, rustedscithe._native as n; p=pathlib.Path(rustedscithe.__file__).resolve(); assert pathlib.Path(sys.prefix).resolve() in p.parents; assert m.version('rustedscithe') == '0.1.5'; print('version:', m.version('rustedscithe')); print('package:', p); print('native:', n.__file__); print('NumPy:', numpy.__version__); print('Expr:', rustedscithe.Expr.parse('x^2 + 1'))"
 & $smokePython -m pytest -c .\bindings\python\pyproject.toml .\bindings\python\tests -q
 ```
+
+Windows `0.1.5` release evidence (2026-10-25): the exact sdist and
+`cp310-abi3-win_amd64` wheel built from commit `0b1c2f9a` were uploaded to both
+TestPyPI and production PyPI. PyPI reports matching SHA-256 values:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `rustedscithe-0.1.5.tar.gz` | `cfa44abd3f2bf77c2c5f58cbc600e5db1ab965927d0c47f22cea698f5a275043` |
+| `rustedscithe-0.1.5-cp310-abi3-win_amd64.whl` | `842c2f8035d33d6e4d16357918ae604e3a1293734d02062b2c501be58d9ded7a` |
+
+The exact local wheel passed its clean installed-wheel suite on CPython 3.10
+and 3.14 (`295 passed, 2 skipped` on each). Fresh CPython 3.14 environments
+then installed the wheel separately from TestPyPI and production PyPI; both
+runs confirmed that the package and `_native.pyd` loaded from the venv, NumPy
+`2.5.4`, and `Expr.parse('x^2 + 1') == 'x ^ 2 + 1'`. The full installed-package
+contract suite passed from each index (`315 passed, 2 skipped`).
 
 Run from the repository root after replacing only the Python executable path
 if necessary:

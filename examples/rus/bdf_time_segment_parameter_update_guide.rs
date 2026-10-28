@@ -1,5 +1,5 @@
 //! Плотный BDF AtomView + Lambdify с переиспользованием подготовленных callbacks.
-//! Запуск: `cargo run --no-default-features --example rus_bdf_symbolic_continuation_guide`.
+//! Запуск: `cargo run --no-default-features --example rus_bdf_time_segment_parameter_update_guide`.
 
 use RustedSciThe::numerical::BDF::BDF_api::{
     BdfSolverOptions, BdfStatus, BdfTelemetryMode, ODEsolver,
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Меняем общий слот параметров и сбрасываем только численную историю BDF.
     // Подготовленные residual/Jacobian callbacks сохраняются.
-    solver.try_continue_with_parameter_values(DVector::from_vec(vec![2.0]), 1.0)?;
+    solver.try_continue_in_time_with_parameter_values(DVector::from_vec(vec![2.0]), 1.0)?;
     solver.try_solve()?;
     assert_eq!(solver.status_kind(), BdfStatus::Finished);
 
@@ -47,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exact = (-0.5_f64 - 2.0 * 0.5).exp();
     assert!((final_value - exact).abs() < 2e-8);
 
-    println!("Пример continuation для плотного BDF AtomView/Lambdify");
+    println!("Изменение параметра между временными сегментами BDF AtomView/Lambdify");
     println!("первый сегмент: y(0.5)={first_end:.10e}");
     println!(
         "точек второго сегмента={}, y(1)={final_value:.10e}, точно={exact:.10e}",

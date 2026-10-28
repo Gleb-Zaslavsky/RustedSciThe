@@ -40,11 +40,11 @@ Declare symbolic parameters with `try_set_equation_parameters`, then bind values
 with `set_parameter_values`. Value-only rebinding reuses the prepared callbacks;
 `try_solve` starts again from the original `(t0, y0)`. To continue from the last
 accepted `(t, y)`, update values and call `try_continue_to(new_t_bound)` instead.
-The symbolic example demonstrates AtomViewNative with Lambdify and accepted-state
-continuation:
+The symbolic example demonstrates AtomViewNative with Lambdify and an accepted-state
+parameter switch followed by continuation in time:
 
 ```powershell
-cargo run --no-default-features --example be_symbolic_continuation_guide
+cargo run --no-default-features --example be_time_segment_parameter_update_guide
 ```
 
 ## Generated AOT
@@ -145,6 +145,16 @@ control, Jacobian/LU reuse, or event localization. To choose
 AOT lifecycle, telemetry mode, or a custom continuation/restart policy, use
 `BeSolverOptions` and the typed BE API. `None` for the native Jacobian means
 finite differences; it is not the same as selecting another symbolic frontend.
+
+## Independent Parameter Sweeps
+
+`BE::try_solve_parameter_loop(y0, vectors)` reuses prepared callbacks but
+resets integration state for every parameter vector. Each solve starts from
+the same initial state and configured interval; this is not continuation from
+the prior result. Successful points retain the time mesh, state matrix and
+native telemetry. Typed failures stay attached to their point and do not stop
+the sweep. See `examples/be_parameter_loop.rs` and the shared
+[`IVP parameter-loop guide`](../IVP_PARAMETER_LOOP_GUIDE_EN.md).
 
 Continuation is expressed explicitly:
 

@@ -24,17 +24,21 @@ pub(crate) fn assemble_global_jacobian(
     x: &[f64],
     y: &[f64],
     parameters: &[f64],
+    external_parameters: &[f64],
     singular: Option<&SingularTermRuntime>,
     workspace: &mut BvpSciCollocationWorkspace,
 ) -> Result<(), BvpSciNewError> {
     let n = plan.dimension();
     let m = x.len();
     let k = parameters.len();
+    let runtime_k = k + external_parameters.len();
     if workspace.n != n || workspace.m != m || workspace.k != k {
         return Err(BvpSciNewError::InvalidConfiguration(
             "Jacobian workspace does not match the collocation state".into(),
         ));
     }
+    workspace.runtime_parameters[..k].copy_from_slice(parameters);
+    workspace.runtime_parameters[k..].copy_from_slice(external_parameters);
     if boundary.residual_dimension() != n + k {
         return Err(BvpSciNewError::ShapeMismatch {
             stage: BvpSciStage::BoundaryCallback,
@@ -51,7 +55,7 @@ pub(crate) fn assemble_global_jacobian(
         plan.evaluate_jacobian_dense_with_scratch(
             x[node],
             state,
-            parameters,
+            &workspace.runtime_parameters,
             &mut workspace.callback_arguments,
             output,
             &mut workspace.callback_jacobian,
@@ -72,7 +76,7 @@ pub(crate) fn assemble_global_jacobian(
         plan.evaluate_jacobian_dense_with_scratch(
             workspace.x_mid[interval],
             state,
-            parameters,
+            &workspace.runtime_parameters,
             &mut workspace.callback_arguments,
             output,
             &mut workspace.callback_jacobian,
@@ -100,7 +104,7 @@ pub(crate) fn assemble_global_jacobian(
             plan.evaluate_parameter_jacobian(
                 x[node],
                 state,
-                parameters,
+                &workspace.runtime_parameters,
                 &mut workspace.callback_arguments,
                 output,
             )?;
@@ -111,7 +115,7 @@ pub(crate) fn assemble_global_jacobian(
             plan.evaluate_parameter_jacobian(
                 workspace.x_mid[interval],
                 state,
-                parameters,
+                &workspace.runtime_parameters,
                 &mut workspace.callback_arguments,
                 output,
             )?;
@@ -130,12 +134,14 @@ pub(crate) fn assemble_global_jacobian(
                     "parameter finite-difference step is not representable".into(),
                 ));
             }
+            workspace.trial_runtime_parameters[..k].copy_from_slice(&workspace.trial_parameters);
+            workspace.trial_runtime_parameters[k..].copy_from_slice(external_parameters);
             for node in 0..m {
                 let state = &y[node * n..(node + 1) * n];
                 plan.evaluate_rhs(
                     x[node],
                     state,
-                    &workspace.trial_parameters,
+                    &workspace.trial_runtime_parameters,
                     &mut workspace.callback_arguments,
                     &mut workspace.callback_output,
                 )?;
@@ -163,7 +169,7 @@ pub(crate) fn assemble_global_jacobian(
                 plan.evaluate_rhs(
                     workspace.x_mid[interval],
                     state,
-                    &workspace.trial_parameters,
+                    &workspace.trial_runtime_parameters,
                     &mut workspace.callback_arguments,
                     &mut workspace.callback_output,
                 )?;
@@ -193,13 +199,14 @@ pub(crate) fn assemble_global_jacobian(
     let yb = &y[(m - 1) * n..m * n];
     workspace.boundary_y_a.copy_from_slice(ya);
     workspace.boundary_y_b.copy_from_slice(yb);
-    workspace.boundary_parameters.copy_from_slice(parameters);
+    workspace.boundary_parameters[..k].copy_from_slice(parameters);
+    workspace.boundary_parameters[k..runtime_k].copy_from_slice(external_parameters);
     evaluate_boundary(
         boundary,
         plan.telemetry(),
         ya,
         yb,
-        parameters,
+        &workspace.boundary_parameters,
         &mut workspace.boundary_residual,
     )?;
     finite_or_error(&workspace.boundary_residual, BvpSciStage::BoundaryCallback)?;
@@ -207,7 +214,7 @@ pub(crate) fn assemble_global_jacobian(
     let boundary_analytic = boundary.evaluate_jacobian(
         ya,
         yb,
-        parameters,
+        &workspace.boundary_parameters,
         &mut workspace.boundary_ya_jacobian,
         &mut workspace.boundary_yb_jacobian,
         &mut workspace.boundary_parameter_jacobian,
@@ -215,7 +222,7 @@ pub(crate) fn assemble_global_jacobian(
     let boundary_state_jacobian_len = (n + k).checked_mul(n).ok_or_else(|| {
         BvpSciNewError::InvalidConfiguration("boundary Jacobian size overflow".into())
     })?;
-    let boundary_parameter_jacobian_len = (n + k).checked_mul(k).ok_or_else(|| {
+    let boundary_parameter_jacobian_len = (n + k).checked_mul(runtime_k).ok_or_else(|| {
         BvpSciNewError::InvalidConfiguration("boundary parameter Jacobian size overflow".into())
     })?;
     if workspace.boundary_ya_jacobian.len() != boundary_state_jacobian_len
@@ -252,7 +259,7 @@ pub(crate) fn assemble_global_jacobian(
                 plan.telemetry(),
                 &workspace.boundary_y_a,
                 yb,
-                parameters,
+                &workspace.boundary_parameters,
                 &mut workspace.boundary_trial_output,
             )?;
             for row in 0..n + k {
@@ -277,7 +284,7 @@ pub(crate) fn assemble_global_jacobian(
                 plan.telemetry(),
                 ya,
                 &workspace.boundary_y_b,
-                parameters,
+                &workspace.boundary_parameters,
                 &mut workspace.boundary_trial_output,
             )?;
             for row in 0..n + k {
@@ -306,7 +313,7 @@ pub(crate) fn assemble_global_jacobian(
                 &mut workspace.boundary_trial_output,
             )?;
             for row in 0..n + k {
-                workspace.boundary_parameter_jacobian[row * k + parameter] =
+                workspace.boundary_parameter_jacobian[row * runtime_k + parameter] =
                     (workspace.boundary_trial_output[row] - workspace.boundary_residual[row])
                         / delta;
             }
@@ -401,7 +408,7 @@ pub(crate) fn assemble_global_jacobian(
             workspace.entries.push((
                 boundary_row_start + row,
                 m * n + parameter,
-                workspace.boundary_parameter_jacobian[row * k + parameter],
+                workspace.boundary_parameter_jacobian[row * runtime_k + parameter],
             ));
         }
     }
@@ -503,8 +510,8 @@ mod tests {
         let y = [1.0, 2.0, 1.5, 2.5];
         let mut workspace =
             BvpSciCollocationWorkspace::new(2, 2, 0, &BvpSciTelemetry::disabled()).unwrap();
-        evaluate_collocation(&plan, &x, &y, &[], None, &mut workspace).unwrap();
-        assemble_global_jacobian(&plan, &boundary, &x, &y, &[], None, &mut workspace).unwrap();
+        evaluate_collocation(&plan, &x, &y, &[], &[], None, &mut workspace).unwrap();
+        assemble_global_jacobian(&plan, &boundary, &x, &y, &[], &[], None, &mut workspace).unwrap();
 
         let left_y0 = workspace
             .entries
@@ -546,8 +553,9 @@ mod tests {
         let y = [0.0, 0.0, 0.0, 0.0];
         let mut workspace =
             BvpSciCollocationWorkspace::new(2, 2, 1, &BvpSciTelemetry::disabled()).unwrap();
-        evaluate_collocation(&plan, &x, &y, &[1.0], None, &mut workspace).unwrap();
-        assemble_global_jacobian(&plan, &boundary, &x, &y, &[1.0], None, &mut workspace).unwrap();
+        evaluate_collocation(&plan, &x, &y, &[1.0], &[], None, &mut workspace).unwrap();
+        assemble_global_jacobian(&plan, &boundary, &x, &y, &[1.0], &[], None, &mut workspace)
+            .unwrap();
 
         let parameter_entries: Vec<_> = workspace
             .entries
@@ -584,9 +592,18 @@ mod tests {
         let parameters = [2.0];
         let mut workspace =
             BvpSciCollocationWorkspace::new(1, 2, 1, &BvpSciTelemetry::disabled()).unwrap();
-        evaluate_collocation(&plan, &x, &y, &parameters, None, &mut workspace).unwrap();
-        assemble_global_jacobian(&plan, &boundary, &x, &y, &parameters, None, &mut workspace)
-            .unwrap();
+        evaluate_collocation(&plan, &x, &y, &parameters, &[], None, &mut workspace).unwrap();
+        assemble_global_jacobian(
+            &plan,
+            &boundary,
+            &x,
+            &y,
+            &parameters,
+            &[],
+            None,
+            &mut workspace,
+        )
+        .unwrap();
 
         let assembled = workspace
             .entries
@@ -607,6 +624,7 @@ mod tests {
             &x,
             &y,
             &[parameters[0] + nominal_delta],
+            &[],
             None,
             &mut trial,
         )

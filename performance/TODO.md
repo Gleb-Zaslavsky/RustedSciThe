@@ -1,5 +1,36 @@
 # Performance Regression Gates: Implementation Checklist
 
+## Independent IVP Parameter-Loop Gates
+
+- [x] Add one substantial repeated-parameter workload per first-tier IVP
+  solver, measuring prepared loop wall time with native telemetry Off.
+- [x] Keep all points on the same initial state and interval; validate every
+  returned point and do not introduce previous-state continuation.
+- [x] Add a focused `ivp-parameter-loop` selector and PowerShell runner so
+  record/compare does not rerun unrelated perf-gates.
+- [ ] Run and review the isolated Release gate on Windows, then record/compare
+  its baselines. Linux calibration remains a separate platform task.
+
+## Focused BVP_sci Parameter-Loop Gate
+
+- [x] Register a large repeated-solve scenario under the dedicated
+  `bvp-sci-parameter-loop` group. Measure the end-to-end native loop with
+  telemetry Off as the gate metric and use separate diagnostic runs for native
+  stage/counter snapshots. Keep fixed-input BVP_sci parameter loops distinct
+  from its free Newton-parameter solves.
+- [x] Choose a workload with a substantial solve duration (target tens of
+  milliseconds or longer per scenario), correct reference checks, and enough
+  continuation points to exercise prepared-callback reuse and prior-profile
+  seeding. The registered workload is 48 states x 129 nodes x 3 loop points;
+  small fixtures remain correctness tests, never timing baselines.
+- [x] Add a dedicated PowerShell runner that accepts Record/Compare and invokes
+  only `--group bvp-sci-parameter-loop`; do not make it part of the broad IVP or
+  all-solver perf-gate script.
+- [x] Verify the group selector resolves only its registered scenario and add
+  a standalone command. Keep its baselines under the existing machine/
+  environment scheme and do not force-rewrite unrelated solver gates.
+- [ ] Record and compare the gate on Windows and Linux after source is committed.
+
 Decision date: 2026-10-20.
 Source requirements: user specification sections 1-25, including the separate
 section 24 on preserving experimental reports.

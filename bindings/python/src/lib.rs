@@ -11,6 +11,7 @@ mod bdf;
 mod be;
 mod block_tridiagonal;
 pub(crate) mod bvp;
+mod bvp_api;
 mod bvp_damp;
 mod contract;
 mod data_processing;
@@ -22,10 +23,12 @@ mod lsode2;
 mod nonlinear;
 mod numpy_support;
 mod ode_api2;
+mod parameter_loop;
 #[cfg(test)]
 mod parity;
 mod radau;
 mod shooting_bvp;
+mod stiff_api;
 mod symbolic_arrays;
 mod system;
 mod task;
@@ -41,8 +44,16 @@ use crate::banded::{BandedMatrix, BandedRefinementResult, LapackStyleBandedLuFai
 use crate::bdf::{BdfCallbackSolver, BdfSolution, BdfSolver};
 use crate::be::{BackwardEulerSolution, BackwardEulerSolver};
 use crate::block_tridiagonal::{BlockTridiagonalLuConsistent, BlockTridiagonalRefinementResult};
-use crate::bvp::{BvpSciSolution, BvpSciSolver};
-use crate::bvp_damp::{BvpDampFrozenSolver, BvpDampNaiveSolver, BvpDampSolution, BvpDampSolver};
+use crate::bvp::{
+    BvpSciParameterLoopPoint, BvpSciParameterLoopReport, BvpSciSolution, BvpSciSolver,
+};
+use crate::bvp_api::{
+    PyBvpApiSolution, PyBvpPostprocessPlan, PyBvpSolverRequest, PyPreparedBvpSolver,
+};
+use crate::bvp_damp::{
+    BvpDampFrozenSolver, BvpDampNaiveSolver, BvpDampParameterLoopPoint, BvpDampParameterLoopReport,
+    BvpDampSolution, BvpDampSolver,
+};
 use crate::contract::{
     ExecutionPolicy, ExecutionRoute, MatrixLayout, SolverCapabilities, SolverOptions,
     SymbolicFrontend, TelemetryMode, capabilities,
@@ -59,8 +70,12 @@ use crate::lambdify::LambdifiedExpr;
 use crate::lsode2::{Lsode2PythonSolver, Lsode2Solution};
 use crate::nonlinear::{FittingSolution, FittingSolver, NonlinearSolution, NonlinearSolver};
 use crate::ode_api2::{UniversalNonStiffSolution, UniversalNonStiffSolver};
+use crate::parameter_loop::PyIvpParameterLoopPoint;
 use crate::radau::{RadauCallbackSolver, RadauSolution, RadauSolver};
 use crate::shooting_bvp::{PyShootingBvpSolution, PyShootingBvpSolver};
+use crate::stiff_api::{
+    PyPreparedStiffSolver, PyStiffPostprocessPlan, PyStiffPreset, PyStiffSolverRequest,
+};
 use crate::symbolic_arrays::{PyExprMatrix, PyExprVector};
 use crate::system::{LambdifiedSystem, SymbolicSystem};
 use crate::task::{BvpTaskResult, IvpTaskResult, TaskDocument};
@@ -91,18 +106,31 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<BackwardEulerSolution>()?;
     module.add_class::<BvpSciSolver>()?;
     module.add_class::<BvpSciSolution>()?;
+    module.add_class::<BvpSciParameterLoopPoint>()?;
+    module.add_class::<BvpSciParameterLoopReport>()?;
+    module.add_class::<PyBvpSolverRequest>()?;
+    module.add_class::<PyPreparedBvpSolver>()?;
+    module.add_class::<PyBvpApiSolution>()?;
+    module.add_class::<PyBvpPostprocessPlan>()?;
     module.add_class::<BvpDampSolver>()?;
     module.add_class::<BvpDampNaiveSolver>()?;
     module.add_class::<BvpDampFrozenSolver>()?;
     module.add_class::<BvpDampSolution>()?;
+    module.add_class::<BvpDampParameterLoopPoint>()?;
+    module.add_class::<BvpDampParameterLoopReport>()?;
     module.add_class::<RadauSolver>()?;
     module.add_class::<RadauCallbackSolver>()?;
     module.add_class::<RadauSolution>()?;
     module.add_class::<PyShootingBvpSolver>()?;
     module.add_class::<PyShootingBvpSolution>()?;
+    module.add_class::<PyStiffPreset>()?;
+    module.add_class::<PyStiffSolverRequest>()?;
+    module.add_class::<PyPreparedStiffSolver>()?;
+    module.add_class::<PyStiffPostprocessPlan>()?;
     module.add_class::<LambdifiedExpr>()?;
     module.add_class::<Lsode2PythonSolver>()?;
     module.add_class::<Lsode2Solution>()?;
+    module.add_class::<PyIvpParameterLoopPoint>()?;
     module.add_class::<UniversalNonStiffSolver>()?;
     module.add_class::<UniversalNonStiffSolution>()?;
     module.add_class::<SymbolicSystem>()?;

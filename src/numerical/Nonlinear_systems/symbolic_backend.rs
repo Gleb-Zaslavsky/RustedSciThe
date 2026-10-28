@@ -296,8 +296,8 @@ mod tests {
         let a = symbolic[2].clone();
         let options = SymbolicProblemOptions::new()
             .with_variables(vec!["x".to_string(), "y".to_string()])
-            .with_equation_parameters(vec!["a".to_string()])
-            .with_equation_parameter_values(DVector::from_vec(vec![2.0]));
+            .with_parameter_names(vec!["a".to_string()])
+            .with_parameter_values(DVector::from_vec(vec![2.0]));
         let baseline = SymbolicNonlinearProblem::from_expressions_with_options(
             vec![
                 a.clone() * x.clone() + y.clone() - Expr::Const(3.0),

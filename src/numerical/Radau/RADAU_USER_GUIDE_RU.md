@@ -13,7 +13,7 @@
 ExprLegacy и плотным хранением. Это удобный вариант, когда нужно единое API
 для нескольких солверов без Radau-специфичных настроек.
 
-Для выбора frontend, layout, continuation, output, telemetry, execution policy
+Для выбора frontend, layout, parameter rebinding, output, telemetry, execution policy
 или AOT следует использовать прямой API:
 
 Если используется общий фасад, production-маршрут Radau оставляет telemetry
@@ -34,7 +34,7 @@ let problem = RadauProblem::new(
     vec!["y".to_owned()],
     "t",
 )
-.with_parameters(vec!["k".to_owned()])
+.with_parameter_names(vec!["k".to_owned()])
 .with_jacobian(vec![Expr::parse_expression("-k")]);
 
 let config = RadauConfig {
@@ -46,7 +46,7 @@ let config = RadauConfig {
 };
 
 let mut solver = RadauSolver::prepare(problem, config)?;
-let solution = solver.solve_with_parameters(&[1.0], &[2.0])?;
+let solution = solver.try_solve_with_parameter_values(&[1.0], &[2.0])?;
 println!("t={} y={:?}", solution.t, solution.y);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
@@ -80,11 +80,12 @@ Layout выбирается при подготовке:
 ```rust
 let dense = RadauMatrixLayout::Dense;
 let sparse = RadauMatrixLayout::Sparse;
-let banded = RadauMatrixLayout::Banded { lower: 1, upper: 1 };
+let banded = RadauMatrixLayout::BandedAuto;
 ```
 
 `Dense` выбирайте для полностью связанных Jacobian и небольших или средних
-систем. `Banded` подходит для устойчивой узкой полосы. `Sparse` подходит для
+систем. `BandedAuto` выводит полосу из символьных зависимостей автоматически;
+явный `Banded { lower, upper }` остается необязательной подсказкой. `Sparse` подходит для
 больших задач со стабильным sparse-pattern, если экономия на хранении и
 линейной алгебре окупает служебные расходы.
 
@@ -109,7 +110,7 @@ let problem = RadauProblem::new(
     vec!["y".to_owned()],
     "t",
 )
-.with_parameters(vec!["k".to_owned()])
+.with_parameter_names(vec!["k".to_owned()])
 .with_jacobian(vec![Expr::parse_expression("-k")]);
 ```
 
@@ -168,7 +169,7 @@ let config = RadauConfig {
 автоматическая оценка начального шага не подходит. Увеличение Newton/retry
 budget не должно маскировать плохой Jacobian или плохое масштабирование.
 
-## 6. Одиночное решение и continuation
+## 6. Повторные решения с переназначением параметров
 
 Для модели без параметров:
 
@@ -176,28 +177,30 @@ budget не должно маскировать плохой Jacobian или п�
 let solution = solver.solve(&[1.0])?;
 ```
 
-Если модель объявлена через `with_parameters`, значения связываются явно:
+Если модель объявлена через `with_parameter_names`, значения связываются явно:
 
 ```rust
 for k in [0.5, 1.0, 2.0, 4.0] {
-    let solution = solver.continue_with_parameters(&[1.0], &[k])?;
+    let solution = solver.try_solve_with_parameter_values(&[1.0], &[k])?;
     println!("k={k}: y(1)={:.9e}", solution.y[0]);
 }
 ```
 
-Continuation переиспользует подготовленную symbolic model: изменение значений
-параметров не должно повторять symbolic differentiation и frontend preparation.
-Первый solve оплачивает подготовку, следующие solves показывают warm path. В
-benchmark подготовку нужно показывать отдельно от повторной серии.
+Каждый вызов переиспользует подготовленную symbolic model: изменение значений
+параметров не повторяет symbolic differentiation и frontend preparation. Это
+независимые решения, потому что каждому явно передаётся `y0`; parameter
+continuation вместо этого использовала бы предыдущее решение как начальное
+приближение. В benchmark подготовку нужно показывать отдельно от повторной серии.
 
 Для нового интервала с сохранением подготовленных callback-ов:
 
 ```rust
 solver.restart(0.0, 2.0)?;
-let solution = solver.continue_with_parameters(&[1.0], &[2.0])?;
+let solution = solver.try_solve_with_parameter_values(&[1.0], &[2.0])?;
 ```
 
-`restart` меняет только интервал, а новый `y0` передаётся следующему solve.
+`restart` меняет только интервал, а новый `y0` передаётся следующему solve;
+само изменение границ не является parameter continuation.
 
 ## 7. Output и post-processing
 
@@ -292,10 +295,10 @@ step-budget exhaustion и output range.
 Готовые examples:
 
 - `examples/radau_lambdify_single.rs` — одиночный Lambdify solve;
-- `examples/radau_lambdify_continuation.rs` — continuation одной prepared model;
+- `examples/radau_lambdify_continuation.rs` — повторные решения с новыми значениями параметров;
 - `examples/radau_public_api_guide.rs` — AtomView, counters и dense output;
 - `examples/radau_backends_guide.rs` — сравнение frontend/layout;
-- `examples/radau_aot_single.rs` и `examples/radau_aot_continuation.rs` — AOT;
+- `examples/radau_aot_single.rs` и `examples/radau_aot_parameter_sweep.rs` — AOT и повторная привязка параметров между fresh solve;
 - `examples/universal_ode_example.rs` и `examples/rus/universal_ode_example.rs` —
   короткий universal facade.
 

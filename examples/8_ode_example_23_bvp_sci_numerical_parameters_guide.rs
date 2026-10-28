@@ -1,8 +1,8 @@
-//! Параметрический гайд по чисто числовой ветке новой архитектуры `BVP_sci`.
+//! Гайд по свободному параметру в чисто числовой ветке `BVP_sci`.
 //!
-//! Солвер одновременно ищет функцию и неизвестный скалярный параметр. После
-//! первой подготовки мы меняем параметр через `set_parameters`, не создавая
-//! заново callback plan. Это и есть базовый сценарий parameter continuation.
+//! Параметры BVP_sci — свободные Newton-неизвестные, а не fixed inputs.
+//! `set_parameter_guess` меняет начальную оценку параметра; после успешного
+//! решения mesh и профиль состояния сохраняются для следующего solve.
 //!
 //! Учебная задача:
 //! `y' = p`, `y(0) = 0`, `p = 1`, поэтому точное решение равно `y(x) = x`.
@@ -49,18 +49,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options,
     )?;
 
-    println!("BVP_sci numerical continuation");
-    println!("parameter | y(0) | y(1) | residual_norm | continuation_solves");
+    println!("BVP_sci free-parameter guess continuation");
+    println!("p guess | solved p | y(0) | y(1) | residual_norm | continuation_solves");
     for parameter in [0.25, 1.5] {
         if parameter != 0.25 {
-            // Подготовленная модель сохраняется; меняется только численное
-            // значение параметра и связанные с ним solver buffers.
-            solver.set_parameters(vec![parameter])?;
+            // Меняем начальное приближение свободного p; граничная невязка
+            // по-прежнему определяет итоговое p=1.
+            solver.set_parameter_guess(vec![parameter])?;
         }
         let solution = solver.solve()?;
         let snapshot = solver.plan().telemetry_snapshot();
         println!(
-            "{:.6} | {:.6} | {:.6} | {:.3e} | {}",
+            "{:.6} | {:.6} | {:.6} | {:.6} | {:.3e} | {}",
+            parameter,
             solution.parameters[0],
             solution.y[0],
             solution.y[solution.y.len() - 1],

@@ -137,11 +137,17 @@ impl SymbolicLeastSquaresSolver {
         self
     }
 
-    /// Builder pattern: Set parameters
-    pub fn with_parameters(mut self, parameters: Vec<String>) -> Self {
+    /// Declares the ordered symbolic parameter names for the problem.
+    pub fn with_parameter_names(mut self, parameters: Vec<String>) -> Self {
         self.prepared = None;
         self.parameters = Some(parameters);
         self
+    }
+
+    /// Legacy name for [`Self::with_parameter_names`].
+    #[deprecated(note = "use with_parameter_names; this declares names, not values")]
+    pub fn with_parameters(self, parameters: Vec<String>) -> Self {
+        self.with_parameter_names(parameters)
     }
 
     /// Builder pattern: Set initial guess
@@ -335,7 +341,7 @@ impl SymbolicLeastSquaresSolver {
                 },
             );
         if let Some(parameters) = &self.parameters {
-            options = options.with_equation_parameters(parameters.clone());
+            options = options.with_parameter_names(parameters.clone());
         }
         let mut prepared =
             PreparedSymbolicLeastSquaresProblem::from_expressions(self.eq_system.clone(), options)?;
@@ -594,9 +600,10 @@ impl SymbolicLeastSquaresSolver {
         Ok(report)
     }
 
-    /// Typed parameter-rebind solve. Symbolic preparation is reused, and the
-    /// returned report contains this solve's optional telemetry snapshot.
-    pub fn try_solve_with_params(
+    /// Binds new parameter values to the prepared problem and solves it.
+    /// Symbolic preparation is reused; this operation does not perform
+    /// parameter continuation or choose the next initial guess.
+    pub fn try_solve_with_parameter_values(
         &mut self,
         equation_parameters: Vec<f64>,
     ) -> Result<
@@ -632,6 +639,18 @@ impl SymbolicLeastSquaresSolver {
             );
         }
         Ok(report)
+    }
+
+    /// Legacy name for [`Self::try_solve_with_parameter_values`].
+    #[deprecated(note = "use try_solve_with_parameter_values")]
+    pub fn try_solve_with_params(
+        &mut self,
+        equation_parameters: Vec<f64>,
+    ) -> Result<
+        crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
+        LeastSquaresError,
+    > {
+        self.try_solve_with_parameter_values(equation_parameters)
     }
 
     /// Solves the nonlinear system with optional logging.
@@ -691,7 +710,7 @@ impl SymbolicLeastSquaresSolver {
     }
 
     /// Solves parametric system without modifying self, returns solution map and vector.
-    pub fn solve_with_params_unmut_internal(
+    fn solve_with_parameter_values_unmut_internal(
         &self,
         params: Vec<f64>,
     ) -> (Option<HashMap<String, f64>>, Option<DVector<f64>>) {
@@ -748,19 +767,37 @@ impl SymbolicLeastSquaresSolver {
         }
     }
 
-    /// Solves parametric system with given parameter values and optional logging.
+    /// Binds parameter values and solves without mutating the solver's stored
+    /// result fields. Symbolic preparation is reused.
+    pub fn solve_with_parameter_values_unmut(
+        &self,
+        params: Vec<f64>,
+    ) -> (Option<HashMap<String, f64>>, Option<DVector<f64>>) {
+        self.solve_with_parameter_values_unmut_internal(params)
+    }
+
+    /// Legacy name for [`Self::solve_with_parameter_values_unmut`].
+    #[deprecated(note = "use solve_with_parameter_values_unmut")]
     pub fn solve_with_params_unmut(
         &self,
         params: Vec<f64>,
     ) -> (Option<HashMap<String, f64>>, Option<DVector<f64>>) {
-        self.solve_with_params_unmut_internal(params)
+        self.solve_with_parameter_values_unmut(params)
     }
 
-    pub fn solve_with_params(&mut self, params: Vec<f64>) {
+    /// Binds parameter values, solves, and stores the result on this wrapper.
+    /// The compiled symbolic preparation is reused across calls.
+    pub fn solve_with_parameter_values(&mut self, params: Vec<f64>) {
         self.ensure_prepared();
-        let (map_of_solutions, solution) = self.solve_with_params_unmut(params);
+        let (map_of_solutions, solution) = self.solve_with_parameter_values_unmut(params);
         self.map_of_solutions = map_of_solutions;
         self.result = solution;
+    }
+
+    /// Legacy name for [`Self::solve_with_parameter_values`].
+    #[deprecated(note = "use solve_with_parameter_values")]
+    pub fn solve_with_params(&mut self, params: Vec<f64>) {
+        self.solve_with_parameter_values(params);
     }
 }
 
@@ -955,12 +992,12 @@ mod tests {
         let mut solver = SymbolicLeastSquaresSolver::new()
             .with_equations_str(vec!["x - a".to_string()])
             .with_unknowns(vec!["x".to_string()])
-            .with_parameters(vec!["a".to_string()])
+            .with_parameter_names(vec!["a".to_string()])
             .with_initial_guess(vec![0.0])
             .with_telemetry(LeastSquaresTelemetryMode::Counters)
             .build();
         let report = solver
-            .try_solve_with_params(vec![2.0])
+            .try_solve_with_parameter_values(vec![2.0])
             .expect("parameter rebind should solve");
         assert!(report.termination.was_successful());
         assert!((solver.result.as_ref().expect("result")[0] - 2.0).abs() < 1e-8);
@@ -1157,7 +1194,7 @@ mod tests2 {
             None,
         );
         LM.set_loglevel("info".to_string());
-        LM.solve_with_params(vec![1.0, 1.0]);
+        LM.solve_with_parameter_values(vec![1.0, 1.0]);
         let map = LM.map_of_solutions.unwrap();
         let expected = (2.0_f64).sqrt() / 2.0;
         assert!((map["x"].abs() - expected).abs() < 1e-6);
@@ -1170,13 +1207,13 @@ mod tests2 {
         let solver = SymbolicLeastSquaresSolver::new()
             .with_equations_str(vec!["a*x^2 + b*y^2 - 1".to_string(), "x - y".to_string()])
             .with_unknowns(vec!["x".to_string(), "y".to_string()])
-            .with_parameters(vec!["a".to_string(), "b".to_string()])
+            .with_parameter_names(vec!["a".to_string(), "b".to_string()])
             .with_initial_guess(vec![0.5, 0.5])
             .with_loglevel("none".to_string())
             .build();
 
         let mut solver = solver;
-        solver.solve_with_params(vec![1.0, 1.0]);
+        solver.solve_with_parameter_values(vec![1.0, 1.0]);
         let map = solver.map_of_solutions.unwrap();
         let expected = (2.0_f64).sqrt() / 2.0;
         assert!((map["x"].abs() - expected).abs() < 1e-6);
@@ -1345,14 +1382,14 @@ mod tests2 {
         let solver = SymbolicLeastSquaresSolver::new()
             .with_equations(vec![eq1, eq2])
             .with_unknowns(vec!["x".to_string(), "y".to_string()])
-            .with_parameters(vec!["a".to_string(), "b".to_string()])
+            .with_parameter_names(vec!["a".to_string(), "b".to_string()])
             .with_initial_guess(vec![0.5, 0.5])
             .with_tolerance(1e-8)
             .with_loglevel("none".to_string())
             .build();
 
         let mut solver = solver;
-        solver.solve_with_params(vec![1.0, 1.0]);
+        solver.solve_with_parameter_values(vec![1.0, 1.0]);
         let map = solver.map_of_solutions.unwrap();
         let expected = (2.0_f64).sqrt() / 2.0;
         assert!((map["x"].abs() - expected).abs() < 1e-6);

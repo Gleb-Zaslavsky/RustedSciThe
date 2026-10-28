@@ -105,7 +105,7 @@ mod tests {
             vec!["a*x-2".to_string(), "y+b".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string(), "b".to_string()]),
+                .with_parameter_names(vec!["a".to_string(), "b".to_string()]),
         )
         .expect("affine parameterized problem should prepare");
         let first = prepared
@@ -182,7 +182,7 @@ mod tests {
             vec!["a*x-2".to_string(), "y+b".to_string()],
             SymbolicProblemOptions::new()
                 .with_variables(vec!["x".to_string(), "y".to_string()])
-                .with_equation_parameters(vec!["a".to_string(), "b".to_string()]),
+                .with_parameter_names(vec!["a".to_string(), "b".to_string()]),
         )
         .expect("strict LM regression problem should prepare");
         let bound = prepared

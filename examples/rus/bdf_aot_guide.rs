@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Скомпилированные callbacks и загруженный артефакт остаются готовыми;
     // меняются только параметр и численная история нового сегмента.
-    solver.try_continue_with_parameter_values(DVector::from_vec(vec![2.0]), 1.0)?;
+    solver.try_continue_in_time_with_parameter_values(DVector::from_vec(vec![2.0]), 1.0)?;
     solver.try_solve()?;
     assert_eq!(solver.status_kind(), BdfStatus::Finished);
 

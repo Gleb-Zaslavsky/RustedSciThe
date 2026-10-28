@@ -24,8 +24,9 @@ use crate::errors::{
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
+use crate::parameter_loop::{PyIvpParameterLoopPoint, run_parameter_loop};
 
-fn finite_vector(values: &[f64], label: &str) -> PyResult<()> {
+pub(crate) fn finite_vector(values: &[f64], label: &str) -> PyResult<()> {
     if values.is_empty() {
         return Err(InvalidConfigurationError::new_err(format!(
             "{label} must not be empty"
@@ -39,7 +40,7 @@ fn finite_vector(values: &[f64], label: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn validate_names(names: &[String], label: &str) -> PyResult<()> {
+pub(crate) fn validate_names(names: &[String], label: &str) -> PyResult<()> {
     if names.is_empty() {
         return Err(InvalidConfigurationError::new_err(format!(
             "{label} must not be empty"
@@ -59,7 +60,7 @@ fn validate_names(names: &[String], label: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn validate_scalar(value: f64, label: &str) -> PyResult<()> {
+pub(crate) fn validate_scalar(value: f64, label: &str) -> PyResult<()> {
     if !value.is_finite() {
         return Err(InvalidConfigurationError::new_err(format!(
             "{label} must be finite"
@@ -68,7 +69,7 @@ fn validate_scalar(value: f64, label: &str) -> PyResult<()> {
     Ok(())
 }
 
-fn validate_route(
+pub(crate) fn validate_route(
     options: &SolverOptions,
 ) -> PyResult<(BeSymbolicAssemblyBackend, BeTelemetryMode)> {
     options.validate_aot_options()?;
@@ -111,7 +112,7 @@ fn validate_route(
     Ok((frontend, telemetry))
 }
 
-fn validate_expression_symbols(
+pub(crate) fn validate_expression_symbols(
     expressions: &[PyExpr],
     state_variables: &[String],
     time_variable: &str,
@@ -161,7 +162,7 @@ pub struct BackwardEulerSolution {
 }
 
 impl BackwardEulerSolution {
-    fn from_solver(solver: &BE) -> Self {
+    pub(crate) fn from_solver(solver: &BE) -> Self {
         let (times, states) = solver.trajectory();
         let detailed = solver.detailed_statistics();
         let common = solver.get_statistics();
@@ -556,6 +557,88 @@ impl BackwardEulerSolver {
         })
     }
 
+    /// Start a fresh solve with new parameter values and initial state.
+    ///
+    /// The configured interval is retained while the numerical trajectory is
+    /// reset. Prepared symbolic callbacks and AOT artifacts are reused.
+    pub fn solve_with_parameter_values(
+        &mut self,
+        y0: Vec<f64>,
+        parameter_values: Vec<f64>,
+    ) -> PyResult<BackwardEulerSolution> {
+        finite_vector(&y0, "y0")?;
+        finite_vector(&parameter_values, "parameter_values")?;
+        if parameter_values.len() != self.parameter_count {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "expected {} parameter values, got {}",
+                self.parameter_count,
+                parameter_values.len()
+            )));
+        }
+        let route = format!("{}:{}", self.frontend, self.execution);
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "backward_euler", &route, || {
+            self.solver
+                .try_solve_with_parameter_values(
+                    DVector::from_vec(y0),
+                    DVector::from_vec(parameter_values),
+                )
+                .map_err(map_be_error)?;
+            Ok(BackwardEulerSolution::from_solver(&self.solver))
+        })
+    }
+
+    /// Run independent solves in caller-specified parameter order. Every
+    /// point uses this same initial state and configured time interval.
+    pub fn solve_parameter_loop(
+        &mut self,
+        py: Python<'_>,
+        y0: Vec<f64>,
+        parameter_vectors: Vec<Vec<f64>>,
+    ) -> PyResult<Vec<Py<PyIvpParameterLoopPoint>>> {
+        finite_vector(&y0, "y0")?;
+        let route = format!("{}:{}", self.frontend, self.execution);
+        run_parameter_loop(py, "backward_euler", &route, parameter_vectors, |parameters| {
+            let solution = self.solve_with_parameter_values(y0.clone(), parameters.to_vec())?;
+            Py::new(py, solution).map(Py::into_any)
+        })
+    }
+
+    /// Start a fresh solve with new parameters, initial state and interval.
+    /// The prepared symbolic/AOT backend is retained.
+    pub fn solve_with_parameter_values_in_interval(
+        &mut self,
+        t0: f64,
+        y0: Vec<f64>,
+        t_end: f64,
+        parameter_values: Vec<f64>,
+    ) -> PyResult<BackwardEulerSolution> {
+        finite_vector(&y0, "y0")?;
+        finite_vector(&parameter_values, "parameter_values")?;
+        if parameter_values.len() != self.parameter_count {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "expected {} parameter values, got {}",
+                self.parameter_count,
+                parameter_values.len()
+            )));
+        }
+        validate_scalar(t0, "t0")?;
+        validate_scalar(t_end, "t_end")?;
+        let route = format!("{}:{}", self.frontend, self.execution);
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "backward_euler", &route, || {
+            self.solver
+                .try_solve_with_parameter_values_in_interval(
+                    t0,
+                    DVector::from_vec(y0),
+                    t_end,
+                    DVector::from_vec(parameter_values),
+                )
+                .map_err(map_be_error)?;
+            Ok(BackwardEulerSolution::from_solver(&self.solver))
+        })
+    }
+
     /// Continue from the latest accepted state, optionally rebinding values.
     ///
     /// This is a warm segment continuation, not a new initial-value problem.
@@ -658,7 +741,7 @@ impl BackwardEulerSolver {
     }
 }
 
-fn map_be_error(error: BeError) -> PyErr {
+pub(crate) fn map_be_error(error: BeError) -> PyErr {
     let native_kind = crate::errors::native_variant(&error);
     let message = error.to_string();
     crate::errors::annotate_native(

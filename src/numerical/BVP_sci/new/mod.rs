@@ -29,6 +29,7 @@ pub mod jacobian;
 pub mod linear;
 pub mod numerical;
 pub mod output;
+pub mod parameter_loop;
 pub mod prepared;
 pub mod problem;
 pub mod singular;
@@ -54,6 +55,7 @@ pub use numerical::{
     NumericalRhsCallback,
 };
 pub use output::{BvpSciDenseOutput, BvpSciOutputPolicy, BvpSciSolution};
+pub use parameter_loop::{BvpSciParameterLoopPoint, BvpSciParameterLoopReport};
 pub use prepared::BvpSciLambdifyPlan;
 pub use singular::BvpSciSingularTerm;
 

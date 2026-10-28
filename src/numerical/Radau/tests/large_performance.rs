@@ -434,12 +434,12 @@ fn expr_coordinate_jacobian_prepare_and_solve_ab_story() {
                         workload.variables.clone(),
                         workload.time_variable.clone(),
                     )
-                    .with_parameters(workload.parameter_names.clone())
+                    .with_parameter_names(workload.parameter_names.clone())
                     .with_jacobian(jacobian);
                     let mut solver = RadauSolver::prepare(problem, timed_config.clone()).unwrap();
                     let prepared = started.elapsed().as_secs_f64() * 1_000.0;
                     let solution = solver
-                        .solve_with_parameters(&initial_state, &parameters)
+                        .try_solve_with_parameter_values(&initial_state, &parameters)
                         .unwrap();
                     let full = started.elapsed().as_secs_f64() * 1_000.0;
                     (prepared, full, solution.y)
@@ -451,11 +451,11 @@ fn expr_coordinate_jacobian_prepare_and_solve_ab_story() {
                         workload.variables.clone(),
                         workload.time_variable.clone(),
                     )
-                    .with_parameters(workload.parameter_names.clone());
+                    .with_parameter_names(workload.parameter_names.clone());
                     let mut solver = RadauSolver::prepare(problem, timed_config.clone()).unwrap();
                     let prepared = started.elapsed().as_secs_f64() * 1_000.0;
                     let solution = solver
-                        .solve_with_parameters(&initial_state, &parameters)
+                        .try_solve_with_parameter_values(&initial_state, &parameters)
                         .unwrap();
                     let full = started.elapsed().as_secs_f64() * 1_000.0;
                     (prepared, full, solution.y)
@@ -504,23 +504,23 @@ fn expr_coordinate_jacobian_prepare_and_solve_ab_story() {
                 workload.variables.clone(),
                 workload.time_variable.clone(),
             )
-            .with_parameters(workload.parameter_names.clone())
+            .with_parameter_names(workload.parameter_names.clone())
             .with_jacobian(diagnostic_jacobian);
             let mut dense_solver =
                 RadauSolver::prepare(dense_problem, detailed_config.clone()).unwrap();
             let dense_diagnostic = dense_solver
-                .solve_with_parameters(&initial_state, &parameters)
+                .try_solve_with_parameter_values(&initial_state, &parameters)
                 .unwrap();
             let derived_problem = RadauProblem::new(
                 workload.equations.clone(),
                 workload.variables.clone(),
                 workload.time_variable.clone(),
             )
-            .with_parameters(workload.parameter_names.clone());
+            .with_parameter_names(workload.parameter_names.clone());
             let mut derived_solver =
                 RadauSolver::prepare(derived_problem, detailed_config).unwrap();
             let derived_diagnostic = derived_solver
-                .solve_with_parameters(&initial_state, &parameters)
+                .try_solve_with_parameter_values(&initial_state, &parameters)
                 .unwrap();
             let dense_counters = &dense_diagnostic.telemetry().counters;
             let derived_counters = &derived_diagnostic.telemetry().counters;
@@ -617,7 +617,7 @@ fn problem(
         workload.variables,
         workload.time_variable,
     )
-    .with_parameters(workload.parameter_names);
+    .with_parameter_names(workload.parameter_names);
     if let Some(jacobian) = jacobian {
         problem = problem.with_jacobian(jacobian);
     }
@@ -726,7 +726,7 @@ fn run_trajectory_case(
                     panic!("prepare {kind:?}/{frontend:?}/{layout:?}: {error}")
                 });
             let baseline = solver
-                .solve_with_parameters(&initial_state, &parameters)
+                .try_solve_with_parameter_values(&initial_state, &parameters)
                 .unwrap_or_else(|error| panic!("solve {kind:?}/{frontend:?}/{layout:?}: {error}"));
             let baseline_samples = baseline
                 .sample_many(&sample_times)
@@ -743,7 +743,7 @@ fn run_trajectory_case(
             }
 
             let continued = solver
-                .continue_with_parameters(&initial_state, target.as_slice())
+                .try_solve_with_parameter_values(&initial_state, target.as_slice())
                 .unwrap_or_else(|error| {
                     panic!("continuation {kind:?}/{frontend:?}/{layout:?}: {error}")
                 });
@@ -753,7 +753,7 @@ fn run_trajectory_case(
                     panic!("fresh prepare {kind:?}/{frontend:?}/{layout:?}: {error}")
                 });
             let fresh_solution = fresh
-                .solve_with_parameters(&fresh_state, target.as_slice())
+                .try_solve_with_parameter_values(&fresh_state, target.as_slice())
                 .unwrap_or_else(|error| {
                     panic!("fresh solve {kind:?}/{frontend:?}/{layout:?}: {error}")
                 });
@@ -818,15 +818,26 @@ fn large_workload_callback_and_full_solve_stage_breakdown() {
         .map(|dimension| (WorkloadKind::DiffusionChain, dimension))
         .chain(std::iter::once((WorkloadKind::ThreeBody, 12)))
     {
+        let workload = build_workload(kind, dimension);
         for frontend in [RadauAssembly::ExprLegacy, RadauAssembly::AtomViewNative] {
             for layout in layouts(kind).into_iter().map(|layout| match layout {
                 RadauMatrixLayout::Dense => InternalMatrixLayout::Dense,
                 RadauMatrixLayout::Sparse => InternalMatrixLayout::Sparse,
+                RadauMatrixLayout::BandedAuto => {
+                    let bandwidth = crate::symbolic::structural::infer_rowwise_bandwidth(
+                        &workload.equations,
+                        &workload.variables,
+                    )
+                    .expect("fixture has inferable symbolic structure");
+                    InternalMatrixLayout::Banded {
+                        lower: bandwidth.0,
+                        upper: bandwidth.1,
+                    }
+                }
                 RadauMatrixLayout::Banded { lower, upper } => {
                     InternalMatrixLayout::Banded { lower, upper }
                 }
             }) {
-                let workload = build_workload(kind, dimension);
                 let variables: Vec<&str> = workload.variables.iter().map(String::as_str).collect();
                 let jacobian = match frontend {
                     RadauAssembly::ExprLegacy => Some(
@@ -904,7 +915,7 @@ fn large_workload_callback_and_full_solve_stage_breakdown() {
                     RadauSolver::prepare(problem, config(public_frontend, public_layout, kind))
                         .unwrap();
                 let solve = solver
-                    .solve_with_parameters(
+                    .try_solve_with_parameter_values(
                         workload.initial_state.as_slice(),
                         workload.parameter_values.as_slice(),
                     )
@@ -984,7 +995,7 @@ fn dense_aot_full_solve_attribution_story() {
             let prepare_ms = started.elapsed().as_secs_f64() * 1_000.0;
             let started = Instant::now();
             let solution = solver
-                .solve_with_parameters(&initial_state, &parameters)
+                .try_solve_with_parameter_values(&initial_state, &parameters)
                 .unwrap_or_else(|error| panic!("{route_name} solve failed: {error}"));
             let full_solve_ms = started.elapsed().as_secs_f64() * 1_000.0;
             let report = solution.telemetry();
@@ -1074,7 +1085,7 @@ fn dense_aot_full_solve_attribution_story() {
             let prepare_ms = started.elapsed().as_secs_f64() * 1_000.0;
             let started = Instant::now();
             let solution = solver
-                .solve_with_parameters(&initial_state, &parameters)
+                .try_solve_with_parameter_values(&initial_state, &parameters)
                 .unwrap_or_else(|error| panic!("{route_name} solve failed: {error}"));
             let full_solve_ms = started.elapsed().as_secs_f64() * 1_000.0;
             let report = solution.telemetry();

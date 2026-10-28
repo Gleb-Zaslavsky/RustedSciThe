@@ -1,6 +1,14 @@
 """Typed public import surface for :mod:`rustedscithe`."""
 
 from ._native import *
+from ._native import StiffPreset as StiffPreset
+from ._native import StiffSolverRequest as StiffSolverRequest
+from ._native import PreparedStiffSolver as PreparedStiffSolver
+from ._native import StiffPostprocessPlan as StiffPostprocessPlan
+from ._native import BvpSolverRequest as BvpSolverRequest
+from ._native import PreparedBvpSolver as PreparedBvpSolver
+from ._native import BvpApiSolution as BvpApiSolution
+from ._native import BvpPostprocessPlan as BvpPostprocessPlan
 from .facade import (
     animate_solution_2d as animate_solution_2d,
     animate_solution_3d as animate_solution_3d,
@@ -36,14 +44,14 @@ from ._native import spline_resample as spline_resample
 __all__ = [
     "Expr", "ExprVector", "ExprMatrix", "BandedMatrix", "LapackStyleBandedLuFaithful", "BandedRefinementResult", "PivotedTridiagonalLu", "BlockTridiagonalLuConsistent", "BlockTridiagonalRefinementResult", "BdfSolver", "BdfCallbackSolver", "BdfSolution",
     "BackwardEulerSolver", "BackwardEulerSolution", "UniversalNonStiffSolver", "UniversalNonStiffSolution", "BvpSciSolver",
-    "BvpSciSolution", "BvpDampSolver", "BvpDampNaiveSolver", "BvpDampFrozenSolver", "BvpDampSolution", "RadauSolver",
+    "BvpSciSolution", "BvpSciParameterLoopPoint", "BvpSciParameterLoopReport", "BvpSolverRequest", "PreparedBvpSolver", "BvpApiSolution", "BvpPostprocessPlan", "BvpDampSolver", "BvpDampNaiveSolver", "BvpDampFrozenSolver", "BvpDampSolution", "BvpDampParameterLoopPoint", "BvpDampParameterLoopReport", "RadauSolver",
     "RadauCallbackSolver", "RadauSolution", "LambdifiedExpr", "Lsode2Solver",
-    "Lsode2Solution", "SymbolicSystem", "LambdifiedSystem", "NonlinearSolver",
+    "Lsode2Solution", "IvpParameterLoopPoint", "SymbolicSystem", "LambdifiedSystem", "NonlinearSolver",
     "NonlinearSolution", "FittingSolver", "FittingSolution", "GavinFittingSolver",
     "GavinFittingSolution", "VarProSolver", "VarProSolution", "UniversalFitting",
     "UniversalFittingSolution", "SymbolicFrontend",
     "ExecutionRoute", "MatrixLayout", "ExecutionPolicy", "TelemetryMode",
-    "SolverOptions", "SolverCapabilities", "TaskDocument", "IvpTaskResult",
+    "SolverOptions", "SolverCapabilities", "StiffPreset", "StiffSolverRequest", "PreparedStiffSolver", "StiffPostprocessPlan", "TaskDocument", "IvpTaskResult",
     "BvpTaskResult", "ShootingBvpSolver", "ShootingBvpSolution", "parse_expr", "symbol", "symbols", "indexed_symbols", "constant", "capabilities",
     "RustedSciTheError", "InvalidExpressionError", "UnsupportedOptionError",
     "UnsupportedSymbolicOperationError",

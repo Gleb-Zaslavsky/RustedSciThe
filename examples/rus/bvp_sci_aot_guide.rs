@@ -82,7 +82,7 @@ fn main() {
     for (name, layout) in [
         ("dense", BvpSciMatrixLayout::Dense),
         ("sparse", BvpSciMatrixLayout::Sparse),
-        ("banded", BvpSciMatrixLayout::Banded { lower: 1, upper: 1 }),
+        ("banded", BvpSciMatrixLayout::BandedAuto),
     ] {
         // Один неудачный layout не скрывает результаты остальных строк.
         if let Err(error) = run(layout, root.join(name)) {

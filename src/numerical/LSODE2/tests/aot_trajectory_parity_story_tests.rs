@@ -56,12 +56,14 @@ pub(super) fn trajectory_config(
             base.with_native_sparse_faer_generated_backend(generated)
         }
         (Lsode2LinearSystemStructure::Sparse, None) => base.with_native_sparse_faer_backend(),
-        (Lsode2LinearSystemStructure::Banded { .. }, Some(generated)) => {
-            base.with_native_banded_faithful_generated_backend(generated)
-        }
-        (Lsode2LinearSystemStructure::Banded { .. }, None) => {
-            base.with_native_banded_faithful_backend()
-        }
+        (
+            Lsode2LinearSystemStructure::BandedAuto | Lsode2LinearSystemStructure::Banded { .. },
+            Some(generated),
+        ) => base.with_native_banded_faithful_generated_backend(generated),
+        (
+            Lsode2LinearSystemStructure::BandedAuto | Lsode2LinearSystemStructure::Banded { .. },
+            None,
+        ) => base.with_native_banded_faithful_backend(),
         (Lsode2LinearSystemStructure::Dense, _) => {
             panic!("the trajectory parity gate intentionally excludes Dense")
         }
@@ -88,7 +90,7 @@ fn aot_trajectory_parity_matches_exprlegacy_atomview_and_lambdify() {
     let atom_telemetry = IvpTelemetry::detailed();
     let lambdify_telemetry = IvpTelemetry::detailed();
     let mut expr = Lsode2Solver::new(trajectory_config(
-        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
+        Lsode2LinearSystemStructure::BandedAuto,
         Lsode2SymbolicAssemblyBackend::ExprLegacy,
         Lsode2SymbolicExecutionMode::Aot {
             toolchain: Lsode2AotToolchain::CTcc,
@@ -99,7 +101,7 @@ fn aot_trajectory_parity_matches_exprlegacy_atomview_and_lambdify() {
     ))
     .expect("ExprLegacy AOT trajectory fixture should construct");
     let mut atom = Lsode2Solver::new(trajectory_config(
-        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
+        Lsode2LinearSystemStructure::BandedAuto,
         Lsode2SymbolicAssemblyBackend::AtomView,
         Lsode2SymbolicExecutionMode::Aot {
             toolchain: Lsode2AotToolchain::CTcc,
@@ -110,7 +112,7 @@ fn aot_trajectory_parity_matches_exprlegacy_atomview_and_lambdify() {
     ))
     .expect("AtomViewNative AOT trajectory fixture should construct");
     let mut lambdify = Lsode2Solver::new(trajectory_config(
-        Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
+        Lsode2LinearSystemStructure::BandedAuto,
         Lsode2SymbolicAssemblyBackend::AtomView,
         Lsode2SymbolicExecutionMode::LambdifyExpr,
         None,
@@ -292,10 +294,7 @@ fn aot_trajectory_parity_covers_sparse_and_banded_routes() {
 
     for (label, structure) in [
         ("Sparse", Lsode2LinearSystemStructure::Sparse),
-        (
-            "Banded",
-            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
-        ),
+        ("Banded", Lsode2LinearSystemStructure::BandedAuto),
     ] {
         let expr_telemetry = IvpTelemetry::detailed();
         let atom_telemetry = IvpTelemetry::detailed();

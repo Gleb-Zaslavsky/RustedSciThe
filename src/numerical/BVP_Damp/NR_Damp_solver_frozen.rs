@@ -56,6 +56,12 @@ include!("frozen_solver/preparation.rs");
 include!("frozen_solver/solve.rs");
 include!("frozen_solver/postprocess.rs");
 
+#[path = "frozen_solver/parameter_loop.rs"]
+mod parameter_loop;
+pub use parameter_loop::{
+    FrozenParameterLoopOutcome, FrozenParameterLoopPoint, FrozenParameterLoopReport,
+};
+
 #[cfg(test)]
 #[path = "tests/frozen_solver_unit.rs"]
 mod tests;

@@ -53,7 +53,7 @@ missing standalone-BDF test axis.
 
 `set_parameter_values` by itself only updates the shared parameter slot and does
 not make a safe continuation boundary. Use
-`try_continue_with_parameter_values(values, t_bound)` after a successful segment:
+`try_continue_in_time_with_parameter_values(values, t_bound)` after a successful segment:
 it starts at the last accepted `(t,y)`, drops BDF differences/J/LU state, and
 reuses prepared callbacks. Invalid parameter counts are checked before updating
 the shared parameter slot. Debug correctness and release AOT/cache lifecycle are

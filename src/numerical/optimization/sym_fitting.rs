@@ -8,7 +8,7 @@ use crate::numerical::Nonlinear_systems::symbolic::{
     LambdifyExecutionPolicy, SymbolicLambdifyFrontend, SymbolicProblemOptions,
 };
 use crate::symbolic::symbolic_engine::Expr;
-use log::{log, Level};
+use log::{Level, log};
 use nalgebra::DVector;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -1192,11 +1192,13 @@ mod tests {
             Sequential
         );
         // Explicit nested policies are rejected even below the threshold.
-        assert!(Parallel {
-            min_observations: 20
-        }
-        .resolve(1, 8, callback_par)
-        .is_err());
+        assert!(
+            Parallel {
+                min_observations: 20
+            }
+            .resolve(1, 8, callback_par)
+            .is_err()
+        );
     }
 
     #[test]

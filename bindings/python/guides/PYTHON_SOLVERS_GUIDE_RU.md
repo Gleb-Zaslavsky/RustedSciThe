@@ -53,13 +53,16 @@ solver = BdfSolver(
 )
 solver.prepare()
 first = solver.solve()
-second = solver.continue_with_parameters(np.array([2.0]), 1.0)
+second = solver.solve_with_parameter_values(np.array([0.8]), np.array([2.0]))
 ```
 
-Continuation использует подготовленный символьный маршрут, но не начинает
-новое решение с исходного `y0`. Для нового состояния и интервала используйте
-`restart(...)`. Холодная AOT-компиляция может окупиться только на длинной
-серии, поэтому сравнивайте отдельно preparation, callback и full solve.
+`solve_with_parameter_values(y0, values)` запускает новое решение на
+настроенном интервале; `solve_with_parameter_values_in_interval(t0, y0,
+t_end, values)` также меняет интервал. Оба метода повторно используют
+символьную подготовку. Продолжение временного сегмента от последнего принятого
+состояния является отдельной операцией. Холодная AOT-компиляция может
+окупиться только на длинной серии, поэтому сравнивайте preparation, callback
+и full solve отдельно.
 
 В общем facade первый аргумент `create_ivp` выбирает семейство солвера, а
 контроллер LSODE2 задаётся отдельно. Это не позволяет спутать выбор солвера с
@@ -147,7 +150,7 @@ SuperLU без печати в консоль.
 до запуска Python. Если солвер не поддерживает нативное логирование, включённый
 общий уровень будет отклонён, а не проигнорирован молча.
 
-Примеры в `bindings/python/examples/` показывают Radau, BDF continuation,
+Примеры в `bindings/python/examples/` показывают Radau, BDF continuation во времени,
 BVP_sci, nonlinear/fitting и batch-задачи. Они используют уже проверенную
 семантику основных Rust-гайдов, а не придумывают отдельные Python-алгоритмы.
 
@@ -157,7 +160,7 @@ BVP_sci, nonlinear/fitting и batch-задачи. Они используют у
 настроек соответствующих native-солверов, но показывают Python-синтаксис:
 
 - [Radau5](RADAU_GUIDE_RU.md): жёсткие IVP, frontend/layout, output и телеметрия.
-- [BDF](BDF_GUIDE_RU.md): плотный BDF, порядок, callbacks и continuation.
+- [BDF](BDF_GUIDE_RU.md): плотный BDF, порядок, callbacks и продолжение во времени.
 - [Backward Euler](BACKWARD_EULER_GUIDE_RU.md): фиксированный шаг и доступные
   dense-маршруты исполнения.
 - [LSODE2](LSODE2_GUIDE_RU.md): контроллеры Adams/BDF, символьные маршруты,

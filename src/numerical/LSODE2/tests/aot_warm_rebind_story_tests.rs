@@ -98,10 +98,7 @@ fn aot_parameter_rebind_and_repeated_warm_solve_reject_stale_runtime() {
 
     for (matrix, structure) in [
         ("Sparse", Lsode2LinearSystemStructure::Sparse),
-        (
-            "Banded",
-            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
-        ),
+        ("Banded", Lsode2LinearSystemStructure::BandedAuto),
     ] {
         let routes = [
             (
@@ -303,10 +300,7 @@ fn aot_parameter_continuation_fair_warm_performance_and_cache_matrix() {
 
     for (matrix, structure) in [
         ("Sparse", Lsode2LinearSystemStructure::Sparse),
-        (
-            "Banded",
-            Lsode2LinearSystemStructure::Banded { kl: 0, ku: 0 },
-        ),
+        ("Banded", Lsode2LinearSystemStructure::BandedAuto),
     ] {
         for (route, assembly, execution, is_aot) in [
             (

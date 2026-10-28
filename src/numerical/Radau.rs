@@ -17,6 +17,8 @@ pub(crate) mod Radau_newton_par;
 
 /// Stable second-generation public facade.
 pub mod api;
+/// Independent parameter sweeps over a prepared Radau model.
+pub mod parameter_loop;
 pub use api::{
     RadauAotConfig, RadauConfig, RadauError, RadauErrorKind, RadauExecution, RadauExecutionPolicy,
     RadauFrontend, RadauJacobianSource, RadauMatrixLayout, RadauNativeSolver, RadauOutputPolicy,

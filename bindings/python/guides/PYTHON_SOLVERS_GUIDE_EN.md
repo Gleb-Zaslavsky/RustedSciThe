@@ -44,7 +44,7 @@ solver's separate logging controls are documented on its own facade.
 ## IVP
 
 `solve_ivp(...)` is the concise route. Use `create_ivp(...)` for explicit
-preparation, continuation and restart. Radau5 receives `y0` at solve time;
+preparation, fresh parameterized solves, time-segment continuation and restart. Radau5 receives `y0` at solve time;
 BDF, Backward Euler and LSODE2 retain the initial state in the solver object.
 
 ```python
@@ -60,7 +60,7 @@ result = solve_ivp(
 print(result.final_state_array())
 ```
 
-For parameter series, prepare once and rebind parameters:
+For repeated independent solves, prepare once and rebind parameters:
 
 ```python
 from rustedscithe import BdfSolver
@@ -71,13 +71,15 @@ solver = BdfSolver(
 )
 solver.prepare()
 first = solver.solve()
-second = solver.continue_with_parameters([2.0], 1.0)
+second = solver.solve_with_parameter_values([0.8], [2.0])
 ```
 
-Continuation reuses symbolic preparation, but it is not a fresh solve from
-the original state. Use `restart(...)` when a new interval or initial state is
-intended. AOT may be slower for one cold solve and amortize over a longer
-series; measure preparation, callback and full-solve stages separately.
+`solve_with_parameter_values(y0, values)` starts a fresh solve on the configured
+interval; `solve_with_parameter_values_in_interval(t0, y0, t_end, values)` also
+sets a new interval. Both reuse symbolic preparation. Time-segment continuation
+is a separate operation from the last accepted state. AOT may be slower for
+one cold solve and amortize over a longer series; measure preparation, callback
+and full-solve stages separately.
 
 The common facade selects the solver family with its first argument. LSODE2's
 controller is a separate keyword, so Adams or automatic mode is not confused
@@ -170,7 +172,7 @@ Detached solutions expose structured mappings and compact report-file methods.
 `TaskDocument.parse(...)`, `task(...)` and `run_task_batch(...)` reuse the Rust
 task parser. Batch execution continues after failures and can be rendered with
 `render_table(...)`. The runnable examples in `bindings/python/examples/`
-cover Radau, BDF continuation, BVP_sci, nonlinear/fitting and task batches.
+cover Radau, BDF time-segment continuation, BVP_sci, nonlinear/fitting and task batches.
 Use `task_dict(source_or_path)` when application code needs plain Python data:
 it serializes the already parsed native specification, including equations,
 solver options, continuation and output settings, without executing the task.

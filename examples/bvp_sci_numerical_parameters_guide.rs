@@ -1,10 +1,9 @@
-// Numerical BVP_sci parameter-continuation guide.
+// Numerical BVP_sci free-parameter initial-guess guide.
 // Run with `cargo run --example bvp_sci_numerical_parameters_guide`.
 //
-// `set_parameters` keeps the prepared callbacks, but it starts a new
-// numerical approximation for the new parameter value. This example uses
-// two genuinely different members of the family: both the differential
-// equation and the boundary residual depend on `p`.
+// BVP_sci parameters are free Newton unknowns, not fixed model inputs.
+// `set_parameter_guess` changes their initial Newton estimate; the state
+// profile and mesh from a successful solve remain available for the next one.
 
 use RustedSciThe::numerical::BVP_sci::{
     BvpSciBoundaryCallbacks, BvpSciExecution, BvpSciLambdifyPlan, BvpSciMatrixLayout,
@@ -45,19 +44,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options,
     )?;
 
-    println!("BVP_sci numerical continuation");
-    println!("parameter | y(0) | y(1) | residual_norm | continuation_solves");
+    println!("BVP_sci free-parameter guess continuation");
+    println!("p guess | solved p | y(0) | y(1) | residual_norm | continuation_solves");
     for parameter in [0.25, 1.5] {
         if parameter != 0.25 {
-            // This is a new BVP member, not a repeated read of p=1 with the
-            // unchanged residual p - 1 = 0. The symbolic preparation is reused
-            // while the numerical state is re-bound and solved again.
-            solver.set_parameters(vec![parameter])?;
+            // Update the starting estimate of the free p unknown. The boundary
+            // residual still determines the solved value p=1.
+            solver.set_parameter_guess(vec![parameter])?;
         }
         let solution = solver.solve()?;
         let snapshot = solver.plan().telemetry_snapshot();
         println!(
-            "{:.6} | {:.6} | {:.6} | {:.3e} | {}",
+            "{:.6} | {:.6} | {:.6} | {:.6} | {:.3e} | {}",
+            parameter,
             solution.parameters[0],
             solution.y[0],
             solution.y[solution.y.len() - 1],

@@ -79,13 +79,14 @@ solver = BvpDampNaiveSolver(
 )
 solver.prepare()
 first = solver.solve_prepared()
-solver.set_parameters([2.0])
-second = solver.solve_prepared()
+second = solver.solve_with_parameter_values([2.0])
 ```
 
 `BvpDampFrozenSolver` uses a frozen Jacobian with a user-selected native reuse
 policy. The mesh remains fixed and uniform; parameters can be rebound after
-`prepare()`, but the initial guess and interval cannot be replaced in place.
+`prepare()`. Use `set_prepared_iterate(...)` to provide a new fixed-mesh Newton
+guess without rebuilding callbacks; the setter validates shape and invalidates
+numeric factors. The interval remains fixed.
 The supported policies are `Frozen_naive` (reuse after the first Jacobian),
 `every_m` (one positive integer period), `at_high_morm` (one positive norm
 threshold), `at_low_speed` (one speed-rate threshold no greater than 1), and
@@ -109,10 +110,28 @@ solver = BvpDampFrozenSolver(
 )
 solver.prepare()
 for rate in (1.0, 2.0):
-    solver.set_parameters([rate])
-    solution = solver.solve_prepared()
+    solution = solver.solve_with_parameter_values([rate])
     print(rate, solution.values()[0][-1], solution.telemetry_counters())
 ```
+
+For a caller-defined sequence of fixed parameter vectors, Frozen also exposes
+`solve_parameter_loop([[...], [...]])`. Each successful point becomes the next
+initial guess. A point-level non-convergence or native solve error is stored in
+the report and does not abort later points; `point.error` remains a typed
+Python exception with the usual solver/stage/route/native-kind metadata. Each
+point exposes the native counters, stage timings, scopes, callback and
+preparation telemetry collected under the configured mode. See
+`examples/bvp_damp_frozen_parameter_loop.py` for a
+success-failure-success path. This API uses a fixed mesh, as required by the
+Frozen/Naive pilot contract.
+
+The adaptive `BvpDampSolver` also exposes `solve_parameter_loop`. It checkpoints
+the last successful refined mesh together with its profile, then starts the
+next point from that pair. If a later point refines again, the native solver
+rebuilds mesh-sized symbolic/numeric work for the new mesh. Each point receives
+its own refinement budget. Failures remain attached to their point and never
+replace the checkpoint. See `examples/bvp_damp_parameter_loop.py` for a
+success-failure-success run with native counters.
 
 The direct constructor exposes the main numerical and structural controls:
 
@@ -129,9 +148,14 @@ The direct constructor exposes the main numerical and structural controls:
 ## Lifecycle, logging and telemetry
 
 `prepare()` separates symbolic preparation from repeated numerical solves.
-Use `solve_prepared()` for a prepared iterate and `restart(...)` when replacing
-the iterate. Parameter changes use `set_parameters(...)` and should preserve
-prepared symbolic work where the native lifecycle allows it. Logging is off
+Use `solve_prepared()` when controlling the prepared lifecycle manually.
+`set_parameter_values()` only rebinds fixed inputs, while
+`set_prepared_iterate()` only replaces the fixed-mesh guess.
+`solve_with_parameter_values()` combines those operations and warm-starts from
+the last successful profile; this is the convenient parameter-continuation
+route for Damped, Naive and Frozen.
+`restart(...)` replaces the ordinary initial guess and may invalidate
+preparation according to the route. Logging is off
 unless explicitly enabled; telemetry mode is independently configured through
 `SolverOptions` and detached into the result.
 

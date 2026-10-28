@@ -1,8 +1,9 @@
-"""Prepared parameter continuation using BVP_Damp's native Naive route.
+"""Fixed-parameter re-solving using BVP_Damp's native Naive route.
 
 The scalar ODE y' = rate with y(0) = 0 has the exact profile y(x) = rate*x.
 This example keeps the fixed uniform mesh and symbolic preparation while
-changing only the numeric parameter.
+changing only a fixed numeric input. Each solve after the first is warm-started
+from the previous profile; ``rate`` is not a Newton unknown.
 """
 
 from rustedscithe import BvpDampNaiveSolver, Expr, SolverOptions
@@ -18,7 +19,7 @@ solver = BvpDampNaiveSolver(
     parameter_values=[1.0],
     options=SolverOptions(
         # AtomNative is used to demonstrate prepared symbolic rebinding; the
-        # fixed-mesh Naive route keeps this example focused on continuation.
+        # fixed-mesh Naive route keeps this example focused on rebinding.
         frontend="atom_native",
         execution="lambdify",
         matrix_layout="dense",
@@ -27,11 +28,10 @@ solver = BvpDampNaiveSolver(
     ),
 )
 
-# Build the symbolic plan once; each iteration changes only the scalar rate.
+# Build the symbolic plan once; reuse the last profile as the next Newton guess.
 solver.prepare()
 for rate in (1.0, 2.0, 0.5):
-    solver.set_parameters([rate])
-    solution = solver.solve_prepared()
+    solution = solver.solve_with_parameter_values([rate])
     endpoint = solution.values()[0][-1]
     counters = solution.telemetry_counters()
     if abs(endpoint - rate) > 1e-8:

@@ -629,8 +629,8 @@ impl NRBVP {
         }
     }
 
-    /// Fallible typed setter for symbolic parameter names.
-    pub fn try_set_params(
+    /// Fallible typed setter for the ordered symbolic parameter-name schema.
+    pub fn try_set_parameter_names(
         &mut self,
         params: Option<&[&str]>,
     ) -> Result<(), BvpBackendIntegrationError> {
@@ -659,10 +659,25 @@ impl NRBVP {
         Ok(())
     }
 
-    /// Compatibility wrapper for [`Self::try_set_params`].
-    pub fn set_params(&mut self, params: Option<&[&str]>) {
-        self.try_set_params(params)
+    /// Legacy name for [`Self::try_set_parameter_names`].
+    #[deprecated(note = "use try_set_parameter_names; this sets names, not values")]
+    pub fn try_set_params(
+        &mut self,
+        params: Option<&[&str]>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        self.try_set_parameter_names(params)
+    }
+
+    /// Set the ordered symbolic parameter-name schema.
+    pub fn set_parameter_names(&mut self, params: Option<&[&str]>) {
+        self.try_set_parameter_names(params)
             .unwrap_or_else(|error| panic!("invalid BVP parameter names: {error:?}"));
+    }
+
+    /// Legacy name for [`Self::set_parameter_names`].
+    #[deprecated(note = "use set_parameter_names; this sets names, not values")]
+    pub fn set_params(&mut self, params: Option<&[&str]>) {
+        self.set_parameter_names(params);
     }
 
     /// Fallible typed setter for the current numeric parameter binding.
@@ -672,7 +687,7 @@ impl NRBVP {
     /// numeric binding in place; symbolic preparation and closure compilation
     /// are retained. Numeric factors still invalidate because Jacobian values
     /// changed.
-    pub fn try_set_param_values(
+    pub fn try_set_parameter_values(
         &mut self,
         values: Option<Vec<f64>>,
     ) -> Result<(), BvpBackendIntegrationError> {
@@ -705,10 +720,25 @@ impl NRBVP {
         Ok(())
     }
 
-    /// Compatibility wrapper for [`Self::try_set_param_values`].
-    pub fn set_param_values(&mut self, values: Option<Vec<f64>>) {
-        self.try_set_param_values(values)
+    /// Legacy abbreviated name for [`Self::try_set_parameter_values`].
+    #[deprecated(note = "use try_set_parameter_values")]
+    pub fn try_set_param_values(
+        &mut self,
+        values: Option<Vec<f64>>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        self.try_set_parameter_values(values)
+    }
+
+    /// Set numeric values for the already declared symbolic parameter schema.
+    pub fn set_parameter_values(&mut self, values: Option<Vec<f64>>) {
+        self.try_set_parameter_values(values)
             .unwrap_or_else(|error| panic!("invalid BVP parameter values: {error:?}"));
+    }
+
+    /// Legacy abbreviated name for [`Self::set_parameter_values`].
+    #[deprecated(note = "use set_parameter_values")]
+    pub fn set_param_values(&mut self, values: Option<Vec<f64>>) {
+        self.set_parameter_values(values);
     }
 
     /// Replaces the callbacks of an already prepared runtime through an
