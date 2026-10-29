@@ -1,6 +1,7 @@
 use super::{
-    BvpApiError, BvpBoundaryCondition, BvpBoundarySide, BvpNativeSolver, BvpProblem,
-    BvpSciFreeParameters, BvpSciSparseFactorization, BvpSolution, BvpSolver, BvpSolverConfig,
+    BvpApiError, BvpApiTelemetryMode, BvpBoundaryCondition, BvpBoundarySide, BvpNativeSolver,
+    BvpProblem, BvpSciFreeParameters, BvpSciSparseFactorization, BvpSettingsError, BvpSolution,
+    BvpSolver, BvpSolverConfig, BvpSolverSettings,
 };
 use crate::Utils::postprocessing::{PostprocessError, PostprocessPlan};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedSolverOptions;
@@ -171,6 +172,79 @@ fn common_logging_level_is_forwarded_without_overwriting_typed_trace_settings() 
         unreachable!()
     };
     assert_eq!(options.logging_level, level);
+}
+
+#[test]
+fn solver_settings_attach_caller_guess_without_erasing_native_route_options() {
+    let damped = BvpSolverSettings::Damped(DampedSolverOptions::default())
+        .with_initial_guess(DMatrix::zeros(1, 2));
+    assert!(matches!(damped, BvpSolverConfig::Damped { .. }));
+
+    let frozen = BvpSolverSettings::Frozen(FrozenSolverOptions::default())
+        .with_initial_guess(DMatrix::zeros(1, 3));
+    assert!(matches!(frozen, BvpSolverConfig::Frozen { .. }));
+
+    let sci = BvpSolverSettings::Sci {
+        options: BvpSciOptions::default().with_matrix_layout(BvpSciMatrixLayout::Sparse),
+        sparse_factorization: BvpSciSparseFactorization::SuperLu,
+        aot_config: None,
+    }
+    .with_initial_guess(DMatrix::zeros(1, 3));
+    let BvpSolverConfig::Sci {
+        options,
+        sparse_factorization,
+        ..
+    } = sci
+    else {
+        unreachable!()
+    };
+    assert_eq!(options.matrix_layout, BvpSciMatrixLayout::Sparse);
+    assert_eq!(sparse_factorization, BvpSciSparseFactorization::SuperLu);
+}
+
+#[test]
+fn common_telemetry_policy_is_forwarded_or_rejected_without_promotion() {
+    let damped = BvpSolverSettings::Damped(DampedSolverOptions::default())
+        .with_telemetry_mode(BvpApiTelemetryMode::Detailed)
+        .unwrap();
+    let BvpSolverSettings::Damped(damped) = damped else {
+        unreachable!()
+    };
+    assert_eq!(
+        damped.generated_backend_config.bvp_telemetry_mode,
+        BvpTelemetryMode::Detailed
+    );
+    assert_eq!(
+        damped.generated_backend_config.aot_telemetry_mode,
+        BvpAotTelemetryMode::Detailed
+    );
+
+    let unsupported = match BvpSolverSettings::Damped(DampedSolverOptions::default())
+        .with_telemetry_mode(BvpApiTelemetryMode::Timings)
+    {
+        Ok(_) => panic!("Damped AOT must reject Timings-only collection"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        unsupported,
+        BvpSettingsError::UnsupportedTelemetry {
+            solver: "BVP_Damp Damped",
+            mode: BvpApiTelemetryMode::Timings,
+            ..
+        }
+    ));
+
+    let sci = BvpSolverSettings::Sci {
+        options: BvpSciOptions::default(),
+        sparse_factorization: BvpSciSparseFactorization::StandardFaer,
+        aot_config: None,
+    }
+    .with_telemetry_mode(BvpApiTelemetryMode::Timings)
+    .unwrap();
+    let BvpSolverSettings::Sci { options, .. } = sci else {
+        unreachable!()
+    };
+    assert_eq!(options.telemetry, BvpSciTelemetryMode::Timings);
 }
 
 #[test]
@@ -764,13 +838,13 @@ fn damped_and_frozen_facade_parameter_loops_keep_native_point_contracts() {
     ));
     assert!(matches!(
         &damped_report.points[1].outcome,
-        DampedParameterLoopOutcome::Failed { error, .. }
+        DampedParameterLoopOutcome::Failed { error, telemetry, .. }
             if matches!(
                 error,
                 BvpBackendIntegrationError::CallbackExecutionFailed { .. }
                     | BvpBackendIntegrationError::NonFiniteCallbackValue { .. }
                     | BvpBackendIntegrationError::LinearSolveFailed { .. }
-            )
+            ) && telemetry.telemetry_mode == BvpTelemetryMode::Counters
     ));
     assert!(matches!(
         &damped_report.points[2].outcome,
@@ -807,13 +881,13 @@ fn damped_and_frozen_facade_parameter_loops_keep_native_point_contracts() {
     ));
     assert!(matches!(
         &frozen_report.points[1].outcome,
-        FrozenParameterLoopOutcome::Failed { error, .. }
+        FrozenParameterLoopOutcome::Failed { error, telemetry, .. }
             if matches!(
                 error,
                 BvpBackendIntegrationError::CallbackExecutionFailed { .. }
                     | BvpBackendIntegrationError::NonFiniteCallbackValue { .. }
                     | BvpBackendIntegrationError::LinearSolveFailed { .. }
-            )
+            ) && telemetry.telemetry_mode == BvpTelemetryMode::Counters
     ));
     assert!(matches!(
         &frozen_report.points[2].outcome,
@@ -1028,14 +1102,16 @@ fn sci_callback_failure_preserves_native_stage_and_allows_retry() {
             Ok(())
         },
     );
+    let mut options = BvpSciOptions::default()
+        .with_execution(BvpSciExecution::Lambdify)
+        .with_assembly(BvpSciAssembly::ExprLegacy)
+        .with_tolerance(1e-7)
+        .with_limits(64, 8, 3);
+    options.telemetry = crate::numerical::BVP_sci::new::BvpSciTelemetryMode::Detailed;
     let mut solver = BvpSolver::new(
         problem,
         BvpSolverConfig::SciWithFreeParameters {
-            options: BvpSciOptions::default()
-                .with_execution(BvpSciExecution::Lambdify)
-                .with_assembly(BvpSciAssembly::ExprLegacy)
-                .with_tolerance(1e-7)
-                .with_limits(64, 8, 3),
+            options,
             sparse_factorization: BvpSciSparseFactorization::StandardFaer,
             aot_config: None,
             initial_guess: DMatrix::zeros(1, 5),
@@ -1062,6 +1138,15 @@ fn sci_callback_failure_preserves_native_stage_and_allows_retry() {
         solver.solution().is_none(),
         "a failed solve must not expose a stale facade result"
     );
+    let super::BvpSolverTelemetrySnapshot::Sci(failed_snapshot) = solver.telemetry_snapshot()
+    else {
+        panic!("failed Sci solve must keep the native telemetry route");
+    };
+    assert_eq!(
+        failed_snapshot.mode,
+        crate::numerical::BVP_sci::new::BvpSciTelemetryMode::Detailed
+    );
+    assert_eq!(failed_snapshot.full_solve_calls, 1);
 
     let result = solver
         .solve()

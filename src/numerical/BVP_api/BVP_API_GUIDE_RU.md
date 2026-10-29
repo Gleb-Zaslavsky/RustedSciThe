@@ -191,3 +191,39 @@ solver-specific lifecycle, диагностики и изменения runtime-
 Task-document parser — самостоятельная подсистема. Для чтения и исполнения
 документов используйте `command_interpreter::task_parser_bvp`; он напрямую
 строит native BVP-солверы и не зависит от этого фасада.
+
+Для гибридного клиента используйте
+`command_interpreter::task_parser_bvp_hybrid::parse_hybrid_bvp_solver_settings_from_document`.
+Он принимает только solver-настройки и отклоняет секции задачи и физической
+модели. Возвращаются native-настройки маршрута Damped, Frozen/Naive или Sci;
+уравнения, порядок состояний, mesh, граничные условия и initial guess остаются
+у приложения. Guess добавляется через `BvpSolverSettings::with_initial_guess`,
+после чего `BvpSolver::new` выполняет обычную проверку маршрута. Рабочий
+пример: [`examples/bvp_api_hybrid_client.rs`](../../../examples/bvp_api_hybrid_client.rs).
+Телеметрия по умолчанию выключена. Для Damped/Frozen режим `Timings` требует
+явной политики backend `LambdifyOnly`; иначе маршрут может выбрать AOT,
+callback recorder которого не поддерживает режим только таймингов, и запрос
+отклоняется типизированной ошибкой.
+
+### Схема настроек гибридного клиента и её границы
+
+Документ настроек зависит от выбранного маршрута и не сводит разные солверы к
+плоскому набору общих полей. Damped/Frozen принимают нативные схему
+дискретизации, стратегию, линейный метод, допуски, bounds и секции адаптивной
+сетки, а также generated-backend/AOT lifecycle, компилятор,
+residual/sparse chunking для Damped/Frozen,
+пороговые настройки executor-а, Lambdify dispatch, профиль Atom, Expr switches,
+логирование и телеметрию. BVP_sci принимает execution/frontend, layout,
+лимиты итераций, callback policy, output retention, sparse factorization,
+логирование и телеметрию; AOT-маршрут дополнительно принимает build/compiler
+metadata и residual/sparse/banded chunking. AOT-поля в Lambdify-маршруте не
+игнорируются, а отклоняются typed error.
+
+Некоторые native-значения намеренно не являются настройками документа:
+AOT resolver — runtime handle внутри процесса, а singular term
+`S*y/(x-a)` в BVP_sci относится к физической модели. `dont_save_log` у
+Damped/Frozen — native post-construction переключатель сохранения отчётов,
+отдельный от общей Rust log-level политики; гибридный parser отклоняет его,
+поскольку facade config пока не хранит это состояние. Для таких controls
+используйте прямой native lifecycle API. Неизвестные поля и неподдерживаемые
+сочетания маршрута возвращают typed errors с путём до поля.

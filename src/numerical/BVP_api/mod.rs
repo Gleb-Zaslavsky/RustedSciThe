@@ -22,9 +22,10 @@ use crate::numerical::BVP_Damp::telemetry::BvpTelemetrySnapshot;
 use crate::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciNewError, BvpSciOptions, BvpSciParameterLoopReport,
     BvpSciSolution, BvpSciSolver, BvpSciSparseFactorization as NativeBvpSciSparseFactorization,
-    BvpSciTelemetrySnapshot,
+    BvpSciTelemetryMode, BvpSciTelemetrySnapshot,
 };
 use crate::numerical::logging::SolverLogLevel;
+use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
 use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
@@ -345,6 +346,215 @@ pub enum BvpSolverConfig {
         initial_guess: DMatrix<f64>,
         free_parameters: BvpSciFreeParameters,
     },
+}
+
+/// Solver-family settings without problem-owned data such as the initial guess.
+///
+/// Hybrid applications can parse or construct this value independently from
+/// their physical model, then attach the caller-owned guess when building a
+/// [`BvpSolverConfig`]. Native option structs are retained intact; this type is
+/// not a normalized, lossy option bag.
+pub enum BvpSolverSettings {
+    /// Damped Newton route with its complete native options.
+    Damped(DampedSolverOptions),
+    /// Frozen/Naive route with its complete native options.
+    Frozen(FrozenSolverOptions),
+    /// Collocation route with its native options and generated-backend policy.
+    Sci {
+        options: BvpSciOptions,
+        sparse_factorization: BvpSciSparseFactorization,
+        aot_config: Option<SymbolicIvpGeneratedBackendConfig>,
+    },
+}
+
+/// Common telemetry request exposed by hybrid BVP clients.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BvpApiTelemetryMode {
+    /// Disable runtime collection.
+    #[default]
+    Off,
+    /// Collect counters without reading clocks.
+    Counters,
+    /// Collect timing data without counters, when supported by the route.
+    Timings,
+    /// Collect both counters and timing data.
+    Detailed,
+}
+
+/// Typed configuration failure while applying a facade-wide policy.
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum BvpSettingsError {
+    /// A selected native route cannot represent the requested telemetry mode.
+    #[error("{solver} does not support telemetry mode {mode:?}: {reason}")]
+    UnsupportedTelemetry {
+        solver: &'static str,
+        mode: BvpApiTelemetryMode,
+        reason: &'static str,
+    },
+}
+
+impl BvpSolverSettings {
+    /// Apply one telemetry policy without conflating logging or decision traces.
+    ///
+    /// BVP_Damp AOT callback telemetry has no Timings-only mode. Damped/Frozen
+    /// accept this request only when their backend is explicitly restricted to
+    /// Lambdify; routes that may select AOT are rejected instead of silently
+    /// enabling Detailed collection. BVP_sci supports all four modes natively.
+    pub fn with_telemetry_mode(
+        mut self,
+        mode: BvpApiTelemetryMode,
+    ) -> Result<Self, BvpSettingsError> {
+        match &mut self {
+            Self::Damped(options) => {
+                if mode == BvpApiTelemetryMode::Timings
+                    && options.generated_backend_config.backend_policy_override
+                        != Some(BackendSelectionPolicy::LambdifyOnly)
+                {
+                    return Err(BvpSettingsError::UnsupportedTelemetry {
+                        solver: "BVP_Damp Damped",
+                        mode,
+                        reason: "Timings-only requires an explicit LambdifyOnly backend policy; AOT telemetry has no timings-only mode",
+                    });
+                }
+                let native = match mode {
+                    BvpApiTelemetryMode::Off => {
+                        crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Off
+                    }
+                    BvpApiTelemetryMode::Counters => {
+                        crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Counters
+                    }
+                    BvpApiTelemetryMode::Timings => {
+                        crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Timings
+                    }
+                    BvpApiTelemetryMode::Detailed => {
+                        crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Detailed
+                    }
+                };
+                let callbacks = match mode {
+                    BvpApiTelemetryMode::Off => {
+                        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Off
+                    }
+                    BvpApiTelemetryMode::Counters => {
+                        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Counters
+                    }
+                    BvpApiTelemetryMode::Timings => {
+                        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Timings
+                    }
+                    BvpApiTelemetryMode::Detailed => {
+                        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Detailed
+                    }
+                };
+                let aot = match mode {
+                    BvpApiTelemetryMode::Off => {
+                        crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Off
+                    }
+                    BvpApiTelemetryMode::Counters => {
+                        crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Counters
+                    }
+                    BvpApiTelemetryMode::Timings => {
+                        crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Off
+                    }
+                    BvpApiTelemetryMode::Detailed => {
+                        crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Detailed
+                    }
+                };
+                options.generated_backend_config.bvp_telemetry_mode = native;
+                options.generated_backend_config.lambdify_telemetry_mode = callbacks;
+                options.generated_backend_config.aot_telemetry_mode = aot;
+            }
+            Self::Frozen(options) => {
+                if mode == BvpApiTelemetryMode::Timings
+                    && options.generated_backend_config.backend_policy_override
+                        != Some(BackendSelectionPolicy::LambdifyOnly)
+                {
+                    return Err(BvpSettingsError::UnsupportedTelemetry {
+                        solver: "BVP_Damp Frozen/Naive",
+                        mode,
+                        reason: "Timings-only requires an explicit LambdifyOnly backend policy; AOT telemetry has no timings-only mode",
+                    });
+                }
+                options.generated_backend_config.bvp_telemetry_mode = match mode {
+                    BvpApiTelemetryMode::Off => {
+                        crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Off
+                    }
+                    BvpApiTelemetryMode::Counters => {
+                        crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Counters
+                    }
+                    BvpApiTelemetryMode::Timings => {
+                        crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Timings
+                    }
+                    BvpApiTelemetryMode::Detailed => {
+                        crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Detailed
+                    }
+                };
+                options.generated_backend_config.lambdify_telemetry_mode = match mode {
+                    BvpApiTelemetryMode::Off => {
+                        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Off
+                    }
+                    BvpApiTelemetryMode::Counters => {
+                        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Counters
+                    }
+                    BvpApiTelemetryMode::Timings => {
+                        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Timings
+                    }
+                    BvpApiTelemetryMode::Detailed => {
+                        crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Detailed
+                    }
+                };
+                options.generated_backend_config.aot_telemetry_mode = match mode {
+                    BvpApiTelemetryMode::Off => {
+                        crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Off
+                    }
+                    BvpApiTelemetryMode::Counters => {
+                        crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Counters
+                    }
+                    BvpApiTelemetryMode::Timings => {
+                        crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Off
+                    }
+                    BvpApiTelemetryMode::Detailed => {
+                        crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Detailed
+                    }
+                };
+            }
+            Self::Sci { options, .. } => {
+                options.telemetry = match mode {
+                    BvpApiTelemetryMode::Off => BvpSciTelemetryMode::Off,
+                    BvpApiTelemetryMode::Counters => BvpSciTelemetryMode::Counters,
+                    BvpApiTelemetryMode::Timings => BvpSciTelemetryMode::Timings,
+                    BvpApiTelemetryMode::Detailed => BvpSciTelemetryMode::Detailed,
+                };
+            }
+        }
+        Ok(self)
+    }
+
+    /// Attach a state-major initial guess and construct the matching route.
+    ///
+    /// The guess shape is route-specific and is validated by
+    /// [`BvpSolver::new`]: Damped expects one column per interval, while Frozen
+    /// and Sci expect one column per mesh node.
+    pub fn with_initial_guess(self, initial_guess: DMatrix<f64>) -> BvpSolverConfig {
+        match self {
+            Self::Damped(options) => BvpSolverConfig::Damped {
+                options,
+                initial_guess,
+            },
+            Self::Frozen(options) => BvpSolverConfig::Frozen {
+                options,
+                initial_guess,
+            },
+            Self::Sci {
+                options,
+                sparse_factorization,
+                aot_config,
+            } => BvpSolverConfig::Sci {
+                options,
+                sparse_factorization,
+                aot_config,
+                initial_guess,
+            },
+        }
+    }
 }
 
 impl BvpSolverConfig {

@@ -240,6 +240,13 @@ factorization/solve, output, parameter rebind и AOT build/link/publication.
 В отчёте рядом с числами всегда фиксируйте frontend, execution, layout,
 output policy и фазу parameter series.
 
+## Логирование
+
+Логирование солвера по умолчанию выключено независимо от телеметрии. Задайте
+общий `SolverLogLevel` в `RadauConfig` или через `with_logging_level(...)`;
+это не включает и не меняет телеметрию. При включении Radau записывает начало,
+успешное завершение и отказ solve через общий scoped timestamped file logger.
+
 ## 9. AOT lifecycle
 
 AOT выбирается явно и требует конфигурации:

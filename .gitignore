@@ -86,6 +86,7 @@
 !/bindings/python/**/*.md
 !/bindings/python/**/*.py
 !/src/somelinalg/TODO.md
+!/src/numerical/BVP_api/TODO.md
 /bindings/python/**/__pycache__/
 /bindings/python/**/*.py[cod]
 

@@ -267,6 +267,13 @@ counts, callback timing, Newton timing, linear timing, output timing, parameter
 rebinds, and AOT build/link/publication timing. Record the frontend, execution
 family, layout, output policy, and parameter phase alongside the numbers.
 
+## Logging
+
+Solver logging is independently disabled by default. Select the shared
+`SolverLogLevel` on `RadauConfig` or with `with_logging_level(...)`; this does
+not enable or alter telemetry. Enabled logging writes solve start/completion
+and failure messages through the crate's scoped timestamped file logger.
+
 ## 9. AOT Lifecycle
 
 AOT is selected explicitly and requires an AOT configuration:

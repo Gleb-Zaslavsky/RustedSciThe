@@ -45,6 +45,26 @@ untyped string map or a flat bag of unrelated `Option` fields. For example,
 `BdfSolverOptions`, `RadauProblem`/`RadauConfig`, `BeSolverOptions` and
 `Lsode2ProblemConfig` retain solver-specific settings.
 
+## Hybrid Solver-Settings Adapter
+
+An application such as KiThe can own parsing physical data and constructing
+the numerical model, while RST parses only the solver choice and settings from
+the same document. Use
+`command_interpreter::task_parser_ivp_hybrid::parse_hybrid_stiff_settings_from_document`
+to obtain `HybridStiffSettings`, build the native problem in the host
+application, then pass its typed `StiffSolverRequest` to
+`HybridStiffSettings::prepare`. The adapter checks that the request matches
+the selected family and delegates capability validation and preparation to
+StiffAPI.
+
+The adapter does not interpret or own domain sections, equations or initial
+conditions. Its optional solver-fragment serializer returns only the solver
+selector and solver options; the host remains responsible for preserving and
+merging its physical document. The existing full-text IVP parser remains the
+separate end-to-end RST workflow for documents that contain the equations and
+initial conditions themselves. Parsing failures retain `IvpTaskError`, while
+request preparation retains typed `StiffApiError` and native solver errors.
+
 ## Fresh Runs After Parameter Rebinding
 
 After preparing a route, use `try_solve_with_parameter_values(y0, values)` to
@@ -110,7 +130,11 @@ Telemetry remains native and solver-specific. `telemetry_mode()` reports the
 selected mode; `telemetry_snapshot()` is available when the solver owns a
 snapshot, and Radau telemetry is obtained from `RadauSolution`. StiffAPI does
 not merge counters or sum nested timings. Logging is configured through a
-preset where the selected native solver supports it.
+preset using the shared `SolverLogLevel` for all four stiff routes, including
+Radau. It defaults to `Off` and is independent of telemetry; enabled logging
+uses the crate's scoped timestamped file logger. Direct Radau users can also
+set `RadauConfig::logging_level` or call `with_logging_level(...)`.
+Import the shared level from `numerical::StiffAPI::SolverLogLevel`.
 
 ## Independent Parameter Sweeps
 

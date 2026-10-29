@@ -13,7 +13,7 @@ rather than flattening them into a lossy common schema.
 | Solver | Defaults and configuration ownership | Lifecycle/result contract | Failure and recovery contract |
 | --- | --- | --- | --- |
 | BDF | `BdfSolverOptions` is passed through; an empty preset changes no field. Dense is the native supported linear layout. | Native `try_generate`, `try_solve`, parameter update/continuation and restart methods remain available through `as_bdf[_mut]`; borrowed result and status remain native. | `BdfSolveError` and native status are not converted. Running/unsolved result is rejected by `trajectory_view`; partial/result semantics follow BDF. |
-| Radau | `RadauProblem`, `RadauConfig`, initial state and ordered run parameters are retained; no facade logging control exists in `RadauConfig`. | Unified solve returns owned `RadauSolution`; fresh parameterized solves take `y0` explicitly, and restart changes the interval. The solver does not retain a common trajectory or implicit continuation state. | `RadauError` and its stable kind remain intact inside `StiffSolveError`; sampling errors remain `RadauError` inside `StiffPostprocessError`. |
+| Radau | `RadauProblem`, `RadauConfig`, initial state, ordered run parameters and logging threshold are retained. | Unified solve returns owned `RadauSolution`; fresh parameterized solves take `y0` explicitly, and restart changes the interval. The solver does not retain a common trajectory or implicit continuation state. | `RadauError` and its stable kind remain intact inside `StiffSolveError`; sampling errors remain `RadauError` inside `StiffPostprocessError`. |
 | Backward Euler | `BeSolverOptions` is passed through; fixed/heuristic step, nonlinear limits and native defaults are not flattened into adaptive-IVP fields. | Native fallible solve, continuation and restart remain available through `as_backward_euler[_mut]`; the native initial/partial trajectory is retained. | `BeError` is preserved. Partial trajectory is not represented as a successful empty result; consumers can inspect native status and trajectory. |
 | LSODE2 | Complete `Lsode2ProblemConfig` is retained, including controller, linear structure, forced backend, stop conditions and `Native/Bridge` execution. | Native prepare/solve, parameter update, reconfigure and restart remain available through `as_lsode2[_mut]`. | `Lsode2Error` variants and source chain are preserved. Native and Bridge are distinct execution routes; the facade does not reinterpret their counters or statuses. |
 
@@ -26,7 +26,7 @@ than promising a Cartesian product of axes.
 | Solver | Layout/route constraints enforced by the adapter | Solver-specific controls kept native |
 | --- | --- | --- |
 | BDF | Dense linear layout only; requests for Sparse/Banded are rejected. | BDF order/step controls, callback factories, parameter binding, stop conditions and restart policy remain in `BdfSolverOptions`/`BdfSolver`. |
-| Radau | Dense/Sparse/BandedAuto and explicit symbolic bandwidth are distinct; logging is rejected because the native config has no logging field. | Radau tolerances, step/retry limits, output policy, fresh parameterized solves and dense-output sampling remain in `RadauConfig`/`RadauSolution`. |
+| Radau | Dense/Sparse/BandedAuto and explicit symbolic bandwidth are distinct. Logging uses the shared `SolverLogLevel`, defaults to Off and is independent of telemetry. | Radau tolerances, step/retry limits, output policy, fresh parameterized solves, logging and dense-output sampling remain native. |
 | Backward Euler | Dense only; Sparse/Banded and forced-Lambdify requests are rejected rather than relabeled. | Fixed/heuristic step policy, Newton tolerance/limits, parameters, stop conditions and continuation remain in `BeSolverOptions`/`BE`. |
 | LSODE2 | Dense/Sparse/BandedAuto/explicit widths are preserved; automatic bandwidth requires symbolic structure. `PreparedAtom` and unsupported AOT/callback combinations are rejected. Native and Bridge execution are separate, not flattened. | Adams/BDF/Auto controller, forced linear backend, stop conditions, callback source, native execution limits and reconfiguration remain in `Lsode2ProblemConfig`/`Lsode2Solver`. |
 
@@ -51,10 +51,11 @@ through the typed variant. Counter parity is exact for matched direct/facade
 runs; timings are observational and must not be compared for exact equality
 across separate runs. Nested/inclusive scopes must not be summed as disjoint.
 
-Logging is forwarded only for solvers exposing a native logging option: BDF,
-BE and LSODE2. Radau rejects the request because `RadauConfig` has no logging
-control. StiffAPI does not install a logger; the existing native logger owns
-the timestamped process file and its setup/I/O behavior.
+Logging is configured through the shared `SolverLogLevel` for BDF, Radau, BE
+and LSODE2. It remains independent of telemetry. StiffAPI does not install a
+logger; the existing native logger owns the timestamped process file and its
+setup/I/O behavior. Radau logs solve start/completion and failed solves in the
+same scoped logging infrastructure.
 
 ## Results And Postprocessing
 

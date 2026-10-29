@@ -42,6 +42,7 @@ use crate::numerical::Radau::{
     RadauAotConfig, RadauConfig, RadauError, RadauExecution, RadauExecutionPolicy, RadauFrontend,
     RadauMatrixLayout, RadauProblem, RadauSolution, RadauSolver, RadauTelemetryMode,
 };
+use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
 use crate::symbolic::symbolic_engine::Expr;
@@ -172,6 +173,8 @@ pub struct IvpSolverOptionsSpec {
     pub matrix_layout: Option<Lsode2LinearSystemStructure>,
     pub execution_policy: Option<IvpLambdifyExecutionPolicy>,
     pub telemetry: Option<IvpTelemetryModeSpec>,
+    /// Shared opt-in logging threshold, independent of telemetry collection.
+    pub logging: Option<SolverLogLevel>,
     pub lsode2: Option<Lsode2TaskOptionsSpec>,
 }
 
@@ -1171,6 +1174,7 @@ fn validate_solver_options(
             (options.matrix_layout.is_some(), "matrix_layout"),
             (options.execution_policy.is_some(), "execution_policy"),
             (options.telemetry.is_some(), "telemetry"),
+            (options.logging.is_some(), "logging"),
         ]
         .into_iter()
         .find_map(|(present, name)| present.then_some(name)),
@@ -1643,6 +1647,9 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                     IvpTelemetryModeSpec::Detailed => BdfTelemetryMode::Detailed,
                 });
             }
+            if let Some(level) = spec.solver_options.logging {
+                options = options.with_logging_level(level);
+            }
             let matrix_layout = spec
                 .solver_options
                 .matrix_layout
@@ -1699,6 +1706,9 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                     IvpTelemetryModeSpec::Detailed => BeTelemetryMode::Detailed,
                 });
             }
+            if let Some(level) = spec.solver_options.logging {
+                options = options.with_logging_level(level);
+            }
             let solver = BE::try_new_with_options(options).map_err(|error| {
                 IvpTaskError::Native(IvpNativeSolverError::BackwardEuler(error))
             })?;
@@ -1735,6 +1745,9 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
                 max_newton_iterations: spec.solver_options.max_iterations.unwrap_or(6),
                 ..RadauConfig::default()
             };
+            if let Some(level) = spec.solver_options.logging {
+                config.logging_level = level;
+            }
             if let Some(assembly) = spec.solver_options.symbolic_assembly {
                 config.frontend = match assembly {
                     Lsode2SymbolicAssemblyBackend::ExprLegacy => RadauFrontend::ExprLegacy,
@@ -1817,8 +1830,11 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
         }
         IvpMethodSpec::Lsode | IvpMethodSpec::Lsoda | IvpMethodSpec::Lsode2 => {
             let config = build_lsode2_problem_config_from_spec(spec)?;
-            let solver = Lsode2Solver::new(config)
+            let mut solver = Lsode2Solver::new(config)
                 .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Lsode2(error)))?;
+            if let Some(level) = spec.solver_options.logging {
+                solver.set_logging_level(level);
+            }
             Ok(IvpTaskSolver::Lsode2(solver))
         }
     }
@@ -1828,7 +1844,7 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
 /// configuration. The numerical adapters own the actual preparation; this
 /// helper only normalizes toolchain and lifecycle policy once at the parser
 /// boundary.
-fn generated_backend_config_for_task(
+pub(super) fn generated_backend_config_for_task(
     execution: &Lsode2TaskExecutionSpec,
 ) -> Option<SymbolicIvpGeneratedBackendConfig> {
     let Lsode2TaskExecutionSpec::Aot {
@@ -1985,7 +2001,7 @@ fn build_lsode2_problem_config_from_spec(
         config = config.with_telemetry(match telemetry {
             IvpTelemetryModeSpec::Off => IvpTelemetry::disabled(),
             IvpTelemetryModeSpec::Counters => IvpTelemetry::counters(),
-            IvpTelemetryModeSpec::Timings => IvpTelemetry::detailed(),
+            IvpTelemetryModeSpec::Timings => IvpTelemetry::timings(),
             IvpTelemetryModeSpec::Detailed => IvpTelemetry::detailed(),
         });
     }
@@ -2469,6 +2485,7 @@ fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, 
     let common_matrix_layout = parse_common_matrix_layout(section)?;
     let common_execution_policy = parse_common_execution_policy(section)?;
     let common_telemetry = parse_common_telemetry(section)?;
+    let common_logging = parse_common_logging(section)?;
     let mut lsode2 = parse_lsode2_options(section)?;
 
     // Normalize common and LSODE2-prefixed spellings before dispatch. The
@@ -2508,8 +2525,37 @@ fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, 
         matrix_layout: common_matrix_layout,
         execution_policy: common_execution_policy,
         telemetry: common_telemetry,
+        logging: common_logging,
         lsode2,
     })
+}
+
+fn parse_common_logging(
+    section: &GenericSectionMap,
+) -> Result<Option<SolverLogLevel>, IvpTaskError> {
+    let logging = get_optional_string(section, "logging", "solver_options")?;
+    let log_level = get_optional_string(section, "log_level", "solver_options")?;
+    if logging.is_some() && log_level.is_some() {
+        return Err(IvpTaskError::InvalidConfiguration {
+            field: "solver_options.logging".to_string(),
+            message: "conflicts with solver_options.log_level; specify logging once".to_string(),
+        });
+    }
+    let raw = logging.or(log_level);
+    let Some(raw) = raw else { return Ok(None) };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" => Ok(Some(SolverLogLevel::Off)),
+        "error" => Ok(Some(SolverLogLevel::Error)),
+        "warn" | "warning" => Ok(Some(SolverLogLevel::Warn)),
+        "info" => Ok(Some(SolverLogLevel::Info)),
+        "debug" => Ok(Some(SolverLogLevel::Debug)),
+        other => Err(IvpTaskError::InvalidConfiguration {
+            field: "solver_options.logging".to_string(),
+            message: format!(
+                "unknown logging level `{other}` (use off, error, warn, info or debug)"
+            ),
+        }),
+    }
 }
 
 fn parse_common_symbolic_assembly(

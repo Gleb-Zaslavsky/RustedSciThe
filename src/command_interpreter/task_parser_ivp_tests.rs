@@ -1842,6 +1842,917 @@ lsode2_linear_solver_policy: auto
 }
 
 #[test]
+fn hybrid_stiff_settings_prepare_external_problem_and_serialize_only_solver_fragment() {
+    use crate::command_interpreter::task_parser_ivp_hybrid::{
+        parse_hybrid_stiff_settings_from_document, serialize_hybrid_solver_fragment,
+    };
+    use crate::numerical::StiffAPI::{PreparedStiffSolver, StiffSolverKind, StiffSolverRequest};
+
+    let input = r#"
+task
+solver: IVP
+method: BDF
+
+chemistry
+mechanism: external-to-RST
+species_count: 7
+
+solver_options
+symbolic_frontend: AtomView
+symbolic_execution: Lambdify
+matrix_layout: dense
+telemetry: timings
+logging: info
+"#;
+    let document = parse_document_for_ivp(input);
+    let settings = parse_hybrid_stiff_settings_from_document(&document)
+        .expect("hybrid parser should need no equations or initial conditions");
+    assert_eq!(settings.solver_kind(), StiffSolverKind::Bdf);
+
+    let options = crate::numerical::StiffAPI::bdf::BdfSolverOptions::for_bdf(
+        vec![crate::symbolic::symbolic_engine::Expr::parse_expression(
+            "-y",
+        )],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.1,
+        0.01,
+        1e-6,
+        1e-8,
+        None,
+        false,
+        None,
+    );
+    let prepared = settings
+        .prepare(StiffSolverRequest::Bdf { options })
+        .expect("hybrid settings should configure the caller-built request");
+    match prepared {
+        PreparedStiffSolver::Bdf(solver) => {
+            assert_eq!(
+                solver.symbolic_assembly_backend(),
+                IvpSymbolicAssemblyBackend::AtomView
+            );
+            assert_eq!(solver.telemetry_mode(), BdfTelemetryMode::Timings);
+            assert_eq!(
+                solver.logging_level(),
+                crate::numerical::logging::SolverLogLevel::Info
+            );
+        }
+        _ => panic!("hybrid settings must retain the selected BDF route"),
+    }
+
+    let fragment = serialize_hybrid_solver_fragment(&document)
+        .expect("solver fragment should serialize independently");
+    assert!(fragment.contains("method: BDF"));
+    assert!(fragment.contains("symbolic_frontend: AtomView"));
+    assert!(fragment.contains("telemetry: timings"));
+    assert!(fragment.contains("logging: info"));
+    assert!(!fragment.contains("chemistry"));
+    assert!(
+        document.contains_key("chemistry"),
+        "input map must remain untouched"
+    );
+    let reparsed = parse_document_for_ivp(&fragment);
+    let roundtrip = parse_hybrid_stiff_settings_from_document(&reparsed)
+        .expect("serialized solver fragment should parse again");
+    assert_eq!(roundtrip.solver_kind(), StiffSolverKind::Bdf);
+}
+
+#[test]
+fn hybrid_stiff_settings_reject_non_stiff_family_and_keep_native_overrides_typed() {
+    use crate::command_interpreter::task_parser_ivp_hybrid::parse_hybrid_stiff_settings_from_document;
+
+    let nonstiff = parse_document_for_ivp("task\nsolver: IVP\nmethod: RK45\n");
+    assert!(matches!(
+        parse_hybrid_stiff_settings_from_document(&nonstiff),
+        Err(IvpTaskError::UnsupportedOption { .. })
+    ));
+
+    let family_specific = parse_document_for_ivp(
+        "task\nsolver: IVP\nmethod: BDF\n\nsolver_options\nrtol: 1e-6\natol: 1e-9\nmax_step: 0.02\n",
+    );
+    let settings = parse_hybrid_stiff_settings_from_document(&family_specific)
+        .expect("family-specific values should remain typed native overrides");
+    assert!(matches!(
+        settings.family,
+        crate::command_interpreter::task_parser_ivp_hybrid::HybridStiffFamilySettings::Bdf {
+            rtol: Some(1e-6),
+            atol: Some(1e-9),
+            max_step: Some(0.02),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn hybrid_stiff_settings_preserve_typed_capability_errors() {
+    use crate::command_interpreter::task_parser_ivp_hybrid::parse_hybrid_stiff_settings_from_document;
+    use crate::numerical::StiffAPI::{StiffApiError, StiffSolverKind, StiffSolverRequest};
+    use crate::symbolic::symbolic_engine::Expr;
+
+    let document = parse_document_for_ivp(
+        "task\nsolver: IVP\nmethod: BDF\n\nsolver_options\nmatrix_layout: banded\n",
+    );
+    let settings = parse_hybrid_stiff_settings_from_document(&document)
+        .expect("the adapter should parse a syntactically valid policy");
+    let request = StiffSolverRequest::Bdf {
+        options: crate::numerical::StiffAPI::bdf::BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".into()],
+            "t".into(),
+            0.0,
+            DVector::from_element(1, 1.0),
+            0.1,
+            0.02,
+            1e-7,
+            1e-9,
+            None,
+            false,
+            Some(0.01),
+        ),
+    };
+    assert!(matches!(
+        settings.prepare(request),
+        Err(StiffApiError::UnsupportedCapability {
+            solver: StiffSolverKind::Bdf,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn hybrid_bdf_forwards_every_telemetry_mode_and_logging_level() {
+    use crate::command_interpreter::task_parser_ivp_hybrid::parse_hybrid_stiff_settings_from_document;
+    use crate::numerical::SolverTelemetryMode;
+    use crate::numerical::StiffAPI::{
+        PreparedStiffSolver, StiffFrontend, StiffMatrixLayout, StiffPreset,
+    };
+    use crate::numerical::logging::SolverLogLevel;
+    use crate::symbolic::symbolic_engine::Expr;
+
+    let telemetry_modes = [
+        ("off", SolverTelemetryMode::Off),
+        ("counters", SolverTelemetryMode::Counters),
+        ("timings", SolverTelemetryMode::Timings),
+        ("detailed", SolverTelemetryMode::Detailed),
+    ];
+    let logging_levels = [
+        ("off", SolverLogLevel::Off),
+        ("error", SolverLogLevel::Error),
+        ("warn", SolverLogLevel::Warn),
+        ("info", SolverLogLevel::Info),
+        ("debug", SolverLogLevel::Debug),
+    ];
+    for (telemetry_text, telemetry_mode) in telemetry_modes {
+        for (logging_text, logging_level) in logging_levels {
+            let document = parse_document_for_ivp(&format!(
+                "task\nsolver: IVP\nmethod: BDF\n\nsolver_options\nsymbolic_frontend: ExprLegacy\nmatrix_layout: dense\ntelemetry: {telemetry_text}\nlogging: {logging_text}\n"
+            ));
+            let hybrid = parse_hybrid_stiff_settings_from_document(&document)
+                .expect("hybrid telemetry/logging policy should parse")
+                .prepare(crate::numerical::StiffAPI::StiffSolverRequest::Bdf {
+                    options: crate::numerical::StiffAPI::bdf::BdfSolverOptions::for_bdf(
+                        vec![Expr::parse_expression("-y")],
+                        vec!["y".into()],
+                        "t".into(),
+                        0.0,
+                        DVector::from_element(1, 1.0),
+                        0.1,
+                        0.02,
+                        1e-7,
+                        1e-9,
+                        None,
+                        false,
+                        Some(0.01),
+                    ),
+                })
+                .expect("hybrid BDF policy should prepare");
+            let programmatic = crate::numerical::StiffAPI::StiffSolverRequest::Bdf {
+                options: crate::numerical::StiffAPI::bdf::BdfSolverOptions::for_bdf(
+                    vec![Expr::parse_expression("-y")],
+                    vec!["y".into()],
+                    "t".into(),
+                    0.0,
+                    DVector::from_element(1, 1.0),
+                    0.1,
+                    0.02,
+                    1e-7,
+                    1e-9,
+                    None,
+                    false,
+                    Some(0.01),
+                ),
+            }
+            .prepare(Some(
+                &StiffPreset::default()
+                    .with_frontend(StiffFrontend::ExprLegacy)
+                    .with_matrix_layout(StiffMatrixLayout::Dense)
+                    .with_telemetry(telemetry_mode)
+                    .with_logging(logging_level),
+            ))
+            .expect("programmatic BDF policy should prepare");
+
+            assert_eq!(hybrid.telemetry_mode(), telemetry_mode);
+            assert_eq!(programmatic.telemetry_mode(), telemetry_mode);
+            match (hybrid, programmatic) {
+                (PreparedStiffSolver::Bdf(hybrid), PreparedStiffSolver::Bdf(programmatic)) => {
+                    assert_eq!(hybrid.logging_level(), logging_level);
+                    assert_eq!(programmatic.logging_level(), logging_level);
+                }
+                _ => panic!("BDF selection must retain the BDF native solver"),
+            }
+        }
+    }
+}
+
+#[test]
+fn hybrid_all_stiff_families_forward_telemetry_and_logging_matrix() {
+    use crate::command_interpreter::task_parser_ivp_hybrid::parse_hybrid_stiff_settings_from_document;
+    use crate::numerical::SolverTelemetryMode;
+    use crate::numerical::StiffAPI::{
+        PreparedStiffSolver, StiffFrontend, StiffMatrixLayout, StiffPreset, StiffSolverKind,
+        StiffSolverRequest,
+    };
+    use crate::numerical::logging::SolverLogLevel;
+    use crate::symbolic::symbolic_engine::Expr;
+
+    fn request_for(kind: StiffSolverKind) -> StiffSolverRequest {
+        let rhs = vec![Expr::parse_expression("-y")];
+        let variables = vec!["y".to_string()];
+        let y0 = DVector::from_element(1, 1.0);
+        match kind {
+            StiffSolverKind::Bdf => StiffSolverRequest::Bdf {
+                options: crate::numerical::StiffAPI::bdf::BdfSolverOptions::for_bdf(
+                    rhs,
+                    variables,
+                    "t".into(),
+                    0.0,
+                    y0,
+                    0.1,
+                    0.02,
+                    1e-7,
+                    1e-9,
+                    None,
+                    false,
+                    Some(0.01),
+                ),
+            },
+            StiffSolverKind::Radau => StiffSolverRequest::Radau {
+                problem: crate::numerical::StiffAPI::radau::RadauProblem::new(rhs, variables, "t"),
+                config: Default::default(),
+                initial_state: vec![1.0],
+                parameters: Vec::new(),
+            },
+            StiffSolverKind::BackwardEuler => StiffSolverRequest::BackwardEuler {
+                options: crate::numerical::StiffAPI::backward_euler::BeSolverOptions::new(
+                    rhs,
+                    variables,
+                    "t".into(),
+                    1e-8,
+                    20,
+                    Some(0.01),
+                    0.0,
+                    0.1,
+                    y0,
+                ),
+                equation_parameters: Vec::new(),
+                parameter_values: Vec::new(),
+            },
+            StiffSolverKind::Lsode2 => StiffSolverRequest::Lsode2 {
+                config: crate::numerical::StiffAPI::lsode2::Lsode2ProblemConfig::new(
+                    rhs,
+                    variables,
+                    "t".into(),
+                    0.0,
+                    y0,
+                    0.1,
+                    0.02,
+                    1e-7,
+                    1e-9,
+                ),
+                logging_level: None,
+            },
+        }
+    }
+
+    fn actual_logging(solver: &PreparedStiffSolver) -> SolverLogLevel {
+        match solver {
+            PreparedStiffSolver::Bdf(solver) => solver.logging_level(),
+            PreparedStiffSolver::Radau(solver) => solver.solver().logging_level(),
+            PreparedStiffSolver::BackwardEuler(solver) => solver.logging_level(),
+            PreparedStiffSolver::Lsode2(solver) => solver.logging_level(),
+        }
+    }
+
+    let families = [
+        ("BDF", StiffSolverKind::Bdf),
+        ("Radau5", StiffSolverKind::Radau),
+        ("BackwardEuler", StiffSolverKind::BackwardEuler),
+        ("LSODE2", StiffSolverKind::Lsode2),
+    ];
+    let telemetry_modes = [
+        ("off", SolverTelemetryMode::Off),
+        ("counters", SolverTelemetryMode::Counters),
+        ("timings", SolverTelemetryMode::Timings),
+        ("detailed", SolverTelemetryMode::Detailed),
+    ];
+    let logging_levels = [
+        ("off", SolverLogLevel::Off),
+        ("error", SolverLogLevel::Error),
+        ("warn", SolverLogLevel::Warn),
+        ("info", SolverLogLevel::Info),
+        ("debug", SolverLogLevel::Debug),
+    ];
+    for (method, kind) in families {
+        for (telemetry_text, telemetry_mode) in telemetry_modes {
+            for (logging_text, logging_level) in logging_levels {
+                let document = parse_document_for_ivp(&format!(
+                    "task\nsolver: IVP\nmethod: {method}\n\nsolver_options\nsymbolic_frontend: ExprLegacy\nmatrix_layout: dense\ntelemetry: {telemetry_text}\nlogging: {logging_text}\n"
+                ));
+                let hybrid = parse_hybrid_stiff_settings_from_document(&document)
+                    .expect("hybrid common policy should parse")
+                    .prepare(request_for(kind))
+                    .expect("hybrid common policy should prepare");
+                let programmatic = request_for(kind)
+                    .prepare(Some(
+                        &StiffPreset::default()
+                            .with_frontend(StiffFrontend::ExprLegacy)
+                            .with_matrix_layout(StiffMatrixLayout::Dense)
+                            .with_telemetry(telemetry_mode)
+                            .with_logging(logging_level),
+                    ))
+                    .expect("programmatic common policy should prepare");
+
+                assert_eq!(hybrid.kind(), kind, "hybrid route for {method}");
+                assert_eq!(hybrid.telemetry_mode(), telemetry_mode, "{method}");
+                assert_eq!(programmatic.telemetry_mode(), telemetry_mode, "{method}");
+                assert_eq!(actual_logging(&hybrid), logging_level, "hybrid {method}");
+                assert_eq!(
+                    actual_logging(&programmatic),
+                    logging_level,
+                    "programmatic {method}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn hybrid_family_overrides_are_retained_as_typed_settings() {
+    use crate::command_interpreter::task_parser_ivp_hybrid::{
+        HybridStiffFamilySettings, parse_hybrid_stiff_settings_from_document,
+    };
+    use crate::numerical::LSODE2::{
+        Lsode2ControllerMode, Lsode2LinearSolverChoice, Lsode2LinearSolverPolicy,
+        Lsode2StopComparator,
+    };
+
+    let parse = |method: &str, options: &str| {
+        let document = parse_document_for_ivp(&format!(
+            "task\nsolver: IVP\nmethod: {method}\n\nsolver_options\n{options}\n"
+        ));
+        parse_hybrid_stiff_settings_from_document(&document)
+            .expect("family-specific settings should parse")
+    };
+
+    let bdf = parse(
+        "BDF",
+        "max_step: 0.03\nrtol: 1e-6\natol: 1e-9\nfirst_step: 0.002\nmax_iterations: 321\nvectorized: false",
+    );
+    assert_eq!(
+        bdf.solver_kind(),
+        crate::numerical::StiffAPI::StiffSolverKind::Bdf
+    );
+    assert!(matches!(
+        bdf.family,
+        HybridStiffFamilySettings::Bdf {
+            max_step: Some(0.03),
+            rtol: Some(1e-6),
+            atol: Some(1e-9),
+            first_step: Some(0.002),
+            max_steps: Some(321),
+            vectorized: Some(false),
+        }
+    ));
+
+    let radau = parse(
+        "Radau5",
+        "max_step: 0.04\nrtol: 2e-6\natol: 2e-9\nfirst_step: 0.003\nmax_iterations: 17",
+    );
+    assert!(matches!(
+        radau.family,
+        HybridStiffFamilySettings::Radau {
+            max_step: Some(0.04),
+            rtol: Some(2e-6),
+            atol: Some(2e-9),
+            first_step: Some(0.003),
+            max_newton_iterations: Some(17),
+        }
+    ));
+
+    let be = parse(
+        "BackwardEuler",
+        "step_size: 0.005\ntolerance: 2e-8\nmax_iterations: 19",
+    );
+    assert!(matches!(
+        be.family,
+        HybridStiffFamilySettings::BackwardEuler {
+            step_size: Some(0.005),
+            tolerance: Some(2e-8),
+            max_iterations: Some(19),
+        }
+    ));
+
+    let lsode = parse(
+        "LSODE2",
+        "max_step: 0.05\nrtol: 3e-6\natol: 3e-9\nfirst_step: 0.004\nvectorized: false\nlsode2_method_family: bdf\nlsode2_linear_structure: dense\nlsode2_linear_solver_policy: dense_lu\nlsode2_native_execution: bridge_solve\nlsode2_stop_variable: y\nlsode2_stop_comparator: le\nlsode2_stop_target: 0.5",
+    );
+    assert_eq!(
+        lsode.solver_kind(),
+        crate::numerical::StiffAPI::StiffSolverKind::Lsode2
+    );
+    assert!(matches!(
+        &lsode.family,
+        HybridStiffFamilySettings::Lsode2 {
+            max_step: Some(0.05),
+            rtol: Some(3e-6),
+            atol: Some(3e-9),
+            first_step: Some(0.004),
+            vectorized: Some(false),
+            controller: Some(controller),
+            linear_solver_policy: Some(Lsode2LinearSolverPolicy::Force(
+                Lsode2LinearSolverChoice::DenseLu
+            )),
+            native_execution: Some(_),
+            stop_conditions,
+        } if controller.mode == Lsode2ControllerMode::BdfOnly
+            && stop_conditions.len() == 1
+            && stop_conditions[0].variable == "y"
+            && stop_conditions[0].target == 0.5
+            && stop_conditions[0].comparator == Lsode2StopComparator::LessEqual
+    ));
+
+    let mut native_config = crate::numerical::StiffAPI::lsode2::Lsode2ProblemConfig::new(
+        vec![crate::symbolic::symbolic_engine::Expr::parse_expression(
+            "-y",
+        )],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.1,
+        0.02,
+        1e-7,
+        1e-9,
+    );
+    native_config.linear_system_structure =
+        crate::numerical::LSODE2::Lsode2LinearSystemStructure::Dense;
+    let prepared = lsode
+        .prepare(crate::numerical::StiffAPI::StiffSolverRequest::Lsode2 {
+            config: native_config,
+            logging_level: None,
+        })
+        .expect("LSODE2 family overrides should prepare without selecting standalone BDF");
+    let crate::numerical::StiffAPI::PreparedStiffSolver::Lsode2(solver) = prepared else {
+        panic!("LSODE2 method selector must retain the LSODE2 facade variant")
+    };
+    assert_eq!(
+        solver.config().controller.mode,
+        Lsode2ControllerMode::BdfOnly
+    );
+    assert_eq!(solver.config().max_step, 0.05);
+    assert_eq!(solver.config().rtol, 3e-6);
+    assert_eq!(solver.config().atol, 3e-9);
+    assert_eq!(solver.config().first_step, Some(0.004));
+    assert!(!solver.config().vectorized);
+    assert_eq!(
+        solver.config().linear_system_structure,
+        crate::numerical::LSODE2::Lsode2LinearSystemStructure::Dense
+    );
+    assert_eq!(
+        solver.config().linear_solver_policy,
+        Lsode2LinearSolverPolicy::Force(Lsode2LinearSolverChoice::DenseLu)
+    );
+    assert_eq!(
+        solver.config().native_execution,
+        crate::numerical::LSODE2::Lsode2NativeExecutionConfig::bridge_solve()
+    );
+    assert_eq!(solver.config().stop_conditions.len(), 1);
+    assert_eq!(
+        solver.config().stop_conditions[0].comparator,
+        Lsode2StopComparator::LessEqual
+    );
+}
+
+#[test]
+fn hybrid_prepare_preserves_typed_parse_native_and_solver_mismatch_errors() {
+    use crate::command_interpreter::task_parser_ivp_hybrid::parse_hybrid_stiff_settings_from_document;
+    use crate::numerical::StiffAPI::{StiffApiError, StiffSolverKind, StiffSolverRequest};
+    use crate::symbolic::symbolic_engine::Expr;
+
+    let malformed = parse_document_for_ivp(
+        "task\nsolver: IVP\nmethod: BDF\n\nsolver_options\ntelemetry: clockish\n",
+    );
+    assert!(matches!(
+        parse_hybrid_stiff_settings_from_document(&malformed),
+        Err(IvpTaskError::InvalidField { .. })
+    ));
+    let duplicate_policy = parse_document_for_ivp(
+        "task\nsolver: IVP\nmethod: LSODE2\n\nsolver_options\nsymbolic_frontend: ExprLegacy\nlsode2_symbolic_assembly: AtomView\n",
+    );
+    assert!(matches!(
+        parse_hybrid_stiff_settings_from_document(&duplicate_policy),
+        Err(IvpTaskError::InvalidConfiguration { .. })
+    ));
+
+    let settings_document = parse_document_for_ivp("task\nsolver: IVP\nmethod: BDF\n");
+    let settings = parse_hybrid_stiff_settings_from_document(&settings_document)
+        .expect("BDF settings should parse without a model");
+    let mut request = crate::numerical::StiffAPI::bdf::BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-k*y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.1,
+        0.02,
+        1e-7,
+        1e-9,
+        None,
+        false,
+        Some(0.01),
+    );
+    request.equation_parameters = Some(vec!["k".into()]);
+    assert!(matches!(
+        settings
+            .clone()
+            .prepare(StiffSolverRequest::Bdf { options: request }),
+        Err(StiffApiError::Bdf(_))
+    ));
+
+    let mismatch = settings.prepare(StiffSolverRequest::Radau {
+        problem: crate::numerical::StiffAPI::radau::RadauProblem::new(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".into()],
+            "t",
+        ),
+        config: Default::default(),
+        initial_state: vec![1.0],
+        parameters: Vec::new(),
+    });
+    assert!(matches!(
+        mismatch,
+        Err(StiffApiError::SolverKindMismatch {
+            selected: StiffSolverKind::Bdf,
+            request: StiffSolverKind::Radau,
+        })
+    ));
+}
+
+#[test]
+fn hybrid_settings_match_programmatic_stiff_routes_for_all_families() {
+    use crate::command_interpreter::task_parser_ivp_hybrid::parse_hybrid_stiff_settings_from_document;
+    use crate::numerical::SolverTelemetryMode;
+    use crate::numerical::StiffAPI::{
+        StiffExecution, StiffFrontend, StiffMatrixLayout, StiffPreset, StiffSolverRequest,
+        StiffTelemetrySnapshot,
+    };
+    use crate::symbolic::symbolic_engine::Expr;
+
+    let parse_settings = |method: &str, options: &str| {
+        let document = parse_document_for_ivp(&format!(
+            "task\nsolver: IVP\nmethod: {method}\n\nsolver_options\n{options}\n"
+        ));
+        parse_hybrid_stiff_settings_from_document(&document)
+            .expect("settings-only hybrid document should parse")
+    };
+    let common = StiffPreset::default()
+        .with_frontend(StiffFrontend::ExprLegacy)
+        .with_matrix_layout(StiffMatrixLayout::Dense)
+        .with_telemetry(SolverTelemetryMode::Counters)
+        .with_logging(crate::numerical::logging::SolverLogLevel::Off);
+    let common_options =
+        "symbolic_frontend: ExprLegacy\nmatrix_layout: dense\ntelemetry: counters\nlogging: off";
+    let y0 = || DVector::from_element(1, 1.0);
+    let rhs = || vec![Expr::parse_expression("-y")];
+    let variables = || vec!["y".to_string()];
+
+    let bdf_options = || {
+        let mut options = crate::numerical::StiffAPI::bdf::BdfSolverOptions::for_bdf(
+            rhs(),
+            variables(),
+            "t".into(),
+            0.0,
+            y0(),
+            0.1,
+            0.02,
+            1e-7,
+            1e-9,
+            None,
+            false,
+            Some(0.01),
+        );
+        options.max_steps = 321;
+        options
+    };
+    let bdf_options_text = format!(
+        "{common_options}\nmax_step: 0.02\nrtol: 1e-7\natol: 1e-9\nfirst_step: 0.01\nmax_iterations: 321\nvectorized: false"
+    );
+    let mut hybrid = parse_settings("BDF", &bdf_options_text)
+        .prepare(StiffSolverRequest::Bdf {
+            options: bdf_options(),
+        })
+        .expect("hybrid BDF settings should prepare");
+    let mut programmatic = StiffSolverRequest::Bdf {
+        options: bdf_options(),
+    }
+    .prepare(Some(&common))
+    .expect("programmatic BDF request should prepare");
+    assert_eq!(hybrid.telemetry_mode(), SolverTelemetryMode::Counters);
+    assert_eq!(programmatic.telemetry_mode(), SolverTelemetryMode::Counters);
+    assert!(matches!(
+        hybrid.try_solve(),
+        Ok(crate::numerical::StiffAPI::StiffSolveOutcome::Bdf)
+    ));
+    assert!(matches!(
+        programmatic.try_solve(),
+        Ok(crate::numerical::StiffAPI::StiffSolveOutcome::Bdf)
+    ));
+    let hybrid_view = hybrid.trajectory_view().unwrap();
+    let programmatic_view = programmatic.trajectory_view().unwrap();
+    assert_eq!(hybrid_view.axis, programmatic_view.axis);
+    assert_eq!(hybrid_view.values, programmatic_view.values);
+    let (
+        StiffTelemetrySnapshot::Bdf {
+            statistics: hybrid_stats,
+            ..
+        },
+        StiffTelemetrySnapshot::Bdf {
+            statistics: programmatic_stats,
+            ..
+        },
+    ) = (
+        hybrid.telemetry_snapshot().unwrap(),
+        programmatic.telemetry_snapshot().unwrap(),
+    )
+    else {
+        panic!("BDF telemetry route should remain typed")
+    };
+    assert_eq!(
+        hybrid_stats.accepted_steps_total,
+        programmatic_stats.accepted_steps_total
+    );
+    assert_eq!(
+        hybrid_stats.residual_calls,
+        programmatic_stats.residual_calls
+    );
+    assert_eq!(
+        hybrid_stats.jacobian_calls,
+        programmatic_stats.jacobian_calls
+    );
+
+    let radau_problem =
+        || crate::numerical::StiffAPI::radau::RadauProblem::new(rhs(), variables(), "t");
+    let radau_config = || crate::numerical::StiffAPI::radau::RadauConfig {
+        t_bound: 0.1,
+        max_step: 0.02,
+        rtol: 1e-7,
+        atol: 1e-9,
+        first_step: Some(0.01),
+        max_newton_iterations: 17,
+        ..Default::default()
+    };
+    let radau_common = common.clone().with_execution(StiffExecution::Lambdify);
+    // Radau consumes its initial state from the request, not from its config.
+    let mut hybrid = parse_settings(
+        "Radau5",
+        &format!("{common_options}\nsymbolic_execution: Lambdify\nmax_step: 0.02\nrtol: 1e-7\natol: 1e-9\nfirst_step: 0.01\nmax_iterations: 17"),
+    )
+    .prepare(StiffSolverRequest::Radau {
+        problem: radau_problem(),
+        config: radau_config(),
+        initial_state: vec![1.0],
+        parameters: Vec::new(),
+    })
+    .expect("hybrid Radau settings should prepare");
+    let mut programmatic = StiffSolverRequest::Radau {
+        problem: radau_problem(),
+        config: radau_config(),
+        initial_state: vec![1.0],
+        parameters: Vec::new(),
+    }
+    .prepare(Some(&radau_common))
+    .expect("programmatic Radau request should prepare");
+    let hybrid_solution = match hybrid.try_solve().unwrap() {
+        crate::numerical::StiffAPI::StiffSolveOutcome::Radau(solution) => solution,
+        other => panic!("unexpected hybrid Radau outcome: {other:?}"),
+    };
+    let programmatic_solution = match programmatic.try_solve().unwrap() {
+        crate::numerical::StiffAPI::StiffSolveOutcome::Radau(solution) => solution,
+        other => panic!("unexpected programmatic Radau outcome: {other:?}"),
+    };
+    assert_eq!(hybrid.telemetry_mode(), SolverTelemetryMode::Counters);
+    assert_eq!(hybrid_solution.y, programmatic_solution.y);
+    assert_eq!(
+        hybrid_solution.telemetry().counters,
+        programmatic_solution.telemetry().counters
+    );
+    assert_eq!(
+        hybrid_solution.telemetry().counters["accepted_steps"],
+        programmatic_solution.telemetry().counters["accepted_steps"]
+    );
+    let be_options = || {
+        crate::numerical::StiffAPI::backward_euler::BeSolverOptions::new(
+            rhs(),
+            variables(),
+            "t".into(),
+            1e-9,
+            30,
+            Some(0.01),
+            0.0,
+            0.1,
+            y0(),
+        )
+    };
+    let be_options_text =
+        format!("{common_options}\nstep_size: 0.01\ntolerance: 1e-9\nmax_iterations: 30");
+    let be_request = || StiffSolverRequest::BackwardEuler {
+        options: be_options(),
+        equation_parameters: Vec::new(),
+        parameter_values: Vec::new(),
+    };
+    let mut hybrid = parse_settings("BackwardEuler", &be_options_text)
+        .prepare(be_request())
+        .expect("hybrid BE settings should prepare");
+    let mut programmatic = be_request()
+        .prepare(Some(&common))
+        .expect("programmatic BE request should prepare");
+    hybrid.try_solve().unwrap();
+    programmatic.try_solve().unwrap();
+    let hybrid_view = hybrid.trajectory_view().unwrap();
+    let programmatic_view = programmatic.trajectory_view().unwrap();
+    assert_eq!(hybrid_view.axis, programmatic_view.axis);
+    assert_eq!(hybrid_view.values, programmatic_view.values);
+    let (
+        StiffTelemetrySnapshot::BackwardEuler {
+            statistics: hybrid_stats,
+            details: hybrid_details,
+            ..
+        },
+        StiffTelemetrySnapshot::BackwardEuler {
+            statistics: programmatic_stats,
+            details: programmatic_details,
+            ..
+        },
+    ) = (
+        hybrid.telemetry_snapshot().unwrap(),
+        programmatic.telemetry_snapshot().unwrap(),
+    )
+    else {
+        panic!("BE telemetry route should remain typed")
+    };
+    assert_eq!(
+        hybrid_stats.accepted_steps_total,
+        programmatic_stats.accepted_steps_total
+    );
+    assert_eq!(
+        hybrid_stats.residual_calls,
+        programmatic_stats.residual_calls
+    );
+    assert_eq!(
+        hybrid_details.accepted_steps,
+        programmatic_details.accepted_steps
+    );
+    assert_eq!(
+        hybrid_details.factorization_calls,
+        programmatic_details.factorization_calls
+    );
+
+    let lsode_config = || {
+        let mut config = crate::numerical::StiffAPI::lsode2::Lsode2ProblemConfig::new(
+            rhs(),
+            variables(),
+            "t".into(),
+            0.0,
+            y0(),
+            0.1,
+            0.02,
+            1e-7,
+            1e-9,
+        );
+        config.controller = crate::numerical::LSODE2::Lsode2ControllerConfig::adams_only();
+        config
+    };
+    let lsode_options_text = format!(
+        "{common_options}\nsymbolic_execution: Lambdify\nmax_step: 0.02\nrtol: 1e-7\natol: 1e-9\nlsode2_method_family: adams"
+    );
+    let lsode_request = || StiffSolverRequest::Lsode2 {
+        config: lsode_config(),
+        logging_level: None,
+    };
+    let mut hybrid = parse_settings("LSODE2", &lsode_options_text)
+        .prepare(lsode_request())
+        .expect("hybrid LSODE2 settings should prepare");
+    let lsode_preset = common.clone().with_execution(StiffExecution::Lambdify);
+    let mut programmatic = lsode_request()
+        .prepare(Some(&lsode_preset))
+        .expect("programmatic LSODE2 request should prepare");
+    for solver in [&hybrid, &programmatic] {
+        let crate::numerical::StiffAPI::PreparedStiffSolver::Lsode2(solver) = solver else {
+            panic!("LSODE2 selector must not become standalone BDF")
+        };
+        assert_eq!(
+            solver.config().controller.mode,
+            crate::numerical::LSODE2::Lsode2ControllerMode::AdamsOnly
+        );
+    }
+    hybrid.try_solve().unwrap();
+    programmatic.try_solve().unwrap();
+    let hybrid_view = hybrid.trajectory_view().unwrap();
+    let programmatic_view = programmatic.trajectory_view().unwrap();
+    assert_eq!(hybrid_view.axis, programmatic_view.axis);
+    assert_eq!(hybrid_view.values, programmatic_view.values);
+    let (
+        StiffTelemetrySnapshot::Lsode2 {
+            statistics: hybrid_stats,
+            native: hybrid_native,
+            ..
+        },
+        StiffTelemetrySnapshot::Lsode2 {
+            statistics: programmatic_stats,
+            native: programmatic_native,
+            ..
+        },
+    ) = (
+        hybrid.telemetry_snapshot().unwrap(),
+        programmatic.telemetry_snapshot().unwrap(),
+    )
+    else {
+        panic!("LSODE2 telemetry route should remain typed")
+    };
+    assert_eq!(
+        hybrid_stats.accepted_steps_total,
+        programmatic_stats.accepted_steps_total
+    );
+    assert_eq!(
+        hybrid_stats.residual_calls,
+        programmatic_stats.residual_calls
+    );
+    assert_eq!(
+        hybrid_native.native_step_attempts,
+        programmatic_native.native_step_attempts
+    );
+    assert_eq!(
+        hybrid_native.native_step_accepts,
+        programmatic_native.native_step_accepts
+    );
+}
+
+#[test]
+fn full_text_lsode2_parser_preserves_timings_instead_of_enabling_detailed_mode() {
+    let spec = parse_ivp_task_from_str(
+        "task\nsolver: IVP\nmethod: LSODE2\n\nequations\narg: t\nunknowns: y\nrhs: -y\n\ninitial_conditions\nt0: 0.0\nt_end: 0.1\ny0: 1.0\n\nsolver_options\ntelemetry: timings\n",
+    )
+    .expect("valid full-text LSODE2 task should parse");
+    let solver = build_ivp_solver_from_spec(&spec).expect("LSODE2 task should build");
+    match solver {
+        IvpTaskSolver::Lsode2(solver) => assert_eq!(
+            solver.config().telemetry.mode(),
+            crate::symbolic::ivp_telemetry::IvpTelemetryMode::Timings
+        ),
+        _ => panic!("expected LSODE2 solver"),
+    }
+}
+
+#[test]
+fn ivp_logging_alias_conflict_is_a_typed_configuration_error() {
+    let document = parse_document_for_ivp(
+        "task\nsolver: IVP\nmethod: BDF\n\nsolver_options\nlogging: info\nlog_level: debug\n",
+    );
+    let error = parse_ivp_solver_settings_from_document(&document)
+        .expect_err("conflicting logging aliases must not silently select one");
+    assert!(matches!(error, IvpTaskError::InvalidConfiguration { .. }));
+}
+
+#[test]
+fn ivp_task_parser_forwards_logging_to_radau() {
+    let spec = parse_ivp_task_from_str(
+        "task\nsolver: IVP\nmethod: Radau5\n\nequations\narg: t\nunknowns: y\nrhs: -y\n\ninitial_conditions\nt0: 0.0\nt_end: 0.1\ny0: 1.0\n\nsolver_options\nlogging: debug\n",
+    )
+    .expect("Radau logging option should parse");
+    let solver = build_ivp_solver_from_spec(&spec).expect("Radau task should prepare");
+    match solver {
+        IvpTaskSolver::Radau { solver, .. } => assert_eq!(
+            solver.config().logging_level,
+            crate::numerical::logging::SolverLogLevel::Debug
+        ),
+        _ => panic!("expected Radau solver"),
+    }
+}
+
+#[test]
 fn ivp_task_parser_supports_full_end_to_end_document_with_lsode2_settings() {
     let input = r#"
 task
@@ -2071,7 +2982,7 @@ telemetry: timings
                 solver.config().lambdify_execution_policy,
                 IvpLambdifyExecutionPolicy::Auto { min_work: 32 }
             );
-            assert_eq!(solver.config().telemetry.mode(), IvpTelemetryMode::Detailed);
+            assert_eq!(solver.config().telemetry.mode(), IvpTelemetryMode::Timings);
             assert!(matches!(
                 solver.config().residual_jacobian_source,
                 Lsode2ResidualJacobianSource::Symbolic {

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use nalgebra::{DMatrix, DVector};
 
+use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
 use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
@@ -229,6 +230,8 @@ pub struct RadauConfig {
     pub matrix_layout: RadauMatrixLayout,
     pub jacobian_source: RadauJacobianSource,
     pub telemetry: RadauTelemetryMode,
+    /// Logging threshold for solve operations; independent of telemetry.
+    pub logging_level: SolverLogLevel,
     /// Callback scheduling policy shared by Lambdify and AOT routes.
     pub execution_policy: RadauExecutionPolicy,
     pub output: RadauOutputPolicy,
@@ -253,6 +256,7 @@ impl Default for RadauConfig {
             matrix_layout: RadauMatrixLayout::Dense,
             jacobian_source: RadauJacobianSource::Analytic,
             telemetry: RadauTelemetryMode::Off,
+            logging_level: SolverLogLevel::Off,
             execution_policy: RadauExecutionPolicy::Sequential,
             output: RadauOutputPolicy::FinalOnly,
             aot: None,
@@ -751,6 +755,7 @@ pub struct RadauSolver {
     parameter_count: usize,
     preparation_telemetry: RadauTelemetry,
     last_solve_telemetry: Option<RadauTelemetryReport>,
+    logging_level: SolverLogLevel,
 }
 
 /// Prepared native-callback Radau model.
@@ -764,6 +769,7 @@ pub struct RadauNativeSolver {
     config: InternalConfig,
     residual: NativeResidualFn,
     jacobian: Option<NativeJacobianFn>,
+    logging_level: SolverLogLevel,
 }
 
 impl RadauNativeSolver {
@@ -795,6 +801,7 @@ impl RadauNativeSolver {
                 message: "native Radau callbacks currently require Dense layout".to_owned(),
             });
         }
+        let logging_level = config.logging_level;
         let mut internal = config.to_internal();
         internal.execution = InternalExecution::Native;
         internal.assembly = None;
@@ -808,11 +815,14 @@ impl RadauNativeSolver {
             config: internal,
             residual,
             jacobian,
+            logging_level,
         })
     }
 
     /// Solve from the supplied initial state, using analytic or FD Jacobians.
     pub fn solve(&mut self, y0: &[f64]) -> Result<RadauSolution, RadauError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
+        crate::numerical::logging::solver_info!("Radau native solve started");
         let mut residual = NativeResidualCallback::new(self.residual.clone());
         let mut jacobian = match self.jacobian.clone() {
             Some(callback) => {
@@ -824,17 +834,24 @@ impl RadauNativeSolver {
                 self.config.telemetry != InternalTelemetryMode::Off,
             )),
         };
-        let (result, output, mut telemetry) = try_solve_dense_with_callbacks_with_output(
+        let solve_result = try_solve_dense_with_callbacks_with_output(
             &self.config,
             &mut residual,
             &mut jacobian,
             y0,
         )
-        .map_err(RadauError::from)?;
+        .map_err(RadauError::from);
+        let (result, output, mut telemetry) = match solve_result {
+            Ok(solved) => solved,
+            Err(error) => {
+                crate::numerical::logging::solver_warn!("Radau native solve failed: {error}");
+                return Err(error);
+            }
+        };
         if let NativeJacobianAdapter::FiniteDifference(callback) = &jacobian {
             telemetry.counters.finite_difference_probes = callback.probes();
         }
-        Ok(RadauSolution {
+        let solution = RadauSolution {
             t: result.t,
             y: result.y,
             attempts: result.attempts,
@@ -842,7 +859,13 @@ impl RadauNativeSolver {
             rejected_steps: result.rejected_steps,
             output,
             telemetry: RadauTelemetryReport::from_internal(&telemetry),
-        })
+        };
+        crate::numerical::logging::solver_info!(
+            "Radau native solve completed: accepted_steps={}, rejected_steps={}",
+            solution.accepted_steps,
+            solution.rejected_steps
+        );
+        Ok(solution)
     }
 
     /// Legacy alias for solving the same callback model from a supplied state.
@@ -868,12 +891,23 @@ impl RadauNativeSolver {
         } else {
             RadauJacobianSource::FiniteDifference
         };
+        config.logging_level = self.logging_level;
         config
     }
 
     /// Return the active telemetry mode without cloning the full configuration.
     pub fn telemetry_mode(&self) -> RadauTelemetryMode {
         self.config.telemetry.into_public()
+    }
+
+    /// Return the active solver logging threshold.
+    pub fn logging_level(&self) -> SolverLogLevel {
+        self.logging_level
+    }
+
+    /// Set the logging threshold independently of telemetry collection.
+    pub fn set_logging_level(&mut self, level: SolverLogLevel) {
+        self.logging_level = level;
     }
 }
 
@@ -938,6 +972,7 @@ impl RadauSolver {
                 message,
             })?;
         }
+        let logging_level = config.logging_level;
         let internal = config.to_internal();
         internal.validate().map_err(RadauError::from)?;
         let assembly = internal.assembly.ok_or_else(|| RadauError {
@@ -1043,18 +1078,30 @@ impl RadauSolver {
             parameter_count,
             preparation_telemetry,
             last_solve_telemetry: None,
+            logging_level,
         })
     }
 
     pub fn config(&self) -> RadauConfig {
         let mut config = RadauConfig::from_internal(&self.config);
         config.aot = self.aot.clone();
+        config.logging_level = self.logging_level;
         config
     }
 
     /// Return the active telemetry mode without cloning the full configuration.
     pub fn telemetry_mode(&self) -> RadauTelemetryMode {
         self.config.telemetry.into_public()
+    }
+
+    /// Return the active solver logging threshold.
+    pub fn logging_level(&self) -> SolverLogLevel {
+        self.logging_level
+    }
+
+    /// Set the logging threshold independently of telemetry collection.
+    pub fn set_logging_level(&mut self, level: SolverLogLevel) {
+        self.logging_level = level;
     }
 
     /// Return the native report for the most recent solve attempt, including
@@ -1080,6 +1127,8 @@ impl RadauSolver {
         y0: &[f64],
         parameters: &[f64],
     ) -> Result<RadauSolution, RadauError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
+        crate::numerical::logging::solver_info!("Radau solve started");
         self.last_solve_telemetry = None;
         if parameters.len() != self.parameter_count {
             return Err(RadauError {
@@ -1104,7 +1153,21 @@ impl RadauSolver {
             &session.telemetry(),
         );
         self.last_solve_telemetry = Some(telemetry.clone());
-        solve_result.map(|(result, output)| self.solution(result, output, telemetry))
+        match solve_result {
+            Ok((result, output)) => {
+                let solution = self.solution(result, output, telemetry);
+                crate::numerical::logging::solver_info!(
+                    "Radau solve completed: accepted_steps={}, rejected_steps={}",
+                    solution.accepted_steps,
+                    solution.rejected_steps
+                );
+                Ok(solution)
+            }
+            Err(error) => {
+                crate::numerical::logging::solver_warn!("Radau solve failed: {error}");
+                Err(error)
+            }
+        }
     }
 
     /// Starts a fresh solve over the configured time interval after binding
@@ -1176,6 +1239,12 @@ impl RadauSolver {
 }
 
 impl RadauConfig {
+    /// Set solver logging independently of telemetry collection.
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        self.logging_level = level;
+        self
+    }
+
     fn to_internal(&self) -> InternalConfig {
         InternalConfig {
             t0: self.t0,
@@ -1229,6 +1298,7 @@ impl RadauConfig {
             matrix_layout: config.matrix_layout.into_public(),
             jacobian_source: config.jacobian_source.into_public(),
             telemetry: config.telemetry.into_public(),
+            logging_level: SolverLogLevel::Off,
             execution_policy: config.execution_policy.into_public(),
             output: config.output.clone().into_public(),
             aot: None,

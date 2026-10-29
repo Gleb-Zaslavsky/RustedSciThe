@@ -1,5 +1,66 @@
 # StiffAPI: Full-Fidelity Stiff IVP Facade
 
+## Programmatic and Hybrid Solver-Settings Entry Points
+
+- [x] Make StiffAPI a self-contained public import boundary for the four stiff
+  families (BDF, Radau, Backward Euler and LSODE2): re-export the native
+  family-specific config/options and required problem/callback types through
+  `StiffAPI::{bdf,radau,backward_euler,lsode2}`. Re-export rather than clone
+  native configuration types; keep `StiffPreset` for common policy axes.
+- [x] Provide a public route to pair a caller-built numerical problem with
+  StiffAPI settings, then use the same validation, capability checks,
+  preparation, numerical dispatch, typed errors and telemetry access as the
+  ordinary programmatic route. Keep solver-specific controls native and make
+  standalone BDF distinct from LSODE2's internal BDF controller.
+- [x] Add a separate hybrid IVP settings adapter in `command_interpreter`.
+  KiThe owns reading domain/physical data and building equations, RHS,
+  variables and initial state. The RST adapter reads only solver selection
+  and options from the same document, returns typed StiffAPI-compatible
+  settings, and never parses or mutates domain sections. The caller then sends
+  its numerical problem and those settings to StiffAPI.
+- [x] Keep the existing full-text `task_parser_ivp` workflow intact: it still
+  parses equations and initial conditions as well as solver settings. Hybrid
+  settings parsing is a separate entry point, not a replacement or migration
+  of that workflow.
+- [x] Add solver-fragment serialization that extracts only the recognized
+  solver section. It returns a fragment without mutating the caller's document;
+  the host application remains responsible for preserving/merging its own
+  domain-specific sections. Reject ambiguous duplicate common/family-specific
+  policy fields rather than silently discarding a setting.
+- [x] Debug-check identical scalar-decay IVPs through programmatic StiffAPI
+  presets and the hybrid document adapter for BDF, Radau, Backward Euler and
+  LSODE2. Compare trajectories and family-relevant discrete telemetry/counters;
+  cover BDF max-step/tolerance/first-step/step-budget forwarding, Radau Newton
+  iteration limits, BE fixed-step/Newton controls, and LSODE2 controller
+  forwarding. Tests: `hybrid_settings_match_programmatic_stiff_routes_for_all_families`
+  and `hybrid_family_overrides_are_retained_as_typed_settings` in
+  `task_parser_ivp_tests.rs` (2026-10-29).
+- [x] Debug-check all four telemetry modes crossed with all five logging levels
+  for every stiff family, comparing hybrid and programmatic effective config.
+  Test: `hybrid_all_stiff_families_forward_telemetry_and_logging_matrix` in
+  `task_parser_ivp_tests.rs` (2026-10-29).
+- [x] Verify typed hybrid parse errors, unsupported capability, native BDF
+  preparation failure, solver/request family mismatch, duplicate LSODE2/common
+  policy rejection, and the distinction between standalone BDF and the
+  LSODE2-internal BDF controller. Tests include
+  `hybrid_prepare_preserves_typed_parse_native_and_solver_mismatch_errors`.
+- [x] Fix the existing LSODE2 task-settings mapping where `Timings` selected
+  Detailed native telemetry. The full cross-family parity matrix remains part
+  of the open gate below.
+- [x] Add native Radau logging with the shared `SolverLogLevel`, default Off,
+  independent of telemetry; forward it through StiffPreset, full-text/hybrid
+  settings, and emit scoped solve lifecycle messages.
+- [x] Add a public-consumer compile test importing solver types only from
+  StiffAPI family modules.
+- [x] Document Programmatic, Hybrid and Full-text workflows in RU/EN and
+  explain the ownership boundary between KiThe and RST in
+  `STIFF_API_GUIDE_{RU,EN}.md`.
+- [x] Finish the Debug hybrid contract matrix for the exposed family-specific
+  settings, telemetry/logging cross-product, duplicate policy, typed failure
+  paths and identical-problem result/counter parity. Compiler-backed AOT build
+  and artifact-lifecycle tests remain in their existing backend-specific gates;
+  this matrix does not compile external toolchains or replace those tests.
+
 ## Independent IVP Parameter Loop
 
 - [x] Add one facade loop over BDF, Radau, Backward Euler and LSODE2, dispatching

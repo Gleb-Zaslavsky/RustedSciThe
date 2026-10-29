@@ -45,6 +45,26 @@ if let StiffSolveOutcome::Radau(solution) = outcome {
 Например, `BdfSolverOptions`, `RadauProblem`/`RadauConfig`, `BeSolverOptions` и
 `Lsode2ProblemConfig` сохраняют свои специфичные настройки.
 
+## Hybrid-адаптер настроек солвера
+
+Приложение вроде KiThe может самостоятельно разбирать физические данные и
+строить численную модель, а RST при этом читает из того же документа только
+выбор солвера и его настройки. Для этого используется
+`command_interpreter::task_parser_ivp_hybrid::parse_hybrid_stiff_settings_from_document`.
+Он возвращает `HybridStiffSettings`; затем host-приложение строит native-задачу
+и передаёт типизированный `StiffSolverRequest` в
+`HybridStiffSettings::prepare`. Адаптер проверяет соответствие семейства и
+делегирует проверку capabilities и подготовку в StiffAPI.
+
+Адаптер не интерпретирует и не присваивает себе domain-секции, уравнения или
+начальные условия. Дополнительный сериализатор solver-фрагмента возвращает
+только выбор солвера и его опции; сохранение и объединение физического
+документа остаётся ответственностью host-приложения. Полнотекстовый IVP parser
+по-прежнему существует как отдельный end-to-end путь RST для документов, где
+уравнения и начальные условия также принадлежат RST. Ошибки разбора сохраняют
+тип `IvpTaskError`, а подготовка запроса возвращает typed `StiffApiError` и
+исходные ошибки native-солвера.
+
 ## Новые расчёты после rebind
 
 После подготовки маршрута `try_solve_with_parameter_values(y0, values)` запускает
@@ -123,3 +143,11 @@ Export, plotting, restart, continuation и пере-bind параметров н
 неявно и не сведены к искусственно одинаковому API. Используйте native
 accessor для функций, контракт которых различается между solver-ами. Подробные
 route/default/error различия перечислены в [contract audit](CONTRACT_AUDIT.md).
+# Логирование Radau
+
+Для Radau, как и для остальных stiff-маршрутов, используется общий
+`SolverLogLevel`. По умолчанию уровень `Off`; логирование не включает и не
+меняет телеметрию. Уровень можно задать через preset StiffAPI либо напрямую в
+`RadauConfig::logging_level` / `RadauConfig::with_logging_level(...)`.
+Сообщения проходят через общий scoped file logger библиотеки. Общий тип уровня
+доступен как `numerical::StiffAPI::SolverLogLevel`.

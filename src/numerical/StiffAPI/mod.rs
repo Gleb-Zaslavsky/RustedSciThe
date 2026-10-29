@@ -33,7 +33,7 @@ use crate::numerical::SolverTelemetryMode;
 use crate::numerical::ivp_parameter_loop::{
     IvpParameterLoopPoint, IvpParameterLoopSolution, run_ordered,
 };
-use crate::numerical::logging::SolverLogLevel;
+pub use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
 use crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot;
@@ -41,6 +41,42 @@ use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 use crate::symbolic::symbolic_ivp_generated::{
     IvpBackendStatistics, SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
+
+/// Native BDF types re-exported at the facade boundary. These remain the
+/// solver's canonical configuration and result types; StiffAPI does not clone
+/// them into a parallel configuration hierarchy.
+pub mod bdf {
+    pub use crate::numerical::BDF::BDF_api::{
+        BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver as Solver,
+    };
+}
+
+/// Native Radau types re-exported at the facade boundary.
+pub mod radau {
+    pub use crate::numerical::Radau::api::*;
+}
+
+/// Native Backward Euler types re-exported at the facade boundary.
+pub mod backward_euler {
+    pub use crate::numerical::BE::NR_for_Euler::{NRE, NreError, NreSolverOptions, NreStepMode};
+    pub use crate::numerical::BE::{
+        BE as Solver, BeDetailedStatistics, BeError, BeSolverOptions, BeStatus,
+        BeSymbolicAssemblyBackend, BeTelemetryMode, DEFAULT_BE_MAX_STEPS,
+    };
+}
+
+/// Production LSODE2 types re-exported at the facade boundary.
+pub mod lsode2 {
+    pub use crate::numerical::LSODE2::{
+        IvpTelemetry, IvpTelemetryMode, Lsode2AotProfile, Lsode2AotToolchain, Lsode2BackendConfig,
+        Lsode2ControllerConfig, Lsode2Error, Lsode2JacobianBackend, Lsode2LinearSolverChoice,
+        Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure, Lsode2MethodFamily,
+        Lsode2NativeExecutionConfig, Lsode2NativeStatistics, Lsode2ProblemConfig,
+        Lsode2ResidualJacobianSource, Lsode2SolveSummary, Lsode2Solver as Solver,
+        Lsode2StopComparator, Lsode2StopCondition, Lsode2SymbolicAssemblyBackend,
+        Lsode2SymbolicExecutionMode,
+    };
+}
 
 /// Solver family selected by an application-level stiff-solver configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -859,6 +895,17 @@ impl Error for StiffPostprocessError {
 }
 
 impl StiffSolverRequest {
+    /// Identify the native family represented by this request before applying
+    /// parser-produced policy settings.
+    pub const fn solver_kind(&self) -> StiffSolverKind {
+        match self {
+            Self::Bdf { .. } => StiffSolverKind::Bdf,
+            Self::Radau { .. } => StiffSolverKind::Radau,
+            Self::BackwardEuler { .. } => StiffSolverKind::BackwardEuler,
+            Self::Lsode2 { .. } => StiffSolverKind::Lsode2,
+        }
+    }
+
     /// Apply the common profile and prepare the selected native implementation.
     pub fn prepare(
         self,
@@ -911,6 +958,48 @@ impl StiffSolverRequest {
                 Ok(PreparedStiffSolver::Lsode2(solver))
             }
         }
+    }
+}
+
+/// Stiff family selection plus common policy parsed from an external task
+/// document. Family-specific numeric controls remain native request fields.
+#[derive(Debug, Clone)]
+pub struct StiffSolverSettings {
+    solver: StiffSolverKind,
+    preset: StiffPreset,
+}
+
+impl StiffSolverSettings {
+    pub fn new(solver: StiffSolverKind) -> Self {
+        Self {
+            solver,
+            preset: StiffPreset::default(),
+        }
+    }
+
+    pub fn with_preset(mut self, preset: StiffPreset) -> Self {
+        self.preset = preset;
+        self
+    }
+
+    pub const fn solver_kind(&self) -> StiffSolverKind {
+        self.solver
+    }
+
+    /// Check the document-selected family and route both programmatic and
+    /// hybrid callers through the same native preparation path.
+    pub fn prepare(
+        self,
+        request: StiffSolverRequest,
+    ) -> Result<PreparedStiffSolver, StiffApiError> {
+        let actual = request.solver_kind();
+        if actual != self.solver {
+            return Err(StiffApiError::SolverKindMismatch {
+                selected: self.solver,
+                request: actual,
+            });
+        }
+        request.prepare(Some(&self.preset))
     }
 }
 
@@ -1499,14 +1588,7 @@ impl StiffPreset {
                     }
                 }
             }
-            StiffSolverKind::Radau => {
-                if self
-                    .logging
-                    .is_some_and(|level| level != SolverLogLevel::Off)
-                {
-                    unsupported = Some("RadauConfig does not expose a logging-level control");
-                }
-            }
+            StiffSolverKind::Radau => {}
             StiffSolverKind::BackwardEuler => {
                 if self
                     .matrix_layout
@@ -1555,13 +1637,8 @@ impl StiffPreset {
     }
 
     fn apply_radau(&self, config: &mut RadauConfig) -> Result<(), StiffApiError> {
-        if let Some(level) = self.logging
-            && level != SolverLogLevel::Off
-        {
-            return Err(StiffApiError::UnsupportedCapability {
-                solver: StiffSolverKind::Radau,
-                capability: "logging control is not exposed by the current RadauConfig",
-            });
+        if let Some(level) = self.logging {
+            config.logging_level = level;
         }
         if let Some(frontend) = self.frontend {
             config.frontend = match frontend {
@@ -2007,6 +2084,10 @@ fn validate_state_dimension(
 #[derive(Debug)]
 pub enum StiffApiError {
     ConflictingPresetAxis(&'static str),
+    SolverKindMismatch {
+        selected: StiffSolverKind,
+        request: StiffSolverKind,
+    },
     UnsupportedCapability {
         solver: StiffSolverKind,
         capability: &'static str,
@@ -2037,6 +2118,7 @@ impl StiffApiError {
             Self::UnsupportedCapability { solver, .. } | Self::DimensionMismatch { solver, .. } => {
                 Some(*solver)
             }
+            Self::SolverKindMismatch { selected, .. } => Some(*selected),
             Self::Radau(_) => Some(StiffSolverKind::Radau),
             Self::Bdf(_) => Some(StiffSolverKind::Bdf),
             Self::BackwardEuler(_) => Some(StiffSolverKind::BackwardEuler),
@@ -2049,6 +2131,7 @@ impl StiffApiError {
     pub const fn stage(&self) -> StiffApiErrorStage {
         match self {
             Self::ConflictingPresetAxis(_)
+            | Self::SolverKindMismatch { .. }
             | Self::UnsupportedCapability { .. }
             | Self::DimensionMismatch { .. } => StiffApiErrorStage::Configuration,
             Self::Radau(_) | Self::Bdf(_) | Self::BackwardEuler(_) | Self::Lsode2(_) => {
@@ -2064,6 +2147,10 @@ impl fmt::Display for StiffApiError {
             Self::ConflictingPresetAxis(axis) => {
                 write!(f, "multiple StiffAPI presets configure the {axis} axis")
             }
+            Self::SolverKindMismatch { selected, request } => write!(
+                f,
+                "hybrid settings select {selected:?}, but the numerical request is {request:?}"
+            ),
             Self::UnsupportedCapability { solver, capability } => {
                 write!(
                     f,
@@ -2094,6 +2181,7 @@ impl Error for StiffApiError {
             Self::BackwardEuler(error) => Some(error),
             Self::Lsode2(error) => Some(error),
             Self::ConflictingPresetAxis(_)
+            | Self::SolverKindMismatch { .. }
             | Self::UnsupportedCapability { .. }
             | Self::DimensionMismatch { .. } => None,
         }

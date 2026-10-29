@@ -1,7 +1,7 @@
 use super::*;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::symbolic_engine::Expr;
-use nalgebra::DVector;
+use nalgebra::{DMatrix, DVector};
 
 fn lsode2_config() -> Lsode2ProblemConfig {
     Lsode2ProblemConfig::new(
@@ -15,6 +15,46 @@ fn lsode2_config() -> Lsode2ProblemConfig {
         1e-7,
         1e-9,
     )
+}
+
+#[test]
+fn family_types_are_available_from_the_stiff_api_boundary() {
+    let _: Option<crate::numerical::StiffAPI::bdf::BdfSolverOptions> = None;
+    let _: Option<crate::numerical::StiffAPI::radau::RadauConfig> = None;
+    let _: Option<crate::numerical::StiffAPI::backward_euler::BeSolverOptions> = None;
+    let _: Option<crate::numerical::StiffAPI::lsode2::Lsode2ProblemConfig> = None;
+}
+
+#[test]
+fn selected_hybrid_settings_reject_a_different_native_request_family() {
+    let options = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.1,
+        0.01,
+        1e-6,
+        1e-8,
+        None,
+        false,
+        None,
+    );
+    let error = match StiffSolverSettings::new(StiffSolverKind::Radau)
+        .prepare(StiffSolverRequest::Bdf { options })
+    {
+        Err(error) => error,
+        Ok(_) => panic!("hybrid solver selection must match the built numerical request"),
+    };
+    assert!(matches!(
+        error,
+        StiffApiError::SolverKindMismatch {
+            selected: StiffSolverKind::Radau,
+            request: StiffSolverKind::Bdf
+        }
+    ));
+    assert_eq!(error.stage(), StiffApiErrorStage::Configuration);
 }
 
 #[test]
@@ -1111,15 +1151,53 @@ fn telemetry_and_logging_preserve_solver_specific_native_capabilities() {
         .unwrap();
     assert_eq!(be.logging_level, SolverLogLevel::Warn);
 
-    assert!(matches!(
+    for level in [
+        SolverLogLevel::Off,
+        SolverLogLevel::Error,
+        SolverLogLevel::Warn,
+        SolverLogLevel::Info,
+        SolverLogLevel::Debug,
+    ] {
+        let mut radau = RadauConfig::default();
         StiffPreset::default()
-            .with_logging(SolverLogLevel::Warn)
-            .apply_radau(&mut RadauConfig::default()),
-        Err(StiffApiError::UnsupportedCapability {
-            solver: StiffSolverKind::Radau,
-            ..
-        })
-    ));
+            .with_logging(level)
+            .apply_radau(&mut radau)
+            .unwrap();
+        assert_eq!(radau.logging_level, level);
+    }
+}
+
+#[test]
+fn radau_logging_level_round_trips_through_native_and_stiff_api_configs() {
+    use crate::numerical::Radau::api::{RadauNativeSolver, RadauProblem, RadauSolver};
+
+    let problem = || RadauProblem::new(vec![Expr::parse_expression("-y")], vec!["y".into()], "t");
+    let native = RadauSolver::prepare(
+        problem(),
+        RadauConfig::default().with_logging_level(SolverLogLevel::Debug),
+    )
+    .expect("native Radau config with logging should prepare");
+    assert_eq!(native.logging_level(), SolverLogLevel::Debug);
+    assert_eq!(native.config().logging_level, SolverLogLevel::Debug);
+
+    let facade = prepare_radau(
+        problem(),
+        RadauConfig::default(),
+        Some(&StiffPreset::default().with_logging(SolverLogLevel::Warn)),
+    )
+    .expect("StiffAPI should forward the shared logging policy");
+    assert_eq!(facade.logging_level(), SolverLogLevel::Warn);
+    assert_eq!(facade.config().logging_level, SolverLogLevel::Warn);
+
+    let mut callback_solver = RadauNativeSolver::prepare(
+        RadauConfig::default().with_logging_level(SolverLogLevel::Info),
+        |_, state: &DVector<f64>| -state,
+        Some(|_, _: &DVector<f64>| DMatrix::from_element(1, 1, -1.0)),
+    )
+    .expect("native callback Radau should accept the shared logging level");
+    assert_eq!(callback_solver.logging_level(), SolverLogLevel::Info);
+    callback_solver.set_logging_level(SolverLogLevel::Off);
+    assert_eq!(callback_solver.config().logging_level, SolverLogLevel::Off);
 }
 
 #[test]

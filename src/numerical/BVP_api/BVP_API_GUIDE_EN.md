@@ -222,3 +222,37 @@ health/error contract and is not implemented as a facade-specific workaround.
 The task-document parser is a separate subsystem. Use
 `command_interpreter::task_parser_bvp` to read and execute task documents; it
 constructs native BVP solvers directly and does not depend on this facade.
+
+Hybrid applications can instead use
+`command_interpreter::task_parser_bvp_hybrid::parse_hybrid_bvp_solver_settings_from_document`.
+It accepts solver-settings sections only, rejects problem/task sections, and
+returns route-native options for Damped, Frozen/Naive, or Sci. The application
+continues to own equations, state ordering, mesh, boundary conditions, and the
+initial guess. Attach that guess with `BvpSolverSettings::with_initial_guess`
+and pass the resulting config through `BvpSolver::new` for standard validation.
+See [`examples/bvp_api_hybrid_client.rs`](../../../examples/bvp_api_hybrid_client.rs).
+Hybrid parsing defaults telemetry to Off. For Damped/Frozen, `Timings` requires
+an explicit `LambdifyOnly` backend policy; otherwise the route may select AOT,
+whose callback recorder has no timings-only mode, and the request is rejected.
+
+### Hybrid settings schema and boundaries
+
+The settings document is intentionally route-aware rather than a flattened
+cross-solver bag. Damped/Frozen accept their native discretization, strategy,
+linear method, tolerances, bounds and adaptive-grid sections, plus generated
+backend/AOT lifecycle, compiler, residual/sparse chunking, executor thresholds, Lambdify
+dispatch, Atom optimization profile, Expr preparation switches, logging and
+telemetry controls. BVP_sci accepts its execution/frontend, matrix layout,
+iteration budgets, callback policy, output retention, sparse factorization,
+logging and telemetry; its AOT route additionally accepts build/compiler
+metadata and residual/sparse/banded chunking settings. AOT-only keys supplied
+to a Lambdify route are rejected rather than ignored.
+
+Some native values are deliberately not document settings: an AOT resolver is
+an in-process runtime handle, while BVP_sci's singular `S*y/(x-a)` term belongs
+to the physical model. Damped/Frozen `dont_save_log` is a native
+post-construction report toggle, distinct from shared Rust text logging; the
+hybrid parser rejects it because the facade config does not yet carry that
+state. Use the direct native lifecycle API when these controls are required.
+Unknown keys and unsupported route combinations produce typed errors with the
+field path.
