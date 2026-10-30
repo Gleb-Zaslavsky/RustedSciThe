@@ -849,6 +849,30 @@ mod tests {
     }
 
     #[test]
+    fn fallible_conversion_handles_large_kithe_coefficient_product() {
+        let expr = Expr::parse_expression("-1790971310706.9194 * C1 * (48197.07247411639 * C2)^2");
+        let atom = try_expr_to_atom(&expr).unwrap();
+        let roundtrip = atom_to_expr(&atom);
+        let actual = roundtrip.eval_expression(&["C1", "C2"], &[0.1, 0.01]);
+        let expected = -4.160350766962736e16;
+
+        assert!(actual.is_finite());
+        assert!(
+            (actual - expected).abs() <= expected.abs() * 2.0e-12,
+            "large coefficient changed on Expr -> Atom -> Expr conversion: expected={expected:.17e}, actual={actual:.17e}"
+        );
+
+        let rounded = Expr::parse_expression("1e12 * x * (5e4 * y)^2");
+        let rounded_atom = try_expr_to_atom(&rounded).unwrap();
+        let rounded_actual = atom_to_expr(&rounded_atom).eval_expression(&["x", "y"], &[0.1, 0.01]);
+        let rounded_expected = 2.5e16;
+        assert!(
+            (rounded_actual - rounded_expected).abs() <= rounded_expected * 2.0e-12,
+            "rounded control expression changed: expected={rounded_expected:.17e}, actual={rounded_actual:.17e}"
+        );
+    }
+
+    #[test]
     fn fallible_conversion_rejects_nonfinite_constants() {
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let error = try_expr_to_atom(&Expr::Const(value)).unwrap_err();

@@ -130,6 +130,7 @@ impl NRBVP {
             let started = Instant::now();
             let solve_result = self.try_main_loop_damped();
             self.custom_timer.finish();
+            self.telemetry_counters.finish_solve(&solve_result);
             self.telemetry_counters.record_termination(
                 matches!(&solve_result, Ok(Some(_))),
                 if matches!(&solve_result, Ok(Some(_))) {

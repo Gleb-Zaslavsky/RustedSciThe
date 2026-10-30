@@ -7,6 +7,10 @@ values, with optional bounds. The Python package exposes separate damped,
 fixed-mesh Naive and fixed-mesh Frozen routes. These select distinct native
 algorithms rather than aliases for one another.
 
+For both fixed-mesh routes, the initial iterate is node-major over the reduced
+Newton unknowns, with one row per mesh interval. The returned profile restores
+fixed endpoint values and has one row per mesh node.
+
 ## Model and boundary observations
 
 The equations are the first-order state derivatives. The Python adapter
@@ -72,7 +76,7 @@ from rustedscithe import BvpDampNaiveSolver, Expr, SolverOptions
 
 solver = BvpDampNaiveSolver(
     [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
-    [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5,
+    [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 4,
     parameters=["rate"], parameter_values=[1.0],
     options=SolverOptions(frontend="atom_native", execution="lambdify",
                           matrix_layout="dense", telemetry="timings"),
@@ -102,7 +106,7 @@ from rustedscithe import BvpDampFrozenSolver, Expr, SolverOptions
 
 solver = BvpDampFrozenSolver(
     [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
-    [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5,
+    [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 4,
     parameters=["rate"], parameter_values=[1.0],
     policy="every_m", policy_parameters=[2.0],
     options=SolverOptions(frontend="atom_native", execution="lambdify",

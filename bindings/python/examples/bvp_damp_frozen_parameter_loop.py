@@ -12,7 +12,7 @@ solver = BvpDampFrozenSolver(
     ["y"],
     {"y": [(0, 0.0)]},
     [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
-    [0.0] * 6,
+    [0.0] * 5,
     parameters=["alpha"],
     parameter_values=[1.0],
     policy="Frozen_naive",

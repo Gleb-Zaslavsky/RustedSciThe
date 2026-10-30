@@ -74,7 +74,8 @@ use crate::numerical::BVP_Damp::prepared_runtime::{
     fingerprint_debug,
 };
 use crate::numerical::BVP_Damp::telemetry::{
-    BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode, BvpTelemetryRecorder, BvpTelemetrySnapshot,
+    BvpLoggingConfig, BvpLoggingMode, BvpSolveStatus, BvpTelemetryMode, BvpTelemetryRecorder,
+    BvpTelemetrySnapshot,
 };
 use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use crate::somelinalg::banded::LinearSolverConfig;

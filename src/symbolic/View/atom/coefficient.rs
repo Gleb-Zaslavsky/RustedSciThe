@@ -351,11 +351,11 @@ impl PackedRationalNumberReader for [u8] {
     fn get_frac_i64(&self) -> (i64, i64, &[u8]) {
         let mut source = self;
         let disc = source.get_u8();
-        let num = match disc & NUM_MASK {
-            U8_NUM => source.get_u8() as i64,
-            U16_NUM => source.get_u16_le() as i64,
-            U32_NUM => source.get_u32_le() as i64,
-            U64_NUM => source.get_u64_le() as i64,
+        let magnitude = match disc & NUM_MASK {
+            U8_NUM => source.get_u8() as u64,
+            U16_NUM => source.get_u16_le() as u64,
+            U32_NUM => source.get_u32_le() as u64,
+            U64_NUM => source.get_u64_le(),
             x => unreachable!("Unsupported numerator type {}", x),
         };
         let den = match disc & DEN_MASK {
@@ -366,11 +366,16 @@ impl PackedRationalNumberReader for [u8] {
             U64_DEN => source.get_u64_le() as i64,
             x => unreachable!("Unsupported denominator type {}", x),
         };
-        if disc & SIGN != 0 {
-            (-num, den, source)
+        let num = if disc & SIGN != 0 {
+            if magnitude == (1_u64 << 63) {
+                i64::MIN
+            } else {
+                -i64::try_from(magnitude).expect("negative packed numerator exceeds i64 range")
+            }
         } else {
-            (num, den, source)
-        }
+            i64::try_from(magnitude).expect("positive packed numerator exceeds i64 range")
+        };
+        (num, den, source)
     }
 
     #[inline(always)]
@@ -444,5 +449,22 @@ impl PackedRationalNumberReader for [u8] {
             return f64::from_bits(u64::from_le_bytes(self[1..9].try_into().unwrap())) == 1.0;
         }
         self[1] == 1 && self[2] == 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PackedRationalNumberReader, PackedRationalNumberWriter};
+    use crate::symbolic::View::coefficient::{Coefficient, CoefficientView};
+
+    #[test]
+    fn packed_reader_decodes_minimum_negative_numerator() {
+        let coefficient = Coefficient::reduce(i64::MIN, 1);
+        let mut packed = Vec::new();
+        coefficient.write_packed(&mut packed);
+        let (view, rest) = packed.as_slice().get_coeff_view();
+
+        assert_eq!(view, CoefficientView::Natural(i64::MIN, 1));
+        assert!(rest.is_empty());
     }
 }

@@ -780,7 +780,7 @@ impl BvpSolver {
                     });
                 }
                 require_uniform_legacy_mesh(&problem.mesh, "BVP_Damp Frozen/Naive")?;
-                validate_initial_guess(&problem, &initial_guess, problem.mesh.len())?;
+                validate_initial_guess(&problem, &initial_guess, problem.mesh.len() - 1)?;
                 let solver = FrozenSolver::new_with_options(
                     problem.equations.clone(),
                     initial_guess,
@@ -789,7 +789,7 @@ impl BvpSolver {
                     problem.legacy_boundary_conditions(),
                     problem.mesh[0],
                     *problem.mesh.last().expect("validated mesh is non-empty"),
-                    problem.mesh.len(),
+                    problem.mesh.len() - 1,
                     options,
                 );
                 BvpNativeSolver::Frozen(solver)
@@ -927,9 +927,12 @@ impl BvpSolver {
         Ok(())
     }
 
-    /// Execute one solve and retain the route-native result.
+    /// Execute one solve and publish the route-native result on success.
+    ///
+    /// A failed retry leaves the last successfully published solution intact;
+    /// inspect the returned typed error and the current telemetry snapshot for
+    /// diagnostics from the failed attempt.
     pub fn solve(&mut self) -> Result<&BvpSolution, BvpApiError> {
-        self.last_solution = None;
         let solution = match &mut self.native {
             BvpNativeSolver::Damped(solver) => {
                 solver.try_solver().map_err(BvpApiError::Damped)?;
@@ -1038,9 +1041,20 @@ impl BvpSolver {
                 }
             }
             BvpNativeSolver::Frozen(solver) => {
-                let previous = solver.get_result().ok_or(BvpApiError::MissingResult)?;
+                let previous = solver.result.as_ref().ok_or(BvpApiError::MissingResult)?;
+                let expected = solver.values.len() * solver.n_steps;
+                if previous.len() != expected {
+                    return Err(BvpApiError::InvalidProblem(
+                        "Frozen solver's retained iterate no longer matches its fixed mesh".into(),
+                    ));
+                }
+                let iterate = DMatrix::from_column_slice(
+                    solver.values.len(),
+                    solver.n_steps,
+                    previous.as_slice(),
+                );
                 solver
-                    .try_set_prepared_iterate(previous.transpose())
+                    .try_set_prepared_iterate(iterate)
                     .map_err(BvpApiError::Frozen)?;
                 solver.try_solver_prepared().map_err(BvpApiError::Frozen)?;
                 BvpSolution::Frozen {

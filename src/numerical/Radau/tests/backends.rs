@@ -174,6 +174,54 @@ fn sparse_backend_keeps_csc_pattern_and_solves_shifted_system() {
 }
 
 #[test]
+fn sparse_backend_maps_eight_jacobian_values_into_ten_slot_shifted_csc() {
+    let entries = [
+        (0, 1),
+        (0, 2),
+        (1, 0),
+        (1, 2),
+        (2, 2),
+        (2, 3),
+        (3, 2),
+        (3, 3),
+    ];
+    let values = [2.0, -1.0, -3.0, 4.0, 5.0, 6.0, -7.0, 8.0];
+    let backend = SparseBackend {
+        pattern: entries.to_vec(),
+    };
+    let mut workspace = backend.create_workspace(4).unwrap();
+    assert_eq!(workspace.jacobian.len(), 10);
+
+    let coefficients = RadauIia5::new();
+    let h = 0.25;
+    backend
+        .assemble_shifted(
+            JacobianValues::Sparse {
+                values: &values,
+                entries: &entries,
+            },
+            h,
+            &coefficients,
+            &mut workspace,
+        )
+        .unwrap();
+
+    for ((row, column), value) in entries.into_iter().zip(values) {
+        let slot = workspace.value_index(row, column).unwrap();
+        let shift = if row == column {
+            coefficients.mu_real / h
+        } else {
+            0.0
+        };
+        assert_eq!(workspace.real[slot], shift - value);
+    }
+    for index in [0, 1] {
+        let diagonal = workspace.value_index(index, index).unwrap();
+        assert_eq!(workspace.real[diagonal], coefficients.mu_real / h);
+    }
+}
+
+#[test]
 fn prepared_layout_selects_one_backend_variant_and_workspace() {
     let layout = RadauMatrixLayout::Banded { lower: 1, upper: 2 };
     let backend = PreparedLinearBackend::from_layout(layout);

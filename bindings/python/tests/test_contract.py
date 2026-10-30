@@ -4028,7 +4028,7 @@ def test_bvp_api_frozen_parameter_loop_returns_native_damped_report():
         "x",
         [index / 4 for index in range(5)],
         [(0, "left", 0.0)],
-        [[0.0] for _ in range(5)],
+        [[0.0] for _ in range(4)],
         parameters=["rate"],
         parameter_values=[1.0],
         options=SolverOptions(frontend="atom_native", telemetry="counters"),
@@ -4051,7 +4051,7 @@ def test_bvp_api_frozen_parameter_loop_returns_native_damped_report():
     ("route", "guess"),
     [
         ("damped", [[1.0], [math.exp(-0.5)]]),
-        ("frozen", [[1.0], [math.exp(-0.5)], [math.exp(-1.0)]]),
+        ("frozen", [[math.exp(-0.5)], [math.exp(-1.0)]]),
     ],
 )
 def test_bvp_api_damped_and_frozen_requests_keep_route_specific_guess_shapes(route, guess):
@@ -4093,7 +4093,7 @@ def test_bvp_api_frozen_accepts_shared_text_logging_level():
         "x",
         [0.0, 0.5, 1.0],
         [(0, "left", 1.0)],
-        [[1.0], [math.exp(-0.5)], [math.exp(-1.0)]],
+        [[math.exp(-0.5)], [math.exp(-1.0)]],
         options=options,
         tolerance=1e-5,
     )
@@ -4179,7 +4179,7 @@ def test_bvp_api_telemetry_modes_preserve_native_channel_semantics(route, mode):
         )
     elif route == "frozen":
         request = BvpSolverRequest.frozen(
-            *common, guess, options=options, tolerance=1e-5,
+            *common, guess[:-1], options=options, tolerance=1e-5,
         )
     else:
         request = BvpSolverRequest.sci(
@@ -4966,7 +4966,7 @@ def test_bvp_damp_fixed_mesh_aot_frontend_layout_matrix(
         ["y"],
         {"y": [(0, 0.0)]},
         [0.0, 0.5, 1.0],
-        [0.0, 0.0, 0.0],
+        [0.0, 0.0],
     )
     kwargs = {
         "parameters": [str(rate)],
@@ -5055,13 +5055,16 @@ def test_bvp_damp_fixed_mesh_telemetry_modes_are_disjoint(
         ["y"],
         {"y": [(0, 0.0)]},
         [0.0, 0.5, 1.0],
-        [0.0, 0.0, 0.0],
+        [0.0, 0.0],
         parameters=["rate"],
         parameter_values=[1.0],
         options=SolverOptions(telemetry=mode),
         **kwargs,
     ).solve()
     assert solution.telemetry_mode == mode
+    assert solution.mesh()[0] == pytest.approx(0.0)
+    assert len(solution.values()[0]) == len(solution.mesh())
+    assert solution.values()[0][0] == pytest.approx(0.0, abs=1e-8)
     assert bool(solution.telemetry_counters()) is has_counters
     assert bool(solution.telemetry_timings_ms()) is has_timings
     assert bool(solution.telemetry_scope_events()) is has_counters
@@ -5086,7 +5089,7 @@ def test_bvp_damp_naive_prepared_parameter_rebind_uses_native_route(capsys):
         ["y"],
         {"y": [(0, 0.0)]},
         [0.0, 0.25, 0.5, 0.75, 1.0],
-        [0.0] * 5,
+        [0.0] * 4,
         parameters=["alpha"],
         parameter_values=[1.0],
         options=SolverOptions(
@@ -5115,7 +5118,7 @@ def test_bvp_damp_naive_prepared_parameter_rebind_uses_native_route(capsys):
 def test_bvp_damp_naive_rejects_nonuniform_mesh_and_unconsumed_bandwidth():
     common = (
         [Expr.parse("0")], ["y"], {"y": [(0, 1.0)]},
-        [0.0, 0.2, 1.0], [1.0, 1.0, 1.0],
+        [0.0, 0.2, 1.0], [1.0, 1.0],
     )
     with pytest.raises(UnsupportedOptionError, match="uniform mesh"):
         BvpDampNaiveSolver(*common)
@@ -5123,7 +5126,7 @@ def test_bvp_damp_naive_rejects_nonuniform_mesh_and_unconsumed_bandwidth():
     with pytest.raises(InvalidConfigurationError, match="same symbol names"):
         BvpDampNaiveSolver(
             [Expr.parse("y")], ["y"], {"y": [(0, 1.0)]},
-            [0.0, 0.5, 1.0], [1.0, 1.0, 1.0], parameters=["y"],
+            [0.0, 0.5, 1.0], [1.0, 1.0], parameters=["y"],
         )
 
     with pytest.raises(UnsupportedOptionError, match="does not consume explicit band widths"):
@@ -5131,7 +5134,7 @@ def test_bvp_damp_naive_rejects_nonuniform_mesh_and_unconsumed_bandwidth():
         banded_options.set_banded_width(1, 1)
         BvpDampNaiveSolver(
             [Expr.parse("0")], ["y"], {"y": [(0, 1.0)]},
-            [0.0, 0.5, 1.0], [1.0, 1.0, 1.0], options=banded_options,
+            [0.0, 0.5, 1.0], [1.0, 1.0], options=banded_options,
         )
 
 
@@ -5140,7 +5143,7 @@ def test_bvp_damp_naive_rejects_nonuniform_mesh_and_unconsumed_bandwidth():
 def test_bvp_damp_naive_lambdify_frontend_layout_contract(frontend, layout):
     solver = BvpDampNaiveSolver(
         [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
-        [0.0, 0.5, 1.0], [0.0, 0.0, 0.0],
+        [0.0, 0.5, 1.0], [0.0, 0.0],
         parameters=["rate"], parameter_values=[1.0],
         options=SolverOptions(
             frontend=frontend, execution="lambdify", matrix_layout=layout,
@@ -5157,7 +5160,7 @@ def test_bvp_damp_naive_lambdify_frontend_layout_contract(frontend, layout):
 def test_bvp_damp_naive_exhaustion_is_typed():
     solver = BvpDampNaiveSolver(
         [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
-        [0.0, 0.5, 1.0], [0.0, 0.0, 0.0],
+        [0.0, 0.5, 1.0], [0.0, 0.0],
         parameters=["rate"], parameter_values=[1.0], max_iterations=1,
     )
     with pytest.raises(ExhaustionError) as failure:
@@ -5179,7 +5182,7 @@ def test_bvp_damp_naive_exhaustion_is_typed():
 def test_bvp_damp_frozen_native_policy_contract(policy, policy_parameters):
     solver = BvpDampFrozenSolver(
         [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
-        [0.0, 0.5, 1.0], [0.0, 0.0, 0.0],
+        [0.0, 0.5, 1.0], [0.0, 0.0],
         parameters=["rate"], parameter_values=[1.0],
         options=SolverOptions(
             frontend="expr_legacy", execution="lambdify", matrix_layout="dense",
@@ -5200,7 +5203,7 @@ def test_bvp_damp_frozen_native_policy_contract(policy, policy_parameters):
 def test_bvp_damp_frozen_prepared_parameter_rebind():
     solver = BvpDampFrozenSolver(
         [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
-        [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5,
+        [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 4,
         parameters=["rate"], parameter_values=[1.0],
         options=SolverOptions(frontend="atom_native", execution="lambdify",
                               matrix_layout="sparse", telemetry="timings"),
@@ -5218,7 +5221,7 @@ def test_bvp_damp_frozen_prepared_parameter_rebind():
 def test_bvp_damp_frozen_parameter_loop_keeps_typed_failures_and_continues():
     solver = BvpDampFrozenSolver(
         [Expr.parse("alpha^0.5")], ["y"], {"y": [(0, 0.0)]},
-        [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], [0.0] * 6,
+        [0.0, 0.2, 0.4, 0.6, 0.8, 1.0], [0.0] * 5,
         parameters=["alpha"], parameter_values=[1.0],
         options=SolverOptions(
             frontend="expr_legacy", execution="lambdify", matrix_layout="sparse",
@@ -5256,7 +5259,7 @@ def test_bvp_damp_frozen_parameter_loop_keeps_typed_failures_and_continues():
 def test_bvp_damp_frozen_parameter_loop_rejects_invalid_input_before_prepare():
     solver = BvpDampFrozenSolver(
         [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
-        [0.0, 0.5, 1.0], [0.0] * 3,
+        [0.0, 0.5, 1.0], [0.0] * 2,
         parameters=["rate"], parameter_values=[1.0],
     )
     with pytest.raises(InvalidConfigurationError, match="at least one"):
@@ -5269,7 +5272,7 @@ def test_bvp_damp_frozen_parameter_loop_rejects_invalid_input_before_prepare():
 def test_bvp_damp_naive_parameter_loop_uses_same_ordered_failure_contract():
     solver = BvpDampNaiveSolver(
         [Expr.parse("alpha^0.5")], ["y"], {"y": [(0, 0.0)]},
-        [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5,
+        [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 4,
         parameters=["alpha"], parameter_values=[1.0],
         options=SolverOptions(telemetry="counters"),
     )
@@ -5318,7 +5321,7 @@ def test_bvp_damp_adaptive_parameter_loop_recovers_after_failed_parameter():
 def test_bvp_damp_frozen_frontend_layout_contract(frontend, layout):
     solver = BvpDampFrozenSolver(
         [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
-        [0.0, 0.5, 1.0], [0.0, 0.0, 0.0],
+        [0.0, 0.5, 1.0], [0.0, 0.0],
         parameters=["rate"], parameter_values=[1.0],
         options=SolverOptions(
             frontend=frontend, execution="lambdify", matrix_layout=layout,
@@ -5349,7 +5352,7 @@ def test_bvp_damp_frozen_policy_validation(policy, parameters, error, message):
     with pytest.raises(error, match=message):
         BvpDampFrozenSolver(
             [Expr.parse("0")], ["y"], {"y": [(0, 1.0)]},
-            [0.0, 0.5, 1.0], [1.0, 1.0, 1.0],
+            [0.0, 0.5, 1.0], [1.0, 1.0],
             policy=policy, policy_parameters=parameters,
         )
 

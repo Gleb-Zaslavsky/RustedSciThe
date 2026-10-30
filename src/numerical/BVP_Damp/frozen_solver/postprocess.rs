@@ -17,29 +17,55 @@ impl NRBVP {
     }
     pub fn get_result(&self) -> Option<DMatrix<f64>> {
         let number_of_Ys = self.values.len();
-        let n_steps = self.n_steps;
-        let vector_of_results = self
-            .result
-            .clone()
-            .expect("Frozen BVP get_result requires a converged solution vector")
-            .clone();
-        let matrix_of_results: DMatrix<f64> =
-            DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice())
-                .transpose();
-        let permutted_results = matrix_of_results;
-        Some(permutted_results)
+        let reduced = self.result.as_ref()?;
+        if number_of_Ys == 0 || reduced.len() != number_of_Ys * self.n_steps {
+            return None;
+        }
+
+        let mut boundary_values = Vec::new();
+        for (state_index, state_name) in self.values.iter().enumerate() {
+            for &(side, value) in self.BorderConditions.get(state_name)? {
+                let node_index = match side {
+                    0 => 0,
+                    1 => self.n_steps,
+                    _ => return None,
+                };
+                boundary_values.push((node_index * number_of_Ys + state_index, side, value));
+            }
+        }
+        let full_len = number_of_Ys * (self.n_steps + 1);
+        let mut seen_positions = vec![false; full_len];
+        if boundary_values.len() != number_of_Ys
+            || boundary_values.iter().any(|(position, _, value)| {
+                if *position >= full_len || !value.is_finite() || seen_positions[*position] {
+                    return true;
+                }
+                seen_positions[*position] = true;
+                false
+            })
+        {
+            return None;
+        }
+
+        let full = construct_full_solution(reduced.clone(), boundary_values);
+        if full.len() != full_len {
+            return None;
+        }
+        Some(
+            DMatrix::from_column_slice(number_of_Ys, self.n_steps + 1, full.as_slice()).transpose(),
+        )
     }
 
     /// Converts the computed solution into the unified postprocessing dataset.
     pub fn postprocess_dataset(&self) -> Result<PostprocessDataset, PostprocessError> {
         if self.result.is_none() {
             return Err(PostprocessError::InvalidDataset(
-                "Frozen BVP postprocess_dataset requires a converged solution vector".to_string(),
+                "Frozen BVP postprocess_dataset requires a converged solution vector and a valid endpoint constraint set".to_string(),
             ));
         }
         let values = self.get_result().ok_or_else(|| {
             PostprocessError::InvalidDataset(
-                "Frozen BVP postprocess_dataset requires a converged solution vector".to_string(),
+                "Frozen BVP postprocess_dataset requires a converged solution vector and a valid endpoint constraint set".to_string(),
             )
         })?;
         PostprocessDataset::new(
@@ -61,15 +87,10 @@ impl NRBVP {
 
     pub fn plot_result(&self) {
         let number_of_Ys = self.values.len();
-        let n_steps = self.n_steps;
-        let vector_of_results = self
-            .result
-            .clone()
-            .expect("Frozen BVP plot_result requires a converged solution vector")
-            .clone();
-        let matrix_of_results: DMatrix<f64> =
-            DMatrix::from_column_slice(number_of_Ys, n_steps, vector_of_results.clone().as_slice())
-                .transpose();
+        let n_steps = self.n_steps + 1;
+        let matrix_of_results: DMatrix<f64> = self
+            .get_result()
+            .expect("Frozen BVP plot_result requires a valid converged full profile");
         for _col in matrix_of_results.column_iter() {
             //   println!( "{:?}", DVector::from_column_slice(_col.as_slice()) );
         }

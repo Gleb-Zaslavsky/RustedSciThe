@@ -28,10 +28,11 @@ use crate::numerical::BVP_Damp::prepared_runtime::{
 use crate::numerical::BVP_Damp::solver_common::{
     DEFAULT_MAX_ITERATIONS, cleanup_registered_aot_artifacts, default_dense_method_name,
     default_forward_scheme_name, default_placeholder_y, default_sparse_method_name,
-    frozen_point_mesh,
+    frozen_interval_mesh,
 };
 use crate::numerical::BVP_Damp::telemetry::{
-    BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode, BvpTelemetryRecorder, BvpTelemetrySnapshot,
+    BvpLoggingConfig, BvpLoggingMode, BvpSolveStatus, BvpTelemetryMode, BvpTelemetryRecorder,
+    BvpTelemetrySnapshot,
 };
 use crate::somelinalg::banded::LinearSolverConfig;
 use crate::symbolic::bvp::telemetry::{

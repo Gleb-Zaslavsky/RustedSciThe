@@ -45,11 +45,11 @@ pub(crate) fn damped_interval_mesh(t0: f64, t_end: f64, n_steps: usize) -> DVect
     DVector::from_vec((0..=n_steps).map(|i| t0 + i as f64 * h).collect())
 }
 
-/// Frozen BVP historically treats `n_steps` as the number of stored mesh
-/// points, so the mesh length is exactly `n_steps`.
-pub(crate) fn frozen_point_mesh(t0: f64, t_end: f64, n_steps: usize) -> DVector<f64> {
-    let h = (t_end - t0) / (n_steps - 1) as f64;
-    DVector::from_vec((0..n_steps).map(|i| t0 + i as f64 * h).collect())
+/// Frozen BVP uses the same interval count as Damped and publishes both
+/// boundary nodes, so the full mesh contains `n_steps + 1` points.
+pub(crate) fn frozen_interval_mesh(t0: f64, t_end: f64, n_steps: usize) -> DVector<f64> {
+    let h = (t_end - t0) / n_steps as f64;
+    DVector::from_vec((0..=n_steps).map(|i| t0 + i as f64 * h).collect())
 }
 
 #[cfg(test)]
@@ -64,8 +64,8 @@ mod tests {
     }
 
     #[test]
-    fn frozen_point_mesh_keeps_legacy_point_count_contract() {
-        let mesh = frozen_point_mesh(0.0, 1.0, 5);
+    fn frozen_interval_mesh_includes_both_boundary_points() {
+        let mesh = frozen_interval_mesh(0.0, 1.0, 4);
 
         assert_eq!(mesh.as_slice(), &[0.0, 0.25, 0.5, 0.75, 1.0]);
     }

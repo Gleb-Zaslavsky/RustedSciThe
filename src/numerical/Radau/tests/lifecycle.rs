@@ -37,6 +37,32 @@ fn workspace_reuses_capacity_for_same_dimension() {
 }
 
 #[test]
+fn sparse_workspace_separates_callback_and_shifted_csc_shapes() {
+    let pattern = [
+        (0, 1),
+        (0, 2),
+        (1, 0),
+        (1, 2),
+        (2, 2),
+        (2, 3),
+        (3, 2),
+        (3, 3),
+    ];
+    let mut workspace = RadauWorkspace::default();
+    workspace
+        .resize_for_layout_with_pattern(4, RadauMatrixLayout::Sparse, &pattern)
+        .unwrap();
+
+    assert_eq!(workspace.jacobian.len(), 8);
+    let RadauLinearWorkspace::Sparse(linear) = &workspace.linear else {
+        panic!("sparse layout must select sparse linear storage");
+    };
+    assert_eq!(linear.row_indices.len(), 10);
+    assert!(linear.value_index(0, 0).is_some());
+    assert!(linear.value_index(1, 1).is_some());
+}
+
+#[test]
 fn factor_key_invalidates_on_jacobian_step_or_shift_change() {
     let key = RadauFactorKey::new(
         2,

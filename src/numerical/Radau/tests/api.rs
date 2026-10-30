@@ -294,3 +294,53 @@ fn public_layout_selection_reaches_native_structured_backends() {
         assert!((solution.y[0] - (-0.1f64).exp()).abs() < 2.0e-4);
     }
 }
+
+#[test]
+fn public_sparse_solve_matches_dense_when_jacobian_lacks_two_diagonals() {
+    let equations = ["-2*y1 + y2", "y0 - 2*y2", "-2*y2 + y3", "y2 - 2*y3"]
+        .into_iter()
+        .map(Expr::parse_expression)
+        .collect::<Vec<_>>();
+    let variables = ["y0", "y1", "y2", "y3"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let initial = [1.0, 0.5, -0.25, 0.75];
+    let mut reference: Option<Vec<f64>> = None;
+
+    for frontend in [RadauFrontend::ExprLegacy, RadauFrontend::AtomViewNative] {
+        for layout in [RadauMatrixLayout::Dense, RadauMatrixLayout::Sparse] {
+            let mut problem = RadauProblem::new(equations.clone(), variables.clone(), "t");
+            if frontend == RadauFrontend::ExprLegacy {
+                let jacobian = equations
+                    .iter()
+                    .flat_map(|equation| {
+                        variables
+                            .iter()
+                            .map(move |variable| equation.diff(variable))
+                    })
+                    .collect();
+                problem = problem.with_jacobian(jacobian);
+            }
+            let config = RadauConfig {
+                frontend,
+                matrix_layout: layout,
+                first_step: Some(0.002),
+                max_step: 0.01,
+                t_bound: 0.05,
+                ..RadauConfig::default()
+            };
+            let mut solver = RadauSolver::prepare(problem, config).unwrap();
+            let solution = solver.solve(&initial).unwrap();
+            assert!(solution.y.iter().all(|value| value.is_finite()));
+
+            if let Some(expected) = reference.as_ref() {
+                for (actual, expected) in solution.y.iter().zip(expected.iter()) {
+                    assert!((actual - expected).abs() < 2.0e-8);
+                }
+            } else {
+                reference = Some(solution.y);
+            }
+        }
+    }
+}

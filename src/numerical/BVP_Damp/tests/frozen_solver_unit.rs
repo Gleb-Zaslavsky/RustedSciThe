@@ -53,6 +53,65 @@ fn frozen_logging_is_disabled_by_default() {
 }
 
 #[test]
+fn frozen_native_failure_exposes_partial_telemetry_for_each_mode() {
+    for mode in [
+        BvpTelemetryMode::Off,
+        BvpTelemetryMode::Counters,
+        BvpTelemetryMode::Timings,
+        BvpTelemetryMode::Detailed,
+    ] {
+        let mut solver = sparse_surface_test_solver();
+        solver.set_bvp_telemetry_mode(mode);
+        solver
+            .try_eq_generate()
+            .expect("callbacks must prepare before injecting a runtime failure");
+        solver.fun = convert_to_fun(Box::new(|_, _| {
+            std::panic::panic_any("Frozen native residual failure")
+        }));
+        let fingerprint = solver.prepared_plan_fingerprint();
+        solver
+            .prepared_runtime_revision
+            .mark_prepared_with_fingerprint(fingerprint);
+        solver.factor_owner.refresh_prepared_binding(fingerprint);
+
+        let error = solver
+            .try_solver_prepared()
+            .expect_err("native callback failure must remain typed");
+        assert!(
+            matches!(
+                &error,
+                BvpBackendIntegrationError::CallbackExecutionFailed { stage, message }
+                    if stage == "residual" && message.contains("Frozen native residual failure")
+            ),
+            "unexpected native error: {error:?}"
+        );
+
+        let snapshot = solver.get_statistics().telemetry;
+        assert_eq!(snapshot.telemetry_mode, mode);
+        assert_eq!(snapshot.last_solve_status, BvpSolveStatus::Failed);
+        assert_eq!(snapshot.solve_id, 1);
+        match mode {
+            BvpTelemetryMode::Off => {
+                assert_eq!(snapshot.counters, Default::default());
+                assert_eq!(snapshot.timings, Default::default());
+            }
+            BvpTelemetryMode::Counters => {
+                assert!(snapshot.counters.residual_calls > 0);
+                assert_eq!(snapshot.timings, Default::default());
+            }
+            BvpTelemetryMode::Timings => {
+                assert_eq!(snapshot.counters, Default::default());
+                assert!(snapshot.timings.total > std::time::Duration::ZERO);
+            }
+            BvpTelemetryMode::Detailed => {
+                assert!(snapshot.counters.residual_calls > 0);
+                assert!(snapshot.timings.total > std::time::Duration::ZERO);
+            }
+        }
+    }
+}
+
+#[test]
 fn frozen_statistics_keep_legacy_projection_and_typed_snapshot_in_sync() {
     let solver = NRBVP::new(
         Vec::new(),
@@ -349,17 +408,15 @@ fn assert_frozen_linear_solution_quality(
     let solution = solver
         .get_result()
         .expect("frozen BVP solver should store a solution matrix");
-    assert_eq!(solution.nrows(), n_steps);
+    assert_eq!(solution.nrows(), n_steps + 1);
     assert_eq!(solution.ncols(), 2);
 
     let h = 1.0 / n_steps as f64;
     let mut sq_sum = 0.0;
     let mut max_abs = 0.0;
     for i in 0..solution.nrows() {
-        // Frozen stores the reduced unknown vector. With both linear BVP
-        // boundary conditions placed at the left edge, row 0 corresponds
-        // to the first free mesh point, not to the boundary itself.
-        let x = (i + 1) as f64 * h;
+        // Public Frozen results restore endpoint constraints to the full mesh.
+        let x = i as f64 * h;
         let y_err = (solution[(i, 0)] - x).abs();
         let z_err = (solution[(i, 1)] - 1.0).abs();
         assert!(
@@ -1661,7 +1718,7 @@ fn frozen_mesh_setter_invalidates_prepared_callbacks_and_rejects_one_point_mesh(
         .try_set_mesh(0.0, 2.0, 6)
         .expect("valid Frozen mesh change should be accepted");
     assert_eq!(solver.n_steps, 6);
-    assert_eq!(solver.x_mesh.len(), 6);
+    assert_eq!(solver.x_mesh.len(), 7);
     assert_eq!(solver.initial_guess.ncols(), 6);
     assert_eq!(solver.initial_guess[(0, 0)], original_guess[(0, 0)]);
     assert!(solver.jac.is_none());
@@ -1682,6 +1739,38 @@ fn frozen_mesh_setter_invalidates_prepared_callbacks_and_rejects_one_point_mesh(
         error,
         BvpBackendIntegrationError::InvalidProblem { field, .. } if field == "n_steps"
     ));
+}
+
+#[test]
+fn frozen_public_profile_restores_left_boundary_on_the_reported_mesh() {
+    let n_steps = 256;
+    let mut solver = NRBVP::new_with_options(
+        vec![Expr::parse_expression("-y")],
+        DMatrix::from_element(1, n_steps, 1.0),
+        vec!["y".to_string()],
+        "x".to_string(),
+        HashMap::from([("y".to_string(), vec![(0usize, 1.0f64)])]),
+        0.0,
+        1.0,
+        n_steps,
+        FrozenSolverOptions::dense_naive().with_tolerance(1e-10),
+    );
+
+    solver
+        .try_solver()
+        .expect("Frozen scalar BVP should solve without runtime errors");
+    let profile = solver
+        .get_result()
+        .expect("converged Frozen solve should publish a full profile");
+    assert_eq!(solver.x_mesh.len(), n_steps + 1);
+    assert_eq!(profile.nrows(), solver.x_mesh.len());
+    assert_eq!(solver.x_mesh[0], 0.0);
+    assert_eq!(solver.x_mesh[n_steps], 1.0);
+    assert!(
+        (profile[(0, 0)] - 1.0).abs() <= 1e-6,
+        "left endpoint must satisfy y(0)=1, got {}",
+        profile[(0, 0)]
+    );
 }
 
 #[test]

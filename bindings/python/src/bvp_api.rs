@@ -343,7 +343,8 @@ impl PyBvpSolverRequest {
     }
 
     /// Configure the fixed-mesh Frozen route. Its guess has one row per mesh
-    /// node. Algorithm controls remain distinct from Damped's adaptive options.
+    /// interval (the reduced Newton unknowns); results include both endpoints.
+    /// Algorithm controls remain distinct from Damped's adaptive options.
     #[staticmethod]
     #[pyo3(signature=(expressions, state_variables, independent_variable, mesh, boundary_conditions, initial_guess, options=None, parameters=None, parameter_values=None, scheme="forward", strategy="Frozen", tolerance=1e-6, max_iterations=25, strategy_params=None, linear_sys_method=None, logging_mode="off"))]
     #[allow(clippy::too_many_arguments)]
@@ -374,7 +375,7 @@ impl PyBvpSolverRequest {
             mesh.clone(),
             boundary_conditions,
         )?;
-        let guess = guess_matrix(initial_guess, state_variables.len(), mesh.len())?;
+        let guess = guess_matrix(initial_guess, state_variables.len(), mesh.len() - 1)?;
         let config = crate::bvp_damp::backend_config(
             &options,
             parse_bvp_logging_mode(logging_mode)?,

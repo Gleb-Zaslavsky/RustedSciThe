@@ -7,6 +7,10 @@ BVP_Damp решает системы ОДУ первого порядка как
 отдельные демпфированный, fixed-mesh Naive и fixed-mesh Frozen маршруты. Это
 разные native-алгоритмы, а не псевдонимы одного маршрута.
 
+Для обоих fixed-mesh маршрутов начальное приближение задаётся node-major по
+сокращённым неизвестным Ньютона: одна строка на интервал. Возвращаемый профиль
+восстанавливает фиксированные значения на границах и содержит строку на каждый узел сетки.
+
 ## Модель и граничные наблюдения
 
 Уравнения задают первые производные состояний. Python-адаптер сейчас требует
@@ -63,7 +67,7 @@ from rustedscithe import BvpDampNaiveSolver, Expr, SolverOptions
 
 solver = BvpDampNaiveSolver(
     [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
-    [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5,
+    [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 4,
     parameters=["rate"], parameter_values=[1.0],
     options=SolverOptions(frontend="atom_native", execution="lambdify",
                           matrix_layout="dense", telemetry="timings"),
@@ -94,7 +98,7 @@ from rustedscithe import BvpDampFrozenSolver, Expr, SolverOptions
 
 solver = BvpDampFrozenSolver(
     [Expr.parse("rate")], ["y"], {"y": [(0, 0.0)]},
-    [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 5,
+    [0.0, 0.25, 0.5, 0.75, 1.0], [0.0] * 4,
     parameters=["rate"], parameter_values=[1.0],
     policy="every_m", policy_parameters=[2.0],
     options=SolverOptions(frontend="atom_native", execution="lambdify",

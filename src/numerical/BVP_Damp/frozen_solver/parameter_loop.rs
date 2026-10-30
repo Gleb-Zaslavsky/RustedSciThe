@@ -111,18 +111,7 @@ impl NRBVP {
                 break;
             }
 
-            self.telemetry_counters.begin_solve();
-            self.custom_timer.start();
             let solve_result = self.try_solver_prepared();
-            self.custom_timer.finish();
-            self.telemetry_counters.record_termination(
-                matches!(&solve_result, Ok(Some(_))),
-                if matches!(&solve_result, Ok(Some(_))) {
-                    1.0
-                } else {
-                    0.0
-                },
-            );
             let telemetry = self.get_statistics().telemetry;
 
             let outcome = match solve_result {
@@ -143,7 +132,12 @@ impl NRBVP {
                         self.n_steps,
                         solution.as_slice(),
                     );
-                    let values = iterate.transpose();
+                    let values = self.get_result().ok_or_else(|| {
+                        BvpBackendIntegrationError::InvalidProblem {
+                            field: "parameter_loop_solution".into(),
+                            message: "Frozen converged iterate could not be expanded to the full endpoint profile".into(),
+                        }
+                    })?;
                     successful_checkpoint = Some(SuccessfulCheckpoint {
                         parameters: parameters.clone(),
                         iterate,
@@ -361,9 +355,9 @@ mod tests {
             panic!("last parameter point should converge after the failed point");
         };
         assert_eq!(first_mesh, last_mesh);
-        assert_eq!(first_values.shape(), (6, 1));
-        assert_eq!(last_values.shape(), (6, 1));
-        assert!(last_values[(5, 0)] > first_values[(5, 0)]);
+        assert_eq!(first_values.shape(), (7, 1));
+        assert_eq!(last_values.shape(), (7, 1));
+        assert!(last_values[(6, 0)] > first_values[(6, 0)]);
         assert_eq!(first_telemetry.telemetry_mode, BvpTelemetryMode::Counters);
         assert_eq!(last_telemetry.telemetry_mode, BvpTelemetryMode::Counters);
         assert!(last_telemetry.solve_id > first_telemetry.solve_id);

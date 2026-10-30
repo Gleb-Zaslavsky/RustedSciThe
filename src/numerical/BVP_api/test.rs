@@ -6,6 +6,7 @@ use super::{
 use crate::Utils::postprocessing::{PostprocessError, PostprocessPlan};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedSolverOptions;
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
+use crate::numerical::BVP_Damp::telemetry::BvpSolveStatus;
 use crate::numerical::BVP_Damp::telemetry::{BvpLoggingMode, BvpTelemetryMode};
 use crate::numerical::BVP_sci::new::BvpSciSparseFactorization as NativeBvpSciSparseFactorization;
 use crate::numerical::BVP_sci::new::{
@@ -149,7 +150,7 @@ fn common_logging_level_is_forwarded_without_overwriting_typed_trace_settings() 
 
     let frozen = BvpSolverConfig::Frozen {
         options: FrozenSolverOptions::default().with_bvp_logging_mode(BvpLoggingMode::Detailed),
-        initial_guess: DMatrix::zeros(1, 3),
+        initial_guess: DMatrix::zeros(1, 2),
     }
     .with_logging_level(level);
     let BvpSolverConfig::Frozen { options, .. } = frozen else {
@@ -432,15 +433,15 @@ fn facade_builds_native_solver_variants_and_preserves_route_guess_layouts() {
         valid_problem(),
         BvpSolverConfig::Frozen {
             options: FrozenSolverOptions::default(),
-            initial_guess: DMatrix::from_element(1, 3, 1.0),
+            initial_guess: DMatrix::from_element(1, 2, 1.0),
         },
     )
     .expect("Frozen native configuration should build");
     let BvpNativeSolver::Frozen(native_frozen) = frozen.native() else {
         panic!("Frozen route must retain its native solver");
     };
-    assert_eq!(native_frozen.n_steps, 3, "Frozen counts mesh points");
-    assert_eq!(native_frozen.initial_guess.shape(), (1, 3));
+    assert_eq!(native_frozen.n_steps, 2, "Frozen counts mesh intervals");
+    assert_eq!(native_frozen.initial_guess.shape(), (1, 2));
     assert_eq!(native_frozen.x_mesh.len(), 3);
     assert!(matches!(
         frozen
@@ -450,6 +451,7 @@ fn facade_builds_native_solver_variants_and_preserves_route_guess_layouts() {
     ));
     let frozen_view = frozen.solution_view().expect("solved result has a view");
     assert_eq!(frozen_view.mesh().len(), 3);
+    assert_eq!(frozen_view.value(0, 0), Some(1.0));
     assert_eq!(frozen_view.state_count(), 1);
     assert!(frozen_view.value(2, 0).unwrap().is_finite());
     let super::BvpSolverTelemetrySnapshot::Frozen(facade_snapshot) = frozen.telemetry_snapshot()
@@ -492,6 +494,148 @@ fn facade_builds_native_solver_variants_and_preserves_route_guess_layouts() {
     )
     .expect("BVP_sci Lambdify route should build");
     assert!(matches!(sci.native(), BvpNativeSolver::Sci(_)));
+}
+
+#[test]
+fn damped_and_frozen_facade_reports_native_failure_without_publishing_a_result() {
+    let modes = [
+        BvpTelemetryMode::Off,
+        BvpTelemetryMode::Counters,
+        BvpTelemetryMode::Timings,
+        BvpTelemetryMode::Detailed,
+    ];
+
+    for mode in modes {
+        for frozen in [false, true] {
+            let config = if frozen {
+                let mut options = FrozenSolverOptions::default();
+                options.generated_backend_config.bvp_telemetry_mode = mode;
+                BvpSolverConfig::Frozen {
+                    options,
+                    initial_guess: DMatrix::zeros(1, 2),
+                }
+            } else {
+                let mut options = DampedSolverOptions::default()
+                    .with_bounds(HashMap::from([("y".to_string(), (-10.0, 10.0))]))
+                    .with_rel_tolerance(HashMap::from([("y".to_string(), 1e-6)]));
+                options.generated_backend_config.bvp_telemetry_mode = mode;
+                BvpSolverConfig::Damped {
+                    options,
+                    initial_guess: DMatrix::zeros(1, 2),
+                }
+            };
+            let mut solver = BvpSolver::new(valid_problem(), config)
+                .expect("failure fixture should prepare before callback execution");
+            match &mut solver.native {
+                BvpNativeSolver::Damped(native) => native.method = "invalid".into(),
+                BvpNativeSolver::Frozen(native) => native.method = "invalid".into(),
+                BvpNativeSolver::Sci(_) => unreachable!("test only constructs Damped/Frozen"),
+            }
+            let error = solver
+                .solve()
+                .expect_err("invalid native route must fail typed");
+            assert!(
+                matches!(
+                    (&error, frozen),
+                    (BvpApiError::Damped(_), false) | (BvpApiError::Frozen(_), true)
+                ),
+                "frozen={frozen}, unexpected facade error: {error:?}"
+            );
+            assert!(std::error::Error::source(&error).is_some());
+            assert!(
+                solver.solution().is_none(),
+                "failed attempt must not publish a result"
+            );
+
+            let snapshot = solver.telemetry_snapshot();
+            let native_snapshot = match (snapshot, frozen) {
+                (super::BvpSolverTelemetrySnapshot::Damped(snapshot), false)
+                | (super::BvpSolverTelemetrySnapshot::Frozen(snapshot), true) => snapshot,
+                _ => panic!("facade must preserve the selected native telemetry variant"),
+            };
+            assert_eq!(native_snapshot.telemetry_mode, mode);
+            assert_eq!(native_snapshot.last_solve_status, BvpSolveStatus::Failed);
+            assert_eq!(native_snapshot.solve_id, 1);
+
+            match mode {
+                BvpTelemetryMode::Off => {
+                    assert_eq!(native_snapshot.counters, Default::default());
+                    assert_eq!(native_snapshot.timings, Default::default());
+                }
+                BvpTelemetryMode::Counters => {
+                    assert_eq!(native_snapshot.counters, Default::default());
+                    assert_eq!(native_snapshot.timings, Default::default());
+                }
+                BvpTelemetryMode::Timings => {
+                    assert_eq!(native_snapshot.counters, Default::default());
+                    assert!(native_snapshot.timings.total > std::time::Duration::ZERO);
+                }
+                BvpTelemetryMode::Detailed => {
+                    assert_eq!(native_snapshot.counters, Default::default());
+                    assert!(native_snapshot.timings.total > std::time::Duration::ZERO);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn damped_and_frozen_failed_retry_preserves_last_accepted_facade_solution() {
+    for frozen in [false, true] {
+        let config = if frozen {
+            BvpSolverConfig::Frozen {
+                options: FrozenSolverOptions::default(),
+                initial_guess: DMatrix::from_element(1, 2, 1.0),
+            }
+        } else {
+            BvpSolverConfig::Damped {
+                options: DampedSolverOptions::default()
+                    .with_bounds(HashMap::from([("y".to_string(), (-10.0, 10.0))]))
+                    .with_rel_tolerance(HashMap::from([("y".to_string(), 1e-6)])),
+                initial_guess: DMatrix::from_element(1, 2, 1.0),
+            }
+        };
+        let mut solver =
+            BvpSolver::new(valid_problem(), config).expect("sample solver should construct");
+        solver.solve().expect("initial solve should succeed");
+        let (accepted_mesh, accepted_values) = match solver.solution().unwrap() {
+            BvpSolution::Damped { mesh, values } | BvpSolution::Frozen { mesh, values } => {
+                (mesh.as_slice().to_vec(), values.clone())
+            }
+            BvpSolution::Sci(_) => unreachable!("test only constructs Damped/Frozen"),
+        };
+
+        match &mut solver.native {
+            BvpNativeSolver::Damped(native) => native.method = "invalid".into(),
+            BvpNativeSolver::Frozen(native) => native.method = "invalid".into(),
+            BvpNativeSolver::Sci(_) => unreachable!("test only constructs Damped/Frozen"),
+        }
+        let retry = solver.solve();
+        assert!(
+            matches!(
+                (&retry, frozen),
+                (Err(BvpApiError::Damped(_)), false) | (Err(BvpApiError::Frozen(_)), true)
+            ),
+            "frozen={frozen}, unexpected retry result: {retry:?}"
+        );
+
+        let (retained_mesh, retained_values) = match solver.solution().unwrap() {
+            BvpSolution::Damped { mesh, values } | BvpSolution::Frozen { mesh, values } => {
+                (mesh.as_slice(), values)
+            }
+            BvpSolution::Sci(_) => unreachable!("test only constructs Damped/Frozen"),
+        };
+        assert_eq!(retained_mesh, accepted_mesh);
+        assert_eq!(retained_values, &accepted_values);
+        let snapshot = solver.telemetry_snapshot();
+        match (snapshot, frozen) {
+            (super::BvpSolverTelemetrySnapshot::Damped(snapshot), false)
+            | (super::BvpSolverTelemetrySnapshot::Frozen(snapshot), true) => {
+                assert_eq!(snapshot.last_solve_status, BvpSolveStatus::Failed);
+            }
+            _ => panic!("facade must preserve the native telemetry route"),
+        }
+    }
 }
 
 #[test]
@@ -742,7 +886,7 @@ fn frozen_facade_rebinds_fixed_inputs_and_warm_starts_on_the_same_mesh() {
         problem,
         BvpSolverConfig::Frozen {
             options: FrozenSolverOptions::default(),
-            initial_guess: DMatrix::zeros(1, 5),
+            initial_guess: DMatrix::zeros(1, 4),
         },
     )
     .unwrap();
@@ -858,7 +1002,7 @@ fn damped_and_frozen_facade_parameter_loops_keep_native_point_contracts() {
         BvpSolverConfig::Frozen {
             options: FrozenSolverOptions::default()
                 .with_bvp_telemetry_mode(BvpTelemetryMode::Counters),
-            initial_guess: DMatrix::zeros(1, 5),
+            initial_guess: DMatrix::zeros(1, 4),
         },
     )
     .expect("Frozen facade route should construct");

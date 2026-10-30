@@ -29,10 +29,10 @@ def run_route(route: str) -> None:
             bounds={"y": (-10.0, 10.0)},
         )
     else:
-        # Frozen's guess has one column per fixed mesh node.
+        # Frozen uses the reduced Newton iterate, one row per interval.
         request = BvpSolverRequest.frozen(
             **common,
-            initial_guess=[[0.0] for _ in mesh],
+            initial_guess=[[0.0] for _ in range(len(mesh) - 1)],
         )
 
     report = request.prepare().solve_parameter_loop([[1.0], [0.0], [4.0]])

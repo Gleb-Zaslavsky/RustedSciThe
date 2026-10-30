@@ -317,6 +317,16 @@ impl Num {
             (CoefficientView::Natural(lhs, den), CoefficientView::Float(rhs)) => {
                 self.set_f64((lhs as f64 / den as f64) * rhs)
             }
+            (CoefficientView::Natural(lhs, lhs_den), CoefficientView::Natural(rhs, rhs_den))
+                if ((lhs as f64 / lhs_den as f64) * (rhs as f64 / rhs_den as f64)).abs()
+                    > i64::MAX as f64 =>
+            {
+                // The packed numeric node supports IEEE-754 coefficients. If
+                // the exact product is outside the compact rational range,
+                // retain its finite magnitude instead of saturating it to an
+                // unrelated i64 boundary value.
+                self.set_f64((lhs as f64 / lhs_den as f64) * (rhs as f64 / rhs_den as f64));
+            }
             _ => {
                 let n = a * b;
                 self.data.truncate(1);

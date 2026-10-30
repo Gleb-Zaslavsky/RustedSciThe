@@ -896,4 +896,67 @@ The performance interpretation is intentionally separate: correctness parity
 is established, but this does not prove a cold `try_solve()` speedup. The
 release story documents the warm-vs-cold performance distinction.
 
+## 2026-10-30: Native failure telemetry and accepted-result lifecycle
+
+Before this change, Damped and Frozen regular `try_solver()` paths already
+finished their timer and retained recorder data before propagating an inner
+typed error. `get_statistics()` therefore remained callable after `Err`, and
+Counters/Detailed retained work completed before failure. Off exposed zero
+counters/timings; the mode identified that those values were not collected.
+Counters are lifetime-accumulated, while the timer is reset for each attempt.
+The returned error remained the authoritative typed failure context.
+
+Two ambiguities remained. Snapshots had no explicit `Failed` versus `NoResult`
+outcome, and Frozen `try_solver_prepared()` did not own its solve telemetry
+lifecycle. The typed snapshot now contains `BvpSolveStatus`; Frozen prepared
+solves begin/finalize timing and status consistently, including parameter-loop
+callers. The BVP facade also retains its last successfully published solution
+when a later solve attempt fails; it does not convert the native work state or
+partial telemetry into a successful solution. Damped/Frozen facade errors
+continue to expose their native typed error through the source chain.
+
+Debug gates passed:
+
+- `damped_native_failure_exposes_partial_telemetry_for_each_mode`
+- `frozen_native_failure_exposes_partial_telemetry_for_each_mode`
+- `damped_and_frozen_facade_reports_native_failure_without_publishing_a_result`
+- `damped_and_frozen_failed_retry_preserves_last_accepted_facade_solution`
+- `solve_status_distinguishes_success_no_result_and_native_failure`
+- all 25 `numerical::BVP_api::tests` and all 11 `parameter_loop::tests`
+
+For both native solvers, injected residual callback failures preserve their
+typed callback error and partial work snapshot. Off collects neither runtime
+counters nor timings; Counters collects nonzero residual work without clock
+readings; Timings collects elapsed solve time without counters; Detailed
+collects both. No release-performance claim is implied by these debug gates.
+
+## 2026-10-30: Frozen endpoint-complete public profile
+
+A KiThe report cited a Frozen result whose first value was approximately
+`0.9961` for `y'=-y`, `y(0)=1`, and called it the value at `x=0`. The
+underlying fixed-mesh Frozen iterate stores only the `n_steps` unconstrained
+unknowns: its first entry is the first interior node, not the left boundary.
+Frozen had been pairing that reduced vector with an endpoint-inclusive mesh,
+so its public result shape and node labels were inconsistent. Damped already
+restored endpoint values while publishing its full profile.
+
+Frozen now follows the same external contract as Damped: `n_steps` denotes
+mesh intervals; guesses and Newton iterates remain reduced internally; public
+mesh/results contain `n_steps + 1` nodes, including the prescribed boundary
+values. Parameter loops and rebind shortcuts preserve the reduced internal
+iterate rather than feeding the expanded public profile back into Newton.
+This corrects result labeling and shape; it does not claim that the interior
+discretization independently enforces boundary values to solver tolerance.
+
+Debug correctness gates:
+
+- `frozen_public_profile_restores_left_boundary_on_the_reported_mesh`: solves
+  `y'=-y`, `y(0)=1`, and verifies that the first published node is `x=0`, its
+  value is the prescribed left boundary, and mesh/profile lengths align.
+- Frozen parameter-loop and BVP facade debug tests verify that the public
+  profile is endpoint-complete while subsequent solves continue from the
+  reduced internal iterate.
+
+No release-performance claim is implied; this is a public result-contract fix.
+
 

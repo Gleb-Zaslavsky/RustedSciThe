@@ -241,6 +241,7 @@ impl NRBVP {
             self.try_main_loop()
         })();
         self.custom_timer.finish();
+        self.telemetry_counters.finish_solve(&res);
         self.telemetry_counters.record_termination(
             matches!(&res, Ok(Some(_))),
             if matches!(&res, Ok(Some(_))) {
@@ -285,7 +286,20 @@ impl NRBVP {
                     "prepared Frozen plan is stale: a tracked revision, public compatibility input, or prepared resource binding changed; call try_eq_generate before try_solver_prepared".to_string(),
             });
         }
-        self.try_main_loop()
+        self.telemetry_counters.begin_solve();
+        self.custom_timer.start();
+        let result = self.try_main_loop();
+        self.custom_timer.finish();
+        self.telemetry_counters.finish_solve(&result);
+        self.telemetry_counters.record_termination(
+            matches!(&result, Ok(Some(_))),
+            if matches!(&result, Ok(Some(_))) {
+                1.0
+            } else {
+                0.0
+            },
+        );
+        result
     }
     /// Compatibility-only wrapper over [`NRBVP::try_solver`].
     ///

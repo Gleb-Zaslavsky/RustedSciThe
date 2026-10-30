@@ -386,8 +386,12 @@ nonlinear algorithm.
   field mutation without adding hashing to residual/Jacobian hot paths.
   New encapsulated state may guarantee stronger invariants; legacy field writes
   must not silently leave stale caches. Avoid structural hashing per callback.
-- [ ] Preserve Damped interval-count and Frozen point-count mesh conventions
-  through adapters (`solver_common.rs` already tests these differences).
+- [x] Unify Damped and Frozen mesh/result contracts (2026-10-30): both count
+  intervals, publish `n_steps + 1` endpoint-inclusive mesh values, and restore
+  fixed boundary values into the public profile. Frozen keeps an `n_steps`
+  reduced Newton guess internally; adapters pass the interval count and expose
+  only full profiles. Debug regression coverage includes `y'=-y`, `y(0)=1`,
+  mesh/value alignment and prepared rebind/parameter-loop paths.
 
 ## 4. Linear Factorization And Buffer Work
 
@@ -424,6 +428,11 @@ nonlinear algorithm.
   (2026-09-20). Shape mismatch and singular Dense factorization now preserve
   residual telemetry and avoid false linear/factorization counters; the
   backend-specific faer/Banded matrix gates remain separate evidence.
+- [x] Verify native-failure telemetry after `solve()` for Damped and Frozen
+  (2026-10-30): expose the last solve status, preserve mode-aware partial
+  counters/timings and typed errors, and retain the last accepted facade
+  solution across a failed retry. Debug tests cover Off/Counters/Timings/
+  Detailed and the Frozen prepared-solve lifecycle.
 - [x] Move the owned Dense/faer factor workspace from two solver-local option
   fields into the shared `BvpPreparedRuntime` container (2026-09-20, debug and
   release correctness gates). Damped and Frozen preserve the same factor-count

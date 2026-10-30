@@ -215,6 +215,65 @@ fn try_calc_residual_surfaces_callback_panic_as_typed_error() {
 }
 
 #[test]
+fn damped_native_failure_exposes_partial_telemetry_for_each_mode() {
+    for mode in [
+        BvpTelemetryMode::Off,
+        BvpTelemetryMode::Counters,
+        BvpTelemetryMode::Timings,
+        BvpTelemetryMode::Detailed,
+    ] {
+        let mut solver = sparse_surface_test_solver_with_tolerances();
+        solver.set_bvp_telemetry_mode(mode);
+        solver
+            .try_eq_generate(None, None)
+            .expect("callbacks must prepare before injecting a runtime failure");
+        solver.fun = convert_to_fun(Box::new(|_, _| {
+            std::panic::panic_any("Damped native residual failure")
+        }));
+        let fingerprint = solver.prepared_plan_fingerprint();
+        solver
+            .prepared_runtime_revision
+            .mark_prepared_with_fingerprint(fingerprint);
+        solver.factor_owner.refresh_prepared_binding(fingerprint);
+
+        let error = solver
+            .try_solver_prepared()
+            .expect_err("native callback failure must remain typed");
+        assert!(
+            matches!(
+                &error,
+                BvpBackendIntegrationError::CallbackExecutionFailed { stage, message }
+                    if stage == "residual" && message.contains("Damped native residual failure")
+            ),
+            "unexpected native error: {error:?}"
+        );
+
+        let snapshot = solver.get_statistics().telemetry;
+        assert_eq!(snapshot.telemetry_mode, mode);
+        assert_eq!(snapshot.last_solve_status, BvpSolveStatus::Failed);
+        assert_eq!(snapshot.solve_id, 1);
+        match mode {
+            BvpTelemetryMode::Off => {
+                assert_eq!(snapshot.counters, Default::default());
+                assert_eq!(snapshot.timings, Default::default());
+            }
+            BvpTelemetryMode::Counters => {
+                assert!(snapshot.counters.residual_calls > 0);
+                assert_eq!(snapshot.timings, Default::default());
+            }
+            BvpTelemetryMode::Timings => {
+                assert_eq!(snapshot.counters, Default::default());
+                assert!(snapshot.timings.total > std::time::Duration::ZERO);
+            }
+            BvpTelemetryMode::Detailed => {
+                assert!(snapshot.counters.residual_calls > 0);
+                assert!(snapshot.timings.total > std::time::Duration::ZERO);
+            }
+        }
+    }
+}
+
+#[test]
 fn grid_refinement_surfaces_sci_residual_callback_failure_as_typed_error() {
     let mut solver = sparse_surface_test_solver();
     solver.BC_position_and_value = vec![(0, 0, 0.0), (4, 1, 1.0)];

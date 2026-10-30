@@ -71,6 +71,22 @@ pub enum BvpTelemetryMode {
     Detailed,
 }
 
+/// Outcome of the most recent native solve attempt represented by a snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BvpSolveStatus {
+    /// No solve attempt has started on this solver instance.
+    #[default]
+    NotStarted,
+    /// The current attempt has started and has not yet published a terminal status.
+    InProgress,
+    /// The native solve returned a result.
+    Converged,
+    /// The native solve returned without a result, for example after exhausting iterations.
+    NoResult,
+    /// The native solve returned a typed error.
+    Failed,
+}
+
 impl BvpTelemetryMode {
     pub const fn collects_counters(self) -> bool {
         matches!(self, Self::Counters | Self::Detailed)
@@ -460,6 +476,7 @@ impl BvpTelemetryCounters {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct BvpTelemetryRecorder {
     telemetry_mode: Cell<BvpTelemetryMode>,
+    last_solve_status: Cell<BvpSolveStatus>,
     logging_config: Cell<BvpLoggingConfig>,
     solve_id: Cell<u64>,
     next_log_sequence: Cell<u64>,
@@ -495,6 +512,10 @@ impl BvpTelemetryRecorder {
 
     pub(crate) fn telemetry_mode(&self) -> BvpTelemetryMode {
         self.telemetry_mode.get()
+    }
+
+    pub(crate) fn last_solve_status(&self) -> BvpSolveStatus {
+        self.last_solve_status.get()
     }
 
     #[inline]
@@ -535,12 +556,21 @@ impl BvpTelemetryRecorder {
     /// Counters intentionally retain their historical solver semantics, while
     /// decision events are solve-local and therefore begin at sequence zero.
     pub(crate) fn begin_solve(&self) {
+        self.last_solve_status.set(BvpSolveStatus::InProgress);
         self.solve_id.set(self.solve_id.get().saturating_add(1));
         self.next_log_sequence.set(0);
         self.dropped_log_events.set(0);
         self.log_events.borrow_mut().clear();
         self.iteration_elapsed.set(Duration::ZERO);
         self.damping_trial_elapsed.set(Duration::ZERO);
+    }
+
+    pub(crate) fn finish_solve<T, E>(&self, result: &Result<Option<T>, E>) {
+        self.last_solve_status.set(match result {
+            Ok(Some(_)) => BvpSolveStatus::Converged,
+            Ok(None) => BvpSolveStatus::NoResult,
+            Err(_) => BvpSolveStatus::Failed,
+        });
     }
 
     /// Starts a solve-owned nonlinear iteration scope.
@@ -1082,9 +1112,18 @@ pub struct BvpTimingSnapshot {
 }
 
 /// Stable typed telemetry returned alongside legacy presentation fields.
+///
+/// Counters retain their native lifetime-accumulated semantics. Timing fields
+/// describe the most recent attempt; they are zero when the selected mode does
+/// not collect timings. `telemetry_mode` distinguishes an uncollected zero from
+/// a measured zero, while `last_solve_status` distinguishes no attempt, an
+/// in-progress attempt, convergence, no result, and a typed failure.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BvpTelemetrySnapshot {
     pub telemetry_mode: BvpTelemetryMode,
+    /// Outcome of the most recent solve attempt. A failed status describes a
+    /// partial snapshot; its typed cause remains the `Err` returned by solve.
+    pub last_solve_status: BvpSolveStatus,
     pub counters: BvpTelemetryCounters,
     pub timings: BvpTimingSnapshot,
     pub scopes: BvpTelemetryScopes,
@@ -1121,6 +1160,28 @@ pub struct BvpTelemetrySnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solve_status_distinguishes_success_no_result_and_native_failure() {
+        let recorder = BvpTelemetryRecorder::default();
+        assert_eq!(recorder.last_solve_status(), BvpSolveStatus::NotStarted);
+
+        recorder.begin_solve();
+        assert_eq!(recorder.last_solve_status(), BvpSolveStatus::InProgress);
+        let no_result: Result<Option<()>, ()> = Ok(None);
+        recorder.finish_solve(&no_result);
+        assert_eq!(recorder.last_solve_status(), BvpSolveStatus::NoResult);
+
+        recorder.begin_solve();
+        let failure: Result<Option<()>, ()> = Err(());
+        recorder.finish_solve(&failure);
+        assert_eq!(recorder.last_solve_status(), BvpSolveStatus::Failed);
+
+        recorder.begin_solve();
+        let success: Result<Option<()>, ()> = Ok(Some(()));
+        recorder.finish_solve(&success);
+        assert_eq!(recorder.last_solve_status(), BvpSolveStatus::Converged);
+    }
 
     #[test]
     fn counters_project_to_legacy_names_without_stringly_internal_state() {
@@ -1166,6 +1227,7 @@ mod tests {
     fn solver_snapshot_keeps_atom_preparation_optional_and_typed() {
         let snapshot = BvpTelemetrySnapshot {
             telemetry_mode: BvpTelemetryMode::Counters,
+            last_solve_status: BvpSolveStatus::NotStarted,
             counters: BvpTelemetryCounters::default(),
             timings: BvpTimingSnapshot::default(),
             scopes: BvpTelemetryScopes::default(),

@@ -99,13 +99,13 @@ impl NRBVP {
     ///
     /// # Arguments
     /// * `eq_system` - System of ODEs as symbolic expressions
-    /// * `initial_guess` - Initial solution guess as matrix (variables Р“вЂ” grid points)
+    /// * `initial_guess` - Reduced Newton guess, with one row per mesh interval and one column per state
     /// * `values` - Names of unknown variables
     /// * `arg` - Independent variable name (usually time or space)
     /// * `BorderConditions` - Boundary conditions for each variable
     /// * `t0` - Initial value of independent variable
     /// * `t_end` - Final value of independent variable
-    /// * `n_steps` - Number of grid points
+    /// * `n_steps` - Number of mesh intervals; the public mesh has `n_steps + 1` points
     /// * `scheme` - Discretization scheme ("trapezoid", etc.)
     /// * `strategy` - Solver strategy ("Damped", "Naive", "Frozen")
     /// * `strategy_params` - Solver configuration parameters
@@ -1715,6 +1715,7 @@ impl NRBVP {
             diagnostics,
             telemetry: BvpTelemetrySnapshot {
                 telemetry_mode: self.telemetry_counters.telemetry_mode(),
+                last_solve_status: self.telemetry_counters.last_solve_status(),
                 counters: telemetry_counters,
                 timings,
                 scopes,

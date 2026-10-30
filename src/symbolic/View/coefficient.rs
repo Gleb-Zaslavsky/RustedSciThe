@@ -110,10 +110,27 @@ impl Coefficient {
         let n = num.unsigned_abs();
         let d = den.unsigned_abs();
         let g = gcd_i64(n, d);
-        Coefficient {
-            num: sign * (n / g) as i64,
-            den: (d / g) as i64,
+        let reduced_num_abs = n / g;
+        let reduced_den_abs = d / g;
+        let reduced_num = if sign < 0 {
+            if reduced_num_abs == (1_u64 << 63) {
+                Some(i64::MIN)
+            } else {
+                i64::try_from(reduced_num_abs).ok().map(|value| -value)
+            }
+        } else {
+            i64::try_from(reduced_num_abs).ok()
+        };
+
+        if let (Some(num), Ok(den)) = (reduced_num, i64::try_from(reduced_den_abs)) {
+            return Coefficient { num, den };
         }
+
+        // For example, `1 / i64::MIN` has a positive denominator magnitude
+        // that cannot fit the compact representation. Keep this infallible
+        // arithmetic API safe by routing the ratio through its bounded
+        // approximation path rather than wrapping or overflowing a cast.
+        Self::reduce_or_approximate_i128(num as i128, den as i128, "Coefficient reduction")
     }
 
     /// Reduce an `i128` ratio and convert it back into the bounded `i64/i64`
@@ -134,12 +151,23 @@ impl Coefficient {
         let abs_num = num.unsigned_abs();
         let abs_den = den.unsigned_abs();
         let g = gcd_i128(abs_num, abs_den);
-        let reduced_num =
-            sign * i128::try_from(abs_num / g).expect("reduced numerator should fit i128");
-        let reduced_den = i128::try_from(abs_den / g).expect("reduced denominator should fit i128");
+        let reduced_num_abs = abs_num / g;
+        let reduced_den_abs = abs_den / g;
+        let reduced_num = if sign < 0 {
+            if reduced_num_abs == (1_u128 << 127) {
+                Some(i128::MIN)
+            } else {
+                i128::try_from(reduced_num_abs).ok().map(|value| -value)
+            }
+        } else {
+            i128::try_from(reduced_num_abs).ok()
+        };
+        let reduced_den = i128::try_from(reduced_den_abs).ok();
 
-        if let (Ok(n), Ok(d)) = (i64::try_from(reduced_num), i64::try_from(reduced_den)) {
-            return Coefficient::reduce(n, d);
+        if let (Some(reduced_num), Some(reduced_den)) = (reduced_num, reduced_den) {
+            if let (Ok(n), Ok(d)) = (i64::try_from(reduced_num), i64::try_from(reduced_den)) {
+                return Coefficient::reduce(n, d);
+            }
         }
 
         // Large exact coefficients are not representable in the compact atom
@@ -149,17 +177,28 @@ impl Coefficient {
         // ratio such as `h/x` crossed this overflow path. Keep high precision
         // for ordinary-sized coefficients while reducing the scale for very
         // large values so the numerator still fits in `i64`.
-        let ratio = (reduced_num as f64) / (reduced_den as f64);
+        let ratio = (num as f64) / (den as f64);
         if !ratio.is_finite() {
             panic!("{context}: coefficient ratio became non-finite");
         }
         const MAX_APPROX_SCALE: f64 = 1.0e15;
-        let scale = (i64::MAX as f64 / ratio.abs().max(1.0))
-            .min(MAX_APPROX_SCALE)
-            .max(1.0)
-            .floor();
+        let scale = if ratio.abs() < 1.0 {
+            (1.0 / ratio.abs())
+                .ceil()
+                .max(MAX_APPROX_SCALE)
+                .min(i64::MAX as f64)
+        } else {
+            (i64::MAX as f64 / ratio.abs())
+                .min(MAX_APPROX_SCALE)
+                .max(1.0)
+                .floor()
+        };
         let scaled = (ratio * scale).round();
-        let clamped = scaled.clamp(i64::MIN as f64, i64::MAX as f64) as i64;
+        let clamped = if scaled == 0.0 && ratio != 0.0 {
+            if ratio.is_sign_negative() { -1 } else { 1 }
+        } else {
+            scaled.clamp(i64::MIN as f64, i64::MAX as f64) as i64
+        };
         Coefficient::reduce(clamped, scale as i64)
     }
 }
@@ -188,9 +227,17 @@ impl Ord for Coefficient {
 impl Neg for Coefficient {
     type Output = Coefficient;
     fn neg(self) -> Coefficient {
-        Coefficient {
-            num: -self.num,
-            den: self.den,
+        if self.num == i64::MIN {
+            Coefficient::reduce_or_approximate_i128(
+                -(self.num as i128),
+                self.den as i128,
+                "Coefficient negation",
+            )
+        } else {
+            Coefficient {
+                num: -self.num,
+                den: self.den,
+            }
         }
     }
 }
@@ -721,11 +768,11 @@ impl PackedRationalNumberReader for [u8] {
     fn get_frac_i64(&self) -> (i64, i64, &[u8]) {
         let mut source = self;
         let disc = source.get_u8();
-        let num = match disc & NUM_MASK {
-            U8_NUM => source.get_u8() as i64,
-            U16_NUM => source.get_u16_le() as i64,
-            U32_NUM => source.get_u32_le() as i64,
-            U64_NUM => source.get_u64_le() as i64,
+        let magnitude = match disc & NUM_MASK {
+            U8_NUM => source.get_u8() as u64,
+            U16_NUM => source.get_u16_le() as u64,
+            U32_NUM => source.get_u32_le() as u64,
+            U64_NUM => source.get_u64_le(),
             x => unreachable!("Unsupported numerator type {}", x),
         };
         let den = match disc & DEN_MASK {
@@ -736,11 +783,16 @@ impl PackedRationalNumberReader for [u8] {
             U64_DEN => source.get_u64_le() as i64,
             x => unreachable!("Unsupported denominator type {}", x),
         };
-        if disc & SIGN != 0 {
-            (-num, den, source)
+        let num = if disc & SIGN != 0 {
+            if magnitude == (1_u64 << 63) {
+                i64::MIN
+            } else {
+                -i64::try_from(magnitude).expect("negative packed numerator exceeds i64 range")
+            }
         } else {
-            (num, den, source)
-        }
+            i64::try_from(magnitude).expect("positive packed numerator exceeds i64 range")
+        };
+        (num, den, source)
     }
 
     #[inline(always)]
@@ -819,7 +871,7 @@ fn gcd_i128(mut a: u128, mut b: u128) -> u128 {
 
 #[cfg(test)]
 mod tests {
-    use super::Coefficient;
+    use super::{Coefficient, PackedRationalNumberReader, PackedRationalNumberWriter};
 
     #[test]
     fn coefficient_multiplication_large_intermediate_falls_back_to_bounded_rational() {
@@ -841,5 +893,39 @@ mod tests {
             (recovered - expected).abs() <= 1.0e-14,
             "overflow fallback lost precision: expected={expected:.17e}, recovered={recovered:.17e}"
         );
+    }
+
+    #[test]
+    fn reduce_preserves_minimum_signed_numerator_without_overflow() {
+        let coefficient = Coefficient::reduce(i64::MIN, 1);
+        assert_eq!(coefficient.num, i64::MIN);
+        assert_eq!(coefficient.den, 1);
+    }
+
+    #[test]
+    fn reduce_approximates_unrepresentable_tiny_denominator_without_zeroing() {
+        let coefficient = Coefficient::reduce(1, i64::MIN);
+        assert_ne!(coefficient.num, 0);
+        assert!(coefficient.den > 0);
+        assert!((coefficient.num as f64 / coefficient.den as f64).is_finite());
+    }
+
+    #[test]
+    fn packed_reader_decodes_minimum_negative_numerator() {
+        let coefficient = Coefficient::reduce(i64::MIN, 1);
+        let mut packed = Vec::new();
+        coefficient.write_packed(&mut packed);
+        let (view, rest) = packed.as_slice().get_coeff_view();
+
+        assert_eq!(view, super::CoefficientView::Natural(i64::MIN, 1));
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn negating_minimum_numerator_uses_bounded_approximation() {
+        let coefficient = -Coefficient::from(i64::MIN);
+        assert!(coefficient.num > 0);
+        assert!(coefficient.den > 0);
+        assert!((coefficient.num as f64 / coefficient.den as f64).is_finite());
     }
 }

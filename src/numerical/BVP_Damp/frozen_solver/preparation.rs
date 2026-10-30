@@ -88,7 +88,7 @@ impl NRBVP {
         let fun0: Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>> =
             Box::new(|_x, y: &DVector<f64>| y.clone());
         let boxed_fun: Box<dyn Fun> = Box::new(FunEnum::Dense(fun0));
-        let x_mesh = frozen_point_mesh(t0, t_end, n_steps);
+        let x_mesh = frozen_interval_mesh(t0, t_end, n_steps);
         // let fun0 =  Box::new( |x, y: &DVector<f64>| y.clone() );
         NRBVP {
             eq_system,
@@ -391,9 +391,9 @@ impl NRBVP {
 
     /// Replaces the Frozen mesh through the fallible lifecycle boundary.
     ///
-    /// Frozen stores `n_steps` mesh points, so at least two points are needed
-    /// to construct a finite interval. The old prepared callbacks, Jacobian
-    /// and factor are never reused after a mesh change; callers must invoke
+    /// Frozen stores `n_steps` intervals and publishes both endpoints. The old
+    /// prepared callbacks, Jacobian, and factor are never reused after a mesh
+    /// change; callers must invoke
     /// [`NRBVP::try_eq_generate`] before `try_solver_prepared` again.
     pub fn try_set_mesh(
         &mut self,
@@ -410,11 +410,11 @@ impl NRBVP {
         if n_steps < 2 {
             return Err(BvpBackendIntegrationError::InvalidProblem {
                 field: "n_steps".to_string(),
-                message: format!("Frozen mesh requires at least 2 points, got {n_steps}"),
+                message: format!("Frozen mesh requires at least 2 intervals, got {n_steps}"),
             });
         }
 
-        let new_mesh = frozen_point_mesh(t0, t_end, n_steps);
+        let new_mesh = frozen_interval_mesh(t0, t_end, n_steps);
         let mesh_changed = self.t0 != t0
             || self.t_end != t_end
             || self.n_steps != n_steps
@@ -1076,6 +1076,7 @@ impl NRBVP {
             diagnostics,
             telemetry: BvpTelemetrySnapshot {
                 telemetry_mode: self.telemetry_counters.telemetry_mode(),
+                last_solve_status: self.telemetry_counters.last_solve_status(),
                 counters: telemetry_counters,
                 timings,
                 scopes,

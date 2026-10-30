@@ -14,7 +14,7 @@ solver = BvpDampFrozenSolver(
     state_variables=["y"],
     boundary_conditions={"y": [(0, 0.0)]},
     mesh=[0.0, 0.25, 0.5, 0.75, 1.0],
-    initial_state=[0.0] * 5,
+    initial_state=[0.0] * 4,
     parameters=["rate"],
     parameter_values=[1.0],
     # Recompute the frozen Jacobian every two solves. This is a visible policy

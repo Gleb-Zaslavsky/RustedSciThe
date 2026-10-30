@@ -214,9 +214,10 @@ impl RadauWorkspace {
                 .and_then(|slots| slots.checked_mul(dimension))
                 .ok_or(RadauError::WorkspaceSizeOverflow { dimension })?,
             RadauMatrixLayout::Sparse => {
-                SparseLinearWorkspace::from_pattern(dimension, sparse_pattern)?
-                    .jacobian
-                    .len()
+                // Callback values follow the original Jacobian pattern. The
+                // sparse linear workspace separately owns the CSC union with
+                // all diagonal slots required by `mu/h * I - J`.
+                sparse_pattern.len()
             }
         };
         self.jacobian.resize(jacobian_len, 0.0);

@@ -1963,10 +1963,10 @@ pub struct BvpDampNaiveSolver {
 impl BvpDampNaiveSolver {
     /// Create a fixed-mesh Naive Newton BVP.
     ///
-    /// `mesh` must be strictly increasing and uniformly spaced because that is
-    /// the mesh contract of the native Frozen/Naive implementation. Initial
-    /// values are node-major `(mesh_node, state)` and boundary locations use
-    /// the native endpoint selector `0` or `1`.
+    /// `mesh` must be strictly increasing and uniformly spaced. The initial
+    /// iterate is node-major over the reduced unknowns (one row per interval);
+    /// fixed endpoint values are reconstructed into the published full profile.
+    /// Boundary locations use the native endpoint selector `0` or `1`.
     #[new]
     #[pyo3(signature=(expressions, state_variables, boundary_conditions, mesh, initial_state, *, parameters=None, parameter_values=None, options=None, independent_variable="x", scheme="forward", tolerance=1e-6, max_iterations=25, logging_mode="off", logging_max_events=256, linear_sys_method=None))]
     #[allow(clippy::too_many_arguments)]
@@ -2121,7 +2121,8 @@ impl BvpDampNaiveSolver {
         native_options.max_iterations = max_iterations;
         native_options.linear_sys_method = linear_sys_method.map(str::to_owned);
         native_options.generated_backend_config = config;
-        let initial_guess = flatten_node_major(initial_state, mesh.len(), state_variables.len())?;
+        let interval_count = mesh.len() - 1;
+        let initial_guess = flatten_node_major(initial_state, interval_count, state_variables.len())?;
         let route = format!(
             "{}:{}:{}",
             options.frontend(),
@@ -2140,7 +2141,7 @@ impl BvpDampNaiveSolver {
                 boundary_conditions,
                 mesh[0],
                 mesh[mesh.len() - 1],
-                mesh.len(),
+                interval_count,
                 native_options,
             );
             if !parameters.is_empty() {
@@ -2239,11 +2240,15 @@ impl BvpDampNaiveSolver {
 
     /// Re-solve with new fixed inputs, seeding from the last successful profile.
     pub fn solve_with_parameter_values(&mut self, values: Vec<f64>) -> PyResult<BvpDampSolution> {
-        let previous = self
-            .has_successful_solution
-            .then(|| self.solver.get_result())
-            .flatten()
-            .map(|result| result.transpose());
+        let previous = self.has_successful_solution.then(|| {
+            self.solver.result.as_ref().map(|result| {
+                DMatrix::from_column_slice(
+                    self.solver.values.len(),
+                    self.solver.n_steps,
+                    result.as_slice(),
+                )
+            })
+        }).flatten();
         self.set_parameter_values(values)?;
         if let Some(previous) = previous {
             self.set_prepared_iterate(matrix_to_node_major(&previous))?;
@@ -2545,12 +2550,15 @@ impl BvpDampFrozenSolver {
 
     /// Re-solve with new fixed inputs, seeding from the last successful profile.
     pub fn solve_with_parameter_values(&mut self, values: Vec<f64>) -> PyResult<BvpDampSolution> {
-        let previous = self
-            .inner
-            .has_successful_solution
-            .then(|| self.inner.solver.get_result())
-            .flatten()
-            .map(|result| result.transpose());
+        let previous = self.inner.has_successful_solution.then(|| {
+            self.inner.solver.result.as_ref().map(|result| {
+                DMatrix::from_column_slice(
+                    self.inner.solver.values.len(),
+                    self.inner.solver.n_steps,
+                    result.as_slice(),
+                )
+            })
+        }).flatten();
         self.set_parameter_values(values)?;
         if let Some(previous) = previous {
             self.set_prepared_iterate(matrix_to_node_major(&previous))?;
