@@ -82,7 +82,6 @@ mod tests {
             5,
             route.options(frontend),
         );
-        solver.dont_save_log(true);
         solver
     }
 

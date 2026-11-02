@@ -378,7 +378,6 @@ fn run_damped(config: &RunConfig, telemetry: BvpTelemetryMode) -> Result<RunResu
         N_STEPS,
         make_damped_options(config, telemetry),
     );
-    solver.dont_save_log(true);
     solver
         .try_set_parameter_names(Some(&["alpha"]))
         .map_err(|error| {
@@ -474,7 +473,6 @@ fn run_frozen(config: &RunConfig, telemetry: BvpTelemetryMode) -> Result<RunResu
         N_STEPS,
         make_frozen_options(config, telemetry),
     );
-    solver.dont_save_log(true);
     solver
         .try_set_parameter_names(Some(&["alpha"]))
         .map_err(|error| {

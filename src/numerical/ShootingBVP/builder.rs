@@ -528,7 +528,6 @@ mod tests {
                 DMatrix::from_row_slice(2, 2, &[0.0, 1.0, -1.0, 0.0])
             },
         );
-        damped.dont_save_log(true);
         damped
             .try_solve()
             .expect("BVP_Damp numerical solve should complete")

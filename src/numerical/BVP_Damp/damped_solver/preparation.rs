@@ -172,7 +172,6 @@ impl NRBVP {
             loglevel,
             param_names: Vec::new(),
             param_values: None,
-            no_reports: false,
             result: None,
             full_result: None,
             x_mesh,

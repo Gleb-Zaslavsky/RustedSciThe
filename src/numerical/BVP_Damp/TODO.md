@@ -1,5 +1,14 @@
 # BVP_Damp Architecture Review And Migration TODO
 
+- [x] Expose positive residual/Jacobian target chunk counts in the Damped and
+  hybrid settings parsers, validate AOT compatibility/conflicting syntax, and
+  forward them into `AotChunkingPolicy` (2026-11-02).
+
+- [x] Remove the inert Damped/Frozen `dont_save_log`/`no_reports` switch and
+  its Damped task-parser setting (2026-11-02). Solver text output uses the
+  shared `SolverLogLevel`, default Off; telemetry, result postprocessing and
+  bounded BVP decision-event logging remain separate channels.
+
 Priority update, 2026-09-23: contribute real Jacobian fixtures to the shared
 [View/Lambdify cost investigation](../../symbolic/View/TODO.md) before further
 evaluator optimization. LSODE2 Atom-to-Expr callback measurements are not proof

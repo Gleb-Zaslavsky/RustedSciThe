@@ -95,7 +95,6 @@ mod tests {
             n_steps,
             route.options(frontend),
         );
-        solver.dont_save_log(true);
         solver
     }
 
@@ -131,7 +130,6 @@ mod tests {
             n_steps,
             route.options(frontend),
         );
-        solver.dont_save_log(true);
         solver
     }
 
@@ -162,7 +160,6 @@ mod tests {
             n_steps,
             route.options(frontend),
         );
-        solver.dont_save_log(true);
         solver
     }
 
@@ -415,7 +412,6 @@ mod tests {
                     ("z".to_string(), (-20.0, 20.0)),
                 ])),
         );
-        solver.dont_save_log(true);
         solver
     }
 

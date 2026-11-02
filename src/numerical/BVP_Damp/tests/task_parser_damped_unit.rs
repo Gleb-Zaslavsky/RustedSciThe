@@ -10,13 +10,15 @@
 use crate::command_interpreter::task_parser::ParseErrorKind;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{AdaptiveGridConfig, NRBVP, SolverParams};
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
-    AotBuildPolicy, AotBuildProfile, AotExecutionPolicy,
+    AotBuildPolicy, AotBuildProfile, AotChunkingPolicy, AotExecutionPolicy,
 };
 use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use crate::somelinalg::banded::LinearSolverPolicy;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
 use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
+use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
+use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::BvpSymbolicAssemblyBackend;
 use std::collections::HashMap;
@@ -134,7 +136,6 @@ fn test_BVP_with_setting_parsing_no_bounds() {
     nr.BorderConditions = BorderConditions;
     nr.initial_guess = initial_guess;
     nr.before_solve_preprocessing();
-    nr.dont_save_log(true);
     nr.solve();
 
     let solution = nr.get_result().unwrap();
@@ -202,7 +203,6 @@ fn test_BVP_with_setting_parsing_with_bounds() {
     nr.BorderConditions = BorderConditions;
     nr.initial_guess = initial_guess;
     nr.before_solve_preprocessing();
-    nr.dont_save_log(true);
     nr.solve();
 
     let solution = nr.get_result().unwrap();
@@ -288,7 +288,6 @@ fn test_BVP_with_setting_from_file() {
     nr.BorderConditions = BorderConditions;
     nr.initial_guess = initial_guess;
     nr.before_solve_preprocessing();
-    nr.dont_save_log(true);
     nr.solve();
 
     let solution = nr.get_result().unwrap();
@@ -325,7 +324,6 @@ fn test_BVP_with_setting_from_file_with_complicated_settings_and_pseudonims_and_
     writeln!(file, "absolute_tolerance: 1e-5").unwrap();
     writeln!(file, "max_iterations: 100").unwrap();
     writeln!(file, "loglevel: Some(info)").unwrap();
-    writeln!(file, "dont_save_log:true").unwrap();
     writeln!(file, "bounds").unwrap();
     writeln!(file, "z: -10.0, 10.0").unwrap();
     writeln!(file, "y: -7.0, 7.0").unwrap();
@@ -404,7 +402,6 @@ fn bvp_damped_solver_settings_spec_parses_typed_settings() {
         abs_tolerance: 1e-6
         max_iterations: 120
         loglevel: Some(info)
-        dont_save_log: false
         bounds
         y: -1.0, 1.0
         rel_tolerance
@@ -428,7 +425,15 @@ fn bvp_damped_solver_settings_spec_parses_typed_settings() {
     assert_eq!(spec.abs_tolerance, 1e-6);
     assert_eq!(spec.max_iterations, 120);
     assert_eq!(spec.loglevel, Some("info".to_string()));
-    assert!(!spec.dont_save_log);
+    assert_eq!(spec.generated_backend.aot_residual_target_chunks, None);
+    assert_eq!(spec.generated_backend.aot_jacobian_target_chunks, None);
+    assert_eq!(
+        spec.generated_backend
+            .build_generated_backend_config(&spec.method)
+            .unwrap()
+            .aot_chunking_policy,
+        AotChunkingPolicy::default()
+    );
     assert_eq!(spec.bounds.as_ref().unwrap()["y"], (-1.0, 1.0));
     assert_eq!(spec.rel_tolerance.as_ref().unwrap()["y"], 1e-4);
     assert_eq!(
@@ -466,6 +471,8 @@ fn bvp_damped_solver_settings_spec_builds_generated_backend_config() {
         aot_build_profile: release
         aot_compile_preset: dev_fastest
         aot_execution_policy: sequential
+        aot_residual_target_chunks: 4
+        aot_jacobian_target_chunks: 3
         banded_linear_solver: faithful
         refinement_steps: 0
         "#;
@@ -504,6 +511,13 @@ fn bvp_damped_solver_settings_spec_builds_generated_backend_config() {
         AotExecutionPolicy::SequentialOnly
     );
     assert_eq!(
+        options.generated_backend_config.aot_chunking_policy,
+        AotChunkingPolicy::with_parts(
+            Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 4 }),
+            Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 }),
+        )
+    );
+    assert_eq!(
         options
             .generated_backend_config
             .banded_linear_solver_config
@@ -517,6 +531,65 @@ fn bvp_damped_solver_settings_spec_builds_generated_backend_config() {
             .iterative_refinement_steps,
         0
     );
+}
+
+#[test]
+fn bvp_damped_aot_chunk_targets_reject_nonpositive_and_invalid_values() {
+    for field in ["aot_residual_target_chunks", "aot_jacobian_target_chunks"] {
+        for value in ["0", "-1", "invalid"] {
+            let input = format!(
+                r#"
+                solver_settings
+                scheme: forward
+                strategy: Damped
+                method: Sparse
+                linear_sys_method: None
+                abs_tolerance: 1e-6
+                max_iterations: 100
+                generated_backend: sparse_aot_tcc
+                {field}: {value}
+                "#
+            );
+            let document = parse_document_for_damped(&input);
+            let error = parse_bvp_damped_solver_settings_from_document(&document)
+                .expect_err("invalid chunk target must be rejected");
+            assert!(matches!(
+                error,
+                BvpDampedTaskError::InvalidField {
+                    field: ref error_field,
+                    ..
+                }
+                    if error_field == field
+            ));
+        }
+    }
+}
+
+#[test]
+fn bvp_damped_aot_chunk_targets_reject_lambdify_only_backend() {
+    let document = parse_document_for_damped(
+        r#"
+        solver_settings
+        scheme: forward
+        strategy: Damped
+        method: Sparse
+        linear_sys_method: None
+        abs_tolerance: 1e-6
+        max_iterations: 100
+        generated_backend: sparse_lambdify
+        aot_residual_target_chunks: 4
+        "#,
+    );
+    let spec = parse_bvp_damped_solver_settings_from_document(&document).unwrap();
+    let error = spec
+        .generated_backend
+        .build_generated_backend_config(&spec.method)
+        .expect_err("AOT chunking must not be silently accepted by Lambdify-only route");
+    assert!(matches!(
+        error,
+        BvpDampedTaskError::InvalidField { ref field, .. }
+            if field == "aot_residual_target_chunks"
+    ));
 }
 
 #[test]
@@ -605,7 +678,6 @@ fn bvp_damped_full_task_spec_parses_settings_and_postprocessing() {
             abs_tolerance: 1e-7
             max_iterations: 42
             loglevel: Some(info)
-            dont_save_log: false
 
             postprocessing
             plot: true
@@ -627,7 +699,6 @@ fn bvp_damped_full_task_spec_parses_settings_and_postprocessing() {
     assert_eq!(spec.solver_settings.abs_tolerance, 1e-7);
     assert_eq!(spec.solver_settings.max_iterations, 42);
     assert_eq!(spec.solver_settings.loglevel.as_deref(), Some("info"));
-    assert!(!spec.solver_settings.dont_save_log);
     assert!(spec.postprocessing.plot);
     assert!(spec.postprocessing.gnuplot);
     assert!(spec.postprocessing.save);

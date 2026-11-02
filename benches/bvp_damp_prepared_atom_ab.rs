@@ -465,7 +465,6 @@ fn new_combustion_solver(steps: usize, assembly: BvpSymbolicAssemblyBackend) -> 
         steps,
         combustion_solver_options(assembly),
     );
-    solver.dont_save_log(true);
     solver
 }
 
@@ -1672,7 +1671,6 @@ fn bratu_solver(
         options,
     );
     solver.set_callback_runtime(callback_runtime);
-    solver.dont_save_log(true);
     solver
 }
 

@@ -64,7 +64,6 @@ fn main() {
         |_x, y, _params| DVector::from_vec(vec![y[1], 0.0]),
         |_x, _y, _params| DMatrix::from_row_slice(2, 2, &[0.0, 1.0, 0.0, 0.0]),
     );
-    solver.dont_save_log(true);
     solver
         .try_solve()
         .expect("Damped numerical replacement must solve");

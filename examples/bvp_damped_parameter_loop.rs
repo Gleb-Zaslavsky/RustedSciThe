@@ -49,7 +49,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options,
     );
     solver.try_set_parameter_names(Some(&["alpha"]))?;
-    solver.dont_save_log(true);
 
     let report = solver.try_solve_parameter_loop(&[vec![1.0], vec![-1.0], vec![4.0]])?;
     if let Some(error) = report.stop_error {

@@ -1089,6 +1089,103 @@ fn callback_policy_forwards_to_radau_and_is_rejected_by_backward_euler() {
 }
 
 #[test]
+fn bdf_lambdify_policy_and_live_callback_telemetry_cover_completed_solve() {
+    let policies = [
+        StiffCallbackPolicy::Sequential,
+        StiffCallbackPolicy::Auto { min_work: 0 },
+        StiffCallbackPolicy::Parallel { min_work: 0 },
+    ];
+    let mut reference = None::<Vec<f64>>;
+
+    for policy in policies {
+        let names = vec!["y0", "y1", "y2", "y3"];
+        let options = BdfSolverOptions::for_bdf(
+            names
+                .iter()
+                .map(|name| Expr::parse_expression(&format!("-{name}")))
+                .collect(),
+            names.iter().map(|name| (*name).to_owned()).collect(),
+            "t".into(),
+            0.0,
+            DVector::from_element(names.len(), 1.0),
+            0.08,
+            0.01,
+            1e-7,
+            1e-9,
+            None,
+            false,
+            Some(0.01),
+        )
+        .with_telemetry_mode(BdfTelemetryMode::Detailed);
+        let request = StiffSolverRequest::Bdf { options };
+        let preset = StiffPreset::default()
+            .with_callback_policy(policy)
+            .with_telemetry(SolverTelemetryMode::Detailed);
+        let mut solver = StiffSolverSettings::new(StiffSolverKind::Bdf)
+            .with_preset(preset)
+            .prepare(request)
+            .expect("BDF Lambdify scheduling policy should be supported");
+
+        solver.try_solve().expect("BDF solve should succeed");
+        let StiffTelemetrySnapshot::Bdf {
+            mode,
+            statistics,
+            symbolic: Some(symbolic),
+        } = solver
+            .telemetry_snapshot()
+            .expect("BDF telemetry snapshot should be available")
+        else {
+            panic!("BDF should expose native and symbolic telemetry");
+        };
+        assert_eq!(mode, SolverTelemetryMode::Detailed);
+        assert_eq!(
+            symbolic.lambdify_execution_policy,
+            match policy {
+                StiffCallbackPolicy::Sequential => IvpLambdifyExecutionPolicy::Sequential,
+                StiffCallbackPolicy::Auto { min_work } => {
+                    IvpLambdifyExecutionPolicy::Auto { min_work }
+                }
+                StiffCallbackPolicy::Parallel { min_work } => {
+                    IvpLambdifyExecutionPolicy::Parallel { min_work }
+                }
+            }
+        );
+        assert!(statistics.residual_calls > 0);
+        assert!(statistics.jacobian_calls > 0);
+        assert!(symbolic.residual_evaluations > 0);
+        assert!(symbolic.jacobian_evaluations > 0);
+        assert!(symbolic.sequential_dispatches + symbolic.parallel_dispatches > 0);
+        match policy {
+            StiffCallbackPolicy::Sequential => {
+                assert_eq!(symbolic.parallel_dispatches, 0);
+                assert!(symbolic.sequential_dispatches > 0);
+            }
+            StiffCallbackPolicy::Parallel { .. } => {
+                assert!(symbolic.parallel_dispatches > 0);
+            }
+            StiffCallbackPolicy::Auto { .. } => {}
+        }
+
+        let trajectory = solver
+            .trajectory_view()
+            .expect("successful BDF solve should expose its trajectory");
+        let final_state = trajectory
+            .values
+            .row(trajectory.values.nrows() - 1)
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        if let Some(reference) = &reference {
+            for (actual, expected) in final_state.iter().zip(reference) {
+                assert!((actual - expected).abs() < 1e-10);
+            }
+        } else {
+            reference = Some(final_state);
+        }
+    }
+}
+
+#[test]
 fn telemetry_and_logging_preserve_solver_specific_native_capabilities() {
     let telemetry_cases = [
         (

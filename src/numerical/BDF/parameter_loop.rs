@@ -39,7 +39,7 @@ impl ODEsolver {
                 });
             let telemetry = BdfParameterLoopTelemetry {
                 statistics: self.get_statistics(),
-                symbolic: self.preparation_backend_telemetry().cloned(),
+                symbolic: self.symbolic_ivp_telemetry_snapshot(),
                 preparation_timings: self.preparation_timings(),
             };
             (result, telemetry)

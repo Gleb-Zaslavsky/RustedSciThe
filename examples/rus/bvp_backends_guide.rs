@@ -94,7 +94,6 @@ fn simple_linear_bvp(options: DampedSolverOptions, n_steps: usize) -> NRBVP {
         n_steps,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }
 

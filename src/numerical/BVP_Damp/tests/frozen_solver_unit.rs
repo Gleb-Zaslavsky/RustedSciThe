@@ -533,7 +533,6 @@ fn frozen_combustion_solver(
         n_steps,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }
 
@@ -700,7 +699,6 @@ fn frozen_polynomial_two_point_solver(n_steps: usize, config: GeneratedBackendCo
         n_steps,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }
 
@@ -1300,7 +1298,6 @@ fn frozen_sparse_lambdify_linear_bvp_solves_against_exact_profile() {
         .with_tolerance(1e-8)
         .with_max_iterations(20);
     let mut solver = frozen_linear_solver(24, options);
-    solver.dont_save_log(true);
 
     solver
         .try_solve()
@@ -1329,7 +1326,6 @@ fn frozen_banded_default_atomview_lambdify_linear_bvp_solves_against_exact_profi
         BvpSymbolicAssemblyBackend::AtomView
     );
     let mut solver = frozen_linear_solver(24, options);
-    solver.dont_save_log(true);
 
     solver
         .try_solve()
@@ -1395,7 +1391,6 @@ fn try_eq_generate_surfaces_missing_prebuilt_aot_as_typed_error() {
 fn try_solve_surfaces_missing_prebuilt_aot_as_typed_error() {
     let mut solver =
         sparse_surface_test_solver_with_naive_strategy().with_sparse_aot_require_prebuilt();
-    solver.dont_save_log(true);
 
     let err = solver
         .try_solve()
@@ -1637,7 +1632,6 @@ fn test_newton_raphson_solver() {
         .expect("dense frozen solver should generate through the fallible API");
 
     assert_eq!(nr.eq_system.len(), 2);
-    nr.dont_save_log(true);
     // Solve the equation at t=0 with initial guess y=[2.0]
     //    nr.set_new_step(0.0, DVector::from_element(1, 2.0), DVector::from_element(1, 2.0));
     let _solution = nr

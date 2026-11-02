@@ -289,7 +289,6 @@ mod tests {
         solver
             .try_set_parameter_names(Some(&["alpha"]))
             .expect("fixed parameter schema should be accepted");
-        solver.dont_save_log(true);
         solver
     }
 

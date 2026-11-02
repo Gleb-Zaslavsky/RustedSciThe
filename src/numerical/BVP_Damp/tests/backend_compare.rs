@@ -171,7 +171,6 @@ mod tests {
             n_steps,
             options,
         );
-        solver.dont_save_log(true);
         solver
     }
 
@@ -548,7 +547,6 @@ mod tests {
             n_steps,
             options,
         );
-        solver.dont_save_log(true);
         solver
     }
 
@@ -1461,7 +1459,6 @@ mod tests {
             n_steps,
             options,
         );
-        solver.dont_save_log(true);
         solver
     }
 
@@ -2816,7 +2813,6 @@ mod tests {
                         "oscillator" => make_oscillator_solver(n_steps, options),
                         _ => unreachable!(),
                     };
-                    solver.dont_save_log(true);
                     solver
                 };
 

@@ -196,7 +196,6 @@ mod tets {
             n_steps,
             options,
         );
-        bvp.dont_save_log(true);
         bvp.try_solve()
             .expect("combustion benchmark BVP should solve through the fallible API");
         //   bvp.plot_result_in_terminal();
@@ -373,7 +372,6 @@ mod tets {
             n_steps,
             options,
         );
-        bvp.dont_save_log(true);
         bvp.try_solve()
             .expect("adaptive combustion BVP should solve through the fallible API");
         //  bvp.gnuplot_result();
@@ -516,7 +514,6 @@ mod tets {
         );
 
         println!("solving system");
-        nr.dont_save_log(true);
         nr.try_solve()
             .expect("test_BVP_Damp1 should solve through the fallible API");
         let solution = nr.get_result().unwrap();
@@ -574,7 +571,6 @@ mod tets {
         );
 
         println!("solving system");
-        nr.dont_save_log(true);
         nr.try_solve()
             .expect("TwoPointBVP should solve through the fallible API");
         let solution = nr.get_result().unwrap().clone();
@@ -646,7 +642,6 @@ mod tets {
         );
 
         println!("solving system");
-        nr.dont_save_log(true);
         nr.try_solve()
             .expect("Clairaut BVP should solve through the fallible API");
         let solution = nr.get_result().unwrap().clone();
@@ -735,7 +730,6 @@ mod tets {
         );
 
         println!("solving system");
-        nr.dont_save_log(true);
         nr.try_solve()
             .expect("Parachute BVP should solve through the fallible API");
         let solution = nr.get_result().unwrap().clone();
@@ -848,7 +842,6 @@ mod tets {
         );
 
         println!("solving system");
-        nr.dont_save_log(true);
         nr.try_solve()
             .expect("Lane-Emden BVP should solve through the fallible API");
         let solution = nr.get_result().unwrap().clone();

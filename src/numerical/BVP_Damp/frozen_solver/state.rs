@@ -54,7 +54,6 @@ pub struct NRBVP {
         Option<crate::symbolic::bvp::telemetry::BvpDirectJacobianTelemetry>,
     parameter_binding: Option<crate::symbolic::bvp::parameter_binding::BvpParameterBindingHandle>,
     custom_timer: CustomTimer,
-    no_reports: bool,
 }
 
 impl ApplyFrozenGeneratedSolverState for NRBVP {

@@ -112,6 +112,8 @@ pub fn parse_hybrid_bvp_solver_settings_from_document(
                     "aot_build_profile",
                     "aot_compile_preset",
                     "aot_execution_policy",
+                    "aot_residual_target_chunks",
+                    "aot_jacobian_target_chunks",
                     "banded_linear_solver",
                     "refinement_steps",
                     "aot_compile_optimization",
@@ -182,6 +184,8 @@ pub fn parse_hybrid_bvp_solver_settings_from_document(
                     "aot_build_profile",
                     "aot_compile_preset",
                     "aot_execution_policy",
+                    "aot_residual_target_chunks",
+                    "aot_jacobian_target_chunks",
                     "banded_linear_solver",
                     "refinement_steps",
                     "aot_compile_optimization",
@@ -630,6 +634,20 @@ fn optional_usize(section: &Section, field: &str) -> Result<Option<usize>, Hybri
     }
 }
 
+fn optional_positive_usize(
+    section: &Section,
+    field: &str,
+) -> Result<Option<usize>, HybridBvpSettingsError> {
+    let value = optional_usize(section, field)?;
+    if value == Some(0) {
+        return Err(invalid(
+            &format!("solver_settings.{field}"),
+            "must be greater than zero",
+        ));
+    }
+    Ok(value)
+}
+
 fn optional_bool(section: &Section, field: &str) -> Result<Option<bool>, HybridBvpSettingsError> {
     let Some(values) = section.get(field) else {
         return Ok(None);
@@ -696,6 +714,8 @@ fn generated_backend_spec(
         // The hybrid parser builds this typed policy directly so it can also
         // represent ParallelExecutorConfig without losing its thresholds.
         aot_execution_policy: None,
+        aot_residual_target_chunks: optional_positive_usize(section, "aot_residual_target_chunks")?,
+        aot_jacobian_target_chunks: optional_positive_usize(section, "aot_jacobian_target_chunks")?,
         banded_linear_solver: optional_string(section, "banded_linear_solver")?,
         refinement_steps: optional_usize(section, "refinement_steps")?,
     })
@@ -716,6 +736,8 @@ fn apply_generated_backend_extensions(
             "aot_build_profile",
             "aot_compile_preset",
             "aot_execution_policy",
+            "aot_residual_target_chunks",
+            "aot_jacobian_target_chunks",
             "aot_compile_optimization",
             "aot_codegen_units",
             "aot_residual_chunking",
@@ -739,6 +761,25 @@ fn apply_generated_backend_extensions(
                 solver: "explicit non-AOT Damped/Frozen backend policy",
             });
         }
+    }
+
+    if section.contains_key("aot_residual_target_chunks")
+        && (section.contains_key("aot_residual_chunking")
+            || section.contains_key("aot_residual_chunk_size"))
+    {
+        return Err(invalid(
+            "solver_settings.aot_residual_target_chunks",
+            "cannot be combined with aot_residual_chunking/aot_residual_chunk_size",
+        ));
+    }
+    if section.contains_key("aot_jacobian_target_chunks")
+        && (section.contains_key("aot_sparse_jacobian_chunking")
+            || section.contains_key("aot_sparse_jacobian_chunk_size"))
+    {
+        return Err(invalid(
+            "solver_settings.aot_jacobian_target_chunks",
+            "cannot be combined with aot_sparse_jacobian_chunking/aot_sparse_jacobian_chunk_size",
+        ));
     }
 
     if let Some(level) = optional_string(section, "aot_compile_optimization")? {
@@ -1859,21 +1900,21 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_parser_rejects_native_report_toggle_it_cannot_forward() {
+    fn hybrid_parser_rejects_unknown_legacy_solver_fields() {
         let document = document(values(&[
             ("solver_family", Value::String("damped".into())),
             ("strategy", Value::String("damped".into())),
             ("scheme", Value::String("forward".into())),
             ("method", Value::String("Sparse".into())),
-            ("dont_save_log", Value::Boolean(true)),
+            ("legacy_report_toggle", Value::Boolean(true)),
         ]));
         let error = parse_hybrid_bvp_solver_settings_from_document(&document)
             .err()
-            .expect("report toggle must be rejected");
+            .expect("unknown legacy field must be rejected");
         assert!(matches!(
             error,
             HybridBvpSettingsError::UnsupportedField { ref path, .. }
-                if path == "solver_settings.dont_save_log"
+                if path == "solver_settings.legacy_report_toggle"
         ));
     }
 
@@ -2162,6 +2203,88 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("aot_execution_policy"));
+    }
+
+    #[test]
+    fn damped_aot_target_chunks_reach_the_generated_backend_config() {
+        let settings = values(&[
+            ("solver_family", Value::String("damped".into())),
+            ("strategy", Value::String("damped".into())),
+            ("scheme", Value::String("trapezoid".into())),
+            ("method", Value::String("Sparse".into())),
+            ("abs_tolerance", Value::Float(1e-6)),
+            ("max_iterations", Value::Integer(42)),
+            (
+                "backend_policy",
+                Value::String("prefer_aot_then_lambdify".into()),
+            ),
+            ("aot_residual_target_chunks", Value::Integer(5)),
+            ("aot_jacobian_target_chunks", Value::Integer(3)),
+        ]);
+        let BvpSolverSettings::Damped(options) =
+            parse_hybrid_bvp_solver_settings_from_document(&document(settings)).unwrap()
+        else {
+            panic!("expected Damped options");
+        };
+
+        assert_eq!(
+            options
+                .generated_backend_config
+                .aot_chunking_policy
+                .residual,
+            Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks: 5 })
+        );
+        assert_eq!(
+            options
+                .generated_backend_config
+                .aot_chunking_policy
+                .sparse_jacobian,
+            Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks: 3 })
+        );
+    }
+
+    #[test]
+    fn damped_aot_target_chunks_reject_zero_and_conflicting_syntax() {
+        let zero = values(&[
+            ("solver_family", Value::String("damped".into())),
+            ("strategy", Value::String("damped".into())),
+            ("scheme", Value::String("forward".into())),
+            ("method", Value::String("Sparse".into())),
+            ("abs_tolerance", Value::Float(1e-6)),
+            ("max_iterations", Value::Integer(20)),
+            ("aot_residual_target_chunks", Value::Integer(0)),
+        ]);
+        let error = match parse_hybrid_bvp_solver_settings_from_document(&document(zero)) {
+            Err(error) => error,
+            Ok(_) => panic!("zero chunk target must be rejected"),
+        };
+        assert!(matches!(
+            error,
+            HybridBvpSettingsError::Damped(BvpDampedTaskError::InvalidField {
+                ref field,
+                ..
+            }) if field == "aot_residual_target_chunks"
+        ));
+
+        let conflicting = values(&[
+            ("solver_family", Value::String("damped".into())),
+            ("strategy", Value::String("damped".into())),
+            ("scheme", Value::String("forward".into())),
+            ("method", Value::String("Sparse".into())),
+            ("abs_tolerance", Value::Float(1e-6)),
+            ("max_iterations", Value::Integer(20)),
+            ("aot_residual_target_chunks", Value::Integer(5)),
+            ("aot_residual_chunking", Value::String("whole".into())),
+        ]);
+        let error = match parse_hybrid_bvp_solver_settings_from_document(&document(conflicting)) {
+            Err(error) => error,
+            Ok(_) => panic!("ambiguous residual chunk settings must be rejected"),
+        };
+        assert!(matches!(
+            error,
+            HybridBvpSettingsError::InvalidField { ref path, .. }
+                if path == "solver_settings.aot_residual_target_chunks"
+        ));
     }
 
     #[test]

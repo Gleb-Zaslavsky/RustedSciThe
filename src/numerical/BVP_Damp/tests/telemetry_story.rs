@@ -84,7 +84,6 @@ mod tests {
 
     fn run_story_case(telemetry_mode: BvpTelemetryMode, logging_mode: BvpLoggingMode) -> TimedRun {
         let mut solver = bratu_solver(telemetry_mode, logging_mode);
-        solver.dont_save_log(true);
         let started = Instant::now();
         solver
             .try_solve()

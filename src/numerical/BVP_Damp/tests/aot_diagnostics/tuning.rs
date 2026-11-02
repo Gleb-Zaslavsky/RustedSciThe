@@ -896,7 +896,6 @@ fn make_example_solver(
         n_steps,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }
 
@@ -1008,7 +1007,6 @@ fn make_combustion_solver(
         n_steps,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }
 
@@ -1061,6 +1059,5 @@ fn make_oscillator_solver(
         n_steps,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }

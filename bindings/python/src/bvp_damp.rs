@@ -2155,7 +2155,6 @@ impl BvpDampNaiveSolver {
             }
             Ok(solver)
         })?;
-        solver.dont_save_log(true);
         Ok(Self {
             solver,
             frontend: options.frontend().to_owned(),

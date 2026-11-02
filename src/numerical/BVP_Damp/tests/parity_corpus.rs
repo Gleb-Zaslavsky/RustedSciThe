@@ -103,7 +103,6 @@ mod tests {
             24,
             options(backend),
         );
-        solver.dont_save_log(true);
         solver
     }
 
@@ -235,7 +234,6 @@ mod tests {
             24,
             options,
         );
-        solver.dont_save_log(true);
         solver
             .try_solve()
             .expect("symbolic parity trace fixture should solve");
@@ -439,7 +437,6 @@ mod tests {
             24,
             trace_options(frontend, matrix, false),
         );
-        solver.dont_save_log(true);
         let result = solver.try_solve();
         result.unwrap_or_else(|error| {
             panic!("symbolic cubic fixture failed for {matrix:?}/{frontend:?}: {error:?}")
@@ -625,7 +622,6 @@ mod tests {
                 n_steps,
                 options,
             );
-            solver.dont_save_log(true);
             solver
                 .try_solve()
                 .expect("oscillator frontend/backend route should solve");
@@ -809,7 +805,6 @@ mod tests {
             2,
             trace_options(backend, matrix, false),
         );
-        solver.dont_save_log(true);
         solver
             .try_eq_generate(None, None)
             .expect("symbolic frontend should prepare the damping fixture");

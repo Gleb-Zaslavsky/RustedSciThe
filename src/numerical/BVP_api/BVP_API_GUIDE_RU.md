@@ -212,6 +212,10 @@ callback recorder которого не поддерживает режим то
 дискретизации, стратегию, линейный метод, допуски, bounds и секции адаптивной
 сетки, а также generated-backend/AOT lifecycle, компилятор,
 residual/sparse chunking для Damped/Frozen,
+а также `aot_residual_target_chunks` и `aot_jacobian_target_chunks` как
+положительные целые shorthand-настройки для AOT-capable policy. Для одной и
+той же residual/Jacobian-ветки они несовместимы с подробной chunking-парой;
+при runtime fallback на Lambdify targets применяются только к AOT-ветке.
 пороговые настройки executor-а, Lambdify dispatch, профиль Atom, Expr switches,
 логирование и телеметрию. BVP_sci принимает execution/frontend, layout,
 лимиты итераций, callback policy, output retention, sparse factorization,
@@ -220,10 +224,11 @@ metadata и residual/sparse/banded chunking. AOT-поля в Lambdify-маршр
 игнорируются, а отклоняются typed error.
 
 Некоторые native-значения намеренно не являются настройками документа:
-AOT resolver — runtime handle внутри процесса, а singular term
-`S*y/(x-a)` в BVP_sci относится к физической модели. `dont_save_log` у
-Damped/Frozen — native post-construction переключатель сохранения отчётов,
-отдельный от общей Rust log-level политики; гибридный parser отклоняет его,
-поскольку facade config пока не хранит это состояние. Для таких controls
-используйте прямой native lifecycle API. Неизвестные поля и неподдерживаемые
-сочетания маршрута возвращают typed errors с путём до поля.
+AOT resolver — runtime handle внутри процесса, а сингулярный член
+`S*y/(x-a)` в BVP_sci относится к физической модели.
+
+Текстовое логирование единообразно задаётся через
+`BvpSolverConfig::with_logging_level(SolverLogLevel)` и по умолчанию выключено
+(`Off`). Экспорт результата и postprocessing — отдельные операции. Неизвестные
+ключи и неподдерживаемые сочетания маршрутов возвращают типизированные ошибки
+с путём к полю.

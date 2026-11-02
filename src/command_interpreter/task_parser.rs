@@ -2390,7 +2390,6 @@ mod tests {
         abs_tolerance: 1e-5
         max_iterations: 100
         loglevel: Some(info)
-        dont_save_logs: true
         bounds
         C: -10.0, 10.0
         J:  -1e20, 1e20

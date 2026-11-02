@@ -247,7 +247,6 @@ fn make_combustion_solver(
         n_steps,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }
 

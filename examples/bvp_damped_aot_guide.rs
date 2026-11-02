@@ -118,7 +118,6 @@ fn main() {
     // performed in an initialization/deployment phase.
     let config = GeneratedBackendConfig::banded_atomview_build_if_missing_release_tcc();
     let mut build_or_reuse = solver_with(config.clone());
-    build_or_reuse.dont_save_log(true);
     build_or_reuse
         .try_solve()
         .expect("AOT build-if-missing solve must succeed");
@@ -130,7 +129,6 @@ fn main() {
         .with_resolver(build_or_reuse.aot_resolver().cloned())
         .with_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
     let mut prebuilt = solver_with(strict_config);
-    prebuilt.dont_save_log(true);
     prebuilt
         .try_solve()
         .expect("prebuilt AOT artifact must be reusable");

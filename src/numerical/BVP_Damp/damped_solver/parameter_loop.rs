@@ -416,7 +416,6 @@ mod tests {
         solver
             .try_set_parameter_values(Some(vec![1.0]))
             .expect("initial parameter is valid");
-        solver.dont_save_log(true);
         solver
     }
 

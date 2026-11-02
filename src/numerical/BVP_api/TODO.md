@@ -46,10 +46,10 @@ Do not pull SciWithFreeParameters into this fixed-input client workflow.
   strategies. Native Damped strategy parameters, adaptive grid policy,
   variable bounds and relative tolerances are passed through and covered by a
   direct parser test. Invalid route combinations are rejected with field paths.
-- [x] Explicitly reject Damped `dont_save_log` in the settings document: it is a
-  post-construction native report toggle, not the shared text-log level, and
-  `BvpSolverSettings` does not currently carry it. Do not accept a setting that
-  the facade would silently drop. Likewise, runtime AOT resolver handles are
+- [x] Remove the unused Damped/Frozen `dont_save_log`/`no_reports` state and its
+  Damped task-parser setting. Shared text logging is controlled by
+  `BvpSolverConfig::with_logging_level`; unknown hybrid fields remain typed
+  errors. Likewise, runtime AOT resolver handles are
   intentionally not document-serializable, and BVP_sci `singular_term` is
   problem/model data rather than a solver setting.
 - [x] Keep the public schema honest as native configs evolve: unsupported

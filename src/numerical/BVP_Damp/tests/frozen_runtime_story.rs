@@ -123,7 +123,6 @@ fn frozen_linear_solver(n_steps: usize, route: Route) -> NRBVP {
         n_steps,
         route.options(),
     );
-    solver.dont_save_log(true);
     solver
 }
 

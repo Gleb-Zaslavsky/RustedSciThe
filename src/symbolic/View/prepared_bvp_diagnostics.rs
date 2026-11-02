@@ -147,7 +147,6 @@ fn solver(steps: usize, frontend: BvpSymbolicAssemblyBackend) -> NRBVP {
         steps,
         options(frontend),
     );
-    solver.dont_save_log(true);
     solver
 }
 

@@ -119,7 +119,6 @@ fn main() {
         options(),
         |_x, y, _params| DVector::from_vec(vec![y[1], 0.0]),
     );
-    finite_difference.dont_save_log(true);
     finite_difference
         .try_solve()
         .expect("finite-difference numerical BVP must solve");
@@ -142,7 +141,6 @@ fn main() {
         |_x, y, _params| DVector::from_vec(vec![y[1], 0.0]),
         |_x, _y, _params| DMatrix::from_row_slice(2, 2, &[0.0, 1.0, 0.0, 0.0]),
     );
-    analytical_jacobian.dont_save_log(true);
     analytical_jacobian
         .try_solve()
         .expect("analytical-Jacobian numerical BVP must solve");

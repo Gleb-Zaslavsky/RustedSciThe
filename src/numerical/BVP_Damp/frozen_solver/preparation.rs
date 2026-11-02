@@ -134,7 +134,6 @@ impl NRBVP {
             direct_banded_jacobian_telemetry: None,
             parameter_binding: None,
             custom_timer: CustomTimer::new(),
-            no_reports: false,
         }
     }
 

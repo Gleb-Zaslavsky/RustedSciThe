@@ -1,7 +1,4 @@
 impl NRBVP {
-    pub fn dont_save_log(&mut self, dont_save_log: bool) {
-        self.no_reports = dont_save_log;
-    }
     pub fn save_to_file(&self) {
         //let date_and_time = Local::now().format("%Y-%m-%d_%H-%M-%S");
         let result_DMatrix = self

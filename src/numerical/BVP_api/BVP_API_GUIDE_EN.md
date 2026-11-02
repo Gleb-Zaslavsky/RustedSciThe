@@ -248,11 +248,16 @@ logging and telemetry; its AOT route additionally accepts build/compiler
 metadata and residual/sparse/banded chunking settings. AOT-only keys supplied
 to a Lambdify route are rejected rather than ignored.
 
+For Damped/Frozen AOT callbacks, `aot_residual_target_chunks` and
+`aot_jacobian_target_chunks` are positive-integer shorthand for target-count
+chunking. They require an AOT-capable backend policy and cannot be combined
+with the corresponding detailed residual/sparse chunking fields. If an AOT
+preference falls back to Lambdify at runtime, these chunk targets apply only to
+the AOT branch.
+
 Some native values are deliberately not document settings: an AOT resolver is
 an in-process runtime handle, while BVP_sci's singular `S*y/(x-a)` term belongs
-to the physical model. Damped/Frozen `dont_save_log` is a native
-post-construction report toggle, distinct from shared Rust text logging; the
-hybrid parser rejects it because the facade config does not yet carry that
-state. Use the direct native lifecycle API when these controls are required.
-Unknown keys and unsupported route combinations produce typed errors with the
-field path.
+to the physical model. Text logging is configured uniformly through
+`BvpSolverConfig::with_logging_level(SolverLogLevel)` and defaults to Off;
+result export/postprocessing is a separate concern. Unknown keys and
+unsupported route combinations produce typed errors with the field path.

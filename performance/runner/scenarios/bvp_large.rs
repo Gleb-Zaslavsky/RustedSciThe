@@ -565,7 +565,6 @@ fn bvp_damp_once(case: BvpDampCase, mode: BvpTelemetryMode) -> Result<BvpDampRun
         DAMP_STEPS,
         damp_options(case, mode),
     );
-    solver.dont_save_log(true);
     let prepare_started = Instant::now();
     solver.try_eq_generate(None, None).map_err(|error| {
         RunnerError::Scenario(format!("BVP_Damp combustion prepare: {error:?}"))

@@ -28,3 +28,30 @@ cover all four StiffAPI routes separately.
 
 The captured summary and per-command technical logs are retained under
 [`IVP parameter-loop Release report`](../../../test_reports/IVP_parameter_loop_release/20261028T093912725Z-12916/summary.md).
+
+## BDF callback-policy telemetry parity (2026-11-02)
+
+An integration report showed successful standalone BDF solves through
+StiffAPI while the nested symbolic snapshot reported zero residual/Jacobian
+evaluations and dispatches. Inspection confirmed that BDF applied the
+requested callback policy to its Lambdify evaluators and those evaluators
+recorded work in the shared `IvpTelemetry`; the facade was returning a
+value-snapshot captured at backend preparation, before integration began.
+
+BDF now retains the cheap shared telemetry handle alongside the immutable
+preparation snapshot. `StiffTelemetrySnapshot::Bdf` reads a fresh symbolic
+snapshot, so Detailed reports include callback activity after the solve. The
+preparation-only accessor remains unchanged for callers that need the exact
+post-preparation view. Native BDF counters and symbolic callback counters
+remain separate layers: native counters describe solver requests/work, while
+the symbolic snapshot describes evaluator calls, scalar evaluations and
+Sequential/Rayon dispatch. Do not assume equality field-by-field.
+
+Debug gate `bdf_lambdify_policy_and_live_callback_telemetry_cover_completed_solve`
+passed for Sequential, Auto `{ min_work: 0 }`, and forced Parallel
+`{ min_work: 0 }` on the same four-state symbolic IVP. Every route reported
+nonzero native residual/Jacobian calls and symbolic residual/Jacobian
+evaluations. Sequential reported sequential dispatch only; forced Parallel
+reported parallel dispatch; Auto reported its effective dispatch. Final states
+matched within `1e-10` across policies. This confirms callback scheduling and
+telemetry behavior in debug; it is not a performance claim.

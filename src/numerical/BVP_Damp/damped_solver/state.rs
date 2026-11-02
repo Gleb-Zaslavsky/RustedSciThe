@@ -31,7 +31,6 @@ pub struct NRBVP {
     pub loglevel: Option<String>,
     pub param_names: Vec<String>, // symbolic parameter names used by RHS but not solved by Newton
     pub param_values: Option<Vec<f64>>, // current numeric values for param_names
-    no_reports: bool,
     // thets all user defined  parameters
     //
     pub result: Option<DVector<f64>>, // result vector of calculation

@@ -431,7 +431,6 @@ fn build_bvp_damp_combustion(nodes: usize) -> NRBVP {
         nodes,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }
 
@@ -479,7 +478,6 @@ fn build_bvp_damp_bratu(nodes: usize) -> NRBVP {
         nodes,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }
 

@@ -357,7 +357,6 @@ fn build_damped(config: RunConfig) -> NRBVP {
         config.n_steps,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }
 
@@ -386,7 +385,6 @@ fn build_frozen(config: RunConfig) -> FrozenBvp {
         config.n_steps,
         options,
     );
-    solver.dont_save_log(true);
     solver
 }
 

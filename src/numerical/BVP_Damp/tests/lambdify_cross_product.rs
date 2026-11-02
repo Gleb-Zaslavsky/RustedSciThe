@@ -101,7 +101,6 @@ mod tests {
             n_steps,
             route.options(frontend),
         );
-        solver.dont_save_log(true);
         solver
     }
 

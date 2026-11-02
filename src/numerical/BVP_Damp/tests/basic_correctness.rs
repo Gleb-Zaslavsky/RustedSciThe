@@ -590,7 +590,6 @@ mod tests {
             .with_banded_lambdify()
             .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
         let (mut solver, t0, t_end, n_steps) = linear_bvp_fixture(80, options);
-        solver.dont_save_log(true);
 
         solver
             .try_solve()
@@ -620,8 +619,6 @@ mod tests {
         solution_tolerance: f64,
     ) {
         prepared = prepared.with_callback_runtime(DampedCallbackRuntime::PreparedAtom);
-        native.dont_save_log(true);
-        prepared.dont_save_log(true);
         native
             .try_solve()
             .expect("solver-native AtomView Banded route should solve");
@@ -663,8 +660,6 @@ mod tests {
 
         let (mut native, _, _, _) = oscillator_bvp_symbolic_fixture(n_steps, options.clone());
         let (mut prepared, _, _, _) = oscillator_bvp_symbolic_fixture(n_steps, options);
-        native.dont_save_log(true);
-        prepared.dont_save_log(true);
         prepared = prepared.with_callback_runtime(DampedCallbackRuntime::PreparedAtom);
         native
             .try_solve()
@@ -728,7 +723,6 @@ mod tests {
             n_steps,
             options,
         );
-        solver.dont_save_log(true);
         if prepared {
             solver.set_callback_runtime(DampedCallbackRuntime::PreparedAtom);
         }
@@ -872,7 +866,6 @@ mod tests {
         let options = base_linear_bvp_options()
             .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
         let (mut solver, _, _, _) = linear_bvp_fixture(12, options);
-        solver.dont_save_log(true);
         solver = solver.with_callback_runtime(DampedCallbackRuntime::PreparedAtom);
         let error = solver
             .try_eq_generate(None, None)
@@ -890,7 +883,6 @@ mod tests {
     fn bvp_banded_atomview_aot_two_point_end_to_end_correctness() {
         let options = base_linear_bvp_options().with_banded_atomview_c_tcc();
         let (mut solver, t0, t_end, n_steps) = linear_bvp_fixture(80, options);
-        solver.dont_save_log(true);
 
         match solver.try_solve() {
             Ok(_) => {
@@ -909,7 +901,6 @@ mod tests {
     fn bvp_pure_numerical_backend_two_point_end_to_end_correctness() {
         let options = base_linear_bvp_options().with_sparse_generated_backend_defaults();
         let (mut solver, t0, t_end, n_steps) = linear_bvp_numeric_fixture(80, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
         solver.set_numeric_rhs(Some(Arc::new(|_x, y: &DVector<f64>, _params| {
             DVector::from_vec(vec![y[1], 0.0])
@@ -925,7 +916,6 @@ mod tests {
     fn bvp_banded_pure_numerical_backend_two_point_end_to_end_correctness() {
         let options = base_linear_bvp_options().with_banded_generated_backend_defaults();
         let (mut solver, t0, t_end, n_steps) = linear_bvp_numeric_fixture(80, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
         solver.set_numeric_rhs(Some(Arc::new(|_x, y: &DVector<f64>, _params| {
             DVector::from_vec(vec![y[1], 0.0])
@@ -970,7 +960,6 @@ mod tests {
             |_x, y: &DVector<f64>, _params| DVector::from_vec(vec![y[1], 0.0]),
             |_x, _y: &DVector<f64>, _params| DMatrix::from_row_slice(2, 2, &[0.0, 1.0, 0.0, 0.0]),
         );
-        solver.dont_save_log(true);
 
         assert!(solver.has_numeric_rhs());
         assert!(solver.has_numeric_jacobian());
@@ -1021,7 +1010,6 @@ mod tests {
             |_x, y: &DVector<f64>, _params| DVector::from_vec(vec![y[1], 0.0]),
             |_x, _y: &DVector<f64>, _params| DMatrix::from_row_slice(2, 2, &[0.0, 1.0, 0.0, 0.0]),
         );
-        solver.dont_save_log(true);
 
         assert!(solver.has_numeric_rhs());
         assert!(solver.has_numeric_jacobian());
@@ -1077,7 +1065,6 @@ mod tests {
             |_x, y: &DVector<f64>, _params| DVector::from_vec(vec![y[1], 0.0]),
             |_x, _y: &DVector<f64>, _params| DMatrix::from_row_slice(2, 2, &[0.0, 1.0, 0.0, 0.0]),
         );
-        solver.dont_save_log(true);
 
         assert!(solver.has_numeric_rhs());
         assert!(solver.has_numeric_jacobian());
@@ -1094,7 +1081,6 @@ mod tests {
             .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::AtomView);
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) = oscillator_bvp_symbolic_fixture(120, options);
-        solver.dont_save_log(true);
 
         solver
             .try_solve()
@@ -1108,7 +1094,6 @@ mod tests {
         options.scheme = "trapezoid".to_string();
         let (mut bootstrap_solver, t0, t_end, n_steps) =
             oscillator_bvp_symbolic_fixture(120, options.clone());
-        bootstrap_solver.dont_save_log(true);
 
         match bootstrap_solver.try_solve() {
             Ok(_) => {
@@ -1131,7 +1116,6 @@ mod tests {
 
                 let (mut strict_solver, t0_strict, t_end_strict, n_steps_strict) =
                     oscillator_bvp_symbolic_fixture(120, options);
-                strict_solver.dont_save_log(true);
                 strict_solver.set_aot_resolver(Some(bootstrap_resolver));
                 strict_solver.set_aot_build_policy(AotBuildPolicy::RequirePrebuilt);
                 strict_solver.try_solve().expect(
@@ -1162,7 +1146,6 @@ mod tests {
         let mut options = base_linear_bvp_options().with_sparse_generated_backend_defaults();
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) = oscillator_bvp_numeric_fixture(120, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
         solver.set_numeric_rhs(Some(Arc::new(|_x, y: &DVector<f64>, _params| {
             DVector::from_vec(vec![y[1], -y[0]])
@@ -1179,7 +1162,6 @@ mod tests {
         let mut options = base_linear_bvp_options().with_banded_generated_backend_defaults();
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) = oscillator_bvp_numeric_fixture(120, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
         solver.set_numeric_rhs(Some(Arc::new(|_x, y: &DVector<f64>, _params| {
             DVector::from_vec(vec![y[1], -y[0]])
@@ -1197,7 +1179,6 @@ mod tests {
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) =
             oscillator_bvp_numeric_two_y_bc_fixture(120, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
 
         solver
@@ -1212,7 +1193,6 @@ mod tests {
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) =
             oscillator_bvp_numeric_two_y_bc_fixture(120, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
 
         solver
@@ -1235,7 +1215,6 @@ mod tests {
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) =
             stiff_decay_bvp_numeric_fixture(200, lambda_fast, lambda_slow, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
         solver.set_numeric_rhs(Some(Arc::new(move |_x, state: &DVector<f64>, _params| {
             DVector::from_vec(vec![-lambda_fast * state[0], -lambda_slow * state[1]])
@@ -1270,7 +1249,6 @@ mod tests {
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) =
             stiff_decay_bvp_numeric_fixture(200, lambda_fast, lambda_slow, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
         solver.set_numeric_rhs(Some(Arc::new(move |_x, state: &DVector<f64>, _params| {
             DVector::from_vec(vec![-lambda_fast * state[0], -lambda_slow * state[1]])
@@ -1305,7 +1283,6 @@ mod tests {
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) =
             stiff_decay_bvp_numeric_jacobian_fixture(200, lambda_fast, lambda_slow, options);
-        solver.dont_save_log(true);
 
         assert!(solver.has_numeric_rhs());
         assert!(solver.has_numeric_jacobian());
@@ -1342,7 +1319,6 @@ mod tests {
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) =
             stiff_decay_bvp_numeric_jacobian_fixture(200, lambda_fast, lambda_slow, options);
-        solver.dont_save_log(true);
 
         assert!(solver.has_numeric_rhs());
         assert!(solver.has_numeric_jacobian());
@@ -1380,7 +1356,6 @@ mod tests {
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) =
             stiff_decay_bvp_numeric_fixture(220, lambda_fast, lambda_slow, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
         solver.set_numeric_rhs(Some(Arc::new(move |_x, state: &DVector<f64>, _params| {
             DVector::from_vec(vec![
@@ -1420,7 +1395,6 @@ mod tests {
         options.scheme = "trapezoid".to_string();
         let (mut solver, t0, t_end, n_steps) =
             stiff_decay_bvp_numeric_fixture(220, lambda_fast, lambda_slow, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
         solver.set_numeric_rhs(Some(Arc::new(move |_x, state: &DVector<f64>, _params| {
             DVector::from_vec(vec![
@@ -1461,7 +1435,6 @@ mod tests {
             .with_strategy_params(Some(strategy));
         let coarse_steps = 20usize;
         let (mut solver, t0, t_end, _n_steps) = linear_bvp_numeric_fixture(coarse_steps, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
         solver.set_numeric_rhs(Some(Arc::new(|_x, y: &DVector<f64>, _params| {
             DVector::from_vec(vec![y[1], 0.0])
@@ -1533,7 +1506,6 @@ mod tests {
             .with_strategy_params(Some(strategy));
         let coarse_steps = 20usize;
         let (mut solver, t0, t_end, _n_steps) = linear_bvp_numeric_fixture(coarse_steps, options);
-        solver.dont_save_log(true);
         solver.set_backend_policy_override(Some(BackendSelectionPolicy::NumericOnly));
         solver.set_numeric_rhs(Some(Arc::new(|_x, y: &DVector<f64>, _params| {
             DVector::from_vec(vec![y[1], 0.0])

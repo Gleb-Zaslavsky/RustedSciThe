@@ -489,11 +489,17 @@ Current error-surface findings:
 
 ## 7. Telemetry And Logging Forwarding
 
+- [x] Expose live BDF symbolic callback telemetry through StiffAPI instead of
+  the preparation-time snapshot (2026-11-02). Verify Sequential, Auto and forced
+  Parallel with Detailed telemetry; keep native BDF solver counters distinct
+  from symbolic callback evaluation/dispatch counters. Regression:
+  `bdf_lambdify_policy_and_live_callback_telemetry_cover_completed_solve`.
+
 Current telemetry access parity:
 
 | Solver | StiffAPI snapshot | Native data retained | Availability boundary |
 | --- | --- | --- | --- |
-| BDF | `StiffTelemetrySnapshot::Bdf` | shared `IvpBackendStatistics`, optional symbolic preparation snapshot | statistics are read from the native solver; symbolic snapshot exists only when captured during preparation |
+| BDF | `StiffTelemetrySnapshot::Bdf` | shared `IvpBackendStatistics`, optional live symbolic preparation/callback snapshot | native statistics are cumulative solver-level work; symbolic snapshot reads the shared callback telemetry handle after solve, while the preparation-only accessor remains available |
 | Backward Euler | `StiffTelemetrySnapshot::BackwardEuler` | shared IVP statistics, BE/NRE-specific counters/timings, optional symbolic lifecycle snapshot | initial/partial solve lifecycle is native; disabled mode can yield zero/default statistics |
 | LSODE2 | `StiffTelemetrySnapshot::Lsode2` | effective shared statistics, LSODE2-native controller/step statistics, symbolic telemetry snapshot | shared view may represent Bridge/BDF or faithful native scopes; `Lsode2TelemetryScope` and native field names remain authoritative |
 | Radau | `StiffTelemetrySnapshot::Radau` | complete `RadauTelemetryReport`, including scope metadata and adaptive trace | report is owned by `RadauSolution`; prepared solver alone cannot supply a solve report |

@@ -370,7 +370,7 @@ impl PreparedStiffSolver {
             Self::Bdf(solver) => Ok(StiffTelemetrySnapshot::Bdf {
                 mode: self.telemetry_mode(),
                 statistics: solver.get_statistics(),
-                symbolic: solver.preparation_backend_telemetry().cloned(),
+                symbolic: solver.symbolic_ivp_telemetry_snapshot(),
             }),
             Self::Radau(_) => Err(StiffTelemetryError::RadauSolutionRequired),
             Self::BackwardEuler(solver) => Ok(StiffTelemetrySnapshot::BackwardEuler {

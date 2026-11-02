@@ -60,6 +60,8 @@
 //! - `matrix_backend`, `backend_policy`, `symbolic_backend`
 //! - `aot_codegen_backend`, `aot_c_compiler`, `aot_build_policy`, `aot_build_profile`
 //! - `aot_compile_preset`, `aot_execution_policy`
+//! - `aot_residual_target_chunks`, `aot_jacobian_target_chunks`
+//!   (positive integers; require an AOT-capable backend policy)
 //! - `banded_linear_solver`, `refinement_steps`
 //! - `abs_tolerance`: Absolute convergence tolerance
 //! - `max_iterations`: Maximum solver iterations
@@ -93,7 +95,6 @@
 //! - `gnuplot`: Enable gnuplot output (boolean)
 //! - `save`: Save results to file (boolean)
 //! - `save_to_csv`: Save as CSV (boolean)
-//! - `dont_save_log`: Disable log saving (boolean)
 //!
 //! ## Non-obvious Features and Tips
 //!
@@ -162,13 +163,15 @@ use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
     AdaptiveGridConfig, DampedSolverOptions, NRBVP, SolverParams,
 };
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
-    AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
+    AotBuildPolicy, AotBuildProfile, AotChunkingPolicy, AotExecutionPolicy, GeneratedBackendConfig,
 };
 use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use crate::somelinalg::banded::{LinearSolverConfig, LinearSolverPolicy};
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
 use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
+use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
+use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::symbolic_functions_BVP::BvpSymbolicAssemblyBackend;
 use nalgebra::DVector;
 use std::collections::HashMap;
@@ -230,7 +233,6 @@ pub struct BvpDampedSolverSettingsSpec {
     pub abs_tolerance: f64,
     pub max_iterations: usize,
     pub loglevel: Option<String>,
-    pub dont_save_log: bool,
     pub bounds: Option<HashMap<String, (f64, f64)>>,
     pub rel_tolerance: Option<HashMap<String, f64>>,
     pub strategy_params: Option<SolverParams>,
@@ -249,6 +251,8 @@ pub struct BvpDampedGeneratedBackendSpec {
     pub aot_build_profile: Option<String>,
     pub aot_compile_preset: Option<String>,
     pub aot_execution_policy: Option<String>,
+    pub aot_residual_target_chunks: Option<usize>,
+    pub aot_jacobian_target_chunks: Option<usize>,
     pub banded_linear_solver: Option<String>,
     pub refinement_steps: Option<usize>,
 }
@@ -437,6 +441,45 @@ fn get_optional_usize(
     }
 }
 
+fn get_optional_positive_usize(
+    section: &GenericSectionMap,
+    field: &str,
+    section_name: &'static str,
+) -> Result<Option<usize>, BvpDampedTaskError> {
+    let Some(Some(values)) = section.get(field) else {
+        return Ok(None);
+    };
+
+    fn decode(value: &Value) -> Option<Option<usize>> {
+        match value {
+            Value::Usize(value) => Some(Some(*value)),
+            Value::Integer(value) => usize::try_from(*value).ok().map(Some),
+            Value::Optional(Some(inner)) => decode(inner),
+            Value::Optional(None) => Some(None),
+            _ => None,
+        }
+    }
+
+    let value =
+        values
+            .first()
+            .and_then(decode)
+            .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                section: section_name,
+                field: field.to_string(),
+                message: "expected a positive integer".to_string(),
+            })?;
+    match value {
+        None => Ok(None),
+        Some(value) if value > 0 => Ok(Some(value)),
+        Some(_) => Err(BvpDampedTaskError::InvalidField {
+            section: section_name,
+            field: field.to_string(),
+            message: "expected a positive integer".to_string(),
+        }),
+    }
+}
+
 fn parse_grid_refinement_method(
     method_name: &str,
     method_params: &[f64],
@@ -557,6 +600,16 @@ fn parse_generated_backend_options(
         aot_execution_policy: get_optional_string(
             section,
             "aot_execution_policy",
+            "solver_settings",
+        )?,
+        aot_residual_target_chunks: get_optional_positive_usize(
+            section,
+            "aot_residual_target_chunks",
+            "solver_settings",
+        )?,
+        aot_jacobian_target_chunks: get_optional_positive_usize(
+            section,
+            "aot_jacobian_target_chunks",
             "solver_settings",
         )?,
         banded_linear_solver: get_optional_string(
@@ -825,6 +878,37 @@ pub fn build_bvp_damped_generated_backend_config_from_spec(
     if let Some(execution_policy) = spec.aot_execution_policy.as_deref() {
         config = config.with_aot_execution_policy(parse_aot_execution_policy(execution_policy)?);
     }
+    if spec.aot_residual_target_chunks.is_some() || spec.aot_jacobian_target_chunks.is_some() {
+        let policy = config.effective_backend_policy(method);
+        if !matches!(
+            policy,
+            BackendSelectionPolicy::AotOnly
+                | BackendSelectionPolicy::PreferAotThenLambdify
+                | BackendSelectionPolicy::PreferAotThenNumeric
+        ) {
+            let field = if spec.aot_residual_target_chunks.is_some() {
+                "aot_residual_target_chunks"
+            } else {
+                "aot_jacobian_target_chunks"
+            };
+            return Err(invalid_solver_option(
+                field,
+                "chunk targets require an AOT-capable backend policy".to_string(),
+            ));
+        }
+
+        let mut chunking = config.aot_chunking_policy;
+        if let Some(target_chunks) = spec.aot_residual_target_chunks {
+            chunking.residual =
+                Some(ResidualChunkingStrategy::ByTargetChunkCount { target_chunks });
+        }
+        if let Some(target_chunks) = spec.aot_jacobian_target_chunks {
+            chunking.sparse_jacobian =
+                Some(SparseChunkingStrategy::ByTargetChunkCount { target_chunks });
+        }
+        config.aot_chunking_policy =
+            AotChunkingPolicy::with_parts(chunking.residual, chunking.sparse_jacobian);
+    }
     if spec.banded_linear_solver.is_some() || spec.refinement_steps.is_some() {
         config = config.with_banded_linear_solver_config(parse_banded_linear_solver_config(
             spec.banded_linear_solver.as_deref(),
@@ -878,11 +962,6 @@ pub fn parse_bvp_damped_solver_settings_from_document(
         .and_then(|values| values.first())
         .and_then(|value| value.as_option_string())
         .cloned();
-    let dont_save_log = if solver_settings.get("dont_save_log").is_some() {
-        first_bool(solver_settings, "solver_settings", "dont_save_log")?
-    } else {
-        true
-    };
     let generated_backend = parse_generated_backend_options(solver_settings)?;
 
     let bounds = if let Some(bounds_section) = document.get("bounds") {
@@ -1018,7 +1097,6 @@ pub fn parse_bvp_damped_solver_settings_from_document(
         abs_tolerance,
         max_iterations,
         loglevel,
-        dont_save_log,
         bounds,
         rel_tolerance,
         strategy_params,
@@ -1156,7 +1234,6 @@ impl NRBVP {
         self.abs_tolerance = spec.abs_tolerance;
         self.max_iterations = spec.max_iterations;
         self.loglevel = spec.loglevel.clone();
-        self.dont_save_log(spec.dont_save_log);
         self.Bounds = spec.bounds.clone();
         self.rel_tolerance = spec.rel_tolerance.clone();
         self.strategy_params = spec.strategy_params.clone();
@@ -1460,8 +1537,9 @@ pub fn create_template_file(path: Option<std::path::PathBuf>) {
     max_iterations: 100
     // Logging level (optional) - None or Some(info/warn/error)
     loglevel: Some(info)
-    // Disable log file saving
-     dont_save_log: true
+    // Optional coarse AOT chunk targets; require an AOT-capable backend.
+    // aot_residual_target_chunks: 4
+    // aot_jacobian_target_chunks: 4
     // Solution bounds for each variable (variable_name: min, max)
     bounds
     // var1: -10.0, 10.0

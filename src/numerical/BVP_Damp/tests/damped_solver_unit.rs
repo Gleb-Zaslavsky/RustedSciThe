@@ -1490,7 +1490,6 @@ fn try_eq_generate_surfaces_missing_prebuilt_aot_as_typed_error() {
 fn try_solve_surfaces_missing_prebuilt_aot_as_typed_error() {
     let mut solver =
         sparse_surface_test_solver_with_tolerances().with_sparse_aot_require_prebuilt();
-    solver.dont_save_log(true);
 
     let err = solver
         .try_solve()

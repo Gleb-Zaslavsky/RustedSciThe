@@ -93,7 +93,6 @@ mod tests {
             5,
             route.options(frontend),
         );
-        solver.dont_save_log(true);
         solver
     }
 
@@ -223,7 +222,6 @@ mod tests {
             5,
             options,
         );
-        solver.dont_save_log(true);
         solver
     }
 
@@ -743,7 +741,6 @@ mod tests {
                     24,
                     options,
                 );
-                solver.dont_save_log(true);
                 solver
                     .try_eq_generate()
                     .unwrap_or_else(|error| panic!("Frozen preparation failed: {error:?}"));

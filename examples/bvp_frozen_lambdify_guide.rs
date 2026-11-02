@@ -52,7 +52,6 @@ fn main() {
         N_STEPS,
         options,
     );
-    solver.dont_save_log(true);
     solver.try_solve().expect("Frozen Lambdify BVP must solve");
 
     let result = solver.get_result().expect("solver must store a result");

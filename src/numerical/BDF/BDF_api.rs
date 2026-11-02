@@ -685,6 +685,7 @@ pub struct ODEsolver {
     statistics: Option<Arc<Mutex<IvpBackendStatistics>>>,
     preparation_timings: BdfPreparationTimings,
     preparation_backend_telemetry: Option<IvpTelemetrySnapshot>,
+    symbolic_backend_telemetry: Option<IvpTelemetry>,
     reported_bdf_counters: BdfOperationCounters,
     /// Optional factory for the Newton linear backend of each generated BDF instance.
     bdf_linear_backend_factory: Option<Box<dyn Fn() -> Box<dyn BdfLinearBackend>>>,
@@ -825,6 +826,7 @@ impl ODEsolver {
             statistics: None,
             preparation_timings: BdfPreparationTimings::default(),
             preparation_backend_telemetry: None,
+            symbolic_backend_telemetry: None,
             reported_bdf_counters: BdfOperationCounters::default(),
             bdf_linear_backend_factory: None,
             bdf_native_jacobian_factory: None,
@@ -904,6 +906,7 @@ impl ODEsolver {
             .then(|| Arc::new(Mutex::new(IvpBackendStatistics::default())));
         self.preparation_timings = BdfPreparationTimings::default();
         self.preparation_backend_telemetry = None;
+        self.symbolic_backend_telemetry = None;
         self.prepared_jacobian_into_factory = None;
         self.backend_prepared = false;
     }
@@ -939,6 +942,15 @@ impl ODEsolver {
     /// timings follow the selected collection mode; `Off` retains no snapshot.
     pub fn preparation_backend_telemetry(&self) -> Option<&IvpTelemetrySnapshot> {
         self.preparation_backend_telemetry.as_ref()
+    }
+
+    /// Returns the live symbolic callback telemetry for the latest generated
+    /// backend. Unlike `preparation_backend_telemetry`, this snapshot includes
+    /// callback work completed after preparation, during integration.
+    pub fn symbolic_ivp_telemetry_snapshot(&self) -> Option<IvpTelemetrySnapshot> {
+        self.symbolic_backend_telemetry
+            .as_ref()
+            .map(IvpTelemetry::snapshot)
     }
 
     /// Returns the lifecycle identity and telemetry for the latest generated
@@ -1612,6 +1624,7 @@ impl ODEsolver {
         }
         self.preparation_timings = BdfPreparationTimings::default();
         self.preparation_backend_telemetry = None;
+        self.symbolic_backend_telemetry = None;
         let start = self.telemetry_mode.collects_timings().then(Instant::now);
         let configuration_started = start.map(|_| Instant::now());
         let mut options = SymbolicIvpProblemOptions::new();
@@ -1727,6 +1740,7 @@ impl ODEsolver {
         self.preparation_backend_telemetry = backend_telemetry
             .as_ref()
             .map(|telemetry| telemetry.snapshot());
+        self.symbolic_backend_telemetry = backend_telemetry.clone();
         self.parameter_values_handle = parameter_values_handle.clone();
         self.preparation_timings.callback_wiring_ms = elapsed_ms(callback_wiring_started);
 
@@ -1785,6 +1799,7 @@ impl ODEsolver {
     fn try_generate_native_numeric(&mut self) -> Result<(), BdfConfigurationError> {
         self.preparation_timings = BdfPreparationTimings::default();
         self.preparation_backend_telemetry = None;
+        self.symbolic_backend_telemetry = None;
         self.prepared_jacobian_into_factory = None;
         let start = self.telemetry_mode.collects_timings().then(Instant::now);
         let callback_wiring_started = start.map(|_| Instant::now());

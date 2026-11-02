@@ -488,7 +488,6 @@ let mut solver = NRBVP::new_with_options(
     options,
 );
 
-solver.dont_save_log(true);
 solver.try_solve()?;
 let result = solver.get_result().expect("BVP result should be available");
 let stats = solver.get_statistics();
@@ -564,7 +563,6 @@ let mut solver = NRBVP::new_numeric_fd_with_options(
     },
 );
 
-solver.dont_save_log(true);
 solver.try_solve()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
