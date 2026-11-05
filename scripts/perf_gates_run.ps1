@@ -53,8 +53,19 @@ try {
     Push-Location $repoRoot
     try {
         Write-Host "perf-gates $($Action.ToLowerInvariant()): machine=$Machine warmups=$Warmups runs=$Runs max-relative-mad=$MaxRelativeMad"
-        & cargo @cargoArgs
-        $code = $LASTEXITCODE
+        # Windows PowerShell can surface native stderr (including Cargo
+        # warnings) as PowerShell errors. Do not let ErrorActionPreference
+        # mistake a warning for process failure; the native exit code remains
+        # the authoritative success/failure signal below.
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & cargo @cargoArgs
+            $code = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         if ($code -ne 0) {
             throw "perf-gates $($Action.ToLowerInvariant()) failed with exit code $code. Inspect the run report printed above."
         }
