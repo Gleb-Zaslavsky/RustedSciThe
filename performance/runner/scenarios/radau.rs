@@ -88,7 +88,7 @@ fn solve_workload(
 
     let solve_started = Instant::now();
     let solution = solver
-        .solve_with_parameter_values(&initial_state, &parameters)
+        .try_solve_with_parameter_values(&initial_state, &parameters)
         .map_err(|error| RunnerError::Scenario(format!("Radau solve: {error}")))?;
     let solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
     let scenario_wall_ms = full_started.elapsed().as_secs_f64() * 1_000.0;
@@ -137,7 +137,7 @@ fn solve_workload(
         RadauTelemetryMode::Timings,
     )?;
     let diagnostic_solution = diagnostic_solver
-        .solve_with_parameter_values(&diagnostic_y0, &diagnostic_parameters)
+        .try_solve_with_parameter_values(&diagnostic_y0, &diagnostic_parameters)
         .map_err(|error| RunnerError::Scenario(format!("Radau timed diagnostic solve: {error}")))?;
     validate_solution(
         &diagnostic_solution.y,

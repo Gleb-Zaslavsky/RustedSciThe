@@ -108,6 +108,48 @@ macro_rules! lsode2_route {
     };
 }
 
+macro_rules! bvp_cantera_route {
+    ($id:literal, $frontend:literal, $execution:literal, $layout:literal, $run:path) => {
+        Scenario {
+            id: $id,
+            solver: "bvp_cantera",
+            groups: &["bvp", "bvp-large", "bvp-cantera-matrix"],
+            workload: "six-state nonlinear combustion BVP, fixed trapezoid grid=24000 intervals, one fresh solve per sample",
+            frontend: $frontend,
+            execution: $execution,
+            linear_algebra: $layout,
+            parallel_policy: "Sequential",
+            telemetry: "off single-solve wall gate + Timings native stage diagnostic",
+            version: 4,
+            gate_metrics: &["scenario_wall_ms"],
+            description: "Large fixed-grid nonlinear combustion workload through the Cantera core; boundary values, bounds, finiteness, and residual are checked on every solve",
+            run: $run,
+            diagnose: Some(crate::scenarios::bvp_cantera::diagnose),
+        }
+    };
+}
+
+macro_rules! bvp_cantera_continuation_route {
+    ($id:literal, $frontend:literal, $execution:literal, $layout:literal, $run:path) => {
+        Scenario {
+            id: $id,
+            solver: "bvp_cantera",
+            groups: &["bvp", "bvp-large", "bvp-cantera-matrix", "bvp-cantera-parameter-continuation"],
+            workload: "six-state linear decay BVP, 12000 intervals, 10 native parameter-loop points with previous successful profile reused",
+            frontend: $frontend,
+            execution: $execution,
+            linear_algebra: $layout,
+            parallel_policy: "Sequential",
+            telemetry: "off loop wall gate + Timings per-loop stage diagnostic",
+            version: 2,
+            gate_metrics: &["scenario_wall_ms"],
+            description: "Native solve_parameter_loop reuses prepared symbolic callbacks across ten rate values; the first point uses the configured guess, later points use the previous success, and every discrete profile is checked analytically",
+            run: $run,
+            diagnose: Some(crate::scenarios::bvp_cantera::diagnose),
+        }
+    };
+}
+
 static CORE_SCENARIOS: &[Scenario] = &[
     Scenario {
         id: "banded_faithful_tridiagonal",
@@ -124,6 +166,150 @@ static CORE_SCENARIOS: &[Scenario] = &[
         description: "Faithful compact band LU factor and solve with known solution",
         run: crate::scenarios::banded::run_tridiagonal,
         diagnose: None,
+    },
+    bvp_cantera_route!(
+        "bvp_cantera_combustion24000_expr_sparse_lambdify",
+        "ExprLegacy",
+        "Lambdify",
+        "Sparse",
+        crate::scenarios::bvp_cantera::expr_sparse_lambdify
+    ),
+    bvp_cantera_route!(
+        "bvp_cantera_combustion24000_atom_sparse_lambdify",
+        "AtomView",
+        "Lambdify",
+        "Sparse",
+        crate::scenarios::bvp_cantera::atom_sparse_lambdify
+    ),
+    bvp_cantera_route!(
+        "bvp_cantera_combustion24000_expr_banded_lambdify",
+        "ExprLegacy",
+        "Lambdify",
+        "BandedAuto",
+        crate::scenarios::bvp_cantera::expr_banded_lambdify
+    ),
+    bvp_cantera_route!(
+        "bvp_cantera_combustion24000_atom_banded_lambdify",
+        "AtomView",
+        "Lambdify",
+        "BandedAuto",
+        crate::scenarios::bvp_cantera::atom_banded_lambdify
+    ),
+    bvp_cantera_route!(
+        "bvp_cantera_combustion24000_expr_sparse_aot",
+        "ExprLegacy",
+        "AOT(warm-cache)",
+        "Sparse",
+        crate::scenarios::bvp_cantera::expr_sparse_aot
+    ),
+    bvp_cantera_route!(
+        "bvp_cantera_combustion24000_atom_sparse_aot",
+        "AtomView",
+        "AOT(warm-cache)",
+        "Sparse",
+        crate::scenarios::bvp_cantera::atom_sparse_aot
+    ),
+    bvp_cantera_route!(
+        "bvp_cantera_combustion24000_expr_banded_aot",
+        "ExprLegacy",
+        "AOT(warm-cache)",
+        "BandedAuto",
+        crate::scenarios::bvp_cantera::expr_banded_aot
+    ),
+    bvp_cantera_route!(
+        "bvp_cantera_combustion24000_atom_banded_aot",
+        "AtomView",
+        "AOT(warm-cache)",
+        "BandedAuto",
+        crate::scenarios::bvp_cantera::atom_banded_aot
+    ),
+    bvp_cantera_continuation_route!(
+        "bvp_cantera_parameter_continuation12000x10_expr_sparse_lambdify",
+        "ExprLegacy",
+        "Lambdify",
+        "Sparse",
+        crate::scenarios::bvp_cantera::continuation_expr_sparse_lambdify
+    ),
+    bvp_cantera_continuation_route!(
+        "bvp_cantera_parameter_continuation12000x10_atom_sparse_lambdify",
+        "AtomView",
+        "Lambdify",
+        "Sparse",
+        crate::scenarios::bvp_cantera::continuation_atom_sparse_lambdify
+    ),
+    bvp_cantera_continuation_route!(
+        "bvp_cantera_parameter_continuation12000x10_expr_banded_lambdify",
+        "ExprLegacy",
+        "Lambdify",
+        "BandedAuto",
+        crate::scenarios::bvp_cantera::continuation_expr_banded_lambdify
+    ),
+    bvp_cantera_continuation_route!(
+        "bvp_cantera_parameter_continuation12000x10_atom_banded_lambdify",
+        "AtomView",
+        "Lambdify",
+        "BandedAuto",
+        crate::scenarios::bvp_cantera::continuation_atom_banded_lambdify
+    ),
+    bvp_cantera_continuation_route!(
+        "bvp_cantera_parameter_continuation12000x10_expr_sparse_aot",
+        "ExprLegacy",
+        "AOT(warm-cache)",
+        "Sparse",
+        crate::scenarios::bvp_cantera::continuation_expr_sparse_aot
+    ),
+    bvp_cantera_continuation_route!(
+        "bvp_cantera_parameter_continuation12000x10_atom_sparse_aot",
+        "AtomView",
+        "AOT(warm-cache)",
+        "Sparse",
+        crate::scenarios::bvp_cantera::continuation_atom_sparse_aot
+    ),
+    bvp_cantera_continuation_route!(
+        "bvp_cantera_parameter_continuation12000x10_expr_banded_aot",
+        "ExprLegacy",
+        "AOT(warm-cache)",
+        "BandedAuto",
+        crate::scenarios::bvp_cantera::continuation_expr_banded_aot
+    ),
+    bvp_cantera_continuation_route!(
+        "bvp_cantera_parameter_continuation12000x10_atom_banded_aot",
+        "AtomView",
+        "AOT(warm-cache)",
+        "BandedAuto",
+        crate::scenarios::bvp_cantera::continuation_atom_banded_aot
+    ),
+    Scenario {
+        id: "bvp_cantera_bratu32768_expr_sparse_lambdify",
+        solver: "bvp_cantera",
+        groups: &["bvp", "bvp-large", "bvp-cantera-matrix"],
+        workload: "symmetric half-domain Bratu y'=z, z'=-2*exp(y), 32768 intervals, one fresh solve per sample",
+        frontend: "ExprLegacy",
+        execution: "Lambdify",
+        linear_algebra: "Sparse",
+        parallel_policy: "Sequential",
+        telemetry: "off single-solve wall gate + Timings native stage diagnostic",
+        version: 2,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "Large nonlinear Bratu BVP with boundary, bounds, finiteness, and residual checks",
+        run: crate::scenarios::bvp_cantera::bratu32768_expr_sparse_lambdify,
+        diagnose: Some(crate::scenarios::bvp_cantera::diagnose),
+    },
+    Scenario {
+        id: "bvp_cantera_kithe_combustion26x256_atom_sparse_lambdify",
+        solver: "bvp_cantera",
+        groups: &["bvp", "bvp-large", "bvp-cantera-matrix"],
+        workload: "KiThe 26-state fixed-grid combustion, 256 intervals, one fresh solve per sample",
+        frontend: "AtomView",
+        execution: "Lambdify",
+        linear_algebra: "Sparse",
+        parallel_policy: "Sequential",
+        telemetry: "off single-solve wall gate + Timings native stage diagnostic",
+        version: 2,
+        gate_metrics: &["scenario_wall_ms"],
+        description: "Large KiThe-derived combustion fixture with profile, boundary and residual checks",
+        run: crate::scenarios::bvp_cantera::kithe_combustion26x256_atom_sparse_lambdify,
+        diagnose: Some(crate::scenarios::bvp_cantera::diagnose),
     },
     bdf_route!(
         "bdf_diff256_lambdify_expr_seq",
@@ -1111,11 +1297,9 @@ mod tests {
 
     #[test]
     fn submillisecond_robertson_sanity_cases_are_not_performance_scenarios() {
-        assert!(
-            !SCENARIOS
-                .iter()
-                .any(|scenario| scenario.workload.starts_with("Robertson,"))
-        );
+        assert!(!SCENARIOS
+            .iter()
+            .any(|scenario| scenario.workload.starts_with("Robertson,")));
     }
 
     #[test]
@@ -1447,5 +1631,66 @@ mod tests {
             scenario.gate_metrics == ["scenario_wall_ms"]
                 && scenario.telemetry.starts_with("off wall gate")
         }));
+    }
+
+    #[test]
+    fn bvp_cantera_gate_registers_large_matched_symbolic_routes() {
+        let scenarios = select(&Selector {
+            group: Some("bvp-cantera-matrix".into()),
+            ..Selector::default()
+        })
+        .unwrap();
+        assert_eq!(scenarios.len(), 18);
+        let parameter_continuation = select(&Selector {
+            group: Some("bvp-cantera-parameter-continuation".into()),
+            ..Selector::default()
+        })
+        .unwrap();
+        assert_eq!(parameter_continuation.len(), 8);
+        assert!(parameter_continuation.iter().all(|scenario| {
+            scenario
+                .workload
+                .contains("10 native parameter-loop points")
+                && scenario.workload.contains("12000 intervals")
+                && scenario.description.contains("solve_parameter_loop")
+                && scenario.version == 2
+                && scenario.diagnose.is_some()
+        }));
+        assert_eq!(
+            scenarios
+                .iter()
+                .filter(|scenario| scenario.id == "bvp_cantera_bratu32768_expr_sparse_lambdify")
+                .count(),
+            1
+        );
+        assert_eq!(
+            scenarios
+                .iter()
+                .filter(|scenario| scenario.id
+                    == "bvp_cantera_kithe_combustion26x256_atom_sparse_lambdify")
+                .count(),
+            1
+        );
+        for frontend in ["ExprLegacy", "AtomView"] {
+            for execution in ["Lambdify", "AOT(warm-cache)"] {
+                for layout in ["Sparse", "BandedAuto"] {
+                    assert_eq!(
+                        scenarios
+                            .iter()
+                            .filter(|scenario| {
+                                scenario.frontend == frontend
+                                    && scenario.execution == execution
+                                    && scenario.linear_algebra == layout
+                                    && scenario.gate_metrics == ["scenario_wall_ms"]
+                                    && scenario.workload.contains("24000 intervals")
+                                    && scenario.version == 4
+                            })
+                            .count(),
+                        1,
+                        "missing/duplicate Cantera route {frontend}/{execution}/{layout}"
+                    );
+                }
+            }
+        }
     }
 }

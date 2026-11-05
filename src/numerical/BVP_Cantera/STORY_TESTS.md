@@ -589,3 +589,42 @@ AOT compiler/profile matrix all passed. The compact stage/duration table is in
 These checks close the current correctness/reporting gates, but do not create a
 performance baseline. Initial repeated record/compare still requires a clean
 source revision and stable samples.
+
+## 2026-11-05: Post-allocation-audit Release matrix
+
+Reran the complete twelve-stage Windows Release matrix after the Newton report
+buffer reuse, direct full-grid matrix construction, and symbolic preparation
+capacity/row-index changes. All twelve stages passed, including Cantera tests
+with ignored cases, the BVP_api facade, perf-gate correctness/registry checks,
+both task-parser routes, Python binding compilation, three runnable examples,
+the 12-route frontend/execution/backend workload table, AOT frontend/layout
+parity, and the compiler/profile matrix. Cantera Release correctness reported
+64 passed, 0 failed. Full summary and technical logs are archived under
+`test_reports/BVP_Cantera_release_manual/20261105T181340Z/`.
+
+The fresh workload table covers the 24000-interval six-state combustion case
+for ExprLegacy/AtomView x Lambdify/AOT x Sparse/BandedAuto. Every route passed
+in one Newton iteration with 2 residual calls, 1 Jacobian call and 1
+factorization; all routes reported the same maximum analytic error
+(`1.367e-12`). Single-sample solve times were 32.947-33.968 ms for Sparse and
+18.530-19.027 ms for BandedAuto; symbolic preparation was 58.417-61.484 ms.
+The 128-interval Dense control solved in 12.846-12.969 ms and remains a
+correctness/control row, not performance evidence. These are single Release
+matrix observations, not repeated medians, a before/after allocation study, or
+a regression verdict. AOT artifact build was warmed and excluded from these
+warm workload timings.
+
+Both continuous-analytic correctness tables passed across ExprLegacy/AtomView
+and Dense/Sparse/BandedAuto. For `y=1/(1+x)`, profile error decreased from
+`7.675e-4` at 16 intervals to `1.918e-4` at 32 and `4.796e-5` at 64, showing
+the expected second-order mesh trend; trapezoid residual stayed below
+`9.8e-17`. The derived `exp(-x^2/4)` fixture also showed second-order
+convergence, with residual below `6.4e-12`.
+
+The 24-route AOT compiler/profile matrix (GCC, TCC, Rust and Zig; three build
+presets; both symbolic frontends) passed. Initial and rebound states matched
+Lambdify exactly in the reported cases. This establishes correctness across
+the tested toolchains, not compiler performance: the table does not yet record
+effective compiler flags, cold build time or artifact size. No performance
+baseline was created by this Release matrix; clean-source repeated perf-gate
+record/compare remains the next separate step.

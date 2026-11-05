@@ -1,6 +1,7 @@
 pub mod banded;
 pub mod bdf;
 pub mod be;
+pub mod bvp_cantera;
 pub mod bvp_damp;
 pub mod bvp_large;
 pub mod bvp_sci;
