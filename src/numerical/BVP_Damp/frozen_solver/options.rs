@@ -15,6 +15,8 @@ pub struct FrozenSolverOptions {
     pub tolerance: f64,
     /// Maximum nonlinear iterations.
     pub max_iterations: usize,
+    /// Optional per-state bounds enforced by a fraction-to-boundary Newton guard.
+    pub bounds: Option<HashMap<String, (f64, f64)>>,
     /// Optional common text-log level, independent of the bounded decision trace.
     pub logging_level: Option<crate::numerical::logging::SolverLogLevel>,
     /// Generated-backend configuration used by sparse solver paths.
@@ -39,6 +41,7 @@ impl FrozenSolverOptions {
             method,
             tolerance,
             max_iterations,
+            bounds: None,
             logging_level: None,
             generated_backend_config: GeneratedBackendConfig::default(),
         }
@@ -153,6 +156,16 @@ impl FrozenSolverOptions {
     /// Overrides the nonlinear iteration limit.
     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
         self.max_iterations = max_iterations;
+        self
+    }
+
+    /// Keeps Frozen Newton iterates inside inclusive per-state bounds.
+    ///
+    /// Bounds are opt-in. The solver limits a Newton step before applying it;
+    /// it never clips a completed iterate or reports a clipped step as
+    /// convergence.
+    pub fn with_bounds(mut self, bounds: HashMap<String, (f64, f64)>) -> Self {
+        self.bounds = Some(bounds);
         self
     }
 
@@ -324,6 +337,7 @@ impl Default for FrozenSolverOptions {
             method: default_sparse_method_name(),
             tolerance: 1e-6,
             max_iterations: DEFAULT_MAX_ITERATIONS,
+            bounds: None,
             logging_level: None,
             generated_backend_config: GeneratedBackendConfig::default(),
         }

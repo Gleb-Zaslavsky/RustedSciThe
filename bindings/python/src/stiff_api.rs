@@ -40,8 +40,8 @@ use crate::be::{BackwardEulerSolution, map_be_error};
 use crate::contract::SolverOptions;
 use crate::expr::PyExpr;
 use crate::lsode2::{Lsode2Solution, map_lsode2_error};
-use crate::radau::{RadauSolution, map_radau_error};
 use crate::parameter_loop::{PyIvpParameterLoopPoint, run_parameter_loop};
+use crate::radau::{RadauSolution, map_radau_error};
 
 /// A composable native profile for common stiff-solver choices.
 ///
@@ -1006,7 +1006,11 @@ impl PyPreparedStiffSolver {
     ) -> PyResult<Vec<Py<PyIvpParameterLoopPoint>>> {
         crate::radau::finite_vector(&y0, "y0")?;
         let solver = solver_name(self.inner.kind());
-        let route = self.callback_route.as_deref().unwrap_or("stiff_api").to_owned();
+        let route = self
+            .callback_route
+            .as_deref()
+            .unwrap_or("stiff_api")
+            .to_owned();
         run_parameter_loop(py, solver, &route, parameter_vectors, |parameters| {
             solve_with_parameter_values(self, py, None, y0.clone(), parameters.to_vec())
         })
@@ -1481,6 +1485,15 @@ fn map_prepare_error(error: rustedscithe_core::numerical::StiffAPI::StiffApiErro
             solver_name(solver),
             "stiff_api:preset",
             "DimensionMismatch",
+        ),
+        StiffApiError::SolverKindMismatch { selected, request } => crate::errors::annotate_native(
+            InvalidConfigurationError::new_err(format!(
+                "hybrid settings select {selected:?}, but the numerical request is {request:?}"
+            )),
+            "configuration",
+            "stiff_api",
+            "request",
+            "SolverKindMismatch",
         ),
     }
 }

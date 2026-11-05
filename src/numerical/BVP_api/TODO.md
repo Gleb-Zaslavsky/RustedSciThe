@@ -1,9 +1,78 @@
 # BVP_api: Hybrid Client Settings And Full-Fidelity Route Contract
 
+## Cantera route onboarding (2026-11-05)
+
+### Parameter continuation and document clients
+
+- [x] Delegate ordered Cantera parameter loops to the native solver; publish
+  only successful full-grid profiles and retain per-point typed failures and
+  partial telemetry. A failed point must never supply the next guess.
+- [x] Cover last-success checkpoint restoration, all-failed/invalid loops,
+  parameter ordering, facade postprocessing and Python report parity in Debug.
+- [x] Support Cantera in both full task documents and settings-only hybrid
+  documents without coupling client equations to the settings parser.
+- [x] Add combustion-like and Bratu parameter-continuation examples in Rust
+  and Python, with honest model scope, bounds, output shapes and failure policy.
+
+- [x] Add an explicit Cantera variant to `BvpSolverSettings`/
+  `BvpSolverConfig` and route it through the existing `Bvp_api`; no separate
+  facade is introduced. Preserve the native report, build the common node-major
+  profile only after successful solve, and expose the native telemetry snapshot.
+- [x] Keep fixed-mesh/uniform-grid validation explicit. Fixed external-input
+  binding/rebinding is supported; mesh restart remains explicitly unsupported.
+- [x] Expose route-tagged partial telemetry without conflating an unattempted
+  solve with a zero-cost measured solve. Reject facade `Timings`-only for
+  Cantera because its native `Timings` mode also collects counters; `Detailed`
+  maps to its combined native mode.
+- [x] Add a basic facade contract test for Cantera routing, full-grid result
+  reconstruction, postprocessing, native report and telemetry; add a runnable
+  Rust example and document current pilot limitations in both guides.
+- [x] Add native Cantera continuation, including failed-point retention,
+  last-success guess selection, exact entry rollback when all points fail,
+  callback/AOT reuse, per-point telemetry, and restoration of the last success.
+- [x] Add the Cantera route to full task-document parsing and the hybrid
+  settings-only parser; the latter accepts solver settings without requiring
+  client equations, while full task execution retains typed capability errors.
+- [x] Add Python facade loop result types, typed point errors, telemetry maps,
+  stubs, focused tests, and combustion-like/Bratu examples in Rust and Python.
+  Both 10-point example sweeps validate endpoint constraints and the discrete
+  trapezoid residual; Bratu is additionally checked against its analytic lower
+  branch. Python tests cover both frontends and Off/Counters/Detailed modes.
+- [x] Add the parser and continuation examples to the Cantera release matrix.
+- [ ] Complete clean-source repeated perf-gate record/compare for the new
+  parameter-loop workload before recording or replacing its baseline.
+- [x] Add multi-state facade parity and retry-lifecycle tests, including
+  preservation of the previous successful profile after a failed retry. The
+  six-state loop covers ExprLegacy/AtomView and Sparse/BandedAuto on 2048
+  intervals; native nonlinear combustion parity is covered at the solver
+  layer across all supported frontends/layouts. The basic typed-failure and
+  partial-telemetry contract also has a bounded scalar test.
+
 The full BVP task parser remains an independent end-to-end workflow. A hybrid
 client owns equations, state ordering, boundary conditions, mesh and initial
 guess; RST parses only solver settings and prepares the selected BVP_api route.
 Do not pull SciWithFreeParameters into this fixed-input client workflow.
+
+## Native Newton Recovery Follow-Up (2026-11-04)
+
+The numerical work and acceptance gates are owned by the
+[Damped/Frozen recovery plan](../BVP_Damp/TODO.md#newton-reliability-recovery-plan-2026-11-04).
+This facade must not duplicate Newton logic or compensate for native defects.
+
+- [ ] Preserve distinct route contracts: Damped owns damping/adaptivity;
+  Frozen/Naive stays fixed-mesh without a damping search. Verify full-step
+  Frozen bounds rejection rather than hidden clipping or step shortening.
+- [ ] Cover native/facade parity for success, bounds blockage, failed search,
+  invalid callbacks and refinement failure; retain typed sources, partial
+  telemetry and previously accepted results without publishing failed iterates.
+- [ ] Run the same large real-problem fixtures through the facade and include
+  rebind/continuation/loop recovery after a failed parameter point. Do not
+  replace the user's guess, bounds or tolerances in the facade to obtain success.
+- [ ] Check settings parsers and Python bindings/guides/examples for the final
+  native bounds, tolerance and damping-parameter contracts. Update affected
+  tests and documentation only after the native numerical gates pass.
+- [ ] Participate in the four-stage Release/stories/performance stabilization
+  defined in the native plan; do not maintain a second baseline policy here.
 
 ## Existing Surface And Scope
 
@@ -66,6 +135,12 @@ Do not pull SciWithFreeParameters into this fixed-input client workflow.
   parameters remain outside this API.
 - [x] Unknown, malformed, duplicate or incompatible keys fail with typed
   errors carrying a full field path. Never silently discard an option.
+- [x] Verify Frozen bounds pass through BVP_api using the complete native
+  `FrozenSolverOptions`: a bounded scalar facade solve retains the configured
+  interval in the native solver and publishes only values inside it. Frozen
+  uses a fraction-to-boundary guard and reports typed `BoundStepBlocked` when
+  no feasible Newton step exists; the facade does not clip or publish a failed
+  iterate (2026-11-04).
 - [x] Retain `parse_bvp_solver_settings_from_document` and other existing
   parser entry points for current clients; document the hybrid parser as the
   canonical solver-settings-only path for new clients.

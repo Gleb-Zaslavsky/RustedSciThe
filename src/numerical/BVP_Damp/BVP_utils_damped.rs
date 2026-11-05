@@ -35,30 +35,65 @@ pub fn bound_step_Cantera(
 }
 /// Inspired by the Cantera MultiNewton bound-step guard.
 ///
-/// Production Damped BVP uses this additive-step contract:
-/// `x_next = x + lambda * step`, where `lambda <= fbound`.
+/// Computes the feasible factor for an additive update. Newton routes whose
+/// applied correction has a different sign must use
+/// [`bound_step_Cantera2_with_update_sign`] so the guard checks the candidate
+/// that will actually be applied.
 pub fn bound_step_Cantera2(
     x: &dyn VectorType,
     step: &dyn VectorType,
     bounds: &Vec<(f64, f64)>,
 ) -> f64 {
+    bound_step_Cantera2_with_update_sign(x, step, bounds, 1.0)
+}
+
+/// Computes the largest feasible factor for `x_next = x + sign * factor * step`.
+///
+/// The public compatibility helper above retains its additive-update contract.
+/// Damped Newton uses a subtractive Newton correction and passes `sign = -1`;
+/// sharing the scalar loop avoids allocating a negated vector per iteration.
+pub(crate) fn bound_step_Cantera2_with_update_sign(
+    x: &dyn VectorType,
+    step: &dyn VectorType,
+    bounds: &[(f64, f64)],
+    sign: f64,
+) -> f64 {
+    bound_step_Cantera2_with_update_sign_and_limit(x, step, bounds, sign).0
+}
+
+pub(crate) fn bound_step_Cantera2_with_update_sign_and_limit(
+    x: &dyn VectorType,
+    step: &dyn VectorType,
+    bounds: &[(f64, f64)],
+    sign: f64,
+) -> (f64, Option<usize>) {
     assert_eq!(x.len(), bounds.len());
+    assert_eq!(x.len(), step.len());
+    debug_assert!(sign == 1.0 || sign == -1.0);
     let mut fbound: f64 = 1.0;
+    let mut limiting_index = None;
 
     for (i, val) in x.iterate().enumerate() {
         let below = bounds[i].0;
         let above = bounds[i].1;
-        let step_i = step.get_val(i);
-        let newval = val + step_i;
+        let newval = val + sign * step.get_val(i);
 
         if newval > above {
-            fbound = fbound.min((above - val) / (newval - val)).max(0.0);
+            let candidate_factor = ((above - val) / (newval - val)).max(0.0);
+            if candidate_factor < fbound {
+                fbound = candidate_factor;
+                limiting_index = Some(i);
+            }
         } else if newval < below {
-            fbound = fbound.min((val - below) / (val - newval));
+            let candidate_factor = (val - below) / (val - newval);
+            if candidate_factor < fbound {
+                fbound = candidate_factor;
+                limiting_index = Some(i);
+            }
         }
     }
 
-    fbound
+    (fbound, limiting_index)
 }
 
 // This function calculates the minimum damping factor necessary to keep the solution within specified bounds after taking a Newton step.
@@ -110,6 +145,168 @@ mod bound_step_tests {
     }
 
     #[test]
+    fn reduced_weighted_norm_matches_full_grid_with_zero_boundary_corrections() {
+        // Node-major state: the large values at (node 0, component 0) and
+        // (node 1, component 1) are prescribed BCs, not Newton unknowns.
+        let state = dense(&[10.0, 20.0, 30.0, 40.0]);
+        let step = dense(&[0.5, 2.0, 1.0, 4.0]);
+        let full_positions = [1, 2, 4, 5];
+        let boundary_values = [(0, 0, 100.0), (3, 1, 200.0)];
+        let rel = [0.01, 0.1, 0.1, 0.01];
+        let mut sums = [0.0; 2];
+
+        let actual = weighted_norm_reduced_unknowns(
+            &state,
+            &step,
+            &rel,
+            0.5,
+            2,
+            3,
+            &full_positions,
+            &boundary_values,
+            &mut sums,
+        )
+        .expect("valid reduced layout should produce a norm");
+
+        // Component scales follow Cantera: all nodes, including the eliminated
+        // BC entries, contribute to the mean state magnitude.
+        let scale_0 = 0.5 + 0.1 * ((100.0_f64 + 20.0 + 30.0) / 3.0);
+        let scale_1 = 0.5 + 0.01 * ((10.0_f64 + 200.0 + 40.0) / 3.0);
+        let expected = (((0.5_f64 / scale_1).powi(2)
+            + (2.0_f64 / scale_0).powi(2)
+            + (1.0_f64 / scale_0).powi(2)
+            + (4.0_f64 / scale_1).powi(2))
+            / 6.0_f64)
+            .sqrt();
+
+        assert_close(actual, expected);
+        let full_state = dense(&[100.0, 10.0, 20.0, 200.0, 30.0, 40.0]);
+        let full_step = dense(&[0.0, 0.5, 2.0, 0.0, 1.0, 4.0]);
+        let full_norm = weighted_norm(&full_state, &full_step, &vec![0.1, 0.01], 0.5, 2, 3);
+        assert_close(actual, full_norm);
+        assert_eq!(sums, [150.0, 250.0]);
+    }
+
+    #[test]
+    fn reduced_weighted_norm_is_invariant_to_consistent_unit_scaling() {
+        let state = dense(&[2.0, 20.0, 6.0, 60.0]);
+        let step = dense(&[0.2, 2.0, 0.4, 4.0]);
+        let scaled_state = dense(&[2000.0, 20000.0, 6000.0, 60000.0]);
+        let scaled_step = dense(&[200.0, 2000.0, 400.0, 4000.0]);
+        let rel = [0.1; 4];
+        let full_positions = [0, 1, 4, 5];
+        let boundary_values = [(2, 0, 4.0), (3, 1, 40.0)];
+        let scaled_boundary_values = [(2, 0, 4000.0), (3, 1, 40000.0)];
+        let mut sums = [0.0; 2];
+
+        let original = weighted_norm_reduced_unknowns(
+            &state,
+            &step,
+            &rel,
+            0.01,
+            2,
+            3,
+            &full_positions,
+            &boundary_values,
+            &mut sums,
+        )
+        .unwrap();
+        let scaled = weighted_norm_reduced_unknowns(
+            &scaled_state,
+            &scaled_step,
+            &rel,
+            10.0,
+            2,
+            3,
+            &full_positions,
+            &scaled_boundary_values,
+            &mut sums,
+        )
+        .unwrap();
+
+        assert_close(original, scaled);
+    }
+
+    #[test]
+    fn reduced_weighted_norm_rejects_invalid_layout_and_nonfinite_data() {
+        let state = dense(&[1.0, 2.0]);
+        let step = dense(&[0.1, 0.2]);
+        let boundary_values = [(2, 0, 3.0), (3, 1, 4.0)];
+        let mut sums = [0.0; 2];
+        let nonfinite_step = dense(&[f64::NAN, 0.2]);
+        assert!(
+            weighted_norm_reduced_unknowns(
+                &state,
+                &nonfinite_step,
+                &[0.1, 0.1],
+                1e-6,
+                2,
+                2,
+                &[0, 1],
+                &boundary_values,
+                &mut sums,
+            )
+            .is_none()
+        );
+        assert!(
+            weighted_norm_reduced_unknowns(
+                &state,
+                &step,
+                &[0.1],
+                1e-6,
+                2,
+                2,
+                &[0, 1],
+                &boundary_values,
+                &mut sums,
+            )
+            .is_none()
+        );
+        assert!(
+            weighted_norm_reduced_unknowns(
+                &state,
+                &step,
+                &[0.1, 0.1],
+                1e-6,
+                2,
+                1,
+                &[0, 0],
+                &boundary_values,
+                &mut sums,
+            )
+            .is_none()
+        );
+        assert!(
+            weighted_norm_reduced_unknowns(
+                &state,
+                &step,
+                &[0.1, 0.1],
+                1e-6,
+                2,
+                2,
+                &[0, 0],
+                &boundary_values,
+                &mut sums,
+            )
+            .is_none()
+        );
+        assert!(
+            weighted_norm_reduced_unknowns(
+                &state,
+                &step,
+                &[0.1, 0.1],
+                1e-6,
+                2,
+                2,
+                &[0, 9],
+                &boundary_values,
+                &mut sums,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn cantera2_keeps_full_step_when_trial_point_is_inside_bounds() {
         let x = dense(&[0.5, -0.2]);
         let step = dense(&[0.1, -0.3]);
@@ -149,6 +346,42 @@ mod bound_step_tests {
 
         assert_close(bound_step_Cantera2(&at_upper, &upper_step, &bounds), 0.0);
         assert_close(bound_step_Cantera2(&at_lower, &lower_step, &bounds), 0.0);
+    }
+
+    #[test]
+    fn subtractive_newton_update_limits_the_actual_candidate_direction() {
+        let x = dense(&[0.0, 1.0, 0.5]);
+        // The runtime update is x - lambda * delta. The first two corrections
+        // move inward from their active bounds; the third crosses the lower
+        // bound and therefore determines the limiting factor.
+        let delta = dense(&[-0.1, 0.1, 0.8]);
+        let bounds = vec![(0.0, 1.0); 3];
+
+        let factor = bound_step_Cantera2_with_update_sign(&x, &delta, &bounds, -1.0);
+
+        assert_close(factor, 0.625);
+        for i in 0..x.len() {
+            let candidate = x[i] - factor * delta[i];
+            assert!(candidate >= bounds[i].0 - 1e-12);
+            assert!(candidate <= bounds[i].1 + 1e-12);
+        }
+    }
+
+    #[test]
+    fn subtractive_newton_update_blocks_only_a_true_outward_boundary_direction() {
+        let at_lower = dense(&[0.0]);
+        let inward_delta = dense(&[-0.1]);
+        let outward_delta = dense(&[0.1]);
+        let bounds = vec![(0.0, 1.0)];
+
+        assert_close(
+            bound_step_Cantera2_with_update_sign(&at_lower, &inward_delta, &bounds, -1.0),
+            1.0,
+        );
+        assert_close(
+            bound_step_Cantera2_with_update_sign(&at_lower, &outward_delta, &bounds, -1.0),
+            0.0,
+        );
     }
 
     #[test]
@@ -265,6 +498,81 @@ pub fn weighted_norm(
     // Average over all points and take square root
     sum /= (n_components * n_points) as f64;
     sum.sqrt()
+}
+
+/// Compute Cantera's weighted correction norm for the boundary-eliminated
+/// Damped system without materializing a full state vector.
+///
+/// Component scales include every grid point, including prescribed boundary
+/// values. Eliminated boundary corrections are zero, but Cantera's RMS
+/// denominator includes the entire full-grid state. `full_positions` maps
+/// each packed entry to its node-major full-state position; `component_sums`
+/// is caller-owned scratch and is reused by line-search trials.
+#[cfg(test)]
+pub(crate) fn weighted_norm_reduced_unknowns(
+    state: &dyn VectorType,
+    step: &dyn VectorType,
+    rel_tolerances: &[f64],
+    abs_tolerance: f64,
+    n_components: usize,
+    n_points: usize,
+    full_positions: &[usize],
+    boundary_values: &[(usize, usize, f64)],
+    component_sums: &mut [f64],
+) -> Option<f64> {
+    let len = step.len();
+    if len == 0
+        || state.len() != len
+        || n_components == 0
+        || n_points == 0
+        || rel_tolerances.len() != len
+        || full_positions.len() != len
+        || component_sums.len() != n_components
+        || len.checked_add(boundary_values.len())? != n_components.checked_mul(n_points)?
+        || !abs_tolerance.is_finite()
+        || abs_tolerance <= 0.0
+    {
+        return None;
+    }
+
+    component_sums.fill(0.0);
+    let full_len = n_components.checked_mul(n_points)?;
+    let mut occupied = vec![false; full_len];
+    for &(position, _, value) in boundary_values {
+        if position >= full_len || occupied[position] || !value.is_finite() {
+            return None;
+        }
+        occupied[position] = true;
+        component_sums[position % n_components] += value.abs();
+    }
+    for (index, &position) in full_positions.iter().enumerate() {
+        let value = state.get_val(index);
+        if position >= full_len || occupied[position] || !value.is_finite() {
+            return None;
+        }
+        occupied[position] = true;
+        component_sums[position % n_components] += value.abs();
+    }
+
+    let mut scaled_rms = 0.0_f64;
+    for i in 0..len {
+        let position = full_positions[i];
+        let component = position % n_components;
+        let tolerance = rel_tolerances[i];
+        if !tolerance.is_finite() || tolerance < 0.0 {
+            return None;
+        }
+        let mean_magnitude = component_sums[component] / n_points as f64;
+        let scale = abs_tolerance + tolerance * mean_magnitude;
+        let correction = step.get_val(i);
+        if !correction.is_finite() || !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        scaled_rms = scaled_rms.hypot(correction / scale);
+    }
+
+    let result = scaled_rms / (full_len as f64).sqrt();
+    result.is_finite().then_some(result)
 }
 pub fn if_initial_guess_inside_bounds(
     initial_guess: &DMatrix<f64>,

@@ -11,7 +11,10 @@ use std::{cmp::Ordering, ops::DerefMut};
 use smallvec::SmallVec;
 
 use super::{
-    atom::{Atom, AtomView, Fun, representation::InlineNum},
+    atom::{
+        Atom, AtomView, Fun,
+        representation::{InlineNum, NumView},
+    },
     coefficient::{Coefficient, CoefficientView},
     state::{RecycledAtom, State, Symbol, Workspace},
 };
@@ -877,6 +880,42 @@ fn coefficient_to_f64(value: CoefficientView<'_>) -> Option<f64> {
     }
 }
 
+fn add_num_views_into(out: &mut Atom, lhs: NumView<'_>, rhs: NumView<'_>) {
+    let sum = out.to_num(Coefficient::zero());
+    sum.set_from_view(&lhs);
+    sum.add(&rhs);
+}
+
+fn atom_num_view(atom: &Atom) -> NumView<'_> {
+    let AtomView::Num(num) = atom.as_view() else {
+        unreachable!("packed numeric arithmetic produces a numeric atom")
+    };
+    num
+}
+
+fn add_coefficient_views_into(out: &mut Atom, lhs: Option<NumView<'_>>, rhs: Option<NumView<'_>>) {
+    let one = Atom::new_num(Coefficient::one());
+    let Atom::Num(one) = &one else {
+        unreachable!("integer one is stored as a numeric atom")
+    };
+    let sum = out.to_num(Coefficient::zero());
+    if let Some(lhs) = lhs {
+        sum.set_from_view(&lhs);
+    } else {
+        sum.set_from_view(&one.to_num_view());
+    }
+    if let Some(rhs) = rhs {
+        sum.add(&rhs);
+    } else {
+        sum.add(&one.to_num_view());
+    }
+}
+
+fn add_num_view_and_one_into(out: &mut Atom, value: NumView<'_>) {
+    let sum = out.to_num(Coefficient::one());
+    sum.add(&value);
+}
+
 impl Atom {
     fn merge_factors(
         &mut self,
@@ -893,13 +932,17 @@ impl Atom {
                 }
                 if let AtomView::Num(n1) = exp1 {
                     if let AtomView::Num(n2) = exp2 {
-                        let new_exp = helper.to_num(n1.get_coeff_view() + n2.get_coeff_view());
-                        if new_exp.to_num_view().is_zero() {
+                        add_num_views_into(helper, n1, n2);
+                        let new_exp = helper.as_view();
+                        let AtomView::Num(new_exp_num) = new_exp else {
+                            unreachable!("packed numeric exponent sum remains numeric")
+                        };
+                        if new_exp_num.is_zero() {
                             self.to_num(1.into());
-                        } else if new_exp.to_num_view().is_one() {
+                        } else if new_exp_num.is_one() {
                             self.set_from_view(&base2);
                         } else {
-                            p1.set_from_base_and_exp(base2, helper.as_view());
+                            p1.set_from_base_and_exp(base2, new_exp);
                         }
                         self.set_normalized(true);
                         return true;
@@ -928,14 +971,17 @@ impl Atom {
             let (base, exp) = p1.to_pow_view().get_base_exp();
             if other.as_view() == base {
                 if let AtomView::Num(n) = exp {
-                    let new_exp = n.get_coeff_view() + 1;
-                    if new_exp.is_zero() {
+                    add_num_view_and_one_into(helper, n);
+                    let new_exp = helper.as_view();
+                    let AtomView::Num(new_exp_num) = new_exp else {
+                        unreachable!("packed numeric exponent sum remains numeric")
+                    };
+                    if new_exp_num.is_zero() {
                         self.to_num(1.into());
-                    } else if new_exp == 1.into() {
+                    } else if new_exp_num.is_one() {
                         self.set_from_view(&other.as_view());
                     } else {
-                        let num = helper.to_num(new_exp);
-                        self.to_pow(other.as_view(), AtomView::Num(num.to_num_view()));
+                        self.to_pow(other.as_view(), new_exp);
                     }
                 } else {
                     other.to_num(1.into());
@@ -957,14 +1003,17 @@ impl Atom {
             let (base, exp) = p.to_pow_view().get_base_exp();
             if self.as_view() == base {
                 if let AtomView::Num(n) = exp {
-                    let new_exp = n.get_coeff_view() + 1;
-                    if new_exp.is_zero() {
+                    add_num_view_and_one_into(helper, n);
+                    let new_exp = helper.as_view();
+                    let AtomView::Num(new_exp_num) = new_exp else {
+                        unreachable!("packed numeric exponent sum remains numeric")
+                    };
+                    if new_exp_num.is_zero() {
                         self.to_num(1.into());
-                    } else if new_exp == 1.into() {
+                    } else if new_exp_num.is_one() {
                         self.set_from_view(&base);
                     } else {
-                        let num = helper.to_num(new_exp);
-                        self.to_pow(base, AtomView::Num(num.to_num_view()));
+                        self.to_pow(base, new_exp);
                     }
                 } else {
                     self.to_num(1.into());
@@ -1034,19 +1083,19 @@ impl Atom {
                 };
 
                 if non_coeff1.eq(&non_coeff2) {
-                    let num = if let AtomView::Num(n) = last_elem {
-                        n.get_coeff_view()
-                    } else {
-                        CoefficientView::Natural(1, 1)
+                    let lhs = match last_elem {
+                        AtomView::Num(num) => Some(num),
+                        _ => None,
                     };
-                    let new_coeff = if let AtomView::Num(n) = last_elem2 {
-                        num + n.get_coeff_view()
-                    } else {
-                        num + 1
+                    let rhs = match last_elem2 {
+                        AtomView::Num(num) => Some(num),
+                        _ => None,
                     };
+                    add_coefficient_views_into(helper, lhs, rhs);
+                    let new_coeff = atom_num_view(helper);
                     let len = slice.len();
 
-                    if new_coeff == 1.into() {
+                    if new_coeff.is_one() {
                         if has_coeff {
                             if len == 2 {
                                 self.set_from_view(&slice2.get(0));
@@ -1063,15 +1112,15 @@ impl Atom {
                     }
 
                     if new_coeff.is_zero() {
-                        self.to_num(new_coeff);
+                        self.set_from_view(&helper.as_view());
                         return true;
                     }
 
-                    let on = helper.to_num(new_coeff);
+                    let on = atom_num_view(helper);
                     if has_coeff {
-                        m.replace_last(on.to_num_view().as_view());
+                        m.replace_last(on.as_view());
                     } else {
-                        m.extend(on.to_num_view().as_view());
+                        m.extend(on.as_view());
                     }
                     m.set_has_coefficient(true);
                     m.set_normalized(true);
@@ -1081,17 +1130,18 @@ impl Atom {
                 if non_coeff1.len() != 1 || other != slice.get(0) {
                     return false;
                 }
-                let new_coeff = if let AtomView::Num(n) = last_elem {
-                    n.get_coeff_view() + 1
+                if let AtomView::Num(n) = last_elem {
+                    add_num_view_and_one_into(helper, n);
                 } else {
                     return false;
-                };
+                }
+                let new_coeff = atom_num_view(helper);
                 if new_coeff.is_zero() {
-                    self.to_num(new_coeff);
+                    self.set_from_view(&helper.as_view());
                     return true;
                 }
-                let on = helper.to_num(new_coeff);
-                m.replace_last(on.to_num_view().as_view());
+                let on = atom_num_view(helper);
+                m.replace_last(on.as_view());
                 m.set_normalized(true);
                 return true;
             }
@@ -1102,22 +1152,24 @@ impl Atom {
             }
             let last_elem = slice.get(slice.len() - 1);
             if self.as_view() == slice.get(0) {
-                let (new_coeff, has_num) = if let AtomView::Num(n) = last_elem {
-                    (n.get_coeff_view() + 1, true)
+                let has_num = if let AtomView::Num(n) = last_elem {
+                    add_num_view_and_one_into(helper, n);
+                    true
                 } else {
                     return false;
                 };
+                let new_coeff = atom_num_view(helper);
                 if new_coeff.is_zero() {
-                    self.to_num(new_coeff);
+                    self.set_from_view(&helper.as_view());
                     return true;
                 }
-                let on = helper.to_num(new_coeff);
+                let on = atom_num_view(helper);
                 other.clone_into(self);
                 if let Atom::Mul(m) = self {
                     if has_num {
-                        m.replace_last(on.to_num_view().as_view());
+                        m.replace_last(on.as_view());
                     } else {
-                        m.extend(on.to_num_view().as_view());
+                        m.extend(on.as_view());
                     }
                     m.set_has_coefficient(true);
                 }
@@ -1422,6 +1474,17 @@ mod test {
         let a = parse!("v1+v2+v3").unwrap();
         let b = parse!("1+v2+v4+v5").unwrap();
         assert_eq!(a + b, parse!("v1+2*v2+v3+v4+v5+1").unwrap());
+    }
+
+    #[test]
+    fn float_coefficients_merge_through_packed_numeric_arithmetic() {
+        assert_eq!(parse!("0.25*x + 0.5*x").unwrap(), parse!("0.75*x").unwrap());
+        assert_eq!(parse!("x + 0.25*x").unwrap(), parse!("1.25*x").unwrap());
+    }
+
+    #[test]
+    fn float_exponents_merge_through_packed_numeric_arithmetic() {
+        assert_eq!(parse!("x^0.25 * x^0.5").unwrap(), parse!("x^0.75").unwrap());
     }
 
     #[test]

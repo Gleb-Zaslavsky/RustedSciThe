@@ -1,5 +1,15 @@
 # TODO: Expr And Atom Frontends, Prepared Runtime And Bindings
 
+## Expr Parser Precedence Audit (2026-11-04)
+
+- [ ] Investigate unary-minus/power precedence and document the current public
+  contract. A BVP correctness fixture reproduced `Expr::parse_expression("-y^2")`
+  evaluating to `+1` at `y=1`; the explicitly parenthesized `0-(y*y)` evaluates
+  to `-1`. Do not silently change parsing semantics during the BVP Newton work:
+  assess compatibility and existing solver/models first. Cover `-y^2`,
+  `(-y)^2`, `-(y^2)`, constants, nested powers and Expr/Atom text routes with
+  evaluation and derivative tests before deciding on a migration.
+
 ## Nonlinear/Fitting Transfer Review (2026-10-24)
 
 - [x] Audit IVP optimization transfer against native nonlinear/fitting code

@@ -316,6 +316,9 @@ pub struct SymbolicIvpGeneratedBackendConfig {
     pub banded_jacobian_chunking_strategy: BandedChunkingStrategy,
     /// Lifecycle build policy.
     pub build_policy: SymbolicIvpAotBuildPolicy,
+    /// Optional cross-language compiler preset override. When absent, Debug
+    /// maps to `DevFastest` and Release maps to `Production` as before.
+    pub aot_build_preset: Option<AotBuildPreset>,
     /// Backend used to emit generated dense IVP artifacts.
     pub aot_codegen_backend: AotCodegenBackend,
     /// Optional explicit C compiler override for `C` AOT backends.
@@ -340,6 +343,7 @@ impl Default for SymbolicIvpGeneratedBackendConfig {
             sparse_jacobian_chunking_strategy: SparseChunkingStrategy::Whole,
             banded_jacobian_chunking_strategy: BandedChunkingStrategy::Whole,
             build_policy: SymbolicIvpAotBuildPolicy::default(),
+            aot_build_preset: None,
             aot_codegen_backend: AotCodegenBackend::default(),
             aot_c_compiler: None,
             output_parent_dir: None,
@@ -441,6 +445,14 @@ impl SymbolicIvpGeneratedBackendConfig {
 
     pub fn with_build_policy(mut self, build_policy: SymbolicIvpAotBuildPolicy) -> Self {
         self.build_policy = build_policy;
+        self
+    }
+
+    /// Overrides the compiler preset used when a build policy materializes an
+    /// artifact. This is independent from runtime AOT options and the build
+    /// policy's Debug/Release artifact directory.
+    pub fn with_aot_build_preset(mut self, preset: AotBuildPreset) -> Self {
+        self.aot_build_preset = Some(preset);
         self
     }
 
@@ -1650,11 +1662,12 @@ impl ResolvedIvpAotPlan {
             }
             other => other,
         };
-        let preset = match profile {
-            Some(AotBuildProfile::Debug) => Some(AotBuildPreset::DevFastest),
-            Some(AotBuildProfile::Release) => Some(AotBuildPreset::Production),
-            None => None,
-        };
+        let preset = profile.map(|profile| {
+            config.aot_build_preset.unwrap_or(match profile {
+                AotBuildProfile::Debug => AotBuildPreset::DevFastest,
+                AotBuildProfile::Release => AotBuildPreset::Production,
+            })
+        });
         Self {
             policy: config.build_policy,
             initial_selection,
@@ -4838,6 +4851,20 @@ mod tests {
         assert_eq!(rebuild.action, ResolvedIvpAotBuildAction::RebuildAlways);
         assert!(rebuild.should_build());
         assert_eq!(rebuild.initial_selection, compiled);
+
+        for preset in [
+            AotBuildPreset::Production,
+            AotBuildPreset::FastBuild,
+            AotBuildPreset::DevFastest,
+        ] {
+            let configured = SymbolicIvpGeneratedBackendConfig::new()
+                .with_build_policy(SymbolicIvpAotBuildPolicy::RebuildAlways {
+                    profile: AotBuildProfile::Release,
+                })
+                .with_aot_build_preset(preset);
+            let resolved = ResolvedIvpAotPlan::resolve(&configured, compiled);
+            assert_eq!(resolved.preset(), Some(preset));
+        }
     }
 
     #[test]

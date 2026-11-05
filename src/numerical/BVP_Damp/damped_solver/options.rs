@@ -5,9 +5,10 @@
 pub struct SolverParams {
     /// Maximum iterations before Jacobian recalculation (default: 3)
     pub max_jac: Option<usize>,
-    /// Maximum damping iterations per Newton step (default: 5)
+    /// Maximum damping trials per Newton step (default: 7; Cantera MultiNewton default)
     pub max_damp_iter: Option<usize>,
-    /// Factor for reducing damping coefficient (default: 0.5)
+    /// Legacy damping exponent offset. On rejection `k`, the current route
+    /// applies `lambda /= 2^(k + damp_factor)` (default: 0.5).
     pub damp_factor: Option<f64>,
     /// Adaptive grid refinement configuration
     pub adaptive: Option<AdaptiveGridConfig>,
@@ -65,7 +66,7 @@ impl Default for SolverParams {
     fn default() -> Self {
         Self {
             max_jac: Some(3),
-            max_damp_iter: Some(5),
+            max_damp_iter: Some(7),
             damp_factor: Some(0.5),
             adaptive: None,
         }

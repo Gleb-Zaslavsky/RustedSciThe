@@ -1,5 +1,514 @@
 # BVP_Damp Architecture Review And Migration TODO
 
+## Newton Reliability Recovery Plan (2026-11-04)
+
+Active correctness/reliability investigation; production stabilization is not
+complete. This is not a performance optimization or permission to relax the
+physical problem. Measurements and interpretation belong in
+`BVP_DAMP_STORY_CORRECTNESS.md`, not in new TODO tables.
+
+### Current Scope Decision
+
+- First mirror the pinned Cantera 3.1.0 numerical core in the independent
+  `numerical::BVP_Cantera` module on a fixed mesh. Do not keep expanding the
+  Damped-local candidate as if it were the standalone solver, and do not mix
+  in RST-specific grid-refinement strategies while establishing parity.
+- Keep symbolic frontends, callback policies, linear-algebra backends and their
+  public configuration unchanged during this core pass.
+- Primary scope is the steady fixed-mesh damped Newton-Raphson core (`MultiNewton`):
+  establish its equations, Jacobian use/reuse, correction norm, bounds, damping
+  decisions, termination status and failure lifecycle against the pinned
+  Cantera reference. This is the production-critical algorithm.
+- Keep Cantera's outer steady/pseudo-transient recovery out of the Newton-core
+  parity gate. It is a separate follow-up feature, not the definition of the
+  Newton method. A generic RST BVP does not uniquely determine a physical
+  transient operator from `y' = f`; only a caller-supplied, explicitly defined
+  operator may be used. Without one, report a typed failure rather than
+  inventing a PDE or silently applying a diagonal shift.
+- Only after the fixed-mesh Newton core is validated should it be tested under
+  existing RST refinement as an extension. Transient recovery, if pursued, is
+  a later and separately gated outer-controller project.
+- The previous norm candidate was evaluated through RST adaptive workloads,
+  which are useful regression evidence but not a clean fixed-mesh Cantera-core
+  parity gate. Build isolated fixed-mesh gates before another integration A/B.
+- The previous reduced-norm prototype divided by the number of free unknowns;
+  this does not reproduce Cantera's full-system RMS denominator. With RST's
+  eliminated, exactly imposed BCs, compare to a full vector with zero boundary
+  corrections and divide by all full-grid entries. The test-only oracle now
+  checks this equivalence; do not retroactively call the prior experiment
+  exact Cantera norm parity.
+- This pass is numerical-core parity only. Do not change callback generation,
+  symbolic frontend selection, matrix backend selection, or public backend
+  configuration while implementing the reference algorithm.
+- Required order: (1) fixed-mesh `MultiNewton` contract tests in standalone
+  `BVP_Cantera`; (2) connect exactly one symbolic input path and Dense backend,
+  then run the large combustion fixtures with correctness/telemetry parity;
+  (3) only after those gates, decide which validated core mechanics to port to
+  `BVP_Damp`; (4) validate RST refinement strategies on top of the accepted
+  core; (5) complete E1-E3 correctness and F1-F4 release stabilization below.
+  Do not make pseudo-transient experiments a prerequisite for deciding whether
+  the Newton core itself is correct.
+- Existing `cantera_core.rs`, `cantera_candidate.rs` and related Damped-local
+  modules are historical diagnostic controls. Keep them while they compare
+  against the current production solver; move only reusable standalone
+  Cantera-contract tests/fixtures, not Damped-private adapter code.
+  Keep the existing production core until its replacement passes the gates.
+- Cantera norm/damping experiments recorded before the Jacobian correction are
+  historical evidence, not a verdict on the corrected problem. Repeat relevant
+  comparisons on the corrected source, without changing problem data.
+
+### Implementation Status (2026-11-04)
+
+- **Resolved correctness blocker:** ExprLegacy and AtomView both omitted
+  cross-component right-node dependencies for Trapezoid. Dependency plans now
+  add only the RHS state arguments actually used by each equation at the right
+  node; Forward and left-node tracking are unchanged. The Trapezoid RHS also
+  binds its independent variable at both interval endpoints, including the
+  Atom endpoint fallback. Debug regressions cover mixed left/right BCs,
+  nonuniform meshes, x-dependent RHS, all three ExprLegacy matrix layouts,
+  Atom sparse differentiation, and the original 26-state Sparse fixture. On
+  that fixture both ExprLegacy and AtomView produce the expected
+  `-0.3030303030303` Jacobian entry and converge on the original fixed mesh:
+  4 iterations, 8 damping trials, 12 linear solves, with matching profile
+  metrics. The minimum concentration-like value is about `-1.30e-4`, within
+  the configured `-0.1` lower bound; this does not establish strict physical
+  positivity. The original fixed-grid failure is therefore explained by a
+  wrong Jacobian, not evidence that the Newton core itself is defective.
+- **Post-fix refinement recheck:** unchanged TwoPoint, Pearson and Grcar-Smooke
+  cases all converge with two refinements and original tolerances. Results:
+  TwoPoint 101 nodes / 8 iterations; Pearson 3082 nodes / 6 iterations;
+  Grcar-Smooke 3088 nodes / 6 iterations. This is Debug correctness evidence,
+  not a performance claim. The standalone DoublePoints route also converges
+  without panic: 2 refinements, 133 nodes, 6 iterations, 10 damping trials,
+  and 16 linear solves. Its earlier typed `MissingResult` was another symptom
+  of the incomplete Jacobian, not a lasting grid failure.
+- **Debug regression gate:** `cargo test --lib symbolic::View:: -- --test-threads=1`
+  passed 206 tests (8 ignored). The latest full `numerical::BVP_Damp::` filter
+  passed 345 tests and ignored 63, with one remaining failure:
+  `test_classic_examples::tets::test_BVP_Damp1` unwraps a missing result. Its
+  isolated run reproduces the failure; the separate correctness test with the
+  same short name passes. This classic test uses the default Forward scheme,
+  so it is outside the Trapezoid Jacobian correction and remains an open,
+  separately tracked solver/test issue. All new Trapezoid and large-fixture
+  gates pass.
+- **Fixed-Jacobian local control:** Debug tests compare the actual legacy
+  damping telemetry with an independent pinned-Cantera schedule calculation;
+  they also verify base-state preservation after exhausted trials and a
+  bound-blocked step. This confirms a real schedule difference, not whole-solver
+  parity or an executed Cantera/RST A/B. Retire the legacy-specific assertion
+  when the production core is migrated. The parser fixture was rerun on the
+  corrected tree as a fixed-mesh baseline; see the story for its measurements.
+- **Test-only local-core candidate:** fixed-mesh A/B reuses the same RST
+  residual/Jacobian callbacks and factor owner. On linear, manufactured
+  nonlinear and original large fixed-grid fixtures, both routes converge. A
+  four-way parser-fixture control isolates two coupled differences: norm
+  (`Cantera weighted RMS` vs `RST Euclidean`) and trial schedule (fixed
+  `sqrt(2)` vs RST's iteration-dependent reduction). Only the combined legacy
+  Euclidean norm + legacy schedule reproduces production: 8 iterations, 3
+  Jacobian evaluations, 15 trials, 23 linear solves and the identical profile.
+  A fifth control with a fresh Jacobian every iteration converges under both
+  Cantera contracts (7 iterations, 7 Jacobians, residual `2.54e-7`), so
+  Jacobian reuse also affects this fixture. Do not disable reuse in production
+  based on this single case: the local Newton may correctly report failure and
+  leave recovery to a separate outer controller. The legacy production result
+  is not validated: fresh-J and reused-J weighted corrections are `2.8948` and
+  `2.8999`, both above one. The mismatch is the raw-Euclidean versus weighted
+  convergence criterion, not stale Jacobian alone. See the dated story entry.
+- [x] Compare fresh-J and actually cached/reused-J corrections at the published
+  parser-fixture profile. Their weighted norms are `2.8948` and `2.8999`, both
+  above the Cantera threshold; this rules out stale Jacobian alone as the
+  source of the false acceptance.
+- [ ] **Deferred Damped production-port debt:** after the independent
+  `BVP_Cantera` solver has passed difficult combustion workloads, validate the
+  Cantera stopping metric's accept/fail behavior and typed nonconvergence on
+  independent fixed-mesh controls and Dense/Sparse/Banded backends before any
+  Cantera-core opt-in is added to production `BVP_Damp`. Do not use this item
+  to couple Damped to the standalone Cantera implementation prematurely.
+- The test-only pseudo-time quadrature study demonstrates why Cantera's
+  diagonal transient shift cannot be applied blindly to RST's integrated
+  interval equations: row and reduced-node column layouts differ, Dirichlet
+  entries are eliminated, nonuniform interval lengths enter the operator,
+  and differential/algebraic masks are model assumptions. For a specified
+  artificial PDE and quadrature, a mass operator can contain off-diagonal
+  entries. Finite-difference checks against actual Forward callbacks and an
+  independent numeric Trapezoid control pass; this is not yet a validated
+  production recovery algorithm or proof of improved convergence.
+
+- The Damped bounds guard now checks the real update `y - lambda * delta`,
+  without allocating a negated vector. It records the limiting packed unknown
+  index alongside the factor; Debug unit and large-reproducer tests pass.
+- The original fixed-grid, three adaptive strategy, and DoublePoints gates all
+  pass after the Jacobian correction; retain the old failure counters only as
+  historical pre-fix evidence.
+- Earlier weighted-RMS candidates passed isolated formula checks but failed
+  broader solver gates before the Trapezoid Jacobian correction. They were
+  removed from production; keep their results in the story and repeat the
+  relevant controlled comparisons on the corrected Jacobian. The independent
+  reduced-system oracle remains test-only.
+- A converged solve followed by an adaptive check with zero marked intervals
+  previously returned `None` and incremented the refinement count. The no-op
+  check now preserves the converged profile and does not claim a mesh revision.
+  Refinement also now prefers the live Newton iterate over a same-length legacy
+  result slot. The full mesh-identity state model remains open.
+- The fixed-ratio damping candidate was not accepted in an earlier Debug A/B
+  before the Trapezoid correction. Production still uses the legacy schedule;
+  the earlier test counts and trajectory checkpoint are historical, not the
+  current gate. Repeat the fixed-mesh comparison before deciding its fate.
+- Pinned `Cantera v3.1.0` `MultiNewton` defaults are `maxJacAge=5`,
+  `dampFactor=sqrt(2)`, and `maxDampIter=7`. Its rejected-trial update is
+  `alpha /= sqrt(2)` on every trial. RST currently has the same seven-trial
+  default and a `max_jac=3` default, but its `damp_factor=0.5` is an exponent
+  offset in the legacy schedule `lambda /= 2^(trial_index + damp_factor)`;
+  matching option names/default counts does not mean numerical parity. This
+  is a reference-contract difference to resolve in the fixed-mesh core, not a
+  request to preserve the legacy schedule.
+- The dedicated Debug module `tests/cantera_core.rs` has two passing
+  fixed-mesh checks: an exact constant profile and a linear `y'=y` BVP that
+  requires Newton correction. Both verify the final discrete equations and
+  assert that no mesh refinement occurred. The unchanged 26-state KiThe
+  fixed-grid case now converges after correcting the Jacobian, as recorded
+  above. Keep these gates distinct from refinement behavior and verify its
+  profile quality independently, not merely convergence status.
+- Next implementation gates are: (1) write down the exact pinned
+  `MultiNewton` state/status transitions and acceptance inequalities; (2) add
+  fixed-grid tests for component scaling, bound-limited damping, rejection
+  without advancing the base iterate, Jacobian age/rebuild and terminal
+  statuses; (3) implement the reference local core against these gates; and
+  (4) rerun the small analytic gates plus the unchanged fixed-grid large
+  reproducer and selected Dense/Sparse/Banded parity controls. Local reference
+  parity can correctly terminate in non-convergence: assess solution recovery
+  only after adding the separately tested Cantera outer pseudo-transient
+  controller. Existing RST grid-refinement strategies stay out of these gates.
+- A pre-Jacobian-fix combined local-core candidate used the full-grid denominator,
+  fixed `sqrt(2)` damping divisor and Cantera default Jacobian age 5. Its two
+  fixed-grid analytic gates and 64 Damped unit tests passed, but the broader
+  Debug filter reported 326 passed / 7 failed / 58 ignored; four previously
+  passing parser-driven solves returned no result. On their fixed-grid model
+  the candidate exhausted line searches after 6 iterations, 38 trials and
+  3 Jacobian evaluations. The previous production core returned a profile
+  after 8 iterations / 18 trials / 3 Jacobian evaluations, with raw discrete
+  residual norm `1.719e-3`; this residual is not automatically comparable to
+  the requested solution tolerance. The combined candidate was removed from
+  production. Repeat on the corrected source. A Cantera-style outer transient
+  retry is a hypothesis, not yet a demonstrated fix. See the story for details.
+- Current Debug results are configuration-specific and recorded chronologically
+  in `BVP_DAMP_STORY_CORRECTNESS.md`. Do not treat an earlier test count as the
+  status of the current tree; rerun the full filter after damping policy is
+  settled. The pinned combustion checkpoint's word "frozen" refers to reference
+  data, not the Frozen algorithm. No clean-source baseline is available, so
+  counts do not establish regression causality.
+- Pre-fix `NoResult`, negative-bound-factor and widened-bounds observations are
+  historical diagnostics, not current results. Keep the feasible-iterate and
+  typed non-finite checks open; re-evaluate them on the corrected Jacobian.
+- [x] Trace the post-bound-step state at full precision. The Details log
+  confirms that `u4_2024` at packed index 52,613 starts the limiting step at
+  exactly `1.1`; the exact factor produces `-0.100000000000000089`, one ULP
+  below its lower bound `-0.1`. The next Newton direction points farther out,
+  yielding a negative factor. This is a floating-point boundary overshoot, not a
+  packed-layout or bounds-remapping mismatch.
+- [ ] Choose a robust fraction-to-boundary implementation that guarantees the
+  representable updated value stays feasible without broad interior clipping.
+  Before the Jacobian fix, a trial `factor * (1 - 1e-12)` fixed this one ULP
+  case but was rejected: on Pearson it still returned `NoResult` and grew work from 7 iterations / 9
+  solves to 25 iterations / 206 solves. A narrower one-ULP factor reduction
+  passed the scalar arithmetic test, but the integrated Pearson A/B was stopped
+  at iteration 13 after the residual returned to `~4.13989e3` without clear
+  progress. Do not retain either experimental policy; the baseline factor
+  calculation remains active while a better line-search/Newton recovery is
+  investigated.
+
+### Scope And Method Contracts
+
+- [x] Separate Damped repair from Frozen/Naive accuracy assessment. A successful
+  Sci control establishes a useful reference on the same continuous problem,
+  not equality of the discretizations or proof of a particular Newton defect.
+- [x] Keep Frozen/Naive simple: fixed mesh, full Newton/chord updates, supported
+  Jacobian reuse strategies and optional bounds. Do not add damping-factor
+  searches, automatic grid refinement, or pseudo-time integration to this route.
+- [ ] Reconcile the recently added Frozen fraction-to-boundary scaling with
+  this simple-method contract: validate the full undamped candidate; if it
+  violates configured bounds, return a typed failure without applying it.
+  Do not silently shorten or clip the update. If feasibility-only scaling is
+  desired later, discuss that explicit contract separately before retaining it.
+- [x] Treat the original 26-state KiThe problem as a mandatory acceptance case.
+  Preserve RHS, BCs, physical bounds, initial guess, tolerances and original
+  solver limits for the primary before/after comparison. Additional meshes,
+  schemes and guesses are labeled diagnostic controls, not substitutes for it.
+- [x] Keep BVP_sci unchanged as the numerical control. Preserve Expr and Atom
+  frontends, Lambdify and AOT, and Dense/Sparse/Banded production routes.
+
+### A. Preserve Evidence And Localize The First Divergence
+
+- [ ] Capture the pre-fix source revision/diff and exact case configuration;
+  preserve existing failure reports before any correction. Do not overwrite
+  performance baselines or rewrite historical observations as corrected runs.
+- [x] Map `PY/MultiNewton.cpp` to the tagged Cantera v3.1.0 implementation.
+  `MultiNewton` defines the local damped-Newton norm, bound factor, fixed
+  geometric damping reduction, acceptance test, and Jacobian-age policy.
+  Cantera `Sim1D::solve` separately wraps it in steady-solve / transient
+  recovery / refinement control; that outer recovery is not part of the
+  MultiNewton core. Do not mix current Cantera dev behavior into this audit.
+  Pinned references: `https://github.com/Cantera/cantera/tree/v3.1.0/src/oneD`
+  and `https://cantera.org/stable/reference/onedim/nonlinear-solver.html`.
+- [x] Compare bound-factor behavior against the local `PY/MultiNewton.cpp`.
+  Cantera forms `x + step` after negating the residual/Newton solve result;
+  RST forms `y - delta`, so the sign-adjusted RST guard is mathematically the
+  same contract. Both return the `-3` no-step outcome when the computed factor
+  is below `1e-10`. Cantera logs when its base state is already outside a bound;
+  RST currently lacks a typed/context-rich equivalent. Do not attribute every
+  `NoResult` to a bound-factor formula defect: trace the first infeasible state
+  and its source (initial guess, accepted step, or mesh transfer). Cantera's
+  `Sim1D` transient retry is a separate outer controller and is not part of
+  `MultiNewton`; adding it to RST would be a separate design decision.
+- [ ] Record one bounded diagnostic trace per attempt: mesh revision, iterate
+  identity, Jacobian age/rebuild reason, linear-system residual, actual update
+  direction, limiting state/node/bound, bound factor, trial factor, scaled and
+  raw correction norms, residual norm, acceptance/rejection and terminal reason.
+  Keep unavailable fields explicit; do not enable diagnostic work in Off mode.
+- [ ] Check residual/Jacobian consistency on the real fixture using selected
+  directional derivatives and the linear residual `J*delta - F`. Do not assume
+  that identifying a loop defect proves every backend and Jacobian correct.
+- [ ] Verify generated unknown ordering and BC elimination before assigning
+  component weights or reporting the state/node responsible for a bound limit.
+
+### B. Damped: Correct The Local Newton Contracts First
+
+- [x] Fix and regression-test the sign mismatch: the runtime solves
+  `J*delta = F` and applies `y - lambda*delta`; previously it sent `delta` to an
+  additive `y + step` bounds helper. The production check now uses the applied
+  direction without allocating a negated vector; focused Debug tests cover the
+  helper and a complete identity-Jacobian Newton update. The large KiThe case
+  subsequently converged after the separate Trapezoid Jacobian correction.
+- [ ] Add Debug tests at both bounds for inward/outward directions, interior
+  crossings, full feasible steps and multiple limiting components. Include a
+  complete scalar Newton attempt and Dense/Sparse/Banded integration coverage,
+  not just standalone helper tests. Assert the accepted candidate is in bounds.
+- [ ] Validate every active iterate against configured bounds before deriving a
+  step fraction. A negative factor means the base state is already infeasible;
+  surface this as a typed solver-state/bounds failure rather than passing a
+  negative `lambda` into damping. Record the exact state/node and whether the
+  infeasibility first appears at initialization, after a Newton update or after
+  mesh transfer.
+- [ ] Re-run the unchanged large fixture after the sign correction alone.
+  Attribute any outcome change to that correction, not to simultaneous changes
+  of the norm, search schedule, mesh, bounds, tolerances or initial guess.
+- [x] Specify and independently test the Cantera-equivalent reduced-system
+  weighted-RMS contract: full-grid component means include fixed BC values;
+  eliminated boundary corrections are zero but still count in the full-grid
+  RMS denominator. A Debug test compares against an explicitly reconstructed
+  full state and correction. Other tests cover mixed BC positions,
+  heterogeneous scales, consistent unit rescaling and invalid/non-finite data.
+  This establishes the formula, not solver-level correctness.
+- [x] Audit the existing `weighted_norm` helper. It expects rectangular full
+  state and correction vectors and cannot be applied directly to the reduced
+  Newton vector. The test oracle instead takes packed state, packed-to-full
+  positions and fixed BC values; per-state relative tolerances are obtained
+  from each packed unknown's mapped component.
+- [ ] Revisit production norm integration only with a new solver-level
+  recovery/acceptance hypothesis and the corrected Jacobian. The earlier
+  weighted-RMS candidate caused additional Debug failures on the pre-fix tree;
+  do not reinstate it without a complete correctness and performance gate.
+- [x] Confirm the packed-layout mapping needed by that audit. Preparation
+  creates unknowns in node-major order and records each unknown's flattened
+  full-state position; BC entries retain their flattened position and value.
+  Therefore component means must be accumulated over `0..=n_steps`, filling
+  both packed unknowns and fixed BCs; Cantera's final RMS denominator is the
+  total full-grid size. The test oracle is not in the production hot path.
+- [x] Test that a small absolute correction can exceed component tolerances
+  while a larger absolute correction remains acceptable in weighted norm.
+- [ ] Extend norm tests to duplicated mesh samples and overflow/nonfinite
+  calculations; preserve unit-rescaling and mixed-boundary coverage. A tiny
+  applied step must not imply convergence.
+- [ ] Audit per-component absolute tolerances. The pinned Cantera norm uses
+  per-component `atol`, while current Damped options expose a scalar absolute
+  tolerance. Preserve the scalar configuration as a valid uniform case, and
+  establish any per-component extension and its bindings before claiming exact
+  general Cantera norm parity. Do not silently invent or change tolerances.
+- [ ] Replace the legacy damping schedule with the pinned Cantera schedule
+  `alpha = fbound; alpha /= sqrt(2)` after each rejected trial, as part of the
+  fixed-mesh numerical-core implementation. The prior partial A/B was not a
+  clean fixed-grid parity test and is not evidence to keep two production
+  schedules. Preserve the seven-trial bound and validate the exact trial
+  factors/statuses in isolated fixed-mesh tests before broad integration.
+- [ ] Compare the legacy and Cantera schedules as test controls on unchanged
+  fixed-grid BVPs. Record trial factors, convergence/failure,
+  residual/Jacobian trace and final profile quality; an iteration-count change
+  alone is not proof of improvement. The fixed-Jacobian scalar control now
+  documents actual legacy trials against the independent Cantera calculation;
+  implement and test the full candidate before calling this solver-level A/B.
+  Do not include adaptive-grid behavior in this core parity comparison.
+- [ ] Test acceptance without advancing the base iterate on rejected trials.
+  Verify a trial uses the same numeric Jacobian/factor as its base correction;
+  inspect Jacobian age reset, increment, forced refresh and fresh-Jacobian
+  failure exit. Do not rebuild symbolic callbacks for numeric Jacobian refresh.
+- [ ] Distinguish invalid input/nonfinite model evaluation, linear failure,
+  exhausted line search, blocked bounds and iteration budget in typed failure
+  diagnostics. Decide explicitly which trial-domain failures may be retried;
+  do not silently swallow callback errors or advertise partial state as success.
+- [ ] Run separate A/B configurations for sign, weighted norm, damping schedule
+  and their combination in diagnostic tests. Broken historical behavior remains
+  only a labeled comparison control, not a permanent public runtime option.
+
+### C. Damped: Refinement And Failure-State Lifecycle
+
+- [x] Separate the converged/no-more-refinement outcome from Newton failure.
+  `try_solve_with_new_grid` now returns the current converged profile when an
+  adaptive check marks no points, while the failed-Newton path remains `None`.
+  Refinement counters and active mesh/profile are changed only when new points
+  are actually inserted. Debug regressions cover a converged no-mark check and
+  an interpolation whose same-length stale result differs from the active
+  iterate. Still add a public end-to-end case for max-refinement exhaustion and
+  verify telemetry after a real refinement followed by convergence.
+- [ ] Separate initial guess, last accepted iterate, converged profile and
+  published result. Associate each retained profile with its mesh identity,
+  not only its vector length. Refinement now prefers `self.y` (the active
+  iterate) over the legacy result slot, and the converged state is synchronized
+  before refinement. Complete the state model and test same-length profiles on
+  distinct meshes; length equality alone is not mesh identity.
+- [ ] Verify interpolation uses the chosen accepted profile, preserves endpoint
+  BCs and respects bounds. Rebuild mesh-dependent callbacks, sparsity and numeric
+  factors exactly when required; keep parameter schema and frontend unchanged.
+- [ ] Cover failures before the first accepted step, after accepted steps,
+  after refinement, and on a repeated solve. No panic, stale-profile publication
+  or loss of partial telemetry/source errors is acceptable.
+- [ ] Test successful convergence with no intervals marked, exhausted refinement
+  budgets and repeated mesh transitions. A valid current-grid result must not
+  become `MissingResult` solely because no new grid is needed.
+- [ ] Exercise TwoPoint, Pearson and Grcar-Smooke explicitly; retain DoublePoints
+  failure-path coverage and the six-state Atom refinement regression. Verify
+  actual mesh changes and outcomes, not just that a refinement counter increased.
+- [x] Confirm against pinned Cantera 3.1.0 source that `Sim1D::solve` retries a
+  failed steady Newton solve with pseudo-transient time steps before retrying
+  steady Newton; mesh refinement follows successful steady convergence. This
+  is outside `MultiNewton` and absent from RST's current Damped lifecycle.
+- [ ] Defer Cantera's outer steady-Newton / transient-recovery controller until
+  the fixed-mesh Newton core and its real BVP acceptance gates are complete.
+  If resumed, make transient recovery opt-in through an explicit model/operator
+  contract (including algebraic and boundary rows); never infer that operator
+  from the steady RHS. Without a supplied operator, preserve the typed steady
+  failure and partial telemetry. Test this outer controller separately from
+  `MultiNewton` and from RST grid refinement.
+
+### D. Frozen/Naive: Bounds And Numerical Accuracy Without New Machinery
+
+- [ ] Test full-step bounds validation, finite candidates, endpoint constraints
+  and initial-guess validation. A blocked step preserves the last accepted
+  state and typed diagnostics, but publishes no failed profile. Cover both
+  Naive and Jacobian-reuse variants through native and BVP_api entry points.
+- [ ] Separate three checks: scaled discrete residual `F_h(y)`, correction norm,
+  and continuous-profile accuracy. Document the meaning of tolerance; a small
+  correction or accurate species sum alone is not an accuracy certificate.
+- [ ] Check the converged unbounded 65-node fixture's discrete residual before
+  assigning its negative concentrations to Newton or to the discretization.
+  Compare 65/129/257-node solves (extend if unresolved) with identical problem
+  data, and explicitly label Forward versus Trapezoid diagnostic cases.
+- [ ] Compare Frozen and Sci on common physical coordinates with a documented
+  interpolation/error policy. Evaluate each route's native-node bounds too;
+  interpolation must not invent or conceal a positivity violation. Check that
+  the Sci reference itself is sufficiently resolved for the comparison.
+- [ ] Record per-component profile errors, endpoint errors, species extrema and
+  sum, temperature range, discrete residual and mesh-convergence trend. Use a
+  second smooth problem with a known solution to separate interpolation and
+  spatial-discretization error from nonlinear solve error.
+- [ ] Keep insufficient-grid and infeasible-bound outcomes honest. Do not make
+  a coarse-grid discrete root physically admissible by clipping, weakening
+  bounds, or adding hidden refinement/damping to Frozen.
+
+### E. Correctness And Real-Problem Acceptance Gates
+
+- [ ] Gate E1, Debug local contracts: all new sign/norm/search/lifecycle tests
+  pass plus existing Damped/Frozen, BVP_api bounds, partial-failure telemetry,
+  parameter rebind/continuation/loop, endpoint reconstruction and Atom refinement
+  regressions. Run relevant View tests if shared symbolic code changes.
+- [ ] Gate E2, unchanged KiThe case: require a bounded, finite, converged Damped
+  profile with valid BCs, independently checked discrete residual and documented
+  agreement with the resolved Sci reference. Report fixed-grid and adaptive
+  results separately. No declaration of success based on `Ok`, small update,
+  conserved sum, or lack of panic alone; unresolved original-case failure keeps
+  this gate open even if diagnostic variants succeed.
+- [ ] Gate E3, independent workload: repeat on at least one other substantial
+  existing combustion/BVP fixture, plus an analytic or manufactured case with
+  disparate component scales. Reuse existing fixtures instead of constructing
+  an easier replacement for the failing case.
+- [ ] Define justified per-component residual/profile/BC comparison tolerances
+  before evaluating candidates. Do not tune acceptance thresholds after seeing
+  failures. Frozen's fixed-mesh accuracy gate is distinct from Damped adaptive
+  convergence; document any unresolved limitation rather than generalizing it.
+- [ ] Cross-check both frontends, supported Lambdify/AOT routes and relevant
+  linear backends; include Sequential/Parallel callback policies. Changed
+  algorithms may change iteration counts: explain differences with accepted
+  steps, residuals and Jacobian ages, not old exact counters as the sole oracle.
+- [ ] Validate Off/Counters/Timings/Detailed semantics, failure snapshots and
+  bounded event logging. Match native and facade outcomes/diagnostics; preserve
+  typed error sources and previously accepted results across failed retries.
+
+### F. Final Four-Stage Stabilization (No Early Baseline Refresh)
+
+- [ ] F1: run affected Release correctness tests including applicable ignored
+  tests and the E1-E3 matrix. Cover Damped, Frozen/Naive and BVP_api; run Sci
+  control/related regressions without changing its algorithm. Verify Python
+  bindings/examples where bounds/error/configuration semantics are affected.
+- [ ] F2: compare compatible existing BVP performance gates before overwriting
+  anything. Investigate regressions and unstable measurements. Record metric,
+  workload or correctness-contract incompatibility explicitly; it is neither a
+  passing comparison nor permission to ignore historical evidence. Correctness
+  must not be traded away to preserve timings from a broken algorithm.
+- [ ] F3: extend/reuse `scripts/bvp_damp_release_matrix.ps1` for a dedicated
+  addressable Newton-reliability matrix; use `bvp_sci_release_matrix.ps1` only
+  where control coverage is needed. Preserve standalone scripts and report
+  every failure/timeout/unstable row in timestamped `test_reports/` with compact
+  Tabled summaries and separate technical logs. No retries-until-green masking.
+- [ ] Review Release story/bench results against historical solver documents:
+  full wall time, preparation, residual/Jacobian work, factorization/linear
+  solves, search/rebuild counts, refinement, peak mesh size and numerical quality.
+  Record decisions and numbers in STORY documents, including rejected hypotheses.
+- [ ] Use long, representative workloads (at least tens of milliseconds,
+  preferably >=50 ms on the reference machine) for new performance gates, with
+  suitable warmups/sample counts and timeouts. Do not replace real workload size
+  with thousands of repetitions of a noisy tiny solve; keep exploratory A/B in
+  stories/benches rather than perf-gates.
+- [ ] F4: after numerical and performance review accepts the corrected runtime,
+  record `--force` only for affected accepted BVP gates on an identified source
+  revision and machine/toolchain, then compare them. Keep unrelated baselines
+  untouched. A single successful record is not stabilization.
+- [ ] Close out with explicit supported behavior/limitations, updated Rust and
+  Python guides/examples where needed, and removal or test-only isolation of
+  superseded numerical logic. Do not leave contradictory comments claiming raw
+  L2 is a weighted norm or subtractive steps have additive bounds semantics.
+
+## Earlier Reproducer Work And Historical Observations
+
+The completed items below describe earlier investigations, not completion of
+the recovery plan above. Historical numerical results and failed experiments
+are retained in `BVP_DAMP_STORY_CORRECTNESS.md`; the current corrected-Jacobian
+status is recorded in Implementation Status above.
+
+- [x] Port and investigate the large native KiThe reproducer before changing
+  solver behavior (2026-11-04). The RST-owned ignored Debug suite is
+  `BVP_Damp/tests/large_native_regressions.rs`; it uses the public BVP_api with
+  the 26-state Expr model, and includes the Sci control plus Frozen, fixed-grid
+  Damped, and adaptive DoublePoints Damped routes.
+  `D:/RUST/RustProjects_/KiThe/src/SimpleReactorsBVP/rst_native_large_bvp_reproducer.rs`
+  (Expr + `BVP_api`; no KiThe model types), retaining the equations, boundary
+  data, guesses, tolerances, and mesh sizes. BVP_sci provides a working control;
+  detailed physical and numerical measurements belong to the story document.
+- [x] Prevent publication/reconstruction of an unsuccessful Damped solve;
+  the facade returns typed `MissingResult` with partial telemetry instead of
+  reconstructing a stale iterate after failed refinement.
+- [x] Run the original routes and expand Frozen mesh-density and Damped grid
+  strategy diagnostics. The earlier Damped failures predate the Trapezoid
+  correction; the post-fix results and remaining acceptance gates are above.
+- [x] Add opt-in Frozen state bounds matching the Damped public configuration
+  model (2026-11-04): validate complete per-state bounds, initial guesses and
+  endpoint values; expand bounds into the reduced node-major Newton vector;
+  constrain updates with the Cantera-style fraction-to-boundary guard; return
+  typed `BoundStepBlocked` if no admissible step is possible. Bounds are part
+  of the prepared-plan fingerprint. BVP_api passes `FrozenSolverOptions`
+  intact; its regression checks the native bounds and an in-range solution.
+- [ ] Complete the Cantera reference audit and local Newton recovery gates in
+  the dated plan above. No reference implementation justifies weakening the
+  reproducer's tolerances or changing its physical constraints.
+
 - [x] Expose positive residual/Jacobian target chunk counts in the Damped and
   hybrid settings parsers, validate AOT compatibility/conflicting syntax, and
   forward them into `AotChunkingPolicy` (2026-11-02).
@@ -8,6 +517,14 @@
   its Damped task-parser setting (2026-11-02). Solver text output uses the
   shared `SolverLogLevel`, default Off; telemetry, result postprocessing and
   bounded BVP decision-event logging remain separate channels.
+
+- [x] Fix AtomView coefficient normalization exposed by adaptive grid
+  regeneration (2026-11-04). The RST-only six-state Expr/BVP_api reproducer
+  now passes Pearson and Grcar-Smooke with both Sequential and Parallel
+  Lambdify callback policies, reaching 786 nodes after two refinements. The
+  failure was an Atom normalization path that added `CoefficientView`s
+  directly instead of using packed numeric arithmetic; see the detailed
+  regression record in `BVP_DAMP_STORY_CORRECTNESS.md`.
 
 Priority update, 2026-09-23: contribute real Jacobian fixtures to the shared
 [View/Lambdify cost investigation](../../symbolic/View/TODO.md) before further

@@ -6,15 +6,19 @@
 //! the application attaches its own guess and constructs `BvpProblem`.
 
 use crate::command_interpreter::task_parser::{DocumentMap, Value};
-use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
+use crate::numerical::logging::SolverLogLevel;
+use crate::numerical::BVP_Cantera::{
+    CanteraExprBvpOptions, CanteraMatrixLayout, CanteraSymbolicExecution, CanteraSymbolicFrontend,
+};
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotChunkingPolicy, AotExecutionPolicy, GeneratedBackendConfig,
 };
 use crate::numerical::BVP_Damp::task_parser_damped::{
-    BvpDampedGeneratedBackendSpec, BvpDampedTaskError,
-    parse_bvp_damped_solver_settings_from_document,
+    parse_bvp_damped_solver_settings_from_document, BvpDampedGeneratedBackendSpec,
+    BvpDampedTaskError,
 };
 use crate::numerical::BVP_Damp::telemetry::BvpLoggingMode;
+use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
 use crate::numerical::BVP_api::{
     BvpApiTelemetryMode, BvpSciSparseFactorization, BvpSettingsError, BvpSolverSettings,
 };
@@ -22,9 +26,7 @@ use crate::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciExecutionPolicy, BvpSciMatrixLayout, BvpSciOptions,
     BvpSciOutputPolicy,
 };
-use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::bvp::telemetry::BvpLambdifyExecutionPolicy;
-use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
 use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
 use crate::symbolic::codegen::codegen_orchestrator::{
@@ -35,6 +37,7 @@ use crate::symbolic::codegen::codegen_tasks::BandedChunkingStrategy;
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotOptimizationLevel;
+use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
@@ -48,6 +51,7 @@ pub enum HybridBvpSolverFamily {
     Damped,
     Frozen,
     Sci,
+    Cantera,
 }
 
 /// Errors from parsing hybrid BVP solver settings.
@@ -83,6 +87,9 @@ pub fn parse_hybrid_bvp_solver_settings_from_document(
     let telemetry = optional_telemetry(settings)?;
 
     let parsed = match family {
+        HybridBvpSolverFamily::Cantera => {
+            BvpSolverSettings::Cantera(parse_cantera_settings(document, settings)?)
+        }
         HybridBvpSolverFamily::Damped => {
             if strategy.as_deref().unwrap_or("damped").to_ascii_lowercase() != "damped" {
                 return Err(invalid(
@@ -418,6 +425,202 @@ pub fn parse_hybrid_bvp_solver_settings_from_document(
     }
 }
 
+fn parse_cantera_settings(
+    document: &DocumentMap,
+    settings: &Section,
+) -> Result<CanteraExprBvpOptions, HybridBvpSettingsError> {
+    ensure_known_fields(
+        settings,
+        "BVP_Cantera",
+        &[
+            "solver_family",
+            "assembly",
+            "execution",
+            "matrix_layout",
+            "absolute_tolerance",
+            "default_relative_tolerance",
+            "max_iterations",
+            "max_jacobian_age",
+            "max_damping_trials",
+            "loglevel",
+            "telemetry",
+            "aot_build_policy",
+            "aot_build_profile",
+            "aot_codegen_backend",
+            "aot_c_compiler",
+            "aot_output_dir",
+            "aot_handoff_path",
+            "aot_crate_name",
+            "aot_module_name",
+            "aot_residual_chunking",
+            "aot_residual_chunk_size",
+            "aot_sparse_jacobian_chunking",
+            "aot_sparse_jacobian_chunk_size",
+            "aot_banded_jacobian_chunking",
+            "aot_banded_jacobian_chunk_size",
+        ],
+    )?;
+    for section in ["strategy_params", "adaptive_strategy", "grid_refinement"] {
+        if document.contains_key(section) {
+            return Err(HybridBvpSettingsError::UnsupportedField {
+                path: section.into(),
+                solver: "BVP_Cantera",
+            });
+        }
+    }
+    let mut options = CanteraExprBvpOptions::default();
+    options.symbolic_frontend = match optional_string(settings, "assembly")?
+        .as_deref()
+        .unwrap_or("expr_legacy")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "expr" | "exprlegacy" | "expr_legacy" | "legacy" => CanteraSymbolicFrontend::ExprLegacy,
+        "atom" | "atomview" | "atomviewnative" | "atom_view" | "atom_view_native" => {
+            CanteraSymbolicFrontend::AtomView
+        }
+        _ => {
+            return Err(invalid(
+                "solver_settings.assembly",
+                "expected expr_legacy or atom_view_native",
+            ))
+        }
+    };
+    options.symbolic_execution = match optional_string(settings, "execution")?
+        .as_deref()
+        .unwrap_or("lambdify")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "lambdify" => CanteraSymbolicExecution::Lambdify,
+        "aot" => CanteraSymbolicExecution::Aot,
+        "numerical" | "callbacks" => {
+            return Err(HybridBvpSettingsError::UnsupportedField {
+                path: "solver_settings.execution".into(),
+                solver: "BVP_Cantera symbolic settings",
+            })
+        }
+        _ => {
+            return Err(invalid(
+                "solver_settings.execution",
+                "expected lambdify or aot",
+            ))
+        }
+    };
+    options.matrix_layout = match optional_string(settings, "matrix_layout")?
+        .as_deref()
+        .unwrap_or("dense")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "dense" => CanteraMatrixLayout::Dense,
+        "sparse" => CanteraMatrixLayout::Sparse,
+        "banded" | "banded_auto" | "bandedauto" => CanteraMatrixLayout::BandedAuto,
+        _ => {
+            return Err(invalid(
+                "solver_settings.matrix_layout",
+                "expected dense, sparse, or banded_auto",
+            ))
+        }
+    };
+    for (field, target) in [
+        ("absolute_tolerance", &mut options.absolute_tolerance),
+        (
+            "default_relative_tolerance",
+            &mut options.default_relative_tolerance,
+        ),
+    ] {
+        if let Some(value) = optional_float(settings, field)? {
+            if value <= 0.0 {
+                return Err(invalid(
+                    &format!("solver_settings.{field}"),
+                    "must be positive",
+                ));
+            }
+            *target = value;
+        }
+    }
+    if let Some(value) = optional_positive_usize(settings, "max_iterations")? {
+        options.max_iterations = value;
+    }
+    if let Some(value) = optional_usize(settings, "max_jacobian_age")? {
+        options.max_jacobian_age = value;
+    }
+    if let Some(value) = optional_positive_usize(settings, "max_damping_trials")? {
+        options.max_damping_trials = value;
+    }
+    if let Some(level) = optional_string(settings, "loglevel")? {
+        options.logging_level = parse_log_level(&level)?;
+    }
+    if let Some(section) = document.get("rel_tolerance") {
+        for name in section.keys() {
+            let value = optional_float(section, name)
+                .map_err(|error| cantera_section_error(error, "rel_tolerance"))?
+                .filter(|value| *value > 0.0)
+                .ok_or_else(|| {
+                    invalid(
+                        &format!("rel_tolerance.{name}"),
+                        "expected a positive finite tolerance",
+                    )
+                })?;
+            options.relative_tolerances.insert(name.clone(), value);
+        }
+    }
+    if let Some(section) = document.get("bounds") {
+        for (name, values) in section {
+            let path = format!("bounds.{name}");
+            let values = values
+                .as_ref()
+                .ok_or_else(|| invalid(&path, "expected two finite bounds"))?;
+            let pair = if let [Value::Vector(values)] = values.as_slice() {
+                values.clone()
+            } else {
+                values
+                    .iter()
+                    .map(|value| match value {
+                        Value::Float(value) => Ok(*value),
+                        Value::Integer(value) => Ok(*value as f64),
+                        Value::Usize(value) => Ok(*value as f64),
+                        _ => Err(invalid(&path, "expected two finite bounds")),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            if pair.len() != 2 || pair.iter().any(|v| !v.is_finite()) || pair[0] > pair[1] {
+                return Err(invalid(&path, "expected finite lower <= upper bounds"));
+            }
+            options.bounds.insert(name.clone(), (pair[0], pair[1]));
+        }
+    }
+    if options.symbolic_execution == CanteraSymbolicExecution::Aot {
+        let mut config = parse_aot_config(settings)?;
+        config.residual_chunking_strategy =
+            parse_residual_chunking(settings)?.unwrap_or(config.residual_chunking_strategy);
+        config.sparse_jacobian_chunking_strategy =
+            parse_sparse_chunking(settings)?.unwrap_or(config.sparse_jacobian_chunking_strategy);
+        config.banded_jacobian_chunking_strategy =
+            parse_banded_chunking(settings)?.unwrap_or(config.banded_jacobian_chunking_strategy);
+        options.aot_config = Some(config);
+    } else if let Some(field) = settings.keys().find(|field| field.starts_with("aot_")) {
+        return Err(HybridBvpSettingsError::UnsupportedField {
+            path: format!("solver_settings.{field}"),
+            solver: "BVP_Cantera Lambdify execution",
+        });
+    }
+    Ok(options)
+}
+
+fn cantera_section_error(error: HybridBvpSettingsError, section: &str) -> HybridBvpSettingsError {
+    match error {
+        HybridBvpSettingsError::InvalidField { path, message } => {
+            HybridBvpSettingsError::InvalidField {
+                path: path.replacen("solver_settings.", &format!("{section}."), 1),
+                message,
+            }
+        }
+        other => other,
+    }
+}
+
 fn validate_sections(document: &DocumentMap) -> Result<(), HybridBvpSettingsError> {
     const ALLOWED: &[&str] = &[
         "solver_settings",
@@ -447,9 +650,10 @@ fn parse_family(settings: &Section) -> Result<HybridBvpSolverFamily, HybridBvpSe
         "damped" | "bvp_damp" => Ok(HybridBvpSolverFamily::Damped),
         "frozen" => Ok(HybridBvpSolverFamily::Frozen),
         "sci" | "bvp_sci" => Ok(HybridBvpSolverFamily::Sci),
+        "cantera" | "bvp_cantera" => Ok(HybridBvpSolverFamily::Cantera),
         _ => Err(invalid(
             "solver_settings.solver_family",
-            "expected damped, frozen, or sci",
+            "expected damped, frozen, sci, or cantera",
         )),
     }
 }
@@ -1467,6 +1671,37 @@ mod tests {
             crate::numerical::BVP_sci::new::BvpSciTelemetryMode::Off
         );
         assert_eq!(factorization, BvpSciSparseFactorization::StandardFaer);
+    }
+
+    #[test]
+    fn cantera_hybrid_settings_are_solver_only_and_build_native_options() {
+        let settings = values(&[
+            ("solver_family", Value::String("cantera".into())),
+            ("assembly", Value::String("atom_view_native".into())),
+            ("execution", Value::String("lambdify".into())),
+            ("matrix_layout", Value::String("banded_auto".into())),
+            ("absolute_tolerance", Value::Float(1e-9)),
+            ("default_relative_tolerance", Value::Float(1e-7)),
+            ("max_iterations", Value::Integer(64)),
+        ]);
+        let BvpSolverSettings::Cantera(options) =
+            parse_hybrid_bvp_solver_settings_from_document(&document(settings)).unwrap()
+        else {
+            panic!("expected settings-only Cantera configuration");
+        };
+        assert_eq!(options.symbolic_frontend, CanteraSymbolicFrontend::AtomView);
+        assert_eq!(options.matrix_layout, CanteraMatrixLayout::BandedAuto);
+        assert_eq!(options.absolute_tolerance, 1e-9);
+        assert_eq!(options.max_iterations, 64);
+
+        let unsupported_execution = document(values(&[
+            ("solver_family", Value::String("cantera".into())),
+            ("execution", Value::String("numerical".into())),
+        ]));
+        assert!(matches!(
+            parse_hybrid_bvp_solver_settings_from_document(&unsupported_execution),
+            Err(HybridBvpSettingsError::UnsupportedField { .. })
+        ));
     }
 
     #[test]

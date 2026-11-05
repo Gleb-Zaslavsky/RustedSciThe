@@ -32,6 +32,7 @@ impl NRBVP {
         fingerprint_debug(&mut hash, &self.method);
         fingerprint_debug(&mut hash, &self.tolerance);
         fingerprint_debug(&mut hash, &self.max_iterations);
+        fingerprint_debug(&mut hash, &self.Bounds);
         fingerprint_debug(&mut hash, &self.param_names);
         fingerprint_debug(&mut hash, &self.param_values);
         fingerprint_debug(&mut hash, &self.x_mesh.as_slice());
@@ -108,6 +109,9 @@ impl NRBVP {
             linear_sys_method,
             method,
             max_iterations,
+            Bounds: None,
+            bounds_vec: Vec::new(),
+            last_bound_step_factor: 1.0,
             logging_level: None,
             max_error: 0.0,
             result: None,
@@ -229,6 +233,7 @@ impl NRBVP {
         options: FrozenSolverOptions,
     ) -> NRBVP {
         let logging_level = options.logging_level;
+        let bounds = options.bounds;
         Self::new_with_generated_backend_config(
             eq_system,
             initial_guess,
@@ -247,7 +252,15 @@ impl NRBVP {
             options.generated_backend_config,
         )
         .with_scheme_name(options.scheme)
+        .with_bounds(bounds)
         .with_solver_logging_level(logging_level)
+    }
+
+    /// Configures optional per-state bounds for the Frozen Newton updates.
+    pub fn with_bounds(mut self, bounds: Option<HashMap<String, (f64, f64)>>) -> Self {
+        self.Bounds = bounds;
+        self.bounds_vec.clear();
+        self
     }
 
     /// Overrides text logging independently of the typed decision trace.
@@ -648,11 +661,118 @@ impl NRBVP {
                 ),
             ));
         }
+        self.resolve_bounds()?;
         Ok(())
+    }
+
+    fn resolve_bounds(&self) -> Result<Vec<(f64, f64)>, BvpBackendIntegrationError> {
+        let Some(bounds) = &self.Bounds else {
+            return Ok(Vec::new());
+        };
+        let invalid = |field: &str, message: String| BvpBackendIntegrationError::InvalidProblem {
+            field: field.to_owned(),
+            message,
+        };
+        for (state_index, state) in self.values.iter().enumerate() {
+            let Some(&(lower, upper)) = bounds.get(state) else {
+                return Err(invalid(
+                    "bounds",
+                    format!("missing bounds for state `{state}`"),
+                ));
+            };
+            if !lower.is_finite() || !upper.is_finite() || lower > upper {
+                return Err(invalid(
+                    "bounds",
+                    format!(
+                        "state `{state}` requires finite lower <= upper, got ({lower}, {upper})"
+                    ),
+                ));
+            }
+            if self
+                .initial_guess
+                .row(state_index)
+                .iter()
+                .any(|value| *value < lower || *value > upper)
+            {
+                return Err(invalid(
+                    "initial_guess",
+                    format!("initial values for state `{state}` lie outside [{lower}, {upper}]"),
+                ));
+            }
+            if self
+                .BorderConditions
+                .get(state)
+                .into_iter()
+                .flatten()
+                .any(|(_, value)| *value < lower || *value > upper)
+            {
+                return Err(invalid(
+                    "boundary_conditions",
+                    format!("boundary value for state `{state}` lies outside [{lower}, {upper}]"),
+                ));
+            }
+        }
+        if let Some(extra) = bounds.keys().find(|key| !self.values.contains(key)) {
+            return Err(invalid(
+                "bounds",
+                format!("bounds contain unknown state `{extra}`"),
+            ));
+        }
+
+        let state_count = self.values.len();
+        let full_len = state_count * (self.n_steps + 1);
+        let mut fixed = vec![false; full_len];
+        for (state_index, state) in self.values.iter().enumerate() {
+            let conditions = self.BorderConditions.get(state).ok_or_else(|| {
+                invalid(
+                    "boundary_conditions",
+                    format!("missing condition for `{state}`"),
+                )
+            })?;
+            if conditions.len() != 1 {
+                return Err(invalid(
+                    "boundary_conditions",
+                    format!("Frozen bounds require exactly one endpoint condition for `{state}`"),
+                ));
+            }
+            let node = match conditions[0].0 {
+                0 => 0,
+                1 => self.n_steps,
+                side => {
+                    return Err(invalid(
+                        "boundary_conditions",
+                        format!("invalid endpoint side {side} for `{state}`"),
+                    ));
+                }
+            };
+            let position = node * state_count + state_index;
+            if fixed[position] {
+                return Err(invalid(
+                    "boundary_conditions",
+                    format!("duplicate endpoint constraint for `{state}`"),
+                ));
+            }
+            fixed[position] = true;
+        }
+
+        let mut expanded = Vec::with_capacity(state_count * self.n_steps);
+        for (position, is_fixed) in fixed.into_iter().enumerate() {
+            if !is_fixed {
+                expanded.push(bounds[&self.values[position % state_count]]);
+            }
+        }
+        if expanded.len() != state_count * self.n_steps {
+            return Err(invalid(
+                "bounds",
+                "reduced bound layout does not match the Frozen Newton vector".into(),
+            ));
+        }
+        Ok(expanded)
     }
 
     pub fn try_eq_generate(&mut self) -> Result<(), BvpBackendIntegrationError> {
         self.try_task_check()?;
+        self.bounds_vec = self.resolve_bounds()?;
         let effective_method = self.generated_backend_config.effective_method(&self.method);
         let effective_policy = self
             .generated_backend_config

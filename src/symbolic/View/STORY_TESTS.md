@@ -4,6 +4,18 @@ This file owns low-level Atom/Expr operation-form diagnostics. Solver-specific
 stories in LSODE2 and BVP consume these results through real Jacobian and
 callback fixtures, but do not own the corpus.
 
+## 2026-11-04: Float coefficient normalization uses packed numeric addition
+
+Atom normalization previously merged duplicate numeric coefficients and
+numeric exponents through `CoefficientView + CoefficientView`. That operator
+is an exact-rational operation and deliberately panics for floating
+coefficients, while `Num::add` supports finite packed Float/Float and
+Float/Natural arithmetic. Normalization now uses the packed numeric route for
+these merges. Debug tests cover duplicate float terms, implicit unit
+coefficients, and float exponents. A public adaptive BVP regression exercises
+the behavior through repeated grid regeneration; its result is recorded in
+`../../numerical/BVP_Damp/BVP_DAMP_STORY_CORRECTNESS.md`.
+
 ## Operation Lowering Micro-Corpus
 
 - Test: `symbolic::View::operation_corpus_tests::operation_lowering_micro_corpus_preserves_values_and_reports_shape`

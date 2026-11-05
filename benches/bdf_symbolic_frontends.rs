@@ -535,8 +535,11 @@ fn benchmark_parameterized_workload_continuation(c: &mut Criterion) {
                         let parameters =
                             parameter_continuation_target(&workload.parameter_values, index);
 
-                        warm.try_continue_in_time_with_parameter_values(parameters.clone(), t_bound)
-                            .expect("warm workload continuation restart");
+                        warm.try_continue_in_time_with_parameter_values(
+                            parameters.clone(),
+                            t_bound,
+                        )
+                        .expect("warm workload continuation restart");
                         warm.try_solve().expect("warm workload continuation solve");
 
                         fresh = parameterized_workload_solver(
@@ -582,7 +585,9 @@ fn benchmark_parameterized_workload_continuation(c: &mut Criterion) {
                                             index,
                                         );
                                         solver
-                                            .try_continue_in_time_with_parameter_values(parameters, t_bound)
+                                            .try_continue_in_time_with_parameter_values(
+                                                parameters, t_bound,
+                                            )
                                             .expect("warm workload continuation restart");
                                         solver
                                             .try_solve()

@@ -1,6 +1,6 @@
 # Typed BVP Facade
 
-`numerical::BVP_api` is a thin selector over production BVP solvers. It
+`numerical::BVP_api` is a thin selector over the BVP solver families. It
 validates shared problem data, routes requests to native APIs, and retains the
 selected native solver, result, and telemetry. It does not replace symbolic
 preparation, solver configuration, Newton/collocation algorithms, or linear
@@ -65,6 +65,13 @@ shapes, see
 [`examples/bvp_api_damped_frozen.rs`](../../../../examples/bvp_api_damped_frozen.rs).
 For a prepared BVP_sci external-input parameter loop, see
 [`examples/bvp_api_parameter_loop.rs`](../../../../examples/bvp_api_parameter_loop.rs).
+The Cantera-derived fixed-mesh route supports ExprLegacy and native AtomView,
+Lambdify and configured AOT execution, and Dense, Sparse, or automatically
+inferred Banded linear storage. It remains an onboarding route, not yet a
+first-tier production solver. Its facade usage is in
+[`examples/bvp_api_cantera.rs`](../../../../examples/bvp_api_cantera.rs).
+Its native numerical contract and limitations are documented in the
+[`BVP_Cantera guide`](../BVP_Cantera/BVP_CANTERA_USER_GUIDE_EN.md).
 For fixed-input loops through both BVP_Damp routes, including their distinct
 checkpoint and failure-report behavior, see
 [`examples/bvp_api_damped_frozen_parameter_loop.rs`](../../../../examples/bvp_api_damped_frozen_parameter_loop.rs).
@@ -79,11 +86,12 @@ The facade requires one scalar condition per equation in total, but permits
 both endpoints to constrain the same state when that matches the mathematical
 problem; the native solver remains responsible for solvability.
 
-Initial-guess layout is solver-specific by design. Damped expects
+Initial-guess layout is solver-specific by design. Damped and Cantera expect
 `state_count x interval_count`; Frozen/Naive and BVP_sci expect
 `state_count x mesh_point_count`. Damped and Frozen accept only uniform meshes
 because their native constructors take interval endpoints and a point/step
-count. BVP_sci receives the explicit mesh directly.
+count. BVP_sci receives the explicit mesh directly. Cantera also requires a
+uniform mesh and performs a fixed-mesh solve without refinement.
 
 BVP_Damp's adaptive refinement is solver-managed inside the solve lifecycle;
 callers do not manually restart it when refinement criteria are unmet. The
@@ -92,7 +100,8 @@ which can preserve its prepared symbolic model while starting from a supplied
 mesh and profile.
 
 The facade does not invent a Cartesian capability matrix. It forwards native
-`DampedSolverOptions`, `FrozenSolverOptions`, or `BvpSciOptions`; BVP_sci also
+`DampedSolverOptions`, `FrozenSolverOptions`, `CanteraExprBvpOptions`, or
+`BvpSciOptions`; BVP_sci also
 retains its sparse-factorization selection and optional AOT configuration. For
 fixed model inputs on Damped/Frozen, call `bind_parameters(names, values)`
 before the first solve, then use `solve_with_parameter_values(values)` to reuse
@@ -104,6 +113,45 @@ preparation; `solve_parameter_loop` then rebinds each supplied vector and
 warm-starts from the last successful profile. This external-input schema is
 distinct from free parameter unknowns and their parameter-dependent boundary
 residuals. For numerical RHS or Jacobian callbacks, use the native BVP_Damp API.
+
+The Cantera route also accepts fixed external inputs inferred from its symbolic
+equations. Declare their names and initial values with
+`BvpProblem::with_external_parameters` before preparation, then update them
+through `set_parameter_values` or `solve_with_parameter_values`. Prepared
+Lambdify/AOT callbacks and the structural Jacobian are reused. Its
+`solve_parameter_loop` runs ordered fixed-input continuation: the first point
+uses the configured initial guess, subsequent points warm-start from the most
+recent successful point, and a failed point is reported without poisoning the
+next attempt. The loop returns the physical mesh, full node-major profiles,
+and per-attempt native reports/telemetry. Mesh restart and refinement remain
+unsupported on this fixed-mesh route; use
+[`examples/bvp_api_cantera_combustion_continuation.rs`](../../../../examples/bvp_api_cantera_combustion_continuation.rs)
+or [`examples/bvp_api_cantera_bratu_continuation.rs`](../../../../examples/bvp_api_cantera_bratu_continuation.rs).
+
+The Cantera facade prepares fixed-trapezoid coordinate callbacks using either
+`CanteraSymbolicFrontend::ExprLegacy` or native
+`CanteraSymbolicFrontend::AtomView` (ExprLegacy is the default). Select
+`CanteraMatrixLayout::Dense`, `Sparse`, or `BandedAuto` in
+`CanteraExprBvpOptions`; bandwidth is inferred from the symbolic pattern.
+Sparse/Banded avoid global dense materialization. AOT requires an explicit
+`SymbolicIvpGeneratedBackendConfig` through `CanteraExprBvpOptions::with_aot_config`;
+this route does not silently switch to Lambdify after AOT preparation fails.
+The route preserves the native Cantera
+solve report and partial telemetry on failure;
+`BvpSolutionView` and common postprocessing expose the reconstructed full
+node-major profile. The parameter loop reuses the prepared route and keeps
+per-point failure and partial telemetry. Mesh restart remains unsupported.
+Cantera's native telemetry supports
+Off, Counters, and Timings (Timings includes counters); the facade rejects a
+Timings-only request and maps `Detailed` to the native combined mode. This
+route remains an onboarding pilot until broad large-workload parity, release
+matrices, and performance gates are complete.
+
+Frozen/Naive state bounds are configured on the native options with
+`FrozenSolverOptions::with_bounds` and pass through `BvpSolverConfig::Frozen`.
+The solver limits Newton updates with a fraction-to-boundary guard; it never
+clips an iterate. If no feasible step is possible, solve returns the typed
+`BoundStepBlocked` error and the facade does not publish that failed iterate.
 
 `solve_parameter_loop` preserves each route's native loop semantics. Damped
 may carry a newly refined mesh together with the last successful profile;

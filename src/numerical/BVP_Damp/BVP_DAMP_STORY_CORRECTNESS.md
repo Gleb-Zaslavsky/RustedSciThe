@@ -959,4 +959,626 @@ Debug correctness gates:
 
 No release-performance claim is implied; this is a public result-contract fix.
 
+## 2026-11-04: AtomView adaptive-grid coefficient normalization
+
+An RST-only public `BVP_api` reproducer exposed a panic in Damped AtomView when
+adaptive refinement rebuilt the symbolic residual. The failure reproduced for
+both Pearson and Grcar-Smooke, and for Sequential and Parallel Lambdify callback
+policies. ExprLegacy passed all four corresponding cases.
+
+The panic was not in the numerical callback or the selected callback policy.
+During symbolic residual assembly, Atom normalization merged like terms whose
+numeric coefficients included `f64` values. Those merge paths added
+`CoefficientView` values directly, but that operator intentionally accepts
+only exact rational coefficients and panics on floating coefficients. The
+packed `Num::add` operation already implements Float/Float and Float/Natural
+addition. Atom normalization now routes coefficient and exponent merges
+through that packed numeric path.
+
+Correctness gates:
+
+- `symbolic::View::normalize::test::float_coefficients_merge_through_packed_numeric_arithmetic`
+- `symbolic::View::normalize::test::float_exponents_merge_through_packed_numeric_arithmetic`
+- `numerical::BVP_Damp::test_atomview_grid_refinement::rst_damped_adaptive_grid_strategy_diagnostic_matrix`
+
+The public reproducer passes in Debug for all eight frontend/policy/strategy
+combinations. Every case completes two adaptive refinements and publishes the
+same 786-node mesh. Tolerances and solver settings were unchanged. The matrix
+is a normal Debug regression test and performs eight full BVP solves; its
+explicit command is recorded in the test module.
+
+## 2026-11-04: Frozen opt-in state bounds
+
+The 26-state Frozen reproducer previously converged without interior
+constraints and returned a finite profile whose concentration minimum was
+`-3.385104e-4`. Endpoint constraints and conservation-like sums did not imply
+nonnegative interior states. Frozen now accepts optional per-state bounds via
+`FrozenSolverOptions::with_bounds`, and the BVP_api retains those native
+options unchanged.
+
+On the exact same 26-state task, the BVP_sci ExprLegacy/Lambdify/Dense control
+converges from 33 seed nodes to 78 nodes. It returns minimum species
+concentration 0 overall; excluding boundary nodes, the minimum is
+`1.886218e-25` and there are no negative interior species values. The
+species-sum error is `1.11e-16`, and `Teta` is in `[0, 3.019011e-3]`. The
+model's rate-law temperature `1200 + 300*Teta` is therefore
+`1200.000..1200.906 K`: elevated in absolute terms but not a giant temperature
+excursion. This directly supports Sci's physical plausibility on the measured
+criteria; the previous `max_abs_state=0.765625` was a species coordinate, not
+the temperature. Debug command:
+`cargo test --lib rst_native_sci_route_accepts_the_frozen_equation_system -- --ignored --nocapture --test-threads=1`.
+
+The implementation validates bound coverage/ranges and verifies the supplied
+initial guess and endpoint values. It expands each state's bounds to the
+unconstrained node-major Newton vector, then applies a fraction-to-boundary
+step guard. It does not clip the completed iterate. If the Newton direction
+points out of a bound and no positive step is admissible, Frozen returns the
+typed `BoundStepBlocked` error, keeps failure telemetry, and does not publish
+a result.
+
+On the reproduced chemistry case, species begin exactly at the lower bound
+zero. At 65 mesh nodes, the initial Newton direction points outward, so the
+bounded solve reports `BoundStepBlocked` on iteration 1 rather than claiming
+convergence or publishing an infeasible profile. Increasing the Frozen mesh to
+129 nodes changes the outcome: both the unbounded and bounded runs converge;
+the minimum species concentration is zero, and the bounded route takes 4
+iterations. Its species-sum error is `2.22e-16`. Thus the earlier negative
+profile was mesh-sensitive and should not be generalized to the refined
+route. The BVP_api scalar bounded control also converges and verifies every
+returned value stays in `[0, 2]`.
+
+### Cross-solver mesh and refinement study
+
+The same 26-state Expr fixture was run in Debug with the original tolerance
+(`1e-5`), initial guess and Damped strategy settings (`max_jac=1`, up to 12
+damping trials). Damped used Sparse, ExprLegacy, trapezoid and physical bounds;
+adaptive refinement was limited to two revisions.
+
+| Route | Mesh | Refinements | Iterations / linear solves | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| Frozen, unbounded | 65 nodes | none | converged | min species `-3.385104e-4` |
+| Frozen, bounded | 65 nodes | none | 1 / 1 | typed `BoundStepBlocked`; no result published |
+| Frozen, unbounded | 129 nodes | none | converged | min species `0`; sum error `2.22e-16` |
+| Frozen, bounded | 129 nodes | none | 4 / 4 | converged within bounds; sum error `2.22e-16` |
+| Damped TwoPoint `(0.02, 0.02, 2.5)` | 34 -> 102 nodes | 2 | 7 / 11 | `NoResult` |
+| Damped Pearson `(1e-3, 1.4)` | 34 -> 3203 nodes | 2 | 11 / 19 | `NoResult` |
+| Damped Grcar-Smooke `(1e-3, 1e-2, 1.4)` | 34 -> 3203 nodes | 2 | 11 / 19 | `NoResult` |
+| Damped Grcar-Smooke, widened bounds `[-1e4, 1e4]` | 34 -> 3216 nodes | 2 | 7 / 33 | typed `LinearSolveFailed`: non-finite residual |
+
+All three Damped refinement strategies completed both mesh revisions without
+panic, but none produced a solution under the reproduced configuration. The
+TwoPoint route made a modest mesh increase; Pearson and Grcar-Smooke generated
+much larger systems. Their repeated bound-limited steps had factors as small
+as `1e-20` to `1e-27`; this points to difficult Newton feasibility/convergence,
+not a grid-construction panic. Widening bounds did not produce convergence and
+eventually allowed a non-finite residual at a system dimension of 83,590.
+Since the refinement itself runs and the failure modes are typed/no-result,
+these runs do not prove a general Damped implementation defect. The exact
+KiThe solver configuration and/or a less aggressive physically justified
+initial guess still need a separate convergence investigation before making
+that claim.
+
+The detailed matrix is the ignored Debug test
+`rst_native_damped_large_problem_grid_strategy_matrix`; the widened-bounds
+control is `rst_native_damped_wide_bounds_grcar_refinement_control`. Frozen
+mesh study is `rst_native_frozen_dense_route_rejects_infeasible_bounded_iterate`.
+The run also exposed and fixed a telemetry bug: `BoundLimitedStep` events had
+hard-coded mesh revision 0. They now use the recorder's current refinement
+count; `bound_limited_step_event_uses_current_mesh_revision` locks this down.
+The public BVP_api scalar bounded control remains green.
+
+### 2026-11-04: Damped Newton Bound Direction Investigation
+
+The production update is `y_next = y - lambda * delta`, where the linear
+solve returns `J * delta = F`. The old bounds guard tested `y + lambda*delta`.
+The guard now evaluates the actual subtractive candidate without allocating a
+negated vector. Bound-limited decision telemetry retains the limiting packed
+unknown index in `value_b`; Detailed solver logging also prints its generated
+variable name, iterate value, correction, configured bounds and factor.
+
+Debug checks cover inward/outward directions at an active bound, an interior
+crossing, multiple candidate components, a complete scalar Newton correction,
+and event payload semantics. The 26-state fixed-grid reproducer still returns
+typed `MissingResult`: 3 iterations, 1 damping trial, 4 linear solves. Its
+first active bound factor is `1.435626e-5` at packed unknown 823; subsequent
+Newton attempts are blocked at factor zero. The adaptive matrix also completes
+TwoPoint, Pearson and Grcar-Smooke refinement without panic, but all three end
+in `NoResult` (Pearson/Grcar-Smooke: 9 iterations, 3 trials, 12 linear solves).
+Thus the sign defect is repaired, but it was not the only cause of the native
+large-task failure.
+
+A Cantera-style weighted RMS correction metric was prototyped for the
+boundary-eliminated packed layout and tested against an independent formula,
+unequal active-node counts and uniform unit scaling. Connecting it to the
+production search/convergence path caused 10 failures in the BVP_Damp Debug
+suite, compared with 4 failures on the sign-correct/raw-norm candidate. The
+production integration was therefore removed; only the isolated test helper
+remains. The sign-correct candidate's full BVP_Damp Debug run reported 322
+passed, 4 failed, 58 ignored. The three Damped failures were classic examples
+that returned no result (`test_BVP_Damp1`, `test_BVP_Damp_Grcar`,
+`test_BVP_Damp_Sci`); the fourth was a Frozen combustion trajectory checkpoint
+mismatch (`0.1563001933` versus `0.1563134851`). These failures remain open and
+must be compared with a clean-source baseline before attribution or any release
+stabilization claim.
+
+### 2026-11-04: Adaptive Newton State Lifecycle Follow-up
+
+The prior paragraph misidentified the accepted-trajectory checkpoint as a
+Frozen-solver failure. The test runs Damped Sparse/Banded routes; "frozen"
+describes its pinned reference values. This distinction is corrected here;
+the earlier count remains a historical run and is not rewritten.
+
+Two lifecycle defects were isolated with Debug regressions. First, an adaptive
+check that marked zero intervals returned `None` even after Newton convergence
+and incremented the mesh-refinement counter without changing the mesh. The
+solver now returns the converged current-grid profile for this no-op case and
+increments the counter only after points are inserted. Second, refinement
+selected `self.result` before the active `self.y` iterate when vector lengths
+matched. It now uses the live iterate first and synchronizes the converged
+state before refinement. A same-length sentinel regression verifies the
+interpolated guess comes from the active iterate.
+
+Validation in Debug after these changes:
+
+- Damped solver unit module: 61 passed, 0 failed.
+- Full non-ignored BVP_Damp filter: 326 passed, 2 failed, 58 ignored. Remaining
+  failures are `test_BVP_Damp1` returning no result and the existing Damped
+  combustion-1000 checkpoint drift (`expected=0.1563134851`,
+  `actual=0.1563001933`). No clean-source A/B baseline was available, so neither
+  is attributed to the lifecycle repair.
+- Six ignored large native reproducer diagnostics passed as diagnostics, not as
+  a solver-acceptance gate. Sci still solves the original model (33 -> 78 nodes,
+  interior species minimum `1.886218e-25`, temperature `1200.000..1200.906 K`).
+  Damped fixed-grid still returns `NoResult` after 3 iterations, 1 damping trial
+  and 4 linear solves. With the active-iterate selection, TwoPoint ends at 100
+  nodes after 2 refinements (5 iterations, 1 trial, 6 solves); Pearson at 4387
+  nodes (7 iterations, 2 trials, 9 solves); Grcar-Smooke at 4401 nodes
+  (7 iterations, 14 trials, 21 solves). All three still return `MissingResult`.
+  The widened-bounds control ends in typed failure, not convergence. Frozen's
+  65-node bounded case is blocked and its 129-node bounded case converges; these
+  are separate outcomes and do not diagnose Damped's Newton failure.
+
+These results support only the lifecycle fixes. They do not validate the
+current raw-L2 Newton acceptance/convergence metric or damping schedule against
+Cantera; those remain separate algorithmic gates.
+
+### 2026-11-04: Damping Schedule A/B Isolation
+
+A fixed geometric damping candidate (`lambda /= 2^damp_factor`) was tested
+separately from the legacy trial-index-accelerating rule. With the candidate
+schedule and a seven-trial budget, the full non-ignored BVP_Damp Debug filter
+reported 324 passed, 7 failed, 58 ignored. Failures included four
+parser-driven examples returning no result, two classic Damped examples, and
+the already observed pinned combustion checkpoint drift. The candidate schedule
+was then reverted while retaining the seven-trial budget; the four targeted
+parser-driven examples passed. This supports the conclusion that the schedule
+change materially affects those solves, but does not yet establish the full
+suite status of the reverted-schedule/seven-trial configuration.
+
+The full Debug filter on the restored legacy schedule with the seven-trial
+budget reports 328 passed, 2 failed, 58 ignored. The failures are
+`test_BVP_Damp1` returning no result and the pinned combustion checkpoint
+mismatch (`expected=0.1563134851`, `actual=0.1563001933`). Thus the trial-budget
+change does not add failures beyond those two unresolved cases in this run; it
+does not repair them either. The production schedule remains the legacy rule
+pending a combined, correctly scaled-norm and fixed-schedule experiment. The
+unit test that merely verified a fixed ratio was removed because it did not
+exercise production code and incorrectly implied the candidate had been
+adopted. No release-performance or convergence claim is made.
+
+The ignored large-native matrix was rerun with this exact production schedule
+and seven-trial default. All six diagnostics passed their assertions. The three
+adaptive Damped cases still report `NoResult` after their configured two mesh
+revisions:
+
+| Strategy | Final nodes | Iterations | Damping trials | Linear solves | Outcome |
+| --- | ---: | ---: | ---: | ---: | --- |
+| TwoPoint `(0.02, 0.02, 2.5)` | 100 | 5 | 1 | 6 | `NoResult` |
+| Pearson `(1e-3, 1.4)` | 4387 | 7 | 2 | 9 | `NoResult` |
+| Grcar-Smooke `(1e-3, 1e-2, 1.4)` | 4401 | 7 | 14 | 21 | `NoResult` |
+
+Detailed decision events show the first active fraction-to-boundary factor is
+`1.435626e-5` at packed unknown 823. Later accepted-base states produce zero or
+negative bound factors at that unknown (after refinement, other packed indices
+also become limiting). This suggests checking whether a state already violates
+its bounds before treating the factor as a legal step length. The log has the
+limiting index, variable, value, correction and bounds, but the matrix summary
+does not yet include those full per-event values. No linear or callback error
+is reported in these three bounded runs; they terminate with `NoResult`.
+
+The Detailed solver log `log_2026-11-04_19-00-40.txt` confirms the transition:
+on mesh revision 1, `u4_2024` (packed index 52,613) starts at exactly `1.1`,
+with bounds `[-0.1, 1.1]` and correction `2.17019817574236047e5`. The exact
+fraction-to-boundary factor is `5.52944893887175e-6`, but the evaluated
+candidate is `-0.100000000000000089`, one ULP below `-0.1`. The next Newton
+direction points farther outward, producing factors `-3.8373e-22` and
+`-8.3393e-31`. This establishes roundoff overshoot rather than index/bounds
+mismatch.
+
+A trial margin `factor * (1 - 1e-12)` keeps this scalar candidate inside the
+bound, and its isolated unit regression passed. It was rejected as a solver
+fix: on Pearson the full solve still returned `NoResult`, while work increased
+from 7 iterations / 9 linear solves / 69.5 s to 25 iterations / 206 linear
+solves / 506.9 s. The limited matrix run did not proceed to Grcar. The
+experiment is removed from production; a representable-feasibility correction
+must avoid this expanded unsuccessful line-search work and be evaluated against
+the complete large-task matrix.
+
+A narrower candidate reduced every positive clipped factor by one `f64` ULP.
+Its scalar arithmetic test passed on the recorded value/correction, but the
+integrated Pearson matrix was stopped at iteration 13: the residual had returned
+to approximately `4.13989e3`, near its initial scale, while line-search work
+continued. No terminal solver result was collected for this run. This candidate
+is also removed; fixing the single representable overshoot is not sufficient
+evidence to retain a production policy that can prolong a nonconvergent solve.
+
+The widened-bounds Grcar control now terminates earlier than a previous
+diagnostic revision: typed `LinearSolveFailed` for non-finite residual on a
+58,136-square system at 2,237 mesh nodes, after one refinement (4 iterations,
+14 damping trials, 17 solves). This control is not an acceptable physical
+configuration and is retained only to distinguish bound blocking from numeric
+failure. Frozen controls again block at 65 nodes and converge at 129 nodes;
+the BVP_sci route again solves at 78 nodes with interior species minimum
+`1.886218e-25` and temperature range `1200.000..1200.906 K`. These results
+confirm that increasing only the trial budget does not resolve the Damped
+large-case failure.
+
+### 2026-11-04: Reduced Cantera Norm Candidate A/B
+
+The reduced-system norm contract was implemented as an allocation-free
+candidate: component scale means include all node values, including prescribed
+BCs, while the weighted RMS contains only packed free unknowns. Independent
+Debug tests cover mixed left/right BC positions, heterogeneous state scales,
+unit rescaling and malformed/non-finite inputs. All three norm tests passed.
+This corrected the earlier active-unknown-only prototype, but did not establish
+solver acceptance.
+
+The candidate used the same weighted-RMS value for `s0`, `s1`, line-search
+acceptance, and convergence at `s1 <= 1`, matching Cantera `MultiNewton`'s
+dimensionless criterion. The full BVP_Damp Debug filter then reported 323
+passed, 7 failed, 58 ignored, compared with 328 passed, 2 failed, 58 ignored
+for the restored raw-norm configuration. Four parser-driven solves newly
+returned no result; Damped1 remained unsuccessful and the combustion trajectory
+checkpoint shifted (`expected=0.1563134851`, `actual=0.1563480860`). The
+candidate is rejected and has been removed from the production path.
+
+On the unchanged large adaptive matrix, TwoPoint remained `NoResult` at 100
+nodes (5 iterations, 1 trial, 6 solves, 0.97 s). Pearson remained `NoResult`
+at 4387 nodes (7 iterations, 2 trials, 9 solves, 70.66 s), effectively no
+improvement against the prior ~69.5 s diagnostic. Grcar-Smooke remained
+`NoResult` at 4401 nodes; it used 9 iterations, 3 trials and 12 solves in
+100.39 s, versus the prior 7 iterations, 14 trials and 21 solves in ~86.3 s.
+Reducing line-search trials did not produce a successful profile and increased
+Grcar wall time. Production remains on the previous norm until a candidate
+passes both the solver-level correctness matrix and the non-regression gate.
+
+The pinned Cantera 3.1.0 source confirms another boundary of the comparison:
+`MultiNewton` owns the local weighted norm, bound factor, damping search and
+status. `Sim1D::solve` is a separate hybrid controller: after failed steady
+Newton it advances pseudo-transient time steps, then retries steady Newton;
+mesh refinement follows a successful steady solve. RST currently has no
+equivalent outer transient recovery. This is a separate architecture decision,
+not part of the rejected norm candidate. References:
+`https://github.com/Cantera/cantera/blob/v3.1.0/src/oneD/MultiNewton.cpp` and
+`https://github.com/Cantera/cantera/blob/v3.1.0/src/oneD/Sim1D.cpp`.
+
+### 2026-11-04: Isolated Fixed-Mesh Cantera-Core Gates
+
+The numerical-core pass is now explicitly separated from RST grid refinement.
+No Expr/AtomView, Lambdify/AOT or Dense/Sparse/Banded route was changed. A new
+Debug test module, `tests/cantera_core.rs`, adds two fixed-mesh analytic gates:
+an exact constant profile and a linear `y'=y` problem initialized away from its
+discrete solution. Both verify the final boundary value and discrete equations,
+record that Newton iterations/linear solves occurred where expected, and assert
+zero grid refinements. Command:
+`cargo test --lib numerical::BVP_Damp::NR_Damp_solver_damped::cantera_core_tests:: -- --nocapture --test-threads=1`
+Result: 2 passed, 0 failed.
+
+The unchanged 26-state KiThe fixture was also rerun independently on its
+original fixed mesh:
+`cargo test --lib numerical::BVP_Damp::test_large_native_regressions::rst_native_damped_fixed_grid_returns_typed_missing_result -- --ignored --nocapture --test-threads=1`
+Result: typed `MissingResult` / `NoResult`, 3 iterations, 1 damping trial,
+4 linear solves, zero refinements. Its decision-event trace shows one tiny
+positive fraction-to-boundary step followed by a zero factor and Jacobian
+refresh; therefore this is a fixed-grid Newton/bounds recovery failure, not a
+grid-refinement failure.
+
+Pinned Cantera v3.1.0 `MultiNewton.h` establishes defaults of Jacobian age 5,
+damping divisor `sqrt(2)`, and 7 damping trials. The source accepts a trial if
+the next weighted correction norm is below 1 or lower than the current norm;
+otherwise it divides alpha by `sqrt(2)`. RST currently has 7 trials but uses
+`max_jac=3` and a different legacy schedule. Thus the current route is not yet
+numerically equivalent even though the broad algorithm is called Cantera-
+derived. The next parity change will implement the fixed-mesh local core behind
+these gates; the separate Sim1D pseudo-transient recovery remains the following
+layer, and RST refinement remains excluded until core parity is established.
+
+References: [Cantera v3.1.0 MultiNewton.h](https://github.com/Cantera/cantera/blob/v3.1.0/include/cantera/oneD/MultiNewton.h), [MultiNewton.cpp](https://github.com/Cantera/cantera/blob/v3.1.0/src/oneD/MultiNewton.cpp), and [Sim1D.cpp](https://github.com/Cantera/cantera/blob/v3.1.0/src/oneD/Sim1D.cpp).
+
+### 2026-11-04: Full-System Norm And Fixed-Mesh Core Trial
+
+The earlier reduced-system candidate used free-unknown count as its RMS
+denominator. Cantera's `norm2` divides by the full system size instead. For
+comparison with RST's eliminated BCs, the independent test oracle now inserts
+zero corrections at fixed boundary entries and divides by the full-grid size;
+it is checked against an explicitly reconstructed full state and correction.
+All three norm-oracle Debug tests passed. This does not assume the earlier
+free-unknown experiment was exact numerical parity with Cantera.
+
+A combined temporary runtime candidate used this full-system weighted norm,
+Cantera's fixed geometric damping divisor and default Jacobian age. The fixed-
+grid analytic tests passed, as did 64 local Damped unit tests, including a
+direct seven-trial damping sequence test. The unchanged 26-state fixed-grid
+KiThe fixture still returned `NoResult` after 3 iterations, 1 trial and 4
+linear solves, with the next update blocked at the bounds.
+
+The full BVP_Damp Debug filter reported 326 passed / 7 failed / 58 ignored.
+Four parser-driven scenarios that had previously returned a profile now return
+no result. An isolated fixed-grid reproduction of their model showed the
+candidate exhausted its damping trials, including a fresh-Jacobian attempt:
+6 iterations, 38 trials and 3 Jacobian evaluations. The restored previous
+runtime returned a profile on that same fixture in 8 iterations, 18 trials and
+3 Jacobian evaluations; its raw final discrete residual norm was `1.719e-3`
+with solution tolerance `1e-5`. Residual and solution tolerance are not
+necessarily in the same units or scaling, so this is a diagnostic warning,
+not by itself a proof of an invalid profile.
+
+The combined runtime candidate was removed to avoid shipping known changed
+failure behavior. The restored BVP_Damp Debug filter reported 330 passed,
+2 failed, 59 ignored; the remaining failures are the previously observed
+`test_BVP_Damp1` no-result and combustion trajectory checkpoint mismatch.
+The candidate did not touch the symbolic or linear-algebra backends.
+The result is consistent with a need to investigate Cantera's separate
+pseudo-transient recovery, but does not demonstrate that recovery will solve
+either fixture. In particular the transient operator and its scaling must be
+derived for RST's integrated first-order residuals and eliminated BC rows;
+an unexamined diagonal shift is not equivalent to Cantera's transient model.
+
+### 2026-11-04: Trapezoid Jacobian Diagnosis And Correction
+
+Cantera 3.1.0 adds a time term to differential residual rows, leaves
+algebraic rows unshifted, and updates the steady Jacobian using the
+domain-provided transient mask. The exact sign belongs to Cantera's residual
+convention; it cannot be copied as a diagonal shift into a differently ordered
+and scaled discretization. The outer controller retries steady Newton after
+time-stepping and reduces the timestep on failure. References: [Flow1D.cpp](https://github.com/Cantera/cantera/blob/v3.1.0/src/oneD/Flow1D.cpp), [MultiJac.cpp](https://github.com/Cantera/cantera/blob/v3.1.0/src/oneD/MultiJac.cpp), and [OneDim.cpp](https://github.com/Cantera/cantera/blob/v3.1.0/src/oneD/OneDim.cpp).
+
+`tests/cantera_transient.rs` is a test-only quadrature study for one explicitly
+chosen artificial PDE, `y_tau = f - y_x`. It applies Forward or Trapezoid
+quadrature on a nonuniform fixed mesh and removes prescribed BC columns. With
+one left and one right BC, the resulting trial mass operator has off-diagonal
+entries and a model-defined differential/algebraic mask. The Forward residual
+plus mass operator agrees with finite differences of actual RST callbacks. An
+independent numeric Trapezoid callback confirms the same finite-difference
+method. These observations establish neither a unique physical transient model
+for arbitrary BVPs nor solver-level convergence.
+Debug command: `cargo test --lib cantera_core_tests::transient:: --quiet -- --test-threads=1`;
+result: 3 passed, 0 failed, 1 ignored. The ignored dependency inspection and
+the separate KiThe Jacobian diagnostic were also run successfully as
+observational diagnostics; neither is a passing Jacobian-parity assertion.
+
+The check exposed a Trapezoid Jacobian defect in **both** symbolic assembly
+routes. For `u'=-u+v`, `v'=u-v`, mesh `[0, 0.2, 1]`, `u(0)=1`, `v(1)=0.25`,
+the first v-equation has derivative `-0.1` with respect to `u_1`. The generated
+ExprLegacy and AtomView dependency lists both omitted this cross-component
+right-node variable, so both sparse Jacobian builders skipped it. The
+independent numeric Jacobian and centered finite differences agreed. This was
+not a mathematical disagreement between differentiation engines; it was a
+shared defect in the candidate-variable metadata supplied to them.
+
+The correction computes each original RHS's state dependencies once and adds
+those dependencies at the right node only for Trapezoid. Forward and left-node
+tracking are unchanged. The Atom path uses its packed-Atom dependency walker,
+so it does not round-trip through Expr to make the plan. The same interval
+assembly also bound the right-endpoint RHS to the left coordinate; both
+ExprLegacy and AtomView now bind `x_j` and `x_{j+1}` correctly, including the
+Atom endpoint fallback.
+
+Debug gates now assert the analytic derivative in Dense, Sparse and Banded
+ExprLegacy layouts, the Atom sparse Jacobian, and the x-dependent Trapezoid
+residual on a nonuniform mesh. The original 26-state KiThe fixed-grid
+Sparse/Trapezoid reproducer now reports generated, analytic and finite-
+difference derivative `-0.3030303030303` for residual row 0 / packed column
+14, for both ExprLegacy and AtomView. Both full solves converge on the
+unchanged fixed mesh in 4 iterations, 8 damping trials and 12 linear solves;
+the reported profile metrics match. Its minimum concentration-like value is
+`-1.295524e-4`, which is allowed by the fixture's configured `-0.1` lower
+bound, so this result is not evidence of strict positivity. Grid-refinement
+strategies must be re-evaluated separately after this fixed-grid correction.
+
+The unchanged large adaptive-grid reproducer was then rerun with the same
+TwoPoint, Pearson and Grcar-Smooke settings. All three converged after two mesh
+refinements: TwoPoint finished with 101 nodes in 8 Newton iterations, Pearson
+with 3082 nodes in 6 iterations, and Grcar-Smooke with 3088 nodes in 6
+iterations. The minimum concentration-like values were respectively about
+`-2.25e-18`, `-1.23e-16`, and `-1.03e-16`, consistent with roundoff around the
+configured nonnegative physical bound. No tolerance was loosened. These Debug
+results show that the earlier NoResult on these cases was downstream of the
+incorrect Trapezoid Jacobian; they do not validate every refinement strategy
+or establish release performance.
+
+The combustion-1000 accepted-trajectory checkpoints changed after the
+corrected Jacobian because the old Sparse/ExprLegacy trajectory was generated
+with the incomplete derivative. All four ExprLegacy/AtomView × Sparse/Banded
+routes were rerun: maximum full-trajectory difference is `1.458421058e-13`,
+and iterations, residual/Jacobian counts, damping/linear-solve counters, and
+semantic decision events match. Corrected checkpoint values are now pinned in
+the regression test rather than retaining the pre-fix trajectory as an
+incorrect oracle.
+
+Commands: `cargo test --lib trapezoid_ -- --nocapture --test-threads=1` ->
+5 passed; the original fixture's focused checks were also run with
+`cargo test --lib rst_native_damped_fixed_grid_ -- --ignored --nocapture --test-threads=1`
+-> 2 passed; the fixed-grid TwoPoint/Pearson/Grcar-Smooke matrix was run with
+`cargo test --lib rst_native_damped_large_problem_grid_strategy_matrix -- --ignored --nocapture --test-threads=1`
+-> 1 passed. The complete View debug filter passed 206 tests (8 ignored). The
+complete BVP_Damp debug filter passed 334 tests (61 ignored) with one unrelated
+classic failure: `test_classic_examples::tets::test_BVP_Damp1` still unwraps an
+absent profile. Its isolated run reproduces that failure; the distinct
+`test_correctness::test_BVP_Damp1` passes. The classic case uses the default
+Forward scheme, so it is not affected by this Trapezoid Jacobian fix. The
+independent pseudo-time quadrature tests remain test-only; they do not alter
+production Newton behavior.
+
+### 2026-11-04: Fixed-Jacobian Damping Control After Jacobian Correction
+
+An isolated scalar control uses `F(y)=y^2-2`, `y0=0.1` and the same frozen
+Jacobian `J=0.2` for every trial. With zero relative tolerance the full-grid
+weighted norm differs from the absolute correction only by a fixed multiplier.
+An independent calculation of the pinned Cantera schedule accepts trial 6 at
+`alpha=1/(4*sqrt(2))`; the existing runtime telemetry records acceptance on
+trial 4 at `alpha=1/(16*sqrt(2))`. Both use the same base point and correction,
+so this isolates the damping schedule; it is a local numerical control, not a
+run of Cantera itself or evidence of full-solver parity.
+
+A constant-residual control exhausts all 7 trials, leaves the original state
+unchanged and returns status `-2`; an outward correction from a bound returns
+`-3` before a damping trial and also preserves the state. These checks exercise
+the actual RST local step and its telemetry without changing production code.
+The fixed-mesh parser fixture on the corrected tree returns a profile after 8
+iterations, 18 trials, 12 rejections, 3 Jacobian evaluations and 26 linear
+solves; its raw residual norm is `1.7190374615250084e-3`. This raw norm is not
+automatically comparable to the configured solution tolerance.
+
+In a separate two-component norm control, the absolute correction `1e-6` in
+the sensitive component exceeds its weighted tolerance, while the absolute
+correction `1.0` in the large-scale component does not. This exercises the
+test-only reduced-system norm, not a production convergence change.
+
+Debug commands: `cargo test --lib cantera_core_tests:: -- --nocapture --test-threads=1`
+reported 9 passed, 2 ignored; `cargo test --lib fixed_mesh_parser_fixture_traces_newton_outcome -- --ignored --nocapture --test-threads=1`
+reported 1 passed; `cargo test --lib NR_Damp_solver_damped::tests:: -- --test-threads=1`
+reported 63 passed; and `cargo test --lib rst_native_damped_fixed_grid_ -- --ignored --nocapture --test-threads=1`
+reported 2 passed. The candidate local core and solver-level A/B remain open.
+
+### 2026-11-04: Test-Only Fixed-Mesh Local-Core A/B
+
+A test-only candidate now uses the actual prepared RST residual/Jacobian
+callbacks and factor owner with a Cantera-style weighted norm, bound factor,
+geometric damping and Jacobian-age control. Both sides use the same initial
+guess, bounds, mesh, tolerance and configured Jacobian/damping budgets;
+callback and Jacobian equality are checked before the nonlinear comparisons.
+It is not a run of Cantera, does not implement `Sim1D` transient recovery, and
+is not wired into production. The test-only weighted norm retains scalar atol.
+
+| Fixed-mesh case | Existing RST core | Test-only candidate |
+| --- | --- | --- |
+| Linear analytic | converged | converged, residual L2 `8.01e-16` |
+| `y'=-(y*y)`, 20 intervals | converged, 7 iterations | converged, 7 iterations, residual L2 `1.74e-16` |
+| Parser fixture, 10 intervals | converged, 8 iterations, 15 trials, residual L2 `1.719e-3` | line-search exhausted, 6 iterations, 29 trials, residual L2 `3.037e-1` |
+| Original KiThe, 33 intervals | converged, 4 iterations, 12 linear solves, residual L2 `5.846e-4` | converged, 5 iterations, 20 linear solves, residual L2 `1.854e-5` |
+
+For the manufactured nonlinear problem both profiles match the analytic
+`1/(1+x)` to `2e-4`, including discretization error. On the large fixture
+the packed profiles differ by at most `2.641e-5`; their minimum concentration-
+like values are `-1.295524e-4` and `-1.292274e-4`, both within the original
+configured lower bound `-0.1` but not strictly nonnegative. Species-sum errors
+are `2.22e-16` and `3.18e-13`; maximum temperatures are `1201.1201 K` and
+`1201.1170 K`. These raw residuals are not normalized error estimates, and
+neither result substitutes for the common-coordinate Sci/profile gate.
+
+The parser fixture is an honest negative local-core gate. A separate
+pseudo-transient controller could affect this outcome, but its effectiveness
+has not been established. The two A/B diagnostic tests report statuses rather
+than asserting every candidate must converge; the analytic controls are actual
+correctness assertions. An unrelated `-y^2` parser-precedence surprise exposed
+while creating the manufactured fixture is tracked in `symbolic/TODO.md`; the
+validated fixture explicitly writes `0-(y*y)`.
+
+At the profile accepted by the existing parser-fixture route, a newly evaluated
+Jacobian and independent nalgebra Dense LU give correction L2 `5.1878e-3` and
+full-grid weighted correction norm `2.8948`, above one. The linear residual is
+`6.30e-19` and the generated Jacobian's directional finite-difference error is
+`5.83e-10`. This highlights a difference from a fresh-Jacobian weighted check;
+Cantera's actual trial can use a reused Jacobian, so it is not by itself proof
+of a specific Cantera terminal status or continuous-profile inaccuracy.
+
+To isolate the schedule, a third test-only parser run kept the candidate's
+weighted norm and Jacobian-age control but used RST's legacy damping sequence.
+It also exhausted the line search: 15 iterations, 77 trials, 92 linear solves
+and residual L2 `3.130e-1`. The geometric sequence exhausted after 6 iterations,
+29 trials and 35 solves. Changing damping sequence alone therefore does not
+recover this fixture. On the large KiThe candidate's final state, a directional
+Jacobian finite-difference check has maximum error `2.35e-10` at scale `3.71`;
+this is one direction, not a complete proof of the full Jacobian.
+
+As a separately labeled diagnostic, the test-only candidate was initialized
+from the profile published by the existing parser-fixture route, rather than
+the original guess. It converged in one iteration / two linear solves, reducing
+raw residual L2 from `1.719e-3` to `5.141e-7`. This is evidence that a nearby
+discrete root can be reached from that seed, not a replacement for the original
+initial-guess gate or a demonstration of pseudo-transient recovery.
+
+A separate bounded fixed-grid control has no admissible discrete solution.
+The candidate accepts one bound-limited trial, retries once with a fresh
+Jacobian after a blocked stale-Jacobian attempt, then returns blocked status
+without publishing a profile. This is a local lifecycle check, not recovery.
+
+Debug: `cargo test --lib cantera_core_tests:: -- --nocapture --test-threads=1`
+reported 13 passed / 3 ignored, including the small candidate controls;
+`cargo test --lib large_kithe_fixed_mesh_ab -- --ignored --nocapture --test-threads=1`
+reported 1 passed as a diagnostic. The full `numerical::BVP_Damp::` Debug
+filter subsequently reported 341 passed / 1 failed / 62 ignored. The failure
+is the previously observed classic `test_BVP_Damp1` missing-profile unwrap.
+Full reference parity, recovery and all release/performance stabilization gates
+remain open.
+
+### 2026-11-04: Fixed-Mesh Newton Norm/Schedule Factorial Control
+
+The parser fixture was rerun with a four-way test-only control while holding
+the fixed mesh, equations, initial guess, bounds, tolerances, callbacks and
+Jacobian-age policy constant. The factors were Cantera weighted RMS versus
+RST Euclidean correction norm, and Cantera's fixed `alpha /= sqrt(2)` schedule
+versus the current RST iteration-dependent schedule.
+
+| Norm | Trial schedule | Outcome | Iterations | Trials | Linear solves | Final residual L2 |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| Cantera weighted RMS | Cantera | line-search failure | 6 | 29 | 35 | `3.036526e-1` |
+| Cantera weighted RMS | Cantera, fresh Jacobian each iteration | converged | 7 | 14 | 21 | `2.535658e-7` |
+| Cantera weighted RMS | RST | line-search failure | 15 | 77 | 92 | `3.129914e-1` |
+| RST Euclidean | Cantera | line-search failure | 4 | 19 | 23 | `2.970219e-1` |
+| RST Euclidean | RST | converged | 8 | 15 | 23 | `1.719037e-3` |
+
+The final row exactly matches the existing production parser-fixture profile and
+its discrete counters (3 Jacobian evaluations; 8 iterations; 15 damping
+trials; 23 linear solves). Therefore neither Cantera norm nor Cantera schedule
+alone reproduces the production outcome; the two legacy contracts together do.
+A fifth control forces a fresh Jacobian each iteration while using both
+Cantera contracts and converges with residual `2.535658e-7`. Jacobian reuse
+also affects this fixture. This does **not** justify disabling reuse globally:
+the local Newton may correctly report failure and leave recovery to a separate
+outer controller, and forced refresh is not the configured `maxJacAge=5`
+reference policy. The production legacy result is not validated: a
+fresh-Jacobian correction at its published profile has weighted norm
+`2.894819`, above one. The correction using the actually cached/reused
+Jacobian is also above one (`2.899883`), so stale Jacobian alone does not
+explain the success. Production compares raw Euclidean correction against a
+separate scalar threshold (`6.355685e-3`): the cached-J Euclidean norm is
+`5.099209e-3`, so the current check accepts it even though its Cantera weighted
+RMS is `2.899883`. This directly identifies the acceptance mismatch. No
+production behavior changed and no migration claim is made. Next verify the
+rejection and typed-failure contract on independent fixed-mesh BVP controls and
+all linear backends.
+
+The full Debug filter was rerun after adding these test-only controls:
+`cargo test --lib numerical::BVP_Damp:: -- --test-threads=1` -> 345 passed,
+1 failed, 63 ignored. The sole failure remains the known classic
+`test_classic_examples::tets::test_BVP_Damp1` missing-profile unwrap; the
+separate correctness test with the same short name passes. No production
+Newton code changed in this diagnostic stage.
+
+### 2026-11-04: Keep Newton-Core Parity Separate From Transient Recovery
+
+The active production question is whether the fixed-mesh damped Newton-Raphson
+core matches the pinned Cantera `MultiNewton` contracts on RST's BVP residual
+and Jacobian. Cantera's outer pseudo-transient controller is not part of that
+local Newton algorithm and is deferred until the steady Newton core has passed
+its own correctness gates. A generic steady BVP does not define a unique
+physical transient operator; any later transient-recovery API must receive an
+explicit model/operator, and must retain typed failure plus partial diagnostics
+when none is supplied. Test-only artificial-PDE probes are exploratory only,
+not production behavior, Newton-core acceptance criteria, or evidence of a
+physical model. The mixed-operator probe was removed from the diagnostic after
+it began to distract from the primary Newton investigation.
+
 

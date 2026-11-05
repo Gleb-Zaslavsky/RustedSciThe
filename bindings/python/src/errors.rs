@@ -310,6 +310,25 @@ native_error_kinds!(rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrat
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::PreparedCallbackPreparationFailed { .. } => "PreparedCallbackPreparationFailed",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AtomAotPlanPreparationFailed { .. } => "AtomAotPlanPreparationFailed",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AotLifecycleFailure { .. } => "AotLifecycleFailure",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::BoundStepBlocked { .. } => "BoundStepBlocked",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError {
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::InvalidConfiguration { .. } => "InvalidConfiguration",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::MissingParameterValues { .. } => "MissingParameterValues",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::SymbolicPreparation { .. } => "SymbolicPreparation",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::FrontendContract { .. } => "FrontendContract",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::Logging { .. } => "Logging",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::ResidualCallback { .. } => "ResidualCallback",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::JacobianCallback { .. } => "JacobianCallback",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::JacobianAssembly { .. } => "JacobianAssembly",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::SingularJacobian { .. } => "SingularJacobian",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::LinearResidualCheckFailed { .. } => "LinearResidualCheckFailed",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::NonFiniteLinearSolution { .. } => "NonFiniteLinearSolution",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::LinearBackend { .. } => "LinearBackend",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::BoundsBlocked { .. } => "BoundsBlocked",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::NonFiniteCorrectionNorm { .. } => "NonFiniteCorrectionNorm",
+    rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::NonConvergence { .. } => "NonConvergence",
 });
 
 native_error_kinds!(rustedscithe_core::numerical::Radau::api::RadauErrorKind {

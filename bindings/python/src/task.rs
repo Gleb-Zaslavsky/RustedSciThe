@@ -228,6 +228,7 @@ fn bvp_family_name(family: BvpSolverFamilySpec) -> &'static str {
     match family {
         BvpSolverFamilySpec::Damp => "bvp_damp",
         BvpSolverFamilySpec::Sci => "bvp_sci",
+        BvpSolverFamilySpec::Cantera => "bvp_cantera",
     }
 }
 
@@ -674,6 +675,7 @@ fn bvp_family_label(family: BvpSolverFamilySpec) -> &'static str {
     match family {
         BvpSolverFamilySpec::Damp => "bvp_damp",
         BvpSolverFamilySpec::Sci => "bvp_sci",
+        BvpSolverFamilySpec::Cantera => "bvp_cantera",
     }
 }
 

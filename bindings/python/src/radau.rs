@@ -29,8 +29,8 @@ use crate::errors::{
     SolverError, SolverPanicState, UnsupportedOptionError, annotate_native, catch_panic,
 };
 use crate::expr::PyExpr;
-use crate::telemetry::write_report;
 use crate::parameter_loop::{PyIvpParameterLoopPoint, run_parameter_loop};
+use crate::telemetry::write_report;
 
 /// Adapt Python callbacks to the native Radau callback ABI.
 ///
@@ -395,10 +395,7 @@ impl RadauSolution {
         Bound<'py, numpy::PyArray1<f64>>,
         Bound<'py, numpy::PyArray2<f64>>,
     )> {
-        let (times, values) = self
-            .native
-            .output_trajectory()
-            .map_err(map_radau_error)?;
+        let (times, values) = self.native.output_trajectory().map_err(map_radau_error)?;
         let rows = (0..values.nrows())
             .map(|row| (0..values.ncols()).map(|col| values[(row, col)]).collect())
             .collect::<Vec<Vec<f64>>>();
@@ -769,7 +766,7 @@ impl RadauSolver {
             Some(options) => options.clone(),
             None => SolverOptions::new(None, None, None, None, None, None, None, None, None)?,
         };
-        let _ = crate::contract::native_logging_level(&options, "radau5")?;
+        let logging_level = crate::contract::native_logging_level(&options, "radau5")?;
         let (frontend, telemetry_mode, execution_policy, matrix_layout) = validate_route(&options)?;
         let output = match output.trim().to_ascii_lowercase().as_str() {
             "final" | "final_only" => RadauOutputPolicy::FinalOnly,
@@ -811,6 +808,7 @@ impl RadauSolver {
                 RadauJacobianSource::FiniteDifference
             },
             telemetry: telemetry_mode,
+            logging_level,
             execution_policy,
             output,
             aot,
@@ -941,7 +939,10 @@ impl RadauSolver {
         parameter_vectors: Vec<Vec<f64>>,
     ) -> PyResult<Vec<Py<PyIvpParameterLoopPoint>>> {
         finite_vector(&y0, "y0")?;
-        let route = format!("{}:{}:{}", self.frontend, self.execution, self.matrix_layout);
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
         run_parameter_loop(py, "radau5", &route, parameter_vectors, |parameters| {
             let solution = self.solve_with_parameter_values(y0.clone(), parameters.to_vec())?;
             Py::new(py, solution).map(Py::into_any)
@@ -1181,7 +1182,7 @@ impl RadauCallbackSolver {
             Some(options) => options.clone(),
             None => SolverOptions::new(None, None, None, None, None, None, None, None, None)?,
         };
-        let _ = crate::contract::native_logging_level(&options, "radau5")?;
+        let logging_level = crate::contract::native_logging_level(&options, "radau5")?;
         let (_, telemetry, _, matrix_layout) = validate_route(&options)?;
         if options.execution() != "lambdify" {
             return Err(UnsupportedOptionError::new_err(
@@ -1232,6 +1233,7 @@ impl RadauCallbackSolver {
             matrix_layout: RadauMatrixLayout::Dense,
             jacobian_source,
             telemetry,
+            logging_level,
             execution_policy: RadauExecutionPolicy::Sequential,
             output,
             aot: None,

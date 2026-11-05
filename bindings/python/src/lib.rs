@@ -111,6 +111,8 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBvpSolverRequest>()?;
     module.add_class::<PyPreparedBvpSolver>()?;
     module.add_class::<PyBvpApiSolution>()?;
+    module.add_class::<crate::bvp_api::BvpCanteraParameterLoopPoint>()?;
+    module.add_class::<crate::bvp_api::BvpCanteraParameterLoopReport>()?;
     module.add_class::<PyBvpPostprocessPlan>()?;
     module.add_class::<BvpDampSolver>()?;
     module.add_class::<BvpDampNaiveSolver>()?;

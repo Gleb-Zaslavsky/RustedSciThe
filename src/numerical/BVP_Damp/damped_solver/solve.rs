@@ -207,6 +207,30 @@ impl NRBVP {
         }
         //_________________________________________________________________
         let p = self.p;
+        let max_damp_iter = self
+            .strategy_params
+            .as_ref()
+            .and_then(|params| params.max_damp_iter)
+            .unwrap_or(7);
+        if max_damp_iter == 0 {
+            return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                field: "strategy_params.max_damp_iter".to_string(),
+                value: "0".to_string(),
+                message: "at least one damping trial is required".to_string(),
+            });
+        }
+        let damp_factor = self
+            .strategy_params
+            .as_ref()
+            .and_then(|params| params.damp_factor)
+            .unwrap_or(0.5);
+        if !damp_factor.is_finite() || !(0.0 < damp_factor && damp_factor < 1.0) {
+            return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                field: "strategy_params.damp_factor".to_string(),
+                value: damp_factor.to_string(),
+                message: "the fixed geometric reduction exponent must be finite and strictly between 0 and 1".to_string(),
+            });
+        }
         let now = Instant::now();
         // compute the undamped Newton step
         let y_k_minus_1 = &*self.y;
@@ -242,7 +266,15 @@ impl NRBVP {
             self.telemetry_counters.record_factorization();
         }
 
-        let fbound = bound_step_Cantera2(y_k_minus_1, &*undamped_step_k_minus_1, &self.bounds_vec);
+        // The linear solve returns delta = J^-1 F, while the Newton state
+        // update below is y_next = y - lambda * delta. Bound feasibility must
+        // be evaluated using that same subtractive direction.
+        let (fbound, limiting_index) = bound_step_Cantera2_with_update_sign_and_limit(
+            y_k_minus_1,
+            &*undamped_step_k_minus_1,
+            &self.bounds_vec,
+            -1.0,
+        );
         if fbound.is_nan() {
             self.telemetry_counters.record_non_finite_value(0);
             error!("\n \n fbound is NaN \n \n");
@@ -254,7 +286,29 @@ impl NRBVP {
             panic!("Damped BVP damping failed: boundary step factor is infinite")
         }
         if fbound < 1.0 {
-            self.telemetry_counters.record_bound_limited_step(fbound);
+            self.telemetry_counters
+                .record_bound_limited_step_at(fbound, limiting_index);
+            if let Some(index) = limiting_index {
+                let value = y_k_minus_1.get_val(index);
+                let delta = undamped_step_k_minus_1.get_val(index);
+                let bounds = self.bounds_vec[index];
+                let full_step_value = value - delta;
+                let limited_step_value = value - fbound * delta;
+                info!(
+                    "Damped bound limit: packed_index={} variable={} value={:.17e} delta={:.17e} full_step={:.17e} limited_step={:.17e} bounds={:?} factor={:.17e}",
+                    index,
+                    self.variable_string
+                        .get(index)
+                        .map(String::as_str)
+                        .unwrap_or("<unknown>"),
+                    value,
+                    delta,
+                    full_step_value,
+                    limited_step_value,
+                    bounds,
+                    fbound,
+                );
+            }
         }
         // let fbound =1.0;
         info!("\n \n fboundary  = {}", fbound);
@@ -267,26 +321,13 @@ impl NRBVP {
             return Ok((-3, None));
         }
 
-        let maxDampIter = self
-            .strategy_params
-            .as_ref()
-            .and_then(|p| p.max_damp_iter)
-            .unwrap_or(5);
-        let DampFacor = self
-            .strategy_params
-            .as_ref()
-            .and_then(|p| p.damp_factor)
-            .unwrap_or(0.5);
-
         let mut S_k: Option<f64> = None;
         let mut damped_step_result: Option<Box<dyn VectorType>> = None;
         let mut conv: f64 = 0.0;
-
-        // compute the weighted norm of the undamped step size (s0 in C++ code) - calculated OUTSIDE the loop
         let s0 = undamped_step_k_minus_1.norm();
 
         let mut k = 0;
-        while k < maxDampIter {
+        while k < max_damp_iter {
             self.telemetry_counters.record_damping_trial_at(
                 self.telemetry_counters.iterations(),
                 lambda,
@@ -341,7 +382,6 @@ impl NRBVP {
                 self.telemetry_counters.record_factorization();
             }
 
-            // compute the weighted norm of step1 (s1 in C++ code)
             let s1 = undamped_step_k.norm();
             self.error_old = s1;
             info!("\n \n L2 norm of undamped step = {}", s1);
@@ -368,7 +408,7 @@ impl NRBVP {
                 break;
             }
             // if fail this criterion we must reject it and retries the step with a reduced damping parameter
-            lambda = lambda / (2.0f64.powf(k as f64 + DampFacor));
+            lambda /= 2.0f64.powf(k as f64 + damp_factor);
             self.telemetry_counters.record_damping_rejection_at(
                 self.telemetry_counters.iterations(),
                 lambda,
@@ -380,7 +420,7 @@ impl NRBVP {
             k += 1;
         }
 
-        if k < maxDampIter {
+        if k < max_damp_iter {
             let step_norm = S_k.expect(
                 "Damped BVP damping invariant violated: accepted damping step did not record a step norm",
             );
@@ -403,7 +443,7 @@ impl NRBVP {
             }
         } else {
             //  if we have reached max damping iterations without finding a damping coefficient we must reject the step
-            warn!("\n \n  No damping coefficient found (max damping iterations reached)");
+            warn!("\n \n  No damping coefficient found (max damping trials reached)");
             Ok((-2, None))
         }
     } // end of damped step
@@ -556,6 +596,7 @@ impl NRBVP {
                 info!("residual norm of the solution = {}", resid_norm);
                 let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
                 // before refining in case it will go wrong
+                self.y = y_k_plus_1.clone_box();
                 self.result = result.clone();
                 info!(
                     "\n \n solution found for the current grid {}",
@@ -572,7 +613,7 @@ impl NRBVP {
                     self.telemetry_counters
                         .finish_iteration_scope(iteration_started);
                     info!("solving with new grid!");
-                    return self.try_solve_with_new_grid();
+                    return self.try_solve_with_new_grid(true);
                 } else {
                     // if adapive is None then we just return the result
                     info!("returning the result");
@@ -619,7 +660,7 @@ impl NRBVP {
                 .map_or(false, |p| p.adaptive.is_some())
         {
             info!("\n \n iterations unsuccessful, calling solve_with_new_grid \n \n");
-            return self.try_solve_with_new_grid();
+            return self.try_solve_with_new_grid(false);
         }
 
         Ok(None)
@@ -692,13 +733,13 @@ impl NRBVP {
                 message: "current unknown count overflowed while refining the mesh".to_string(),
             }
         })?;
-        let y_DVector = self
-            .result
-            .as_ref()
-            .filter(|result| result.len() == expected_unknowns)
-            .map(|result| result.to_DVectorType())
+        let y_DVector = (self.y.len() == expected_unknowns)
+            .then(|| self.y.to_DVectorType())
             .or_else(|| {
-                (self.y.len() == expected_unknowns).then(|| self.y.to_DVectorType())
+                self.result
+                    .as_ref()
+                    .filter(|result| result.len() == expected_unknowns)
+                    .map(|result| result.to_DVectorType())
             })
             .or_else(|| {
                 (self.initial_guess.len() == expected_unknowns)
@@ -787,9 +828,21 @@ impl NRBVP {
     /// Updates solver state with new mesh and restarts Newton iterations
     fn try_solve_with_new_grid(
         &mut self,
+        current_grid_converged: bool,
     ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         let (new_mesh, initial_guess, number_of_nonzero_keys) = self.create_new_grid()?;
         self.custom_timer.grid_refinement_tac();
+
+        let mesh_changed = new_mesh.as_slice() != self.x_mesh.as_slice();
+        if !mesh_changed {
+            self.number_of_refined_intervals = 0;
+            self.we_need_refinement();
+            if current_grid_converged {
+                return Ok(self.result.clone());
+            }
+            return Ok(None);
+        }
+
         self.number_of_refined_intervals = number_of_nonzero_keys;
         self.nodes_added.push(number_of_nonzero_keys);
         let initial_guess_matrix = DMatrix::from_column_slice(
@@ -809,55 +862,50 @@ impl NRBVP {
         self.telemetry_counters.record_grid_refinement();
         self.we_need_refinement();
 
-        if number_of_nonzero_keys > 0 {
-            // Preserve the structural bandwidth before clearing the prepared
-            // layout. `clear_layout` intentionally resets it to (0, 0), but
-            // the regenerated mesh must reuse the previous structural hint;
-            // otherwise the second Banded preparation receives a diagonal-only
-            // contract and rejects valid off-diagonal entries.
-            let prepared_bandwidth = self.factor_owner.bandwidth();
+        // Preserve the structural bandwidth before clearing the prepared
+        // layout. `clear_layout` intentionally resets it to (0, 0), but the
+        // regenerated mesh must reuse the previous structural hint; otherwise
+        // the second Banded preparation receives a diagonal-only contract and
+        // rejects valid off-diagonal entries.
+        let prepared_bandwidth = self.factor_owner.bandwidth();
 
-            // Clear old Jacobian completely to avoid dimension mismatch
-            let had_owned_factor = self.factor_owner.borrow().is_some();
-            if had_owned_factor
-                || self
-                    .factor_owner
-                    .old_jac
-                    .as_ref()
-                    .map(|jacobian| jacobian.factorization_ready())
-                    .unwrap_or(false)
-            {
-                self.telemetry_counters.record_factorization_invalidation();
-            }
-            self.factor_owner.clear_numeric_jacobian();
-            self.jac = None; // Clear Jacobian function as well
-            self.jac_recalc = true; // Force Jacobian recalculation for new grid
-            self.m = 0; // Reset Jacobian age counter
-
-            // Clear other cached state that might be invalid for new grid
-            self.bounds_vec.clear();
-            self.rel_tolerance_vec.clear();
-            self.factor_owner.clear_layout();
-            self.variable_string.clear();
-
-            // Update grid parameters
-            self.n_steps = new_mesh.len() - 1;
-
-            info!(
-                "new guess of shape {} {}",
-                self.initial_guess.nrows(),
-                self.initial_guess.ncols()
-            );
-            info!("new mesh length {}", new_mesh.len());
-
-            self.custom_timer.symbolic_operations_tic();
-            // Regenerate system with the preserved structural bandwidth.
-            self.try_eq_generate(Some(new_mesh), Some(prepared_bandwidth))?;
-            self.custom_timer.symbolic_operations_tac();
-        } else {
-            info!("no new grid needed - returning to main loop");
-            return Ok(None);
+        // Clear old Jacobian completely to avoid dimension mismatch
+        let had_owned_factor = self.factor_owner.borrow().is_some();
+        if had_owned_factor
+            || self
+                .factor_owner
+                .old_jac
+                .as_ref()
+                .map(|jacobian| jacobian.factorization_ready())
+                .unwrap_or(false)
+        {
+            self.telemetry_counters.record_factorization_invalidation();
         }
+        self.factor_owner.clear_numeric_jacobian();
+        self.jac = None; // Clear Jacobian function as well
+        self.jac_recalc = true; // Force Jacobian recalculation for new grid
+        self.m = 0; // Reset Jacobian age counter
+
+        // Clear other cached state that might be invalid for new grid
+        self.bounds_vec.clear();
+        self.rel_tolerance_vec.clear();
+        self.factor_owner.clear_layout();
+        self.variable_string.clear();
+
+        // Update grid parameters
+        self.n_steps = new_mesh.len() - 1;
+
+        info!(
+            "new guess of shape {} {}",
+            self.initial_guess.nrows(),
+            self.initial_guess.ncols()
+        );
+        info!("new mesh length {}", new_mesh.len());
+
+        self.custom_timer.symbolic_operations_tic();
+        // Regenerate system with the preserved structural bandwidth.
+        self.try_eq_generate(Some(new_mesh), Some(prepared_bandwidth))?;
+        self.custom_timer.symbolic_operations_tac();
         self.jac_recalc = true;
         self.try_main_loop_damped()
     }
@@ -902,7 +950,12 @@ impl NRBVP {
         let res = res?;
         let end = begin.elapsed();
         elapsed_time(end);
-        self.handle_result();
+        // A failed Newton attempt may leave an iterate in `self.result` for
+        // refinement/restart diagnostics, but it is not a publishable profile.
+        // In particular, its mesh may no longer match the active refined mesh.
+        if res.is_some() {
+            self.handle_result();
+        }
         self.calc_statistics();
         self.custom_timer.get_all();
         Ok(res)
@@ -951,7 +1004,11 @@ impl NRBVP {
         let res = res?;
         let end = begin.elapsed();
         elapsed_time(end);
-        self.handle_result();
+        // Keep failure handling consistent with the cold solve path: only a
+        // converged result may be expanded with boundary values and published.
+        if res.is_some() {
+            self.handle_result();
+        }
         self.calc_statistics();
         self.custom_timer.get_all();
         Ok(res)

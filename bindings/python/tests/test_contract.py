@@ -3992,6 +3992,57 @@ def test_bvp_api_typed_request_builds_native_sci_route_and_keeps_telemetry():
     assert telemetry["timings_ms"] == {}
 
 
+def test_bvp_api_cantera_route_exposes_frontend_backend_and_native_telemetry():
+    y = Expr.variable("y")
+    rate = Expr.variable("rate")
+    request = BvpSolverRequest.cantera(
+        [-rate * y],
+        ["y"],
+        "x",
+        [index / 16.0 for index in range(17)],
+        [(0, "left", 1.0)],
+        [[math.exp(-(index + 1) / 16.0)] for index in range(16)],
+        options=SolverOptions(
+            frontend="atom_native",
+            execution="lambdify",
+            matrix_layout="banded",
+            telemetry="detailed",
+        ),
+        tolerance=1e-7,
+        external_parameters=["rate"],
+        external_parameter_values=[0.5],
+    )
+    solver = request.prepare()
+    assert solver.route == "cantera"
+    solution = solver.solve()
+    assert solution.route == "cantera"
+    assert solution.values_array().shape == (17, 1)
+    assert solution.values()[0][0] == pytest.approx(1.0, abs=1e-12)
+    first_endpoint = solution.values()[-1][0]
+    rebound = solver.solve_with_parameter_values([1.0])
+    assert rebound.values()[-1][0] == pytest.approx(math.exp(-1.0), abs=2e-3)
+    assert rebound.values()[-1][0] < first_endpoint
+    telemetry = solver.telemetry_snapshot()
+    assert telemetry["route"] == "cantera"
+    assert telemetry["mode"] == "timings"
+    assert telemetry["counters"]["jacobian_evaluations"] >= 1
+    assert "factorization" in telemetry["timings_ms"]
+
+
+def test_bvp_api_cantera_rejects_unsupported_parallel_policy():
+    y = Expr.variable("y")
+    with pytest.raises(UnsupportedOptionError, match="execution_policy='sequential'"):
+        BvpSolverRequest.cantera(
+            [-y],
+            ["y"],
+            "x",
+            [index / 8.0 for index in range(9)],
+            [(0, "left", 1.0)],
+            [[1.0] for _ in range(8)],
+            options=SolverOptions(execution_policy="parallel"),
+        )
+
+
 def test_bvp_api_sci_external_parameter_loop_uses_native_route_report():
     """Fixed inputs are prepared once and rebound before each continued solve."""
     y = Expr.variable("y")

@@ -92,6 +92,13 @@ pub(crate) mod ivp_test_support;
 pub mod ivp_workloads;
 /// Backward-Euler Newton implementation, retained at its historical path.
 pub use BE::NR_for_Euler;
+/// Independent fixed-mesh implementation of the Cantera `MultiNewton` core.
+///
+/// This experimental solver is isolated from `BVP_Damp`: it currently accepts
+/// residual/Jacobian callbacks and uses a dense linear solve so the numerical
+/// iteration can be validated before symbolic or alternate-backend adapters
+/// are considered.
+pub mod BVP_Cantera;
 /// Boundary value problems solvers for stiff nonlinear ODEs
 ///
 /// solver NR_Damp_solver_frozen implements NR method with damping

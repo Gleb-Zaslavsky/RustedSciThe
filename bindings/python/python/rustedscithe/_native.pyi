@@ -7,6 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 __all__ = [
+    "BvpCanteraParameterLoopPoint", "BvpCanteraParameterLoopReport",
     "Expr", "ExprVector", "ExprMatrix", "BandedMatrix", "LapackStyleBandedLuFaithful", "BandedRefinementResult", "PivotedTridiagonalLu", "BlockTridiagonalLuConsistent", "BlockTridiagonalRefinementResult", "BdfSolver", "BdfCallbackSolver", "BdfSolution",
     "BackwardEulerSolver", "BackwardEulerSolution", "UniversalNonStiffSolver", "UniversalNonStiffSolution", "BvpSciSolver",
     "BvpSciSolution", "BvpSciParameterLoopPoint", "BvpSciParameterLoopReport", "BvpSolverRequest", "PreparedBvpSolver", "BvpApiSolution", "BvpPostprocessPlan", "BvpDampSolver", "BvpDampNaiveSolver", "BvpDampFrozenSolver", "BvpDampSolution", "BvpDampParameterLoopPoint", "BvpDampParameterLoopReport", "RadauSolver",
@@ -955,7 +956,17 @@ class BvpSciParameterLoopReport:
 
 
 class BvpSolverRequest:
-    """Typed request for the native Damped, Frozen or symbolic BVP_sci facade."""
+    """Typed request for Damped, Frozen, Cantera or symbolic BVP_sci."""
+    @staticmethod
+    def cantera(
+        expressions: Sequence[Expr], state_variables: Sequence[str], independent_variable: str,
+        mesh: Sequence[float], boundary_conditions: Sequence[tuple[int, Literal["left", "right"], float]],
+        initial_guess: Sequence[Sequence[float]], options: SolverOptions | None = ...,
+        tolerance: float = ..., max_iterations: int = 100, max_jacobian_age: int = 5,
+        max_damping_trials: int = 7, bounds: Mapping[str, tuple[float, float]] | None = ...,
+        external_parameters: Sequence[str] | None = ...,
+        external_parameter_values: Sequence[float] | None = ...,
+    ) -> BvpSolverRequest: ...
     @staticmethod
     def damped(
         expressions: Sequence[Expr], state_variables: Sequence[str], independent_variable: str,
@@ -1000,12 +1011,12 @@ class BvpSolverRequest:
 
 class PreparedBvpSolver:
     @property
-    def route(self) -> Literal["damped", "frozen", "naive", "sci"]: ...
+    def route(self) -> Literal["damped", "frozen", "naive", "sci", "cantera"]: ...
     @property
     def telemetry_route(self) -> str: ...
     def solve(self) -> BvpApiSolution: ...
     def solve_with_parameter_values(self, values: Sequence[float]) -> BvpApiSolution: ...
-    def solve_parameter_loop(self, parameter_vectors: Sequence[Sequence[float]]) -> BvpDampParameterLoopReport | BvpSciParameterLoopReport: ...
+    def solve_parameter_loop(self, parameter_vectors: Sequence[Sequence[float]]) -> BvpDampParameterLoopReport | BvpSciParameterLoopReport | BvpCanteraParameterLoopReport: ...
     def set_parameter_values(self, values: Sequence[float]) -> None: ...
     def set_parameter_guess(self, values: Sequence[float]) -> None: ...
     def parameter_guess(self) -> list[float]: ...
@@ -1022,6 +1033,27 @@ class BvpApiSolution:
     def values_array(self) -> NDArray[np.float64]: ...
     @property
     def sci_details(self) -> BvpSciSolution | None: ...
+
+
+class BvpCanteraParameterLoopPoint:
+    index: int
+    parameters: list[float]
+    guess_source_index: int | None
+    status: Literal["converged", "failed"]
+    telemetry_mode: str
+    iterations: int | None
+    correction_norm: float | None
+    residual_norm: float | None
+    solution: BvpApiSolution | None
+    error: Exception | None
+    def telemetry_counters(self) -> dict[str, int]: ...
+    def telemetry_timings_ms(self) -> dict[str, float]: ...
+
+
+class BvpCanteraParameterLoopReport:
+    points: list[BvpCanteraParameterLoopPoint]
+    stop_error: Exception | None
+    def completed_count(self) -> int: ...
 
 
 class BvpPostprocessPlan:

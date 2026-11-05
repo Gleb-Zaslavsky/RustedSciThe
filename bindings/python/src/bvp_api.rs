@@ -9,23 +9,31 @@ use std::path::PathBuf;
 use nalgebra::DMatrix;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
-use rustedscithe_core::numerical::BVP_Damp::telemetry::BvpLoggingMode;
+use rustedscithe_core::Utils::postprocessing::{PostprocessPlan, PostprocessStatus};
+use rustedscithe_core::numerical::BVP_Cantera::{
+    CanteraExprBvpOptions, CanteraMatrixLayout, CanteraSymbolicExecution, CanteraSymbolicFrontend,
+    CanteraTelemetryMode,
+};
 use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
+use rustedscithe_core::numerical::BVP_Damp::telemetry::BvpLoggingMode;
 use rustedscithe_core::numerical::BVP_api::{
     BvpApiError, BvpBoundaryCondition, BvpBoundarySide, BvpParameterLoopReport, BvpProblem,
     BvpSciFreeParameters, BvpSciSparseFactorization, BvpSolution, BvpSolver, BvpSolverConfig,
     BvpSolverTelemetrySnapshot,
 };
 use rustedscithe_core::numerical::BVP_sci::new::{BvpSciAssembly, BvpSciExecution, BvpSciOptions};
-use rustedscithe_core::Utils::postprocessing::{PostprocessPlan, PostprocessStatus};
 
 use crate::contract::SolverOptions;
 use crate::errors::{
-    annotate_native, catch_panic, native_variant, CallbackError, CallbackFailureState,
-    ExhaustionError, InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
-    UnsupportedOptionError,
+    CallbackError, CallbackFailureState, ExhaustionError, InvalidConfigurationError,
+    PreparationError, SolverError, SolverPanicState, UnsupportedOptionError, annotate_native,
+    catch_panic, native_variant,
 };
 use crate::expr::PyExpr;
+
+#[path = "bvp_api_cantera_loop.rs"]
+mod cantera_loop;
+pub use cantera_loop::{BvpCanteraParameterLoopPoint, BvpCanteraParameterLoopReport};
 
 /// Turn a row-major `[node][state]` Python guess into the native state-major
 /// matrix. Route factories validate the route-specific number of nodes first.
@@ -121,6 +129,27 @@ fn map_api_error(error: BvpApiError) -> PyErr {
         BvpApiError::Damped(error) | BvpApiError::Frozen(error) => {
             return crate::bvp_damp::map_native_error(error);
         }
+        BvpApiError::Cantera(error) => {
+            let kind = native_variant(&error);
+            let message = error.to_string();
+            let mapped = match error {
+                rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::InvalidConfiguration { .. }
+                | rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::MissingParameterValues { .. }
+                | rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::FrontendContract { .. } => {
+                    InvalidConfigurationError::new_err(message)
+                }
+                rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::SymbolicPreparation { .. }
+                | rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::Logging { .. } => {
+                    PreparationError::new_err(message)
+                }
+                rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::ResidualCallback { .. }
+                | rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::JacobianCallback { .. } => {
+                    CallbackError::new_err(message)
+                }
+                _ => SolverError::new_err(message),
+            };
+            (mapped, kind, "bvp_cantera", "native")
+        }
         BvpApiError::Sci(error) => {
             let kind = native_variant(&error);
             let message = error.to_string();
@@ -183,6 +212,7 @@ pub struct PyBvpSolverRequest {
 pub struct PyPreparedBvpSolver {
     inner: BvpSolver,
     route: &'static str,
+    cantera_telemetry_mode: Option<&'static str>,
     panic_state: SolverPanicState,
     callback_failure: CallbackFailureState,
 }
@@ -416,7 +446,8 @@ impl PyBvpSolverRequest {
         frozen.linear_sys_method = linear_sys_method;
         frozen.tolerance = tolerance;
         frozen.max_iterations = max_iterations;
-        frozen = frozen.with_logging_level(crate::contract::native_logging_level(&options, "bvp_api")?);
+        frozen =
+            frozen.with_logging_level(crate::contract::native_logging_level(&options, "bvp_api")?);
         frozen.generated_backend_config = config;
         Ok(Self {
             problem: Some(problem),
@@ -430,6 +461,114 @@ impl PyBvpSolverRequest {
                 "frozen"
             },
             parameters: parameter_pair(parameters, parameter_values)?,
+            callback_failure: CallbackFailureState::default(),
+        })
+    }
+
+    /// Configure the fixed-grid Cantera-style Newton route. The guess has one
+    /// row per interval; the endpoint values constrained by boundary
+    /// conditions are eliminated from the native unknown vector.
+    #[staticmethod]
+    #[pyo3(signature=(expressions, state_variables, independent_variable, mesh, boundary_conditions, initial_guess, options=None, tolerance=1e-8, max_iterations=100, max_jacobian_age=5, max_damping_trials=7, bounds=None, external_parameters=None, external_parameter_values=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn cantera(
+        expressions: Vec<PyExpr>,
+        state_variables: Vec<String>,
+        independent_variable: String,
+        mesh: Vec<f64>,
+        boundary_conditions: Vec<(usize, String, f64)>,
+        initial_guess: Vec<Vec<f64>>,
+        options: Option<PyRef<'_, SolverOptions>>,
+        tolerance: f64,
+        max_iterations: usize,
+        max_jacobian_age: usize,
+        max_damping_trials: usize,
+        bounds: Option<HashMap<String, (f64, f64)>>,
+        external_parameters: Option<Vec<String>>,
+        external_parameter_values: Option<Vec<f64>>,
+    ) -> PyResult<Self> {
+        let options = shared_options(options)?;
+        if options.execution_policy() != "sequential" {
+            return Err(UnsupportedOptionError::new_err(
+                "BVP_Cantera currently supports execution_policy='sequential' only",
+            ));
+        }
+        let problem = problem(
+            expressions,
+            state_variables.clone(),
+            independent_variable,
+            mesh.clone(),
+            boundary_conditions,
+        )?;
+        let guess = guess_matrix(
+            initial_guess,
+            state_variables.len(),
+            mesh.len().saturating_sub(1),
+        )?;
+        let frontend = match options.frontend() {
+            "expr_legacy" => CanteraSymbolicFrontend::ExprLegacy,
+            "atom_native" | "atom_view" => CanteraSymbolicFrontend::AtomView,
+            other => {
+                return Err(UnsupportedOptionError::new_err(format!(
+                    "unsupported Cantera symbolic frontend '{other}'"
+                )));
+            }
+        };
+        let execution = match options.execution() {
+            "lambdify" => CanteraSymbolicExecution::Lambdify,
+            "aot" => CanteraSymbolicExecution::Aot,
+            other => {
+                return Err(UnsupportedOptionError::new_err(format!(
+                    "unsupported Cantera symbolic execution '{other}'"
+                )));
+            }
+        };
+        let matrix_layout = match options.matrix_layout() {
+            "dense" => CanteraMatrixLayout::Dense,
+            "sparse" => CanteraMatrixLayout::Sparse,
+            "banded" => CanteraMatrixLayout::BandedAuto,
+            other => {
+                return Err(UnsupportedOptionError::new_err(format!(
+                    "unsupported Cantera linear layout '{other}'"
+                )));
+            }
+        };
+        let telemetry_mode = match options.telemetry() {
+            "off" => CanteraTelemetryMode::Off,
+            "counters" => CanteraTelemetryMode::Counters,
+            "timings" | "detailed" => CanteraTelemetryMode::Timings,
+            other => {
+                return Err(InvalidConfigurationError::new_err(format!(
+                    "unsupported Cantera telemetry mode '{other}'"
+                )));
+            }
+        };
+        let mut native_options = CanteraExprBvpOptions {
+            symbolic_frontend: frontend,
+            symbolic_execution: execution,
+            matrix_layout,
+            absolute_tolerance: tolerance,
+            default_relative_tolerance: tolerance,
+            bounds: bounds.unwrap_or_default(),
+            max_iterations,
+            max_jacobian_age,
+            max_damping_trials,
+            logging_level: crate::contract::native_logging_level(&options, "bvp_cantera")?,
+            telemetry_mode,
+            ..CanteraExprBvpOptions::default()
+        };
+        if execution == CanteraSymbolicExecution::Aot {
+            native_options =
+                native_options.with_aot_config(crate::aot::generated_config(&options)?);
+        }
+        Ok(Self {
+            problem: Some(problem),
+            config: Some(BvpSolverConfig::Cantera {
+                options: native_options,
+                initial_guess: guess,
+            }),
+            route: "cantera",
+            parameters: parameter_pair(external_parameters, external_parameter_values)?,
             callback_failure: CallbackFailureState::default(),
         })
     }
@@ -649,6 +788,14 @@ impl PyBvpSolverRequest {
         let config = self.config.take().ok_or_else(|| {
             InvalidConfigurationError::new_err("request has already been prepared")
         })?;
+        let cantera_telemetry_mode = match &config {
+            BvpSolverConfig::Cantera { options, .. } => Some(match options.telemetry_mode {
+                CanteraTelemetryMode::Off => "off",
+                CanteraTelemetryMode::Counters => "counters",
+                CanteraTelemetryMode::Timings => "timings",
+            }),
+            _ => None,
+        };
         let parameters = self.parameters.take();
         let route = self.route;
         let solver = catch_panic("construct", "bvp_api", route, || {
@@ -663,6 +810,7 @@ impl PyBvpSolverRequest {
         Ok(PyPreparedBvpSolver {
             inner: solver,
             route,
+            cantera_telemetry_mode,
             panic_state: SolverPanicState::default(),
             callback_failure: self.callback_failure.clone(),
         })
@@ -704,6 +852,7 @@ impl PyPreparedBvpSolver {
             BvpSolution::Damped { .. } => "damped",
             BvpSolution::Frozen { .. } => "frozen",
             BvpSolution::Sci(_) => "sci",
+            BvpSolution::Cantera { .. } => "cantera",
         };
         let sci_details = match (solution, self.inner.telemetry_snapshot()) {
             (BvpSolution::Sci(native), BvpSolverTelemetrySnapshot::Sci(snapshot)) => {
@@ -745,6 +894,7 @@ impl PyPreparedBvpSolver {
             BvpSolution::Damped { .. } => "damped",
             BvpSolution::Frozen { .. } => "frozen",
             BvpSolution::Sci(_) => "sci",
+            BvpSolution::Cantera { .. } => "cantera",
         };
         let sci_details = match (solution, self.inner.telemetry_snapshot()) {
             (BvpSolution::Sci(native), BvpSolverTelemetrySnapshot::Sci(snapshot)) => {
@@ -785,6 +935,14 @@ impl PyPreparedBvpSolver {
             })?;
 
         Python::attach(|py| match report {
+            BvpParameterLoopReport::Cantera(report) => {
+                let report = cantera_loop::from_native(
+                    py,
+                    report,
+                    self.cantera_telemetry_mode.unwrap_or("off"),
+                )?;
+                Ok(Py::new(py, report)?.into_any())
+            }
             BvpParameterLoopReport::Damped(report) => {
                 let report = crate::bvp_damp::damped_parameter_loop_report(py, route, report)?;
                 Ok(Py::new(py, report)?.into_any())
@@ -966,6 +1124,13 @@ impl PyPreparedBvpSolver {
                     })
                     .collect::<PyResult<Vec<_>>>()?;
                 output.set_item("scopes", scopes)?;
+            }
+            BvpSolverTelemetrySnapshot::Cantera(snapshot) => {
+                let mode = self.cantera_telemetry_mode.unwrap_or("not_started");
+                output.set_item("mode", mode)?;
+                let (counters, timings) = cantera_loop::telemetry_maps(snapshot.as_ref(), mode);
+                output.set_item("counters", counters)?;
+                output.set_item("timings_ms", timings)?;
             }
         }
         Ok(output)

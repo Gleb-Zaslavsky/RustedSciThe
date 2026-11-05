@@ -519,6 +519,56 @@ mod tests {
     }
 
     #[test]
+    fn trapezoid_expr_jacobian_tracks_cross_component_right_node_dependency() {
+        for backend in [
+            BvpMatrixBackend::Dense,
+            BvpMatrixBackend::FaerSparseCol,
+            BvpMatrixBackend::Banded,
+        ] {
+            let mut jacobian = Jacobian::new();
+            jacobian.discretization_system_BVP_par(
+                vec![
+                    Expr::parse_expression("-u+v"),
+                    Expr::parse_expression("u-v"),
+                ],
+                vec!["u".into(), "v".into()],
+                "x".into(),
+                0.0,
+                Some(2),
+                None,
+                Some(vec![0.0, 0.2, 1.0]),
+                std::collections::HashMap::from([
+                    ("u".into(), vec![(0, 1.0)]),
+                    ("v".into(), vec![(1, 0.25)]),
+                ]),
+                None,
+                None,
+                "trapezoid".into(),
+            );
+            jacobian.backend_config = BvpBackendConfig::lambdify(backend);
+            assert!(
+                jacobian.variables_for_all_disrete[1].contains(&"u_1".to_string()),
+                "{backend:?} dependency plan omitted the cross-component right node"
+            );
+            jacobian.calc_jacobian_parallel_smart_optimized();
+            let derivative = jacobian
+                .symbolic_jacobian_sparse
+                .iter()
+                .find(|(row, col, _)| *row == 1 && *col == 1)
+                .map(|(_, _, derivative)| derivative)
+                .unwrap_or_else(|| panic!("{backend:?} omitted dR_1/du_1"));
+            let derivative_value = derivative
+                .to_string()
+                .parse::<f64>()
+                .expect("the fixture derivative is constant");
+            assert!(
+                (derivative_value + 0.1).abs() < 1e-12,
+                "{backend:?}: expected dR_1/du_1=-0.1, got {derivative}"
+            );
+        }
+    }
+
+    #[test]
     fn dependency_column_jacobian_matches_scan_with_explicit_bandwidth() {
         let mut scan = dependency_case(BvpMatrixBackend::Banded);
         let mut columns = dependency_case(BvpMatrixBackend::Banded);

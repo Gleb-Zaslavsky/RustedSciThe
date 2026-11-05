@@ -31,6 +31,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use super::jacobian::PreparedSparseAtomSystem;
 use super::{
     Atom,
     atom::FunctionBuilder,
@@ -349,6 +350,7 @@ fn eq_step_atom_with_maps(
     arg_symbol: Symbol,
     j: usize,
     t: f64,
+    t_next: f64,
     scheme: &str,
 ) -> Result<Atom, BvpAtomDiscretizationError> {
     validate_scheme(scheme)?;
@@ -357,7 +359,8 @@ fn eq_step_atom_with_maps(
     Ok(match scheme {
         "forward" => eq_step_j,
         "trapezoid" => {
-            let eq_step_j_plus_1 = rename_and_bind_symbol(eq_i, &rename_maps[j + 1], arg_symbol, t);
+            let eq_step_j_plus_1 =
+                rename_and_bind_symbol(eq_i, &rename_maps[j + 1], arg_symbol, t_next);
             let half = Atom::new_num(1) / Atom::new_num(2);
             // Keep the historical normalized form for regular rows.  The raw
             // constructors are reserved for singular endpoint residuals; on
@@ -599,6 +602,20 @@ fn try_assemble_atom_bvp_problem(
         .map(|(symbol, value)| (symbol.get_stripped_name().to_string(), *value))
         .collect();
 
+    // Match the ExprLegacy dependency plan: only state symbols actually used
+    // by each RHS need right-node candidates for Trapezoid Jacobians.
+    let value_names = input
+        .value_symbols
+        .iter()
+        .map(|symbol| symbol.get_stripped_name().to_string())
+        .collect::<Vec<_>>();
+    let rhs_state_dependencies = (scheme == "trapezoid").then(|| {
+        PreparedSparseAtomSystem::from_atoms_discovering_dependencies(
+            &input.equations,
+            &value_names,
+        )
+    });
+
     let discretization_start = Instant::now();
     let assembled_rows: Result<Vec<Vec<(Atom, Vec<Symbol>)>>, BvpAtomDiscretizationError> = (0
         ..(n_steps_total - 1))
@@ -626,6 +643,17 @@ fn try_assemble_atom_bvp_problem(
                             vars_in_equation.push(var_symbol);
                         }
                     }
+                    if let Some(dependencies) = rhs_state_dependencies
+                        .as_ref()
+                        .and_then(|prepared| prepared.candidate_columns_for_row(i))
+                    {
+                        for &var_idx in dependencies {
+                            let var_symbol = input.matrix_of_symbols[j + 1][var_idx];
+                            if !vars_to_exclude.contains(&var_symbol) {
+                                vars_in_equation.push(var_symbol);
+                            }
+                        }
+                    }
 
                     // Restore the proven normalized residual shape on ordinary
                     // mesh rows.  A raw shape is still required at a singular
@@ -641,6 +669,7 @@ fn try_assemble_atom_bvp_problem(
                                 &fallback.arg,
                                 j,
                                 t,
+                                mesh_points[j + 1],
                                 step_sizes[j],
                                 &scheme,
                                 &bc_value_map_names,
@@ -687,6 +716,7 @@ fn try_assemble_atom_bvp_problem(
                             input.arg_symbol,
                             j,
                             t,
+                            mesh_points[j + 1],
                             &scheme,
                         )?;
                         let eq_step_j = substitute_symbol_values(&eq_step_j, &bc_value_map);
@@ -873,11 +903,12 @@ fn build_residual_atom_expr_fallback(
     arg: &str,
     j: usize,
     t: f64,
+    t_next: f64,
     h: f64,
     scheme: &str,
     vars_for_boundary_conditions: &HashMap<String, f64>,
 ) -> Atom {
-    let eq_step_j = build_eq_step_expr(matrix_of_names, eq_i, values, arg, j, t, scheme);
+    let eq_step_j = build_eq_step_expr(matrix_of_names, eq_i, values, arg, j, t, t_next, scheme);
     let y_j_plus_1 = Expr::Var(matrix_of_names[j + 1][eq_index].clone());
     let y_j = Expr::Var(matrix_of_names[j][eq_index].clone());
     let residual = y_j_plus_1 - y_j - Expr::Const(h) * eq_step_j;
@@ -894,6 +925,7 @@ fn build_eq_step_expr(
     arg: &str,
     j: usize,
     t: f64,
+    t_next: f64,
     scheme: &str,
 ) -> Expr {
     let rename_map: HashMap<String, String> = values
@@ -911,7 +943,9 @@ fn build_eq_step_expr(
                 .zip(matrix_of_names[j + 1].iter())
                 .map(|(source, target)| (source.clone(), target.clone()))
                 .collect();
-            let eq_step_j_plus_1 = eq_i.rename_variables(&next_rename_map).set_variable(arg, t);
+            let eq_step_j_plus_1 = eq_i
+                .rename_variables(&next_rename_map)
+                .set_variable(arg, t_next);
             Expr::Const(0.5) * (eq_step_j + eq_step_j_plus_1)
         }
         _ => unreachable!("scheme was validated before endpoint fallback"),
@@ -1064,6 +1098,7 @@ mod tests {
                     try_discretization_system_bvp_par_atom, try_eq_step_atom,
                 },
                 conversions::{atom_to_expr, expr_to_atom},
+                jacobian::PreparedSparseAtomSystem,
                 state::Symbol,
             },
             symbolic_engine::Expr,
@@ -1314,6 +1349,87 @@ mod tests {
             None,
             "trapezoid".to_string(),
         );
+    }
+
+    #[test]
+    fn trapezoid_atom_jacobian_tracks_cross_component_right_node_dependency() {
+        let system = discretization_system_bvp_par_atom(
+            vec![
+                Expr::parse_expression("-u+v"),
+                Expr::parse_expression("u-v"),
+            ],
+            vec!["u".into(), "v".into()],
+            "x".into(),
+            0.0,
+            Some(2),
+            None,
+            Some(vec![0.0, 0.2, 1.0]),
+            HashMap::from([("u".into(), vec![(0, 1.0)]), ("v".into(), vec![(1, 0.25)])]),
+            None,
+            None,
+            "trapezoid".into(),
+        );
+
+        assert!(system.variables_for_all_discrete[1].contains(&"u_1".to_string()));
+        let prepared = PreparedSparseAtomSystem::from_atoms(
+            &system.vector_of_functions,
+            &system.variable_string,
+            &system.variables_for_all_discrete,
+        );
+        let derivative = prepared
+            .calc_sparse_jacobian_with_bandwidth(None)
+            .into_iter()
+            .find(|entry| entry.row == 1 && entry.col == 1)
+            .map(|entry| atom_to_expr(&entry.value))
+            .expect("row 1 must include the u_1 derivative");
+        let derivative_value = eval_expr_numeric(&derivative, &HashMap::new());
+        assert!(
+            (derivative_value + 0.1).abs() < 1e-12,
+            "expected dR_1/du_1=-0.1, got {derivative}"
+        );
+    }
+
+    #[test]
+    fn trapezoid_binds_rhs_at_both_mesh_endpoints() {
+        let equations = vec![Expr::Var("x".into())];
+        let values = vec!["y".into()];
+        let boundary_conditions = HashMap::from([("y".into(), vec![(0, 0.0)])]);
+        let mesh = vec![0.0, 0.2, 1.0];
+        let atom = discretization_system_bvp_par_atom(
+            equations.clone(),
+            values.clone(),
+            "x".into(),
+            0.0,
+            Some(2),
+            None,
+            Some(mesh.clone()),
+            boundary_conditions.clone(),
+            None,
+            None,
+            "trapezoid".into(),
+        );
+        let mut legacy = Jacobian::new();
+        legacy.discretization_system_BVP_par(
+            equations,
+            values,
+            "x".into(),
+            0.0,
+            Some(2),
+            None,
+            Some(mesh),
+            boundary_conditions,
+            None,
+            None,
+            "trapezoid".into(),
+        );
+
+        let assignments = HashMap::from([("y_1".into(), 0.3), ("y_2".into(), 0.9)]);
+        let atom_residual =
+            eval_expr_numeric(&atom_to_expr(&atom.vector_of_functions[0]), &assignments);
+        let legacy_residual = eval_expr_numeric(&legacy.vector_of_functions[0], &assignments);
+        let expected = 0.3 - 0.2 * (0.0 + 0.2) / 2.0;
+        assert!((atom_residual - expected).abs() < 1e-12);
+        assert!((legacy_residual - expected).abs() < 1e-12);
     }
 
     #[test]

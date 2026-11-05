@@ -1379,6 +1379,8 @@ pub enum BvpBackendIntegrationError {
     /// A residual callback returned a non-finite value before damping or a
     /// linear solve could consume it.
     NonFiniteCallbackValue { stage: String, index: usize },
+    /// A configured BVP state bound leaves no admissible Frozen Newton step.
+    BoundStepBlocked { iteration: usize },
     /// A prepared solve was requested after a problem input changed. The caller
     /// must regenerate the residual/Jacobian callbacks before reusing the
     /// prepared-solver entry point.
@@ -1486,6 +1488,10 @@ impl fmt::Display for BvpBackendIntegrationError {
                     "{stage} callback returned a non-finite value at index {index}"
                 )
             }
+            Self::BoundStepBlocked { iteration } => write!(
+                f,
+                "Frozen BVP bounds block the Newton step at iteration {iteration}"
+            ),
             Self::PreparedRuntimeInvalidated { reason } => {
                 write!(f, "prepared BVP runtime invalidated: {reason}")
             }
@@ -7730,6 +7736,7 @@ impl Jacobian {
         arg: &str,
         j: usize,
         t: f64,
+        t_next: f64,
         scheme: &str,
     ) -> Expr {
         let vec_of_names_on_step = &matrix_of_names[j];
@@ -7754,7 +7761,7 @@ impl Jacobian {
 
                 let eq_step_j_plus_1 = eq_i
                     .rename_variables(&hashmap_for_rename)
-                    .set_variable(arg, t);
+                    .set_variable(arg, t_next);
                 Expr::Const(0.5) * (eq_step_j + eq_step_j_plus_1)
             }
             _ => panic!("Invalid scheme"),
@@ -7978,6 +7985,28 @@ impl Jacobian {
         debug!("creating BVP discretization equations");
         let discretization_start = Instant::now();
 
+        // Trapezoid evaluates the RHS at both ends of an interval. Track the
+        // actual state arguments per equation so sparse Jacobian preparation
+        // does not omit cross-component derivatives at the right node.
+        let rhs_state_dependencies: Vec<Vec<usize>> = if scheme == "trapezoid" {
+            eq_system
+                .iter()
+                .map(|equation| {
+                    let arguments = equation
+                        .all_arguments_are_variables()
+                        .into_iter()
+                        .collect::<HashSet<_>>();
+                    values
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, value)| arguments.contains(value).then_some(index))
+                        .collect()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Optimized discretization with variable tracking
         let (discreditized_system, variables_for_all_discrete): (Vec<Expr>, Vec<Vec<String>>) = (0
             ..n_steps - 1)
@@ -7988,8 +8017,16 @@ impl Jacobian {
                     .par_iter()
                     .enumerate()
                     .map(|(i, eq_i)| {
-                        let eq_step_j =
-                            Self::eq_step(&matrix_of_names, eq_i, &values, &arg, j, t, &scheme);
+                        let eq_step_j = Self::eq_step(
+                            &matrix_of_names,
+                            eq_i,
+                            &values,
+                            &arg,
+                            j,
+                            t,
+                            T_list[j + 1],
+                            &scheme,
+                        );
                         let Y_j_plus_1 = &matrix_of_expr[j + 1][i];
                         let Y_j = &matrix_of_expr[j][i];
                         let res_ij = Y_j_plus_1.clone() - Y_j.clone() - H[j].clone() * eq_step_j;
@@ -8011,6 +8048,14 @@ impl Jacobian {
                             let var_name = &matrix_of_names[j][var_idx];
                             if !vars_to_exclude.contains(var_name) {
                                 vars_in_equation.push(var_name.clone());
+                            }
+                        }
+                        if scheme == "trapezoid" {
+                            for &var_idx in &rhs_state_dependencies[i] {
+                                let var_name = &matrix_of_names[j + 1][var_idx];
+                                if !vars_to_exclude.contains(var_name) {
+                                    vars_in_equation.push(var_name.clone());
+                                }
                             }
                         }
 

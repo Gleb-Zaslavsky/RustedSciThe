@@ -75,8 +75,9 @@
 //!
 //! ### strategy_params Section
 //! - `max_jac`: Maximum iterations with old Jacobian (Optional)
-//! - `max_damp_iter`: Maximum damped iterations (Optional)
-//! - `damp_factor`: Damping factor reduction (Optional)
+//! - `max_damp_iter`: Maximum damping trials per Newton step (default: 7)
+//! - `damp_factor`: Legacy base-2 exponent offset in the damping reduction
+//!   (`lambda /= 2^(trial_index + damp_factor)`; default: `0.5`).
 //!
 //! ### adaptive_strategy Section
 //! - `version`: Grid refinement version

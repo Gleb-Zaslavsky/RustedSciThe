@@ -16,6 +16,10 @@ pub struct NRBVP {
     pub method: String,
     pub tolerance: f64,
     pub max_iterations: usize,
+    /// Optional per-state bounds and their reduced Newton-vector expansion.
+    pub Bounds: Option<HashMap<String, (f64, f64)>>,
+    bounds_vec: Vec<(f64, f64)>,
+    last_bound_step_factor: f64,
     /// Optional common text-log override; `None` preserves the historical
     /// mapping from the bounded BVP decision-log mode.
     pub logging_level: Option<crate::numerical::logging::SolverLogLevel>,

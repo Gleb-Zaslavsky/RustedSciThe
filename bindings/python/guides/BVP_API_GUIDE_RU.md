@@ -35,6 +35,24 @@ print(solution.values_array()[-1, 0])
 print(solver.telemetry_snapshot())
 ```
 
+Фабрики фасада выбирают семейство native-солвера: `damped`, `frozen`, `sci`
+или `cantera`. Маршрут `cantera` реализует fixed-grid trapezoid/Newton для
+равномерной сетки и поддерживает ExprLegacy или нативный AtomView, Lambdify
+или AOT, а также Dense, Sparse и автоматически определяемый Banded backend.
+Начальное приближение содержит одну строку на интервал; граничные значения
+задаются отдельно. Grid refinement этим fixed-mesh маршрутом не поддерживается.
+Фиксированные символьные входы можно передать через
+`external_parameters` и `external_parameter_values`; вызов
+`solve_with_parameter_values(values)` повторно использует подготовленные
+Lambdify/AOT callbacks. `solve_parameter_loop(parameter_vectors)` выполняет
+продолжение по порядку: первое решение использует исходное приближение, а
+следующие — последний успешный профиль. Ошибка точки сохраняется как typed
+error с доступной telemetry, но не прерывает последующие точки и не заменяет
+последнее успешное решение. Простой пример находится в
+`examples/bvp_api_cantera.py`, нетривиальные sweeps — в
+`examples/bvp_api_cantera_combustion_continuation.py` и
+`examples/bvp_api_cantera_bratu_continuation.py`.
+
 ## Маршруты и формы данных
 
 Фабрики помечены native-семейством: `damped`, `frozen` или `sci`. `mesh`

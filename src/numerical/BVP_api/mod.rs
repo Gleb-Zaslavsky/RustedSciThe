@@ -9,26 +9,32 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use crate::Utils::postprocessing::{
-    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+use crate::numerical::logging::SolverLogLevel;
+use crate::numerical::BVP_Cantera::CanteraExprBvpProblem;
+use crate::numerical::BVP_Cantera::{
+    CanteraExprBvpOptions, CanteraNewtonSolver, CanteraParameterLoopOutcome,
+    CanteraParameterLoopReport, CanteraSolveReport, CanteraSolverError, CanteraTelemetryMode,
+    CanteraTelemetrySnapshot,
 };
+use crate::numerical::BVP_Damp::telemetry::BvpTelemetrySnapshot;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
     DampedParameterLoopReport, DampedSolverOptions, NRBVP as DampedSolver,
 };
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::{
     FrozenParameterLoopReport, FrozenSolverOptions, NRBVP as FrozenSolver,
 };
-use crate::numerical::BVP_Damp::telemetry::BvpTelemetrySnapshot;
 use crate::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciNewError, BvpSciOptions, BvpSciParameterLoopReport,
     BvpSciSolution, BvpSciSolver, BvpSciSparseFactorization as NativeBvpSciSparseFactorization,
     BvpSciTelemetryMode, BvpSciTelemetrySnapshot,
 };
-use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
 use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
+use crate::Utils::postprocessing::{
+    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+};
 use nalgebra::{DMatrix, DVector};
 use thiserror::Error;
 
@@ -209,11 +215,13 @@ impl BvpProblem {
         Ok(problem)
     }
 
-    /// Declare fixed BVP_sci inputs before constructing the solver.
+    /// Declare fixed symbolic inputs before constructing a BVP_sci or
+    /// BVP_Cantera solver.
     ///
     /// This is separate from [`BvpSciFreeParameters`], which adds unknowns to
-    /// the Newton system. The declared evaluator schema is prepared once;
-    /// `solve_parameter_loop` supplies successive values for that schema.
+    /// the Newton system. On BVP_sci, the declared evaluator schema is prepared
+    /// once and its parameter loop supplies successive values. BVP_Cantera
+    /// supports binding/rebinding the same fixed-input schema but not a loop.
     pub fn with_external_parameters(
         mut self,
         names: Vec<String>,
@@ -221,13 +229,12 @@ impl BvpProblem {
     ) -> Result<Self, BvpApiError> {
         if names.is_empty() || names.len() != values.len() {
             return Err(BvpApiError::InvalidProblem(
-                "BVP_sci external parameter names and values must have equal non-zero lengths"
-                    .into(),
+                "external parameter names and values must have equal non-zero lengths".into(),
             ));
         }
         if values.iter().any(|value| !value.is_finite()) {
             return Err(BvpApiError::InvalidProblem(
-                "BVP_sci external parameter values must be finite".into(),
+                "external parameter values must be finite".into(),
             ));
         }
         let mut seen = HashSet::with_capacity(names.len());
@@ -238,7 +245,7 @@ impl BvpProblem {
                 || !seen.insert(name.as_str())
         }) {
             return Err(BvpApiError::InvalidProblem(
-                "BVP_sci external parameter names must be unique and distinct from state and independent-variable names".into(),
+                "external parameter names must be unique and distinct from state and independent-variable names".into(),
             ));
         }
         self.external_parameters = Some(BvpSciExternalParameters { names, values });
@@ -317,6 +324,12 @@ impl BvpProblem {
 
 /// Solver-specific native configuration. No shared lossy option bag is used.
 pub enum BvpSolverConfig {
+    /// Fixed-mesh Cantera-derived Newton core using ExprLegacy/Lambdify.
+    Cantera {
+        options: CanteraExprBvpOptions,
+        /// State-major initial guess with one value per non-fixed node.
+        initial_guess: DMatrix<f64>,
+    },
     /// Damped Newton route. Its guess has one column per mesh interval.
     Damped {
         options: DampedSolverOptions,
@@ -355,6 +368,8 @@ pub enum BvpSolverConfig {
 /// [`BvpSolverConfig`]. Native option structs are retained intact; this type is
 /// not a normalized, lossy option bag.
 pub enum BvpSolverSettings {
+    /// Fixed-mesh Cantera-derived Newton route with its native options.
+    Cantera(CanteraExprBvpOptions),
     /// Damped Newton route with its complete native options.
     Damped(DampedSolverOptions),
     /// Frozen/Naive route with its complete native options.
@@ -405,6 +420,22 @@ impl BvpSolverSettings {
         mode: BvpApiTelemetryMode,
     ) -> Result<Self, BvpSettingsError> {
         match &mut self {
+            Self::Cantera(options) => {
+                if mode == BvpApiTelemetryMode::Timings {
+                    return Err(BvpSettingsError::UnsupportedTelemetry {
+                        solver: "BVP_Cantera",
+                        mode,
+                        reason: "Cantera currently collects counters together with timings; request Detailed instead",
+                    });
+                }
+                options.telemetry_mode = match mode {
+                    BvpApiTelemetryMode::Off => CanteraTelemetryMode::Off,
+                    BvpApiTelemetryMode::Counters => CanteraTelemetryMode::Counters,
+                    BvpApiTelemetryMode::Timings | BvpApiTelemetryMode::Detailed => {
+                        CanteraTelemetryMode::Timings
+                    }
+                };
+            }
             Self::Damped(options) => {
                 if mode == BvpApiTelemetryMode::Timings
                     && options.generated_backend_config.backend_policy_override
@@ -535,6 +566,10 @@ impl BvpSolverSettings {
     /// and Sci expect one column per mesh node.
     pub fn with_initial_guess(self, initial_guess: DMatrix<f64>) -> BvpSolverConfig {
         match self {
+            Self::Cantera(options) => BvpSolverConfig::Cantera {
+                options,
+                initial_guess,
+            },
             Self::Damped(options) => BvpSolverConfig::Damped {
                 options,
                 initial_guess,
@@ -562,6 +597,7 @@ impl BvpSolverConfig {
     /// Native telemetry and bounded typed decision traces remain independent.
     pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
         match &mut self {
+            Self::Cantera { options, .. } => options.logging_level = level,
             Self::Damped { options, .. } => {
                 *options = options.clone().with_logging_level(level);
             }
@@ -579,6 +615,8 @@ impl BvpSolverConfig {
 /// Native solver retained by the facade so callers can reach solver-specific
 /// lifecycle and diagnostics without those details being erased.
 pub enum BvpNativeSolver {
+    /// Standalone fixed-mesh Cantera Newton solver.
+    Cantera(CanteraNewtonSolver),
     /// Native BVP_Damp damped Newton solver.
     Damped(DampedSolver),
     /// Native BVP_Damp Frozen/Naive solver.
@@ -590,6 +628,12 @@ pub enum BvpNativeSolver {
 /// One successful native result, preserving the route's result contract.
 #[derive(Clone, Debug)]
 pub enum BvpSolution {
+    /// Cantera fixed-mesh Newton result with its complete native report.
+    Cantera {
+        mesh: DVector<f64>,
+        values: DMatrix<f64>,
+        report: CanteraSolveReport,
+    },
     /// Damped result; values are node-major (`mesh.len() x state_count`).
     Damped {
         mesh: DVector<f64>,
@@ -621,6 +665,7 @@ impl<'a> BvpSolutionView<'a> {
     /// Borrow the actual mesh retained by the selected solver.
     pub fn mesh(&self) -> &'a [f64] {
         match self.solution {
+            BvpSolution::Cantera { mesh, .. } => mesh.as_slice(),
             BvpSolution::Damped { mesh, .. } | BvpSolution::Frozen { mesh, .. } => mesh.as_slice(),
             BvpSolution::Sci(solution) => &solution.x,
         }
@@ -629,6 +674,7 @@ impl<'a> BvpSolutionView<'a> {
     /// Number of state variables represented in each mesh row.
     pub fn state_count(&self) -> usize {
         match self.solution {
+            BvpSolution::Cantera { values, .. } => values.ncols(),
             BvpSolution::Damped { values, .. } | BvpSolution::Frozen { values, .. } => {
                 values.ncols()
             }
@@ -643,6 +689,7 @@ impl<'a> BvpSolutionView<'a> {
             return None;
         }
         Some(match self.solution {
+            BvpSolution::Cantera { values, .. } => values[(node, state)],
             BvpSolution::Damped { values, .. } | BvpSolution::Frozen { values, .. } => {
                 values[(node, state)]
             }
@@ -655,6 +702,8 @@ impl<'a> BvpSolutionView<'a> {
 /// original fields, scopes, units, and absent-versus-zero semantics.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BvpSolverTelemetrySnapshot {
+    /// Cantera core counters/timings and their native scopes.
+    Cantera(Option<CanteraTelemetrySnapshot>),
     /// Damped Newton counters, timings, scopes, storage, and logging trace.
     Damped(BvpTelemetrySnapshot),
     /// Frozen/Naive counters, timings, scopes, storage, and logging trace.
@@ -666,6 +715,8 @@ pub enum BvpSolverTelemetrySnapshot {
 /// Ordered continuation output retaining the route's complete native report.
 #[derive(Debug)]
 pub enum BvpParameterLoopReport {
+    /// Fixed-mesh Cantera outcomes; failed points never become the next guess.
+    Cantera(CanteraParameterLoopReport),
     /// Adaptive Damped loop outcomes, meshes and typed errors.
     Damped(DampedParameterLoopReport),
     /// Frozen/Naive loop outcomes and telemetry snapshots.
@@ -690,6 +741,8 @@ pub enum BvpApiError {
     Frozen(#[source] BvpBackendIntegrationError),
     #[error("BVP_sci route failed")]
     Sci(#[from] BvpSciNewError),
+    #[error("Cantera BVP route failed")]
+    Cantera(#[from] CanteraSolverError),
     #[error("postprocessing failed for {solver}")]
     Postprocessing {
         solver: &'static str,
@@ -700,7 +753,7 @@ pub enum BvpApiError {
     MissingResult,
 }
 
-fn require_uniform_legacy_mesh(mesh: &[f64], solver: &'static str) -> Result<(), BvpApiError> {
+fn require_uniform_interval_mesh(mesh: &[f64], solver: &'static str) -> Result<(), BvpApiError> {
     let first_step = mesh[1] - mesh[0];
     let domain_width = mesh[mesh.len() - 1] - mesh[0];
     let scale = domain_width.abs().max(first_step.abs()).max(1.0);
@@ -711,7 +764,7 @@ fn require_uniform_legacy_mesh(mesh: &[f64], solver: &'static str) -> Result<(),
     {
         return Err(BvpApiError::UnsupportedRoute {
             solver,
-            reason: "native Damped and Frozen constructors accept uniform endpoints/count, not an arbitrary mesh",
+            reason: "this route accepts uniform interval endpoints/count, not an arbitrary mesh",
         });
     }
     Ok(())
@@ -737,6 +790,7 @@ pub struct BvpSolver {
     problem: BvpProblem,
     native: BvpNativeSolver,
     last_solution: Option<BvpSolution>,
+    last_cantera_telemetry: Option<CanteraTelemetrySnapshot>,
 }
 
 impl BvpSolver {
@@ -744,6 +798,32 @@ impl BvpSolver {
     pub fn new(problem: BvpProblem, config: BvpSolverConfig) -> Result<Self, BvpApiError> {
         problem.validate()?;
         let native = match config {
+            BvpSolverConfig::Cantera {
+                options,
+                initial_guess,
+            } => {
+                require_uniform_interval_mesh(&problem.mesh, "BVP_Cantera")?;
+                validate_initial_guess(&problem, &initial_guess, problem.mesh.len() - 1)?;
+                let cantera_problem = CanteraExprBvpProblem {
+                    equations: problem.equations.clone(),
+                    initial_guess,
+                    state_names: problem.state_names.clone(),
+                    independent_variable: problem.independent_variable.clone(),
+                    boundary_conditions: problem.legacy_boundary_conditions(),
+                    interval: (
+                        problem.mesh[0],
+                        *problem.mesh.last().expect("validated mesh"),
+                    ),
+                    steps: problem.mesh.len() - 1,
+                };
+                let mut solver = CanteraNewtonSolver::from_symbolic(cantera_problem, options)?;
+                if let Some(parameters) = problem.external_parameters.as_ref() {
+                    solver
+                        .bind_parameters(parameters.names.clone(), parameters.values.clone())
+                        .map_err(BvpApiError::Cantera)?;
+                }
+                BvpNativeSolver::Cantera(solver)
+            }
             BvpSolverConfig::Damped {
                 options,
                 initial_guess,
@@ -754,7 +834,7 @@ impl BvpSolver {
                         reason: "external_parameters are supported by the symbolic BVP_sci route, not BVP_Damp",
                     });
                 }
-                require_uniform_legacy_mesh(&problem.mesh, "BVP_Damp Damped")?;
+                require_uniform_interval_mesh(&problem.mesh, "BVP_Damp Damped")?;
                 validate_initial_guess(&problem, &initial_guess, problem.mesh.len() - 1)?;
                 let solver = DampedSolver::new_with_options(
                     problem.equations.clone(),
@@ -779,7 +859,7 @@ impl BvpSolver {
                         reason: "external_parameters are supported by the symbolic BVP_sci route, not BVP_Damp",
                     });
                 }
-                require_uniform_legacy_mesh(&problem.mesh, "BVP_Damp Frozen/Naive")?;
+                require_uniform_interval_mesh(&problem.mesh, "BVP_Damp Frozen/Naive")?;
                 validate_initial_guess(&problem, &initial_guess, problem.mesh.len() - 1)?;
                 let solver = FrozenSolver::new_with_options(
                     problem.equations.clone(),
@@ -831,12 +911,14 @@ impl BvpSolver {
             problem,
             native,
             last_solution: None,
+            last_cantera_telemetry: None,
         })
     }
 
     /// Access the selected native solver for its complete specialized API.
     pub fn native_mut(&mut self) -> &mut BvpNativeSolver {
         self.last_solution = None;
+        self.last_cantera_telemetry = None;
         &mut self.native
     }
 
@@ -845,7 +927,7 @@ impl BvpSolver {
         &self.native
     }
 
-    /// Declare fixed model inputs for BVP_Damp routes before their first solve.
+    /// Declare fixed model inputs for BVP_Damp or BVP_Cantera before solving.
     ///
     /// These values are evaluator inputs, not Newton unknowns. BVP_sci's
     /// `parameters` have different semantics and are deliberately rejected by
@@ -875,6 +957,9 @@ impl BvpSolver {
         }
         let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
         match &mut self.native {
+            BvpNativeSolver::Cantera(solver) => solver
+                .bind_parameters(names, values)
+                .map_err(BvpApiError::Cantera)?,
             BvpNativeSolver::Damped(solver) => {
                 solver
                     .try_set_parameter_names(Some(&name_refs))
@@ -910,6 +995,9 @@ impl BvpSolver {
             ));
         }
         match &mut self.native {
+            BvpNativeSolver::Cantera(solver) => solver
+                .set_parameter_values(values)
+                .map_err(BvpApiError::Cantera)?,
             BvpNativeSolver::Damped(solver) => solver
                 .try_set_parameter_values(Some(values))
                 .map_err(BvpApiError::Damped)?,
@@ -934,16 +1022,34 @@ impl BvpSolver {
     /// diagnostics from the failed attempt.
     pub fn solve(&mut self) -> Result<&BvpSolution, BvpApiError> {
         let solution = match &mut self.native {
+            BvpNativeSolver::Cantera(solver) => match solver.solve() {
+                Ok(report) => {
+                    self.last_cantera_telemetry = Some(report.telemetry.clone());
+                    let values = solver.full_grid_values(&report.state)?;
+                    BvpSolution::Cantera {
+                        mesh: DVector::from_vec(self.problem.mesh.clone()),
+                        values,
+                        report,
+                    }
+                }
+                Err(error) => {
+                    if let Some(report) = error.partial_report() {
+                        self.last_cantera_telemetry = Some(report.telemetry.clone());
+                    }
+                    return Err(BvpApiError::Cantera(error));
+                }
+            },
             BvpNativeSolver::Damped(solver) => {
-                solver.try_solver().map_err(BvpApiError::Damped)?;
+                if solver.try_solver().map_err(BvpApiError::Damped)?.is_none() {
+                    return Err(BvpApiError::MissingResult);
+                }
                 BvpSolution::Damped {
                     mesh: solver.x_mesh.clone(),
                     values: solver.get_result().ok_or(BvpApiError::MissingResult)?,
                 }
             }
             BvpNativeSolver::Frozen(solver) => {
-                solver.try_solver().map_err(BvpApiError::Frozen)?;
-                if solver.result.is_none() {
+                if solver.try_solver().map_err(BvpApiError::Frozen)?.is_none() {
                     return Err(BvpApiError::MissingResult);
                 }
                 BvpSolution::Frozen {
@@ -964,6 +1070,10 @@ impl BvpSolver {
     pub fn parameter_guess(&self) -> Result<Vec<f64>, BvpApiError> {
         match &self.native {
             BvpNativeSolver::Sci(solver) => Ok(solver.state().2.to_vec()),
+            BvpNativeSolver::Cantera(_) => Err(BvpApiError::UnsupportedRoute {
+                solver: "BVP_Cantera",
+                reason: "the fixed-mesh Cantera route has no free Newton parameters",
+            }),
             BvpNativeSolver::Damped(_) | BvpNativeSolver::Frozen(_) => {
                 Err(BvpApiError::UnsupportedRoute {
                     solver: "BVP_Damp",
@@ -976,6 +1086,10 @@ impl BvpSolver {
     /// Set BVP_sci free-parameter Newton guesses without changing their schema.
     pub fn set_parameter_guess(&mut self, values: Vec<f64>) -> Result<(), BvpApiError> {
         match &mut self.native {
+            BvpNativeSolver::Cantera(_) => Err(BvpApiError::UnsupportedRoute {
+                solver: "BVP_Cantera",
+                reason: "the fixed-mesh Cantera route has no free Newton parameters",
+            }),
             BvpNativeSolver::Sci(solver) => {
                 solver
                     .set_parameter_guess(values)
@@ -1001,22 +1115,45 @@ impl BvpSolver {
         self.solve()
     }
 
-    /// Re-solve a prepared BVP_Damp model with new fixed inputs.
+    /// Re-solve a prepared BVP_Damp or BVP_Cantera model with new fixed inputs.
     ///
-    /// When a previous result exists, the current native Newton iterate is
-    /// retained as the next guess. BVP_Damp owns adaptive refinement and may
-    /// rebuild mesh-sized symbolic work if the solve grows the grid further.
+    /// BVP_Damp retains its current Newton iterate and may rebuild mesh-sized
+    /// work after adaptive refinement. BVP_Cantera reuses its fixed-mesh
+    /// symbolic callbacks and current packed state.
     pub fn solve_with_parameter_values(
         &mut self,
         values: Vec<f64>,
     ) -> Result<&BvpSolution, BvpApiError> {
+        if let BvpNativeSolver::Cantera(solver) = &mut self.native {
+            match solver.continue_with_parameter_values(values) {
+                Ok(report) => {
+                    let values = solver.full_grid_values(&report.state)?;
+                    self.last_cantera_telemetry = Some(report.telemetry.clone());
+                    self.last_solution = Some(BvpSolution::Cantera {
+                        mesh: DVector::from_vec(self.problem.mesh.clone()),
+                        values,
+                        report,
+                    });
+                    return Ok(self
+                        .last_solution
+                        .as_ref()
+                        .expect("converged profile stored"));
+                }
+                Err(error) => {
+                    self.last_cantera_telemetry = error
+                        .partial_report()
+                        .map(|report| report.telemetry.clone());
+                    return Err(BvpApiError::Cantera(error));
+                }
+            }
+        }
         let has_previous_result = self.last_solution.is_some();
         self.set_parameter_values(values)?;
         if !has_previous_result {
             return self.solve();
         }
-
         let solution = match &mut self.native {
+            BvpNativeSolver::Cantera(_) => unreachable!("Cantera route returned above"),
             BvpNativeSolver::Damped(solver) => {
                 let current = solver.y.to_DVectorType();
                 let expected = solver.values.len() * solver.n_steps;
@@ -1034,7 +1171,13 @@ impl BvpSolver {
                 solver
                     .try_set_prepared_iterate(iterate)
                     .map_err(BvpApiError::Damped)?;
-                solver.try_solver_prepared().map_err(BvpApiError::Damped)?;
+                if solver
+                    .try_solver_prepared()
+                    .map_err(BvpApiError::Damped)?
+                    .is_none()
+                {
+                    return Err(BvpApiError::MissingResult);
+                }
                 BvpSolution::Damped {
                     mesh: solver.x_mesh.clone(),
                     values: solver.get_result().ok_or(BvpApiError::MissingResult)?,
@@ -1056,7 +1199,13 @@ impl BvpSolver {
                 solver
                     .try_set_prepared_iterate(iterate)
                     .map_err(BvpApiError::Frozen)?;
-                solver.try_solver_prepared().map_err(BvpApiError::Frozen)?;
+                if solver
+                    .try_solver_prepared()
+                    .map_err(BvpApiError::Frozen)?
+                    .is_none()
+                {
+                    return Err(BvpApiError::MissingResult);
+                }
                 BvpSolution::Frozen {
                     mesh: solver.x_mesh.clone(),
                     values: solver.get_result().ok_or(BvpApiError::MissingResult)?,
@@ -1087,8 +1236,45 @@ impl BvpSolver {
         &mut self,
         parameter_vectors: &[Vec<f64>],
     ) -> Result<BvpParameterLoopReport, BvpApiError> {
+        if let BvpNativeSolver::Cantera(solver) = &mut self.native {
+            let report = solver.solve_parameter_loop(parameter_vectors)?;
+            // Native recovery owns the checkpoint. The facade publishes only
+            // converged profiles; telemetry describes the last attempted point.
+            if let Some(point) = report.points.last() {
+                self.last_cantera_telemetry = match &point.outcome {
+                    CanteraParameterLoopOutcome::Converged { report, .. } => {
+                        Some(report.telemetry.clone())
+                    }
+                    CanteraParameterLoopOutcome::Failed { error } => error
+                        .partial_report()
+                        .map(|report| report.telemetry.clone()),
+                };
+            }
+            if let Some((mesh, values, solve_report)) =
+                report
+                    .points
+                    .iter()
+                    .rev()
+                    .find_map(|point| match &point.outcome {
+                        CanteraParameterLoopOutcome::Converged {
+                            mesh,
+                            values,
+                            report,
+                        } => Some((mesh, values, report)),
+                        CanteraParameterLoopOutcome::Failed { .. } => None,
+                    })
+            {
+                self.last_solution = Some(BvpSolution::Cantera {
+                    mesh: DVector::from_vec(mesh.clone()),
+                    values: values.clone(),
+                    report: solve_report.clone(),
+                });
+            }
+            return Ok(BvpParameterLoopReport::Cantera(report));
+        }
         self.last_solution = None;
         match &mut self.native {
+            BvpNativeSolver::Cantera(_) => unreachable!("Cantera loop returned above"),
             BvpNativeSolver::Damped(solver) => solver
                 .try_solve_parameter_loop(parameter_vectors)
                 .map(BvpParameterLoopReport::Damped)
@@ -1118,6 +1304,7 @@ impl BvpSolver {
         if !matches!(&self.native, BvpNativeSolver::Sci(_)) {
             return Err(BvpApiError::UnsupportedRoute {
                 solver: match &self.native {
+                    BvpNativeSolver::Cantera(_) => "BVP_Cantera",
                     BvpNativeSolver::Damped(_) => "BVP_Damp Damped",
                     BvpNativeSolver::Frozen(_) => "BVP_Damp Frozen/Naive",
                     BvpNativeSolver::Sci(_) => unreachable!("Sci route was checked above"),
@@ -1166,6 +1353,9 @@ impl BvpSolver {
     /// into a facade-defined counter or timing schema.
     pub fn telemetry_snapshot(&self) -> BvpSolverTelemetrySnapshot {
         match &self.native {
+            BvpNativeSolver::Cantera(_) => {
+                BvpSolverTelemetrySnapshot::Cantera(self.last_cantera_telemetry.clone())
+            }
             BvpNativeSolver::Damped(solver) => {
                 BvpSolverTelemetrySnapshot::Damped(solver.get_statistics().telemetry)
             }
@@ -1189,6 +1379,7 @@ impl BvpSolver {
             BvpSolution::Damped { mesh, values } | BvpSolution::Frozen { mesh, values } => {
                 (mesh.as_slice().to_vec(), values.clone())
             }
+            BvpSolution::Cantera { mesh, values, .. } => (mesh.as_slice().to_vec(), values.clone()),
             BvpSolution::Sci(solution) => {
                 let dimension = solution.dimension();
                 let node_count = solution.x.len();
@@ -1218,6 +1409,7 @@ impl BvpSolver {
             return Err(BvpApiError::MissingResult);
         }
         let solver = match &self.native {
+            BvpNativeSolver::Cantera(_) => "BVP_Cantera",
             BvpNativeSolver::Damped(_) => "BVP_Damp Damped",
             BvpNativeSolver::Frozen(_) => "BVP_Damp Frozen/Naive",
             BvpNativeSolver::Sci(_) => "BVP_sci",

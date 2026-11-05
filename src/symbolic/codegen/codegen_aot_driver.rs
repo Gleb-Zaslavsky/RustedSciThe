@@ -575,7 +575,7 @@ pub fn generated_aot_build_request_from_artifact(
         GeneratedAotArtifact::Zig(library_spec) => {
             let profile = match preset {
                 AotBuildPreset::Production => ZigAotBuildProfile::ReleaseFast,
-                AotBuildPreset::FastBuild => ZigAotBuildProfile::ReleaseFast,
+                AotBuildPreset::FastBuild => ZigAotBuildProfile::ReleaseSmall,
                 AotBuildPreset::DevFastest => ZigAotBuildProfile::Debug,
             };
             GeneratedAotBuildRequest::Zig(ZigAotBuildRequest::new(

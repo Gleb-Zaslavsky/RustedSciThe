@@ -1,9 +1,11 @@
 use crate::command_interpreter::bvp_dialogue::{
-    run_bvp_damp_template_dialogue, run_bvp_sci_template_dialogue,
-    write_bvp_sci_task_template, write_bvp_task_template,
+    run_bvp_damp_template_dialogue, run_bvp_sci_template_dialogue, write_bvp_sci_task_template,
+    write_bvp_task_template,
 };
 use crate::command_interpreter::docx_parser::{process_docx, process_docx_check};
-use crate::command_interpreter::ivp_dialogue::{run_ivp_template_dialogue, write_ivp_task_template};
+use crate::command_interpreter::ivp_dialogue::{
+    run_ivp_template_dialogue, write_ivp_task_template,
+};
 use crate::command_interpreter::task_runner::{
     anchor_task_paths, parse_task_spec_from_file, render_task_check, render_task_preview,
     requested_output_paths, run_task_batch, run_task_from_spec, ParsedTaskSpec, TaskDocumentKind,
@@ -185,9 +187,7 @@ fn choose_template_kind() -> Option<TemplateKind> {
 fn run_interactive_wizard(output_path: Option<PathBuf>) -> std::io::Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         println!("Interactive wizard requires a terminal; no file was written.");
-        println!(
-            "Use `template <ivp|bvp|bvp-sci> [output-path]` for scripted generation."
-        );
+        println!("Use `template <ivp|bvp|bvp-sci> [output-path]` for scripted generation.");
         return Ok(());
     }
     let Some(kind) = choose_template_kind() else {
@@ -228,10 +228,7 @@ fn remedy_for_task_category(category: &str) -> &'static str {
         }
         "continuation" => "verify continuation values, lifecycle mode, and restart policy",
         "postprocess" => "check output paths and requested postprocessing tools",
-        "solver"
-        | "solver_result"
-        | "solver_exhaustion"
-        | "solver_singular"
+        "solver" | "solver_result" | "solver_exhaustion" | "solver_singular"
         | "solver_tolerance" => {
             "inspect tolerances, solver limits, and the native solver diagnostics"
         }
@@ -255,7 +252,9 @@ fn print_showcase() {
     println!("Task-shell commands:");
     println!("  rustedscithe run <task-file> [--format table|json] [--force]");
     println!("  rustedscithe check <task-file>");
-    println!("  rustedscithe batch <task-file>... [--format table|json] [--report summary.md] [--force]");
+    println!(
+        "  rustedscithe batch <task-file>... [--format table|json] [--report summary.md] [--force]"
+    );
     println!("  rustedscithe convert <docx-file>");
     println!("  rustedscithe convert-check <docx-file>");
     println!("  rustedscithe template (interactive family picker)");
@@ -370,6 +369,9 @@ fn print_run_summary(result: &TaskRunResult) {
                     "BVP_Damp"
                 }
                 crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => "BVP_sci",
+                crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera => {
+                    "BVP_Cantera"
+                }
             };
             let frontend = bvp
                 .specification
@@ -498,6 +500,9 @@ fn render_run_summary_json(result: &TaskRunResult) -> String {
                     "BVP_Damp"
                 }
                 crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => "BVP_sci",
+                crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera => {
+                    "BVP_Cantera"
+                }
             };
             let frontend = bvp
                 .specification
@@ -1059,16 +1064,18 @@ pub fn run() -> Result<(), i32> {
             if let Some(kind) = kind {
                 match kind {
                     TemplateKind::Ivp => {
-                        let path = write_ivp_task_template(output_path).map_err(report_wizard_error)?;
+                        let path =
+                            write_ivp_task_template(output_path).map_err(report_wizard_error)?;
                         println!("IVP task template saved to {}", path.display());
                     }
                     TemplateKind::Bvp => {
-                        let path = write_bvp_task_template(output_path).map_err(report_wizard_error)?;
+                        let path =
+                            write_bvp_task_template(output_path).map_err(report_wizard_error)?;
                         println!("BVP task template saved to {}", path.display());
                     }
                     TemplateKind::BvpSci => {
-                        let path =
-                            write_bvp_sci_task_template(output_path).map_err(report_wizard_error)?;
+                        let path = write_bvp_sci_task_template(output_path)
+                            .map_err(report_wizard_error)?;
                         println!("BVP_sci task template saved to {}", path.display());
                     }
                 }

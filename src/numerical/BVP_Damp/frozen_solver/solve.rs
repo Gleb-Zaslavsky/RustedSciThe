@@ -149,8 +149,27 @@ impl NRBVP {
         let elapsed = now.elapsed();
         elapsed_time(elapsed);
         //  println!(" \n \n dy= {:?}", &delta);
-        // element wise subtraction
-        let new_y = y - &*delta;
+        self.last_bound_step_factor = 1.0;
+        let applied_step = if self.bounds_vec.is_empty() {
+            delta
+        } else {
+            let additive_step = delta.mul_float(-1.0);
+            let maximum_step_factor = bound_step_Cantera2(y, &*additive_step, &self.bounds_vec);
+            if !maximum_step_factor.is_finite() || maximum_step_factor < 1e-10 {
+                return Err(BvpBackendIntegrationError::BoundStepBlocked {
+                    iteration: self.telemetry_counters.iterations() as usize,
+                });
+            }
+            if maximum_step_factor < 1.0 {
+                self.telemetry_counters
+                    .record_bound_limited_step(maximum_step_factor);
+            }
+            self.last_bound_step_factor = maximum_step_factor;
+            delta.mul_float(maximum_step_factor)
+        };
+        // Bounds limit the Newton update before it is applied; no post-step
+        // clipping is allowed because that could manufacture false convergence.
+        let new_y = y - &*applied_step;
 
         Ok(new_y)
     }
@@ -199,7 +218,7 @@ impl NRBVP {
             );
             self.error_old = error;
             info!(" \n \n error = {:?} \n \n", &error);
-            if error < self.tolerance {
+            if error < self.tolerance && self.last_bound_step_factor >= 1.0 {
                 info!("converged in {} iterations, error = {}", i, error);
                 self.result = Some(new_y.to_DVectorType());
                 self.max_error = error;

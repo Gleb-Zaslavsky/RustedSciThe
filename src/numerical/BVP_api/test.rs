@@ -3,26 +3,30 @@ use super::{
     BvpProblem, BvpSciFreeParameters, BvpSciSparseFactorization, BvpSettingsError, BvpSolution,
     BvpSolver, BvpSolverConfig, BvpSolverSettings,
 };
-use crate::Utils::postprocessing::{PostprocessError, PostprocessPlan};
-use crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedSolverOptions;
-use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
+use crate::numerical::logging::SolverLogLevel;
+use crate::numerical::BVP_Cantera::CanteraExprBvpOptions;
 use crate::numerical::BVP_Damp::telemetry::BvpSolveStatus;
 use crate::numerical::BVP_Damp::telemetry::{BvpLoggingMode, BvpTelemetryMode};
+use crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedSolverOptions;
+use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
 use crate::numerical::BVP_sci::new::BvpSciSparseFactorization as NativeBvpSciSparseFactorization;
 use crate::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciMatrixLayout, BvpSciOptions, BvpSciOutputPolicy,
     BvpSciTelemetryMode,
 };
-use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode;
 use crate::symbolic::bvp::legacy::BvpBackendIntegrationError;
 use crate::symbolic::bvp::legacy::BvpSymbolicAssemblyBackend;
 use crate::symbolic::bvp::telemetry::{BvpLambdifyExecutionPolicy, BvpLambdifyTelemetryMode};
 use crate::symbolic::symbolic_engine::Expr;
+use crate::Utils::postprocessing::{PostprocessError, PostprocessPlan};
 use nalgebra::DMatrix;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+#[path = "cantera_continuation_tests.rs"]
+mod cantera_continuation;
 
 fn valid_problem() -> BvpProblem {
     BvpProblem::new(
@@ -37,6 +41,203 @@ fn valid_problem() -> BvpProblem {
         }],
     )
     .expect("valid BVP should construct")
+}
+
+#[test]
+fn cantera_facade_routes_solution_profile_postprocessing_and_native_telemetry() {
+    assert!(matches!(
+        BvpSolverSettings::Cantera(CanteraExprBvpOptions::default())
+            .with_telemetry_mode(BvpApiTelemetryMode::Timings),
+        Err(BvpSettingsError::UnsupportedTelemetry {
+            solver: "BVP_Cantera",
+            mode: BvpApiTelemetryMode::Timings,
+            ..
+        })
+    ));
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("0")],
+        vec!["y".into()],
+        "x",
+        vec![0.0, 0.5, 1.0],
+        vec![BvpBoundaryCondition {
+            state: 0,
+            side: BvpBoundarySide::Left,
+            value: 1.0,
+        }],
+    )
+    .expect("Cantera fixture should be a valid BVP");
+    let settings = BvpSolverSettings::Cantera(CanteraExprBvpOptions::default())
+        .with_telemetry_mode(BvpApiTelemetryMode::Detailed)
+        .expect("Cantera supports detailed native telemetry")
+        .with_initial_guess(DMatrix::from_element(1, 2, 1.0))
+        .with_logging_level(SolverLogLevel::Off);
+    let mut solver = BvpSolver::new(problem, settings)
+        .expect("Cantera facade route should prepare through its native adapter");
+    assert!(matches!(
+        solver.telemetry_snapshot(),
+        super::BvpSolverTelemetrySnapshot::Cantera(None)
+    ));
+
+    solver.solve().expect("constant profile should solve");
+    let view = solver
+        .solution_view()
+        .expect("successful result is published");
+    assert_eq!(view.mesh(), &[0.0, 0.5, 1.0]);
+    assert_eq!(view.state_count(), 1);
+    for node in 0..view.mesh().len() {
+        assert!((view.value(node, 0).unwrap() - 1.0).abs() < 1e-12);
+    }
+    let BvpSolution::Cantera { report, .. } = solver.solution().unwrap() else {
+        panic!("facade must retain the Cantera-native result report");
+    };
+    assert_eq!(
+        report.linear_backend,
+        crate::numerical::BVP_Cantera::CanteraLinearBackend::Dense
+    );
+    assert!(report.telemetry.residual_evaluations > 0);
+    let telemetry = solver.telemetry_snapshot();
+    let super::BvpSolverTelemetrySnapshot::Cantera(Some(telemetry)) = telemetry else {
+        panic!("facade must preserve Cantera telemetry fields");
+    };
+    assert!(telemetry.residual_evaluations > 0);
+    let dataset = solver
+        .postprocess_dataset()
+        .expect("Cantera profile should feed the common postprocessing dataset");
+    assert_eq!(dataset.axis.len(), 3);
+}
+
+#[test]
+fn cantera_facade_routes_symbolic_sparse_and_automatic_banded_backends() {
+    for frontend in [
+        crate::numerical::BVP_Cantera::CanteraSymbolicFrontend::ExprLegacy,
+        crate::numerical::BVP_Cantera::CanteraSymbolicFrontend::AtomView,
+    ] {
+        for (layout, expected) in [
+            (
+                crate::numerical::BVP_Cantera::CanteraMatrixLayout::Sparse,
+                crate::numerical::BVP_Cantera::CanteraLinearBackend::Sparse,
+            ),
+            (
+                crate::numerical::BVP_Cantera::CanteraMatrixLayout::BandedAuto,
+                crate::numerical::BVP_Cantera::CanteraLinearBackend::Banded { lower: 1, upper: 0 },
+            ),
+        ] {
+            let problem = BvpProblem::new(
+                vec![Expr::parse_expression("-y")],
+                vec!["y".into()],
+                "x",
+                vec![0.0, 0.25, 0.5, 0.75, 1.0],
+                vec![BvpBoundaryCondition {
+                    state: 0,
+                    side: BvpBoundarySide::Left,
+                    value: 1.0,
+                }],
+            )
+            .expect("symbolic fixed-mesh problem should validate");
+            let options = CanteraExprBvpOptions {
+                symbolic_frontend: frontend,
+                matrix_layout: layout,
+                ..CanteraExprBvpOptions::default()
+            };
+            let settings = BvpSolverSettings::Cantera(options)
+                .with_initial_guess(DMatrix::from_element(1, 4, 1.0));
+            let mut solver = BvpSolver::new(problem, settings)
+                .expect("Cantera facade should prepare structural backends");
+            solver.solve().expect("linear BVP should converge");
+            let BvpSolution::Cantera { report, .. } = solver.solution().unwrap() else {
+                panic!("expected a Cantera result");
+            };
+            assert_eq!(report.linear_backend, expected);
+            let final_value = solver.solution_view().unwrap().value(4, 0).unwrap();
+            let trapezoid_ratio: f64 = (1.0 - 0.5 / 4.0) / (1.0 + 0.5 / 4.0);
+            assert!((final_value - trapezoid_ratio.powi(4)).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn cantera_facade_rebinds_fixed_inputs_without_rebuilding_symbolic_callbacks() {
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("-(rate + offset)*y")],
+        vec!["y".into()],
+        "x",
+        (0..17).map(|index| index as f64 / 16.0).collect(),
+        vec![BvpBoundaryCondition {
+            state: 0,
+            side: BvpBoundarySide::Left,
+            value: 1.0,
+        }],
+    )
+    .unwrap()
+    .with_external_parameters(vec!["rate".into(), "offset".into()], vec![0.4, 0.1])
+    .unwrap();
+    let mut solver = BvpSolver::new(
+        problem,
+        BvpSolverConfig::Cantera {
+            options: CanteraExprBvpOptions::default(),
+            initial_guess: DMatrix::from_element(1, 16, 1.0),
+        },
+    )
+    .expect("Cantera facade should prepare fixed symbolic inputs");
+
+    let first = solver.solve().unwrap().clone();
+    let BvpSolution::Cantera { values: first, .. } = first else {
+        panic!("Cantera facade should preserve its route result");
+    };
+    solver
+        .set_parameter_values(vec![0.5, 0.1])
+        .expect("fixed inputs should be rebound without preparing callbacks");
+    let second = solver.solve().unwrap().clone();
+    let BvpSolution::Cantera { values: second, .. } = second else {
+        panic!("Cantera facade should preserve its route result");
+    };
+    assert!((first[(16, 0)] - (-0.5_f64).exp()).abs() < 2e-3);
+    assert!((second[(16, 0)] - (-0.6_f64).exp()).abs() < 2e-3);
+    assert!(second[(16, 0)] < first[(16, 0)]);
+}
+
+#[test]
+fn cantera_facade_exposes_partial_telemetry_without_publishing_a_failed_profile() {
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("1")],
+        vec!["y".into()],
+        "x",
+        vec![0.0, 0.5, 1.0],
+        vec![BvpBoundaryCondition {
+            state: 0,
+            side: BvpBoundarySide::Left,
+            value: 0.0,
+        }],
+    )
+    .expect("bounded Cantera fixture should be a valid BVP");
+    let mut options = CanteraExprBvpOptions::default();
+    options.bounds.insert("y".into(), (0.0, 0.0));
+    let settings = BvpSolverSettings::Cantera(options)
+        .with_telemetry_mode(BvpApiTelemetryMode::Counters)
+        .expect("counter telemetry is supported")
+        .with_initial_guess(DMatrix::zeros(1, 2));
+    let mut solver =
+        BvpSolver::new(problem, settings).expect("bounded Cantera route should prepare");
+
+    let error = solver
+        .solve()
+        .expect_err("the required positive profile is blocked by the zero-width bound");
+    match error {
+        BvpApiError::Cantera(
+            crate::numerical::BVP_Cantera::CanteraSolverError::BoundsBlocked { report },
+        ) => {
+            assert!(report.telemetry.jacobian_evaluations > 0);
+            assert!(report.telemetry.linear_solves > 0);
+        }
+        other => panic!("expected typed Cantera bounds failure, got {other:?}"),
+    }
+    assert!(solver.solution().is_none());
+    let super::BvpSolverTelemetrySnapshot::Cantera(Some(snapshot)) = solver.telemetry_snapshot()
+    else {
+        panic!("facade must retain telemetry from the failed native attempt");
+    };
+    assert!(snapshot.residual_evaluations > 0);
+    assert!(snapshot.jacobian_evaluations > 0);
 }
 
 #[test]
@@ -60,7 +261,7 @@ fn native_solver_defaults_are_distinct_and_facade_preserves_them() {
     assert!(damped.rel_tolerance.is_none());
     let strategy = damped.strategy_params.as_ref().unwrap();
     assert_eq!(strategy.max_jac, Some(3));
-    assert_eq!(strategy.max_damp_iter, Some(5));
+    assert_eq!(strategy.max_damp_iter, Some(7));
     assert_eq!(strategy.damp_factor, Some(0.5));
 
     let damped_generated = &damped.generated_backend_config;
@@ -97,12 +298,10 @@ fn native_solver_defaults_are_distinct_and_facade_preserves_them() {
     assert_eq!(frozen.method, "Sparse");
     assert_eq!(frozen.tolerance, 1e-6);
     assert_eq!(frozen.max_iterations, 25);
-    assert!(
-        frozen
-            .strategy_params
-            .as_ref()
-            .is_some_and(|params| params.contains_key("Frozen_naive"))
-    );
+    assert!(frozen
+        .strategy_params
+        .as_ref()
+        .is_some_and(|params| params.contains_key("Frozen_naive")));
     assert_eq!(
         frozen.generated_backend_config.symbolic_assembly_backend,
         BvpSymbolicAssemblyBackend::AtomView
@@ -310,8 +509,8 @@ fn problem_rejects_duplicate_symbol_names() {
 
 #[test]
 fn logging_setup_failures_remain_typed_through_facade_error_sources() {
-    use crate::numerical::BVP_sci::new::BvpSciNewError;
     use crate::numerical::logging::SolverLoggingError;
+    use crate::numerical::BVP_sci::new::BvpSciNewError;
 
     let damped_native = BvpBackendIntegrationError::LogSetupFailed {
         source: SolverLoggingError::FileCreation("permission denied".into()),
@@ -319,11 +518,9 @@ fn logging_setup_failures_remain_typed_through_facade_error_sources() {
     let damped_facade = BvpApiError::Damped(damped_native);
     let damped_source = std::error::Error::source(&damped_facade)
         .expect("facade must preserve the native Damped logging error");
-    assert!(
-        damped_source
-            .to_string()
-            .contains("cannot initialize BVP solver logging")
-    );
+    assert!(damped_source
+        .to_string()
+        .contains("cannot initialize BVP solver logging"));
     assert!(std::error::Error::source(damped_source).is_some());
 
     let frozen_facade = BvpApiError::Frozen(BvpBackendIntegrationError::LogSetupFailed {
@@ -412,12 +609,10 @@ fn facade_builds_native_solver_variants_and_preserves_route_guess_layouts() {
     );
     let damped_export = tempfile::tempdir().expect("Damped export directory");
     let damped_csv = damped_export.path().join("damped.csv");
-    assert!(
-        damped
-            .execute_postprocessing(&PostprocessPlan::new().save_csv(&damped_csv))
-            .expect("Damped mesh result should export")
-            .all_done()
-    );
+    assert!(damped
+        .execute_postprocessing(&PostprocessPlan::new().save_csv(&damped_csv))
+        .expect("Damped mesh result should export")
+        .all_done());
     assert!(damped_csv.exists());
     let unsupported_restart = damped.restart(vec![0.0, 0.5, 1.0], DMatrix::from_element(1, 3, 1.0));
     assert!(matches!(
@@ -432,7 +627,8 @@ fn facade_builds_native_solver_variants_and_preserves_route_guess_layouts() {
     let mut frozen = BvpSolver::new(
         valid_problem(),
         BvpSolverConfig::Frozen {
-            options: FrozenSolverOptions::default(),
+            options: FrozenSolverOptions::default()
+                .with_bounds(HashMap::from([("y".to_string(), (0.0, 2.0))])),
             initial_guess: DMatrix::from_element(1, 2, 1.0),
         },
     )
@@ -440,6 +636,14 @@ fn facade_builds_native_solver_variants_and_preserves_route_guess_layouts() {
     let BvpNativeSolver::Frozen(native_frozen) = frozen.native() else {
         panic!("Frozen route must retain its native solver");
     };
+    assert_eq!(
+        native_frozen
+            .Bounds
+            .as_ref()
+            .and_then(|bounds| bounds.get("y")),
+        Some(&(0.0, 2.0)),
+        "BVP_api must preserve the complete Frozen bounds configuration"
+    );
     assert_eq!(native_frozen.n_steps, 2, "Frozen counts mesh intervals");
     assert_eq!(native_frozen.initial_guess.shape(), (1, 2));
     assert_eq!(native_frozen.x_mesh.len(), 3);
@@ -453,7 +657,10 @@ fn facade_builds_native_solver_variants_and_preserves_route_guess_layouts() {
     assert_eq!(frozen_view.mesh().len(), 3);
     assert_eq!(frozen_view.value(0, 0), Some(1.0));
     assert_eq!(frozen_view.state_count(), 1);
-    assert!(frozen_view.value(2, 0).unwrap().is_finite());
+    for node in 0..frozen_view.mesh().len() {
+        let value = frozen_view.value(node, 0).unwrap();
+        assert!(value.is_finite() && (0.0..=2.0).contains(&value));
+    }
     let super::BvpSolverTelemetrySnapshot::Frozen(facade_snapshot) = frozen.telemetry_snapshot()
     else {
         panic!("Frozen facade must retain its telemetry variant");
@@ -472,12 +679,10 @@ fn facade_builds_native_solver_variants_and_preserves_route_guess_layouts() {
     );
     let frozen_export = tempfile::tempdir().expect("Frozen export directory");
     let frozen_csv = frozen_export.path().join("frozen.csv");
-    assert!(
-        frozen
-            .execute_postprocessing(&PostprocessPlan::new().save_csv(&frozen_csv))
-            .expect("Frozen mesh result should export")
-            .all_done()
-    );
+    assert!(frozen
+        .execute_postprocessing(&PostprocessPlan::new().save_csv(&frozen_csv))
+        .expect("Frozen mesh result should export")
+        .all_done());
     assert!(frozen_csv.exists());
 
     let sci_options = BvpSciOptions::default()
@@ -527,6 +732,7 @@ fn damped_and_frozen_facade_reports_native_failure_without_publishing_a_result()
             let mut solver = BvpSolver::new(valid_problem(), config)
                 .expect("failure fixture should prepare before callback execution");
             match &mut solver.native {
+                BvpNativeSolver::Cantera(_) => unreachable!("test only constructs Damped/Frozen"),
                 BvpNativeSolver::Damped(native) => native.method = "invalid".into(),
                 BvpNativeSolver::Frozen(native) => native.method = "invalid".into(),
                 BvpNativeSolver::Sci(_) => unreachable!("test only constructs Damped/Frozen"),
@@ -602,10 +808,12 @@ fn damped_and_frozen_failed_retry_preserves_last_accepted_facade_solution() {
             BvpSolution::Damped { mesh, values } | BvpSolution::Frozen { mesh, values } => {
                 (mesh.as_slice().to_vec(), values.clone())
             }
+            BvpSolution::Cantera { .. } => unreachable!("test only constructs Damped/Frozen"),
             BvpSolution::Sci(_) => unreachable!("test only constructs Damped/Frozen"),
         };
 
         match &mut solver.native {
+            BvpNativeSolver::Cantera(_) => unreachable!("test only constructs Damped/Frozen"),
             BvpNativeSolver::Damped(native) => native.method = "invalid".into(),
             BvpNativeSolver::Frozen(native) => native.method = "invalid".into(),
             BvpNativeSolver::Sci(_) => unreachable!("test only constructs Damped/Frozen"),
@@ -623,6 +831,7 @@ fn damped_and_frozen_failed_retry_preserves_last_accepted_facade_solution() {
             BvpSolution::Damped { mesh, values } | BvpSolution::Frozen { mesh, values } => {
                 (mesh.as_slice(), values)
             }
+            BvpSolution::Cantera { .. } => unreachable!("test only constructs Damped/Frozen"),
             BvpSolution::Sci(_) => unreachable!("test only constructs Damped/Frozen"),
         };
         assert_eq!(retained_mesh, accepted_mesh);
@@ -1121,12 +1330,10 @@ fn bvp_sci_facade_parameter_loop_prepares_fixed_inputs_once_and_keeps_route_repo
         .expect("second parameter point should converge from the prior profile");
     assert!((first.y[first.y.len() - 1] - 0.5_f64.exp()).abs() < 2e-5);
     assert!((second.y[second.y.len() - 1] - 1.0_f64.exp()).abs() < 2e-5);
-    assert!(
-        report
-            .points
-            .iter()
-            .all(|point| point.telemetry.rhs_calls > 0 && point.telemetry.jacobian_calls > 0)
-    );
+    assert!(report
+        .points
+        .iter()
+        .all(|point| point.telemetry.rhs_calls > 0 && point.telemetry.jacobian_calls > 0));
     assert!(solver.solution().is_none());
 }
 

@@ -24,6 +24,11 @@ and the dated reports it references; do not append run output here.
 
 ## Completed Checkpoints
 
+- [x] Route floating-point coefficient merges in Atom normalization through
+  packed `Num` arithmetic. Direct `CoefficientView` addition is exact-rational
+  only and panicked when a valid `f64` coefficient was combined while merging
+  like terms or powers. Debug regression tests cover float term coefficients
+  and exponents; the adaptive BVP reproducer is recorded in the BVP_Damp story.
 - [x] Keep both frontends and historical compatibility routes available.
 - [x] Add View-owned operation-form and structural diagnostics, with solver
   fixtures remaining in their solver STORY_TESTS.

@@ -1,0 +1,628 @@
+//! Cantera-local linear-workspace boundary.
+//!
+//! The Newton algorithm owns refresh/reuse timing. Backend implementations
+//! receive coordinate values directly; Sparse and Banded never build a dense
+//! global matrix. The production backend kernels are reused from `BVP_sci`,
+//! without importing its collocation/Newton lifecycle.
+
+use crate::numerical::BVP_Cantera::CanteraJacobianPattern;
+use crate::numerical::BVP_sci::new::linear::NativeLinearBackend;
+use crate::numerical::BVP_sci::new::{BvpSciMatrixLayout, BvpSciNewError};
+use nalgebra::{linalg::LU, DMatrix, DVectorViewMut, Dyn};
+use thiserror::Error;
+
+/// Linear storage policy for the standalone Cantera core.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CanteraMatrixLayout {
+    /// Dense nalgebra LU; appropriate for compact/fully-coupled systems.
+    #[default]
+    Dense,
+    /// Faer CSC sparse LU over the structural Jacobian coordinates.
+    Sparse,
+    /// Infer exact scalar lower/upper bandwidth from the symbolic pattern.
+    BandedAuto,
+}
+
+/// Backend identity and resolved storage metadata for one factorization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanteraLinearBackend {
+    Dense,
+    Sparse,
+    Banded { lower: usize, upper: usize },
+}
+
+impl CanteraLinearBackend {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Dense => "Dense",
+            Self::Sparse => "Sparse",
+            Self::Banded { .. } => "Banded",
+        }
+    }
+}
+
+/// Typed errors crossing the Newton/linear-algebra boundary.
+#[derive(Debug, Error)]
+pub(crate) enum CanteraLinearError {
+    #[error("{backend} matrix is singular")]
+    Singular { backend: &'static str },
+    #[error(
+        "{backend} solve failed its backward-residual check: residual={residual_norm:e}, allowed={tolerance:e}"
+    )]
+    ResidualCheckFailed {
+        backend: &'static str,
+        residual_norm: f64,
+        tolerance: f64,
+    },
+    #[error("{backend} solve produced a non-finite solution")]
+    NonFiniteSolution { backend: &'static str },
+    #[error("{backend} backend: {message}")]
+    Backend {
+        backend: &'static str,
+        message: String,
+        #[source]
+        source: Option<BvpSciNewError>,
+    },
+}
+
+enum Storage {
+    Dense {
+        factorization: Option<LU<f64, Dyn, Dyn>>,
+    },
+    Native(NativeLinearBackend),
+}
+
+/// Reusable factorization and numeric assembly storage for one fixed pattern.
+pub(crate) struct CanteraLinearWorkspace {
+    backend: CanteraLinearBackend,
+    dimension: usize,
+    coordinates: Option<Vec<(usize, usize)>>,
+    entries: Vec<(usize, usize, f64)>,
+    residual_check_scratch: Vec<f64>,
+    row_norm_scratch: Vec<f64>,
+    matrix_inf_norm: f64,
+    dense_matrix: Option<DMatrix<f64>>,
+    storage: Storage,
+}
+
+impl CanteraLinearWorkspace {
+    pub(crate) fn new(
+        layout: CanteraMatrixLayout,
+        dimension: usize,
+        pattern: Option<&CanteraJacobianPattern>,
+    ) -> Result<Self, CanteraLinearError> {
+        if dimension == 0 {
+            return Err(backend_error(layout, "matrix dimension must be positive"));
+        }
+        if let Some(pattern) = pattern {
+            if pattern.dimension() != dimension {
+                return Err(backend_error(
+                    layout,
+                    &format!(
+                        "Jacobian pattern dimension {} does not match matrix dimension {dimension}",
+                        pattern.dimension()
+                    ),
+                ));
+            }
+        }
+        let requires_pattern = layout != CanteraMatrixLayout::Dense;
+        if requires_pattern && pattern.is_none() {
+            return Err(backend_error(
+                layout,
+                "Sparse and BandedAuto require a coordinate Jacobian pattern",
+            ));
+        }
+
+        let coordinates = pattern.map(|pattern| pattern.coordinates().to_vec());
+        let mut entries = Vec::with_capacity(coordinates.as_ref().map_or(0, Vec::len));
+        if let Some(coordinates) = &coordinates {
+            entries.extend(coordinates.iter().map(|&(row, column)| (row, column, 0.0)));
+        }
+
+        let (backend, storage) = match layout {
+            CanteraMatrixLayout::Dense => (
+                CanteraLinearBackend::Dense,
+                Storage::Dense {
+                    factorization: None,
+                },
+            ),
+            CanteraMatrixLayout::Sparse => {
+                let native =
+                    NativeLinearBackend::new(BvpSciMatrixLayout::Sparse, dimension, entries.len())
+                        .map_err(|error| map_native_error(CanteraLinearBackend::Sparse, error))?;
+                (CanteraLinearBackend::Sparse, Storage::Native(native))
+            }
+            CanteraMatrixLayout::BandedAuto => {
+                let (lower, upper) = pattern
+                    .expect("BandedAuto pattern checked above")
+                    .bandwidth();
+                let backend = CanteraLinearBackend::Banded { lower, upper };
+                let native = NativeLinearBackend::new(
+                    BvpSciMatrixLayout::Banded { lower, upper },
+                    dimension,
+                    entries.len(),
+                )
+                .map_err(|error| map_native_error(backend, error))?;
+                (backend, Storage::Native(native))
+            }
+        };
+
+        Ok(Self {
+            backend,
+            dimension,
+            coordinates,
+            entries,
+            residual_check_scratch: vec![0.0; dimension],
+            row_norm_scratch: vec![0.0; dimension],
+            matrix_inf_norm: 0.0,
+            dense_matrix: None,
+            storage,
+        })
+    }
+
+    pub(crate) const fn backend(&self) -> CanteraLinearBackend {
+        self.backend
+    }
+
+    pub(crate) fn factor_dense(&mut self, matrix: DMatrix<f64>) -> Result<(), CanteraLinearError> {
+        if self.backend != CanteraLinearBackend::Dense {
+            return Err(backend_error(
+                self.backend,
+                "dense Jacobian callback cannot feed a structural backend",
+            ));
+        }
+        let (rows, columns) = matrix.shape();
+        if rows != self.dimension || columns != self.dimension {
+            return Err(backend_error(
+                self.backend,
+                &format!(
+                    "expected {}x{} matrix, got {rows}x{columns}",
+                    self.dimension, self.dimension
+                ),
+            ));
+        }
+        let Storage::Dense { factorization } = &mut self.storage else {
+            unreachable!("backend and storage variants are constructed together")
+        };
+        *factorization = Some(matrix.lu());
+        Ok(())
+    }
+
+    pub(crate) fn assemble_coordinates(
+        &mut self,
+        values: &[f64],
+    ) -> Result<(), CanteraLinearError> {
+        let coordinates = self.coordinates.as_ref().ok_or_else(|| {
+            backend_error(
+                self.backend,
+                "coordinate Jacobian values supplied without a pattern",
+            )
+        })?;
+        if values.len() != coordinates.len() {
+            return Err(backend_error(
+                self.backend,
+                &format!(
+                    "coordinate Jacobian has {} values for {} pattern entries",
+                    values.len(),
+                    coordinates.len()
+                ),
+            ));
+        }
+        if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+            let (row, column) = coordinates[index];
+            return Err(backend_error(
+                self.backend,
+                &format!("Jacobian value at ({row}, {column}) is not finite"),
+            ));
+        }
+
+        match &mut self.storage {
+            Storage::Dense { .. } => {
+                let mut matrix = DMatrix::zeros(self.dimension, self.dimension);
+                for (&(row, column), &value) in coordinates.iter().zip(values) {
+                    matrix[(row, column)] = value;
+                }
+                self.dense_matrix = Some(matrix);
+            }
+            Storage::Native(native) => {
+                for (entry, &value) in self.entries.iter_mut().zip(values) {
+                    entry.2 = value;
+                }
+                self.row_norm_scratch.fill(0.0);
+                for &(row, _, value) in &self.entries {
+                    self.row_norm_scratch[row] += value.abs();
+                }
+                self.matrix_inf_norm = self
+                    .row_norm_scratch
+                    .iter()
+                    .fold(0.0_f64, |maximum, value| maximum.max(*value));
+                native
+                    .assemble(&self.entries)
+                    .map_err(|error| map_native_error(self.backend, error))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn factor_assembled(&mut self) -> Result<(), CanteraLinearError> {
+        match &mut self.storage {
+            Storage::Dense { factorization } => {
+                let matrix = self.dense_matrix.take().ok_or_else(|| {
+                    backend_error(self.backend, "factor requested before coordinate assembly")
+                })?;
+                *factorization = Some(matrix.lu());
+                Ok(())
+            }
+            Storage::Native(native) => native
+                .factor()
+                .map_err(|error| map_native_error(self.backend, error)),
+        }
+    }
+
+    pub(crate) fn factor_coordinates(&mut self, values: &[f64]) -> Result<(), CanteraLinearError> {
+        self.assemble_coordinates(values)?;
+        self.factor_assembled()
+    }
+
+    pub(crate) fn solve_in_place(&mut self, rhs: &mut [f64]) -> Result<(), CanteraLinearError> {
+        if rhs.len() != self.dimension {
+            return Err(backend_error(
+                self.backend,
+                &format!(
+                    "right-hand side has length {}, expected {}",
+                    rhs.len(),
+                    self.dimension
+                ),
+            ));
+        }
+        match &mut self.storage {
+            Storage::Dense { factorization } => {
+                let factorization = factorization.as_ref().ok_or_else(|| {
+                    backend_error(self.backend, "solve requested before factorization")
+                })?;
+                let mut rhs = DVectorViewMut::from_slice(rhs, self.dimension);
+                if factorization.solve_mut(&mut rhs) {
+                    Ok(())
+                } else {
+                    Err(CanteraLinearError::Singular {
+                        backend: self.backend.name(),
+                    })
+                }
+            }
+            Storage::Native(native) => {
+                let rhs_norm = rhs
+                    .iter()
+                    .fold(0.0_f64, |maximum, value| maximum.max(value.abs()));
+                for (check, &value) in self.residual_check_scratch.iter_mut().zip(rhs.iter()) {
+                    *check = -value;
+                }
+
+                native
+                    .solve_in_place(rhs)
+                    .map_err(|error| map_native_error(self.backend, error))?;
+                if rhs.iter().any(|value| !value.is_finite()) {
+                    return Err(CanteraLinearError::NonFiniteSolution {
+                        backend: self.backend.name(),
+                    });
+                }
+
+                for &(row, column, value) in &self.entries {
+                    self.residual_check_scratch[row] += value * rhs[column];
+                }
+                let residual_norm = self
+                    .residual_check_scratch
+                    .iter()
+                    .fold(0.0_f64, |maximum, value| maximum.max(value.abs()));
+                let solution_norm = rhs
+                    .iter()
+                    .fold(0.0_f64, |maximum, value| maximum.max(value.abs()));
+                let scale = self.matrix_inf_norm * solution_norm + rhs_norm;
+                let tolerance =
+                    128.0 * f64::EPSILON * self.dimension as f64 * scale.max(f64::MIN_POSITIVE);
+                if !residual_norm.is_finite() || residual_norm > tolerance {
+                    return Err(CanteraLinearError::ResidualCheckFailed {
+                        backend: self.backend.name(),
+                        residual_norm,
+                        tolerance,
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn backend_error(backend: impl IntoBackendIdentity, message: &str) -> CanteraLinearError {
+    CanteraLinearError::Backend {
+        backend: backend.backend_name(),
+        message: message.to_owned(),
+        source: None,
+    }
+}
+
+trait IntoBackendIdentity {
+    fn backend_name(self) -> &'static str;
+}
+
+impl IntoBackendIdentity for CanteraLinearBackend {
+    fn backend_name(self) -> &'static str {
+        self.name()
+    }
+}
+
+impl IntoBackendIdentity for CanteraMatrixLayout {
+    fn backend_name(self) -> &'static str {
+        match self {
+            Self::Dense => "Dense",
+            Self::Sparse => "Sparse",
+            Self::BandedAuto => "Banded",
+        }
+    }
+}
+
+fn map_native_error(backend: CanteraLinearBackend, error: BvpSciNewError) -> CanteraLinearError {
+    match error {
+        BvpSciNewError::SingularJacobian => CanteraLinearError::Singular {
+            backend: backend.name(),
+        },
+        other => CanteraLinearError::Backend {
+            backend: backend.name(),
+            message: other.to_string(),
+            source: Some(other),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_backend_failures_preserve_the_typed_source() {
+        let source = BvpSciNewError::LinearFactorization {
+            message: "fixture failure".into(),
+        };
+        let error = map_native_error(CanteraLinearBackend::Sparse, source.clone());
+        match error {
+            CanteraLinearError::Backend {
+                backend,
+                source: Some(actual),
+                ..
+            } => {
+                assert_eq!(backend, "Sparse");
+                assert_eq!(actual, source);
+                assert!(std::error::Error::source(&CanteraLinearError::Backend {
+                    backend,
+                    message: actual.to_string(),
+                    source: Some(actual),
+                })
+                .is_some());
+            }
+            other => panic!("expected typed native backend failure, got {other:?}"),
+        }
+    }
+
+    fn solve_tridiagonal(layout: CanteraMatrixLayout) -> [f64; 3] {
+        let pattern = CanteraJacobianPattern::try_new(
+            3,
+            vec![(0, 0), (0, 1), (1, 0), (1, 1), (1, 2), (2, 1), (2, 2)],
+        )
+        .expect("tridiagonal pattern should be valid");
+        let mut workspace = CanteraLinearWorkspace::new(layout, 3, Some(&pattern))
+            .expect("linear workspace should prepare");
+        workspace
+            .factor_coordinates(&[4.0, 1.0, 1.0, 4.0, 1.0, 1.0, 4.0])
+            .expect("tridiagonal matrix should factor");
+        let mut rhs = [6.0, 12.0, 14.0];
+        workspace
+            .solve_in_place(&mut rhs)
+            .expect("tridiagonal RHS should solve");
+        rhs
+    }
+
+    #[test]
+    fn dense_workspace_reuses_one_factorization_for_multiple_rhs() {
+        let pattern = CanteraJacobianPattern::dense(2).expect("dense pattern should prepare");
+        let mut workspace =
+            CanteraLinearWorkspace::new(CanteraMatrixLayout::Dense, 2, Some(&pattern))
+                .expect("dense workspace should prepare");
+        workspace
+            .factor_coordinates(&[3.0, 1.0, 1.0, 2.0])
+            .expect("valid square matrix should factor");
+
+        let mut first = [9.0, 8.0];
+        workspace
+            .solve_in_place(&mut first)
+            .expect("first RHS should solve");
+        assert!((first[0] - 2.0).abs() < 1e-12);
+        assert!((first[1] - 3.0).abs() < 1e-12);
+
+        let mut second = [4.0, 3.0];
+        workspace
+            .solve_in_place(&mut second)
+            .expect("same factorization should solve a second RHS");
+        assert!((second[0] - 1.0).abs() < 1e-12);
+        assert!((second[1] - 1.0).abs() < 1e-12);
+        assert_eq!(workspace.backend(), CanteraLinearBackend::Dense);
+    }
+
+    #[test]
+    fn sparse_and_auto_banded_solve_the_same_coordinate_system() {
+        let expected = [1.0, 2.0, 3.0];
+        for layout in [
+            CanteraMatrixLayout::Dense,
+            CanteraMatrixLayout::Sparse,
+            CanteraMatrixLayout::BandedAuto,
+        ] {
+            let actual = solve_tridiagonal(layout);
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-10, "layout={layout:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_backend_reuses_one_factorization_for_multiple_rhs() {
+        let expected = [[1.0, 2.0, 3.0], [0.0, 1.0, 2.0]];
+        for layout in [
+            CanteraMatrixLayout::Dense,
+            CanteraMatrixLayout::Sparse,
+            CanteraMatrixLayout::BandedAuto,
+        ] {
+            let pattern = CanteraJacobianPattern::try_new(
+                3,
+                vec![(0, 0), (0, 1), (1, 0), (1, 1), (1, 2), (2, 1), (2, 2)],
+            )
+            .unwrap();
+            let mut workspace = CanteraLinearWorkspace::new(layout, 3, Some(&pattern)).unwrap();
+            workspace
+                .factor_coordinates(&[4.0, 1.0, 1.0, 4.0, 1.0, 1.0, 4.0])
+                .unwrap();
+            for solution in expected {
+                let rhs = [
+                    4.0 * solution[0] + solution[1],
+                    solution[0] + 4.0 * solution[1] + solution[2],
+                    solution[1] + 4.0 * solution[2],
+                ];
+                let mut actual = rhs;
+                workspace.solve_in_place(&mut actual).unwrap();
+                for (actual, expected) in actual.into_iter().zip(solution) {
+                    assert!((actual - expected).abs() < 1e-10, "layout={layout:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dense_reports_singular_system_and_all_backends_reject_invalid_inputs() {
+        let pattern =
+            CanteraJacobianPattern::try_new(2, vec![(0, 0), (0, 1), (1, 0), (1, 1)]).unwrap();
+        let mut dense =
+            CanteraLinearWorkspace::new(CanteraMatrixLayout::Dense, 2, Some(&pattern)).unwrap();
+        dense.factor_coordinates(&[1.0, 2.0, 2.0, 4.0]).unwrap();
+        let mut incompatible_rhs = [1.0, 0.0];
+        assert!(matches!(
+            dense.solve_in_place(&mut incompatible_rhs),
+            Err(CanteraLinearError::Singular { .. })
+        ));
+
+        for layout in [
+            CanteraMatrixLayout::Dense,
+            CanteraMatrixLayout::Sparse,
+            CanteraMatrixLayout::BandedAuto,
+        ] {
+            let mut workspace = CanteraLinearWorkspace::new(layout, 2, Some(&pattern)).unwrap();
+            assert!(matches!(
+                workspace.factor_coordinates(&[1.0]),
+                Err(CanteraLinearError::Backend { .. })
+            ));
+            assert!(matches!(
+                workspace.factor_coordinates(&[1.0, f64::NAN]),
+                Err(CanteraLinearError::Backend { .. })
+            ));
+            let mut wrong_rhs = [1.0];
+            assert!(matches!(
+                workspace.solve_in_place(&mut wrong_rhs),
+                Err(CanteraLinearError::Backend { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn every_backend_surfaces_a_typed_singular_failure_with_backend_identity() {
+        let pattern =
+            CanteraJacobianPattern::try_new(2, vec![(0, 0), (0, 1), (1, 0), (1, 1)]).unwrap();
+        for layout in [
+            CanteraMatrixLayout::Dense,
+            CanteraMatrixLayout::Sparse,
+            CanteraMatrixLayout::BandedAuto,
+        ] {
+            let mut workspace = CanteraLinearWorkspace::new(layout, 2, Some(&pattern)).unwrap();
+            let factor = workspace.factor_coordinates(&[1.0, 2.0, 2.0, 4.0]);
+            let failure = match factor {
+                Err(error) => error,
+                Ok(()) => {
+                    let mut rhs = [1.0, 0.0];
+                    match workspace.solve_in_place(&mut rhs) {
+                        Err(error) => error,
+                        Ok(()) => panic!(
+                            "singular matrix unexpectedly solved successfully with {:?}",
+                            workspace.backend()
+                        ),
+                    }
+                }
+            };
+            assert!(
+                failure.to_string().contains(workspace.backend().name()),
+                "failure must identify {:?}: {failure}",
+                workspace.backend()
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_and_banded_assembly_never_materializes_a_dense_matrix() {
+        for layout in [CanteraMatrixLayout::Sparse, CanteraMatrixLayout::BandedAuto] {
+            let pattern = CanteraJacobianPattern::try_new(
+                3,
+                vec![(0, 0), (0, 1), (1, 0), (1, 1), (1, 2), (2, 1), (2, 2)],
+            )
+            .unwrap();
+            let mut workspace = CanteraLinearWorkspace::new(layout, 3, Some(&pattern)).unwrap();
+            workspace
+                .assemble_coordinates(&[4.0, 1.0, 1.0, 4.0, 1.0, 1.0, 4.0])
+                .unwrap();
+            assert!(workspace.dense_matrix.is_none(), "layout={layout:?}");
+            assert!(matches!(&workspace.storage, Storage::Native(_)));
+        }
+    }
+
+    #[test]
+    fn large_structural_workspaces_keep_cantera_owned_storage_linear() {
+        let dimension = 18_000;
+        let mut coordinates = Vec::with_capacity(3 * dimension - 2);
+        for row in 0..dimension {
+            if row > 0 {
+                coordinates.push((row, row - 1));
+            }
+            coordinates.push((row, row));
+            if row + 1 < dimension {
+                coordinates.push((row, row + 1));
+            }
+        }
+        let pattern = CanteraJacobianPattern::try_new(dimension, coordinates).unwrap();
+        let nnz = pattern.coordinates().len();
+
+        for layout in [CanteraMatrixLayout::Sparse, CanteraMatrixLayout::BandedAuto] {
+            let workspace = CanteraLinearWorkspace::new(layout, dimension, Some(&pattern)).unwrap();
+            assert!(workspace.dense_matrix.is_none(), "layout={layout:?}");
+            assert_eq!(workspace.coordinates.as_ref().unwrap().len(), nnz);
+            assert_eq!(workspace.entries.len(), nnz);
+
+            // Count only the Cantera-owned vectors; NativeLinearBackend keeps
+            // its allocations private and is deliberately not estimated here.
+            let owned_bytes = workspace.coordinates.as_ref().unwrap().capacity()
+                * std::mem::size_of::<(usize, usize)>()
+                + workspace.entries.capacity() * std::mem::size_of::<(usize, usize, f64)>()
+                + workspace.residual_check_scratch.capacity() * std::mem::size_of::<f64>()
+                + workspace.row_norm_scratch.capacity() * std::mem::size_of::<f64>();
+            println!(
+                "Cantera-owned linear buffers: layout={layout:?}, dimension={dimension}, nnz={nnz}, bytes={owned_bytes}"
+            );
+            let linear_bound = 128 * (nnz + dimension);
+            assert!(
+                owned_bytes <= linear_bound,
+                "Cantera-owned structural storage unexpectedly superlinear: layout={layout:?}, bytes={owned_bytes}, bound={linear_bound}"
+            );
+        }
+    }
+
+    #[test]
+    fn structural_backend_rejects_dense_matrix_without_a_pattern() {
+        let error = match CanteraLinearWorkspace::new(CanteraMatrixLayout::Sparse, 2, None) {
+            Ok(_) => panic!("Sparse requires coordinates"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, CanteraLinearError::Backend { .. }));
+    }
+}

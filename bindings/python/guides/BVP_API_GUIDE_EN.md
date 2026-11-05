@@ -37,7 +37,8 @@ print(solver.telemetry_snapshot())
 
 ## Routes And Shapes
 
-Factories are tagged by native solver family: `damped`, `frozen`, or `sci`.
+Factories are tagged by native solver family: `damped`, `frozen`, `sci`, or
+`cantera`.
 `mesh` must be finite and strictly increasing. Boundary conditions are
 `(state_index, "left" | "right", value)` triples; the indices refer to the
 ordered `state_variables` list. Equations and state variables must have equal
@@ -57,6 +58,23 @@ Python exception with `stage`, `solver`, `route` and `native_kind`; the facade
 does not silently fall back. The generic facade supports symbolic Lambdify
 and AOT routes. Numerical Python callback routes remain on the direct
 `BvpSciSolver` API.
+
+The `cantera` factory selects the fixed-uniform-grid trapezoid/Newton route.
+It supports ExprLegacy or native AtomView with Lambdify or AOT, and Dense,
+Sparse, or automatically inferred Banded storage. Its initial guess has one
+row per interval; endpoint values are imposed by the boundary conditions.
+Grid refinement is not part of this fixed-mesh solver route. Fixed
+symbolic inputs can be supplied with `external_parameters` and
+`external_parameter_values`; the prepared Lambdify/AOT callbacks are reused
+when `solve_with_parameter_values(values)` changes them.
+`solve_parameter_loop(parameter_vectors)` performs ordered continuation from
+the configured guess and then the most recent successful profile. Each failed
+point remains in a `BvpCanteraParameterLoopReport` with a typed error and
+available telemetry; it does not abort later points or replace the last
+successful profile. See `examples/bvp_api_cantera.py` for a single solve and
+`examples/bvp_api_cantera_combustion_continuation.py` or
+`examples/bvp_api_cantera_bratu_continuation.py` for nontrivial parameter
+sweeps.
 
 For BVP_sci free parameters, provide all of `free_parameter_names`,
 `free_parameter_guess` and `boundary_residual`. The residual callback receives

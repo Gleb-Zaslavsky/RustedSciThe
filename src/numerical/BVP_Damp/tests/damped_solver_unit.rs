@@ -40,6 +40,37 @@ fn damped_logging_is_disabled_by_default_and_requires_explicit_enablement() {
 }
 
 #[test]
+fn damped_trial_reduction_rejects_invalid_configuration_as_typed_error() {
+    let mut solver = sparse_surface_test_solver();
+    solver.strategy_params = Some(SolverParams {
+        max_damp_iter: Some(0),
+        ..SolverParams::default()
+    });
+
+    let error = solver
+        .try_damped_step()
+        .expect_err("zero damping trials must be rejected before any Newton work");
+    assert!(matches!(
+        error,
+        BvpBackendIntegrationError::InvalidSolverConfiguration { field, value, .. }
+            if field == "strategy_params.max_damp_iter" && value == "0"
+    ));
+
+    solver.strategy_params = Some(SolverParams {
+        damp_factor: Some(f64::NAN),
+        ..SolverParams::default()
+    });
+    let error = solver
+        .try_damped_step()
+        .expect_err("non-finite damping exponent must be rejected before Newton work");
+    assert!(matches!(
+        error,
+        BvpBackendIntegrationError::InvalidSolverConfiguration { field, .. }
+            if field == "strategy_params.damp_factor"
+    ));
+}
+
+#[test]
 fn explicit_damped_off_overrides_structured_event_logging_mode() {
     let mut solver = sparse_surface_test_solver();
     solver.loglevel = Some("off".to_string());
@@ -172,6 +203,29 @@ fn try_step_preserves_partial_telemetry_on_dense_factorization_failure() {
     assert_eq!(snapshot.counters.residual_calls, 1);
     assert_eq!(snapshot.counters.linear_solves, 0);
     assert_eq!(snapshot.counters.factorizations, 0);
+}
+
+#[test]
+fn damped_newton_bounds_allow_a_correction_toward_the_feasible_interior() {
+    let mut solver = sparse_surface_test_solver();
+    let size = solver.values.len() * solver.n_steps;
+    let target = DVector::from_element(size, 0.5);
+    solver.fun = Box::new(FunEnum::Dense(Box::new(move |_, y| y - &target)));
+    solver.y = Box::new(DVector::zeros(size));
+    solver.bounds_vec = vec![(0.0, 1.0); size];
+    solver.rel_tolerance_vec = vec![1e-8; size];
+    solver.factor_owner.old_jac = Some(Box::new(DMatrix::<f64>::identity(size, size)));
+
+    let (status, candidate) = solver
+        .try_damped_step()
+        .expect("feasible Newton correction should not be rejected by bounds");
+    let candidate = candidate.expect("accepted damped step should return its candidate");
+
+    assert_eq!(status, 1, "the linear fixture reaches its root in one step");
+    for value in candidate.iterate() {
+        assert!((value - 0.5).abs() < 1e-12);
+        assert!((0.0..=1.0).contains(&value));
+    }
 }
 
 #[test]
@@ -329,6 +383,108 @@ fn grid_refinement_rejects_missing_method_as_typed_configuration_error() {
             && value == "missing"
             && message.contains("grid method must be specified")
     ));
+}
+
+#[test]
+fn converged_easy_grid_with_no_marked_intervals_returns_current_solution() {
+    let mut solver = sparse_surface_test_solver_with_tolerances();
+    solver.strategy_params = Some(SolverParams {
+        adaptive: Some(AdaptiveGridConfig {
+            version: 1,
+            max_refinements: 2,
+            grid_method: GridRefinementMethod::Easy(2.0),
+        }),
+        ..SolverParams::default()
+    });
+    // This is the state reached after a previous refinement requested another
+    // adaptive check; the current profile is converged, but the new check marks
+    // no intervals.
+    solver.new_grid_enabled = true;
+    solver.set_bvp_telemetry_mode(BvpTelemetryMode::Counters);
+
+    let result = solver
+        .try_solver()
+        .expect("the fixed-grid Newton solve should converge");
+    assert!(
+        result.is_some(),
+        "no-op refinement must preserve convergence"
+    );
+    let published = solver
+        .get_result()
+        .expect("the converged current-grid profile must be published");
+    assert_eq!(
+        published.nrows(),
+        6,
+        "the original five-interval mesh remains active"
+    );
+    assert_eq!(
+        solver.get_statistics().telemetry.counters.grid_refinements,
+        0,
+        "a no-op grid check is not a mesh refinement"
+    );
+}
+
+#[test]
+fn failed_newton_no_op_grid_check_does_not_return_stale_result() {
+    let mut solver = sparse_surface_test_solver_with_tolerances();
+    solver.strategy_params = Some(SolverParams {
+        adaptive: Some(AdaptiveGridConfig {
+            version: 1,
+            max_refinements: 2,
+            grid_method: GridRefinementMethod::Easy(2.0),
+        }),
+        ..SolverParams::default()
+    });
+    solver
+        .try_eq_generate(None, None)
+        .expect("test callbacks must be prepared before setting mesh state");
+    let current = DVector::from_element(solver.n_steps * solver.values.len(), 0.25);
+    solver.y = Vectors_type_casting(&current, solver.effective_runtime_method());
+    solver.result = Some(DVector::from_element(current.len(), 7.0));
+
+    let result = solver
+        .try_solve_with_new_grid(false)
+        .expect("failed-attempt no-op refinement should remain a typed outcome");
+    assert!(
+        result.is_none(),
+        "failed Newton must not inherit a stale result"
+    );
+    assert_eq!(
+        solver.get_statistics().telemetry.counters.grid_refinements,
+        0,
+        "a no-op grid check is not a mesh refinement"
+    );
+}
+
+#[test]
+fn refinement_interpolates_the_current_iterate_not_a_same_length_stale_result() {
+    let mut solver = sparse_surface_test_solver_with_tolerances();
+    solver.strategy_params = Some(SolverParams {
+        adaptive: Some(AdaptiveGridConfig {
+            version: 1,
+            max_refinements: 1,
+            grid_method: GridRefinementMethod::DoublePoints,
+        }),
+        ..SolverParams::default()
+    });
+    solver
+        .try_eq_generate(None, None)
+        .expect("test callbacks must be prepared before setting mesh state");
+    let current = DVector::from_element(solver.n_steps * solver.values.len(), 0.25);
+    solver.y = Vectors_type_casting(&current, solver.effective_runtime_method());
+    solver.result = Some(DVector::from_element(current.len(), 7.0));
+
+    let (_, interpolated, inserted_intervals) = solver
+        .create_new_grid()
+        .expect("refinement should interpolate the active Newton iterate");
+
+    assert!(inserted_intervals > 0);
+    assert!(
+        interpolated
+            .iter()
+            .all(|value| (*value - 0.25).abs() < 1e-14 || (*value - 0.625).abs() < 1e-14),
+        "refined guess must come from the current iterate, not the stale result slot: {interpolated:?}"
+    );
 }
 
 #[test]

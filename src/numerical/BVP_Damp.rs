@@ -28,6 +28,10 @@ mod test_aot_race_stress;
 #[cfg(test)]
 #[path = "BVP_Damp/tests/aot_runtime_contract.rs"]
 mod test_aot_runtime_contract;
+/// AtomView arithmetic regression during adaptive BVP grid regeneration
+#[cfg(test)]
+#[path = "BVP_Damp/tests/atomview_grid_refinement.rs"]
+mod test_atomview_grid_refinement;
 /// focused backend comparison diagnostics for solver-facing BVP generated pipelines
 #[cfg(test)]
 #[path = "BVP_Damp/tests/backend_compare.rs"]
@@ -64,6 +68,19 @@ mod test_lambdify_cross_product;
 #[cfg(test)]
 #[path = "BVP_Damp/tests/lambdify_lifecycle.rs"]
 mod test_lambdify_lifecycle;
+/// Large public-API BVP reproducer for native solver failure and refinement paths
+#[cfg(any(test, feature = "perf-gates"))]
+#[path = "BVP_Damp/tests/large_native_regressions.rs"]
+pub(crate) mod test_large_native_regressions;
+
+/// Reuses the maintained KiThe large-combustion fixture from perf-gates.
+/// This is feature-gated so the test fixture does not enter ordinary builds.
+#[cfg(feature = "perf-gates")]
+#[doc(hidden)]
+pub fn cantera_kithe_combustion_perf_fixture()
+-> crate::numerical::BVP_Cantera::CanteraExprBvpProblem {
+    test_large_native_regressions::cantera_fixed_grid_expr_problem()
+}
 /// typed Dense/faer/Banded linear-solve boundary gates
 #[cfg(test)]
 #[path = "BVP_Damp/tests/linear_solve_boundary.rs"]

@@ -12,6 +12,7 @@ use crate::numerical::BVP_Damp::BVP_traits::{
     Fun, FunEnum, Jac, LinearSolveTiming, VectorType, Vectors_type_casting,
 };
 use crate::numerical::BVP_Damp::BVP_utils::*;
+use crate::numerical::BVP_Damp::BVP_utils_damped::bound_step_Cantera2;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::BvpDerivativeScheme;
 use crate::numerical::BVP_Damp::factor_runtime::prepare_factor_owner_runtime;
 use crate::numerical::BVP_Damp::generated_solver_handoff::{

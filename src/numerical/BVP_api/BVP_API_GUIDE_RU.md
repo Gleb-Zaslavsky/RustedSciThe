@@ -65,6 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Циклы фиксированных входных параметров через оба маршрута BVP_Damp, включая
 различия checkpoint и отчётов об ошибках:
 [`examples/bvp_api_damped_frozen_parameter_loop.rs`](../../../../examples/bvp_api_damped_frozen_parameter_loop.rs).
+Маршрут Cantera через фасад показан в
+[`examples/bvp_api_cantera.rs`](../../../../examples/bvp_api_cantera.rs); пока
+это onboarding-пилот, а не production-ready маршрут первого тира.
 
 ## Выбор маршрута и данные
 
@@ -76,11 +79,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ограничивать одну переменную, если этого требует математическая задача;
 разрешимость системы проверяет сам solver.
 
-Конфигурация solver-specific намеренно. Damped initial guess имеет форму
-`state_count x interval_count`; Frozen/Naive и BVP_sci используют
+Конфигурация solver-specific намеренно. Damped и Cantera initial guess имеют
+форму `state_count x interval_count`; Frozen/Naive и BVP_sci используют
 `state_count x mesh_point_count`. Damped и Frozen принимают только равномерную
 сетку, поскольку их native constructors задаются концами интервала и числом
-шагов. Неравномерную сетку можно передать BVP_sci напрямую.
+шагов. Cantera также требует равномерную сетку и выполняет solve без её
+уточнения. Неравномерную сетку можно передать BVP_sci напрямую.
 
 Адаптивное уточнение сетки в BVP_Damp выполняется самим solver во время
 решения: пользователь не перезапускает его вручную при нарушении критериев
@@ -89,9 +93,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 символьную модель.
 
 Фасад не строит искусственную общую матрицу возможностей. Настройки
-передаются native типами `DampedSolverOptions`, `FrozenSolverOptions` или
-`BvpSciOptions`; BVP_sci также сохраняет sparse factorization и необязательную
-AOT-конфигурацию. Для fixed inputs в Damped/Frozen перед первым solve вызовите
+передаются native типами `DampedSolverOptions`, `FrozenSolverOptions`,
+`CanteraExprBvpOptions` или `BvpSciOptions`; BVP_sci также сохраняет sparse
+factorization и необязательную AOT-конфигурацию. Для fixed inputs в
+Damped/Frozen перед первым solve вызовите
 `bind_parameters(names, values)`, а затем `solve_with_parameter_values(values)`:
 фасад переиспользует подготовленный маршрут и предыдущий Newton iterate.
 `parameters` в BVP_sci имеют другую семантику: это свободные Newton-неизвестные,
@@ -99,6 +104,42 @@ AOT-конфигурацию. Для fixed inputs в Damped/Frozen перед п
 `BvpProblem::with_external_parameters(names, initial_values)` до подготовки
 символьных callbacks. `solve_parameter_loop` меняет значения перед каждым
 solve и использует последний успешный профиль как начальное приближение.
+
+Cantera facade готовит координатные callbacks фиксированной trapezoid-системы
+через `CanteraSymbolicFrontend::ExprLegacy` либо нативный
+`CanteraSymbolicFrontend::AtomView` (по умолчанию ExprLegacy). В
+`CanteraExprBvpOptions` можно выбрать `CanteraMatrixLayout::Dense`, `Sparse`
+или `BandedAuto`; ширина полосы выводится из символьного шаблона,
+Sparse/Banded не материализуют глобальную плотную матрицу. AOT использует
+общий `SymbolicIvpGeneratedBackendConfig`. Успешный native report
+сохраняется в `BvpSolution::Cantera`, а общий solution
+view и postprocessing получают восстановленный полный node-major профиль.
+Фиксированные внешние входы поддерживаются: задайте их через
+`BvpProblem::with_external_parameters`, затем используйте
+`set_parameter_values` или `solve_with_parameter_values`; подготовленные
+Lambdify/AOT callbacks и структура Якобиана переиспользуются. Метод
+`solve_parameter_loop` выполняет упорядоченное продолжение по фиксированным
+входам: первая точка использует исходное приближение, последующие — последний
+успешный профиль. Ошибка одной точки сохраняется вместе с частичной telemetry и
+не отравляет следующую попытку. Отчёт содержит физическую сетку, полные
+node-major профили успешных точек и native-отчёты попыток. Mesh restart и
+уточнение сетки на этом fixed-mesh маршруте не поддерживаются. См. примеры
+[`bvp_api_cantera_combustion_continuation.rs`](../../../../examples/bvp_api_cantera_combustion_continuation.rs)
+и [`bvp_api_cantera_bratu_continuation.rs`](../../../../examples/bvp_api_cantera_bratu_continuation.rs).
+До первого solve telemetry в snapshot явно отсутствует; после попытки facade
+возвращает native counters/timings, включая частичный snapshot при численной
+ошибке.
+Его native `Timings` собирает также counters, поэтому facade отклоняет запрос
+Timings-only; режим `Detailed` включает совместный сбор обоих типов данных.
+расширенные parity gates, release matrix и perf-gates остаются
+обязательными до promotion.
+
+Bounds состояний Frozen/Naive задаются в native options через
+`FrozenSolverOptions::with_bounds` и без потерь передаются в
+`BvpSolverConfig::Frozen`. Солвер ограничивает Newton update fraction-to-
+boundary guard-ом и не обрезает готовый iterate. Если допустимого шага нет,
+возвращается typed-ошибка `BoundStepBlocked`, а фасад не публикует неуспешный
+iterate.
 Фасад сохраняет нативную семантику циклов: Damped может передавать следующей
 точке также новую уточнённую сетку, а Frozen/Naive сохраняет исходную сетку и
 передаёт только успешный профиль. Ошибка отдельной точки записывается в отчёт и

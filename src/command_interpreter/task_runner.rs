@@ -7,11 +7,11 @@
 //!   into other Rust programs
 
 use crate::command_interpreter::task_parser_bvp::{
-    BvpTaskError, BvpTaskRunResult, BvpTaskSpec, parse_bvp_task_from_str, run_bvp_task,
+    parse_bvp_task_from_str, run_bvp_task, BvpTaskError, BvpTaskRunResult, BvpTaskSpec,
 };
 use crate::command_interpreter::task_parser_ivp::{
-    IvpMethodSpec, IvpTaskError, IvpTaskRunResult, IvpTaskSpec, IvpTelemetryModeSpec,
-    Lsode2TaskExecutionSpec, parse_ivp_task_from_str, run_ivp_task,
+    parse_ivp_task_from_str, run_ivp_task, IvpMethodSpec, IvpTaskError, IvpTaskRunResult,
+    IvpTaskSpec, IvpTelemetryModeSpec, Lsode2TaskExecutionSpec,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -590,7 +590,7 @@ pub fn detect_task_kind_from_str(input: &str) -> Result<TaskDocumentKind, TaskRu
         return match solver.as_str() {
             "ivp" => Ok(TaskDocumentKind::Ivp),
             "bvp" | "bvp_damp" | "bvp_damped" | "bvp_sci" | "bvpsci" | "bvp_scipy"
-            | "scipy_bvp" => Ok(TaskDocumentKind::Bvp),
+            | "scipy_bvp" | "bvp_cantera" | "cantera" => Ok(TaskDocumentKind::Bvp),
             _ => Err(TaskRunnerError::UnsupportedSolver { value: solver }),
         };
     }
@@ -687,6 +687,7 @@ fn render_bvp_preview(spec: &BvpTaskSpec) -> String {
     let family = match spec.solver.family {
         crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Damp => "BVP_Damp",
         crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => "BVP_sci",
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera => "BVP_Cantera",
     };
     out.push_str(&format!(
         "solver={family}, layout={:?}, arg={}, t0={}, t_end={}, n_steps={}\n",
@@ -698,6 +699,10 @@ fn render_bvp_preview(spec: &BvpTaskSpec) -> String {
             "strategy={:?}, scheme={}\n",
             spec.solver.strategy, spec.solver.scheme
         ));
+    } else if spec.solver.family
+        == crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera
+    {
+        out.push_str(&render_cantera_settings(spec));
     } else {
         out.push_str(&format!(
             "frontend={:?}, execution={:?}, callback_policy={:?}, tolerance={}, max_nodes={}\n",
@@ -908,6 +913,7 @@ fn render_bvp_check(spec: &BvpTaskSpec) -> String {
     let family = match spec.solver.family {
         crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Damp => "BVP_Damp",
         crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => "BVP_sci",
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera => "BVP_Cantera",
     };
     let capabilities =
         crate::command_interpreter::task_parser_bvp::bvp_solver_capabilities(spec.solver.family);
@@ -939,6 +945,9 @@ fn render_bvp_check(spec: &BvpTaskSpec) -> String {
         out.push_str("continuation: none\n");
     }
     match spec.solver.family {
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera => {
+            out.push_str(&render_cantera_settings(spec));
+        }
         crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Damp => {
             out.push_str(&format!(
                 "strategy={:?}, scheme={}\n",
@@ -1043,6 +1052,19 @@ fn render_bvp_check(spec: &BvpTaskSpec) -> String {
         out.push_str(&format!("{idx:>3} | {name} | {rhs}\n"));
     }
     out
+}
+
+fn render_cantera_settings(spec: &BvpTaskSpec) -> String {
+    match spec.solver_options.cantera.as_ref().map(|options| options.build_options(&spec.solver)) {
+        Some(Ok(options)) => format!(
+            "symbolic_frontend={:?}, execution={:?}, fixed_mesh_intervals={}, absolute_tolerance={}, default_relative_tolerance={}, max_iterations={}, max_jacobian_age={}, max_damping_trials={}, telemetry={:?}\n",
+            options.symbolic_frontend, options.symbolic_execution, spec.mesh.n_steps,
+            options.absolute_tolerance, options.default_relative_tolerance,
+            options.max_iterations, options.max_jacobian_age, options.max_damping_trials,
+            options.telemetry_mode,
+        ),
+        _ => "Cantera settings are invalid\n".into(),
+    }
 }
 
 fn render_bvp_output_targets(

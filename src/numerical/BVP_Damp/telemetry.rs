@@ -153,6 +153,7 @@ pub enum BvpLogEventKind {
     FactorizationInvalidated,
     DampingTrial,
     DampingRejected,
+    /// `value_a` is the limiting factor; `value_b` is the packed unknown index.
     BoundLimitedStep,
     NonFiniteValue,
     NearSingularSystem,
@@ -883,14 +884,18 @@ impl BvpTelemetryRecorder {
     }
 
     pub(crate) fn record_bound_limited_step(&self, factor: f64) {
+        self.record_bound_limited_step_at(factor, None);
+    }
+
+    pub(crate) fn record_bound_limited_step_at(&self, factor: f64, packed_index: Option<usize>) {
         self.record_log_event(
             BvpLogLevel::Debug,
             BvpLogEventKind::BoundLimitedStep,
             self.iterations.get(),
             0,
-            0,
+            self.grid_refinements.get(),
             factor,
-            f64::NAN,
+            packed_index.map_or(f64::NAN, |index| index as f64),
         );
     }
 
@@ -1360,6 +1365,24 @@ mod tests {
         assert_eq!(events[1].level, BvpLogLevel::Error);
         assert_eq!(events[1].value_a, 0.0);
         assert_eq!(events[1].value_b, 3.5);
+    }
+
+    #[test]
+    fn bound_limited_step_event_uses_current_mesh_revision() {
+        let recorder = BvpTelemetryRecorder::default();
+        recorder.set_logging_mode(BvpLoggingMode::Detailed);
+        recorder.begin_solve();
+        recorder.record_grid_refinement();
+        recorder.record_bound_limited_step_at(0.25, Some(7));
+
+        let events = recorder.log_events_snapshot();
+        let event = events
+            .iter()
+            .find(|event| event.kind == BvpLogEventKind::BoundLimitedStep)
+            .expect("bound-limited step event should be retained");
+        assert_eq!(event.mesh_revision, 1);
+        assert_eq!(event.value_a, 0.25);
+        assert_eq!(event.value_b, 7.0);
     }
 
     #[test]
