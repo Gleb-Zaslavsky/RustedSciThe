@@ -4,21 +4,23 @@ use std::error::Error;
 use std::fs;
 use tempfile::tempdir;
 
-const CANTERA_TASK: &str = include_str!("../../examples/tasks/bvp_cantera.txt");
+const CORRECTION_NEWTON_TASK: &str = include_str!("../../examples/tasks/bvp_correction_newton.txt");
 
 #[test]
-fn cantera_full_document_forwards_native_options() {
-    use crate::numerical::BVP_Cantera::{CanteraMatrixLayout, CanteraTelemetryMode};
-    let spec = parse_bvp_task_from_str(CANTERA_TASK).unwrap();
-    assert_eq!(spec.solver.family, BvpSolverFamilySpec::Cantera);
+fn correction_newton_full_document_forwards_native_options() {
+    use crate::numerical::BVP_CorrectionNewton::{
+        CorrectionNewtonMatrixLayout, CorrectionNewtonTelemetryMode,
+    };
+    let spec = parse_bvp_task_from_str(CORRECTION_NEWTON_TASK).unwrap();
+    assert_eq!(spec.solver.family, BvpSolverFamilySpec::CorrectionNewton);
     let options = spec
         .solver_options
-        .cantera
+        .correction_newton
         .as_ref()
         .unwrap()
         .build_options(&spec.solver)
         .unwrap();
-    assert_eq!(options.matrix_layout, CanteraMatrixLayout::Dense);
+    assert_eq!(options.matrix_layout, CorrectionNewtonMatrixLayout::Dense);
     assert_eq!(options.absolute_tolerance, 1e-9);
     assert_eq!(options.default_relative_tolerance, 1e-7);
     assert_eq!(options.max_iterations, 60);
@@ -26,14 +28,17 @@ fn cantera_full_document_forwards_native_options() {
     assert_eq!(options.max_damping_trials, 8);
     assert_eq!(options.bounds["Y"], (0.0, 2.0));
     assert_eq!(options.relative_tolerances["Y"], 2e-7);
-    assert_eq!(options.telemetry_mode, CanteraTelemetryMode::Timings);
+    assert_eq!(
+        options.telemetry_mode,
+        CorrectionNewtonTelemetryMode::Timings
+    );
     let settings_only = parse_document_for_bvp(
-        "task\nsolver: BVP_Cantera\n\nsolver_options\nmax_jacobian_age: 0\n",
+        "task\nsolver: BVP_CorrectionNewton\n\nsolver_options\nmax_jacobian_age: 0\n",
     );
     let settings = parse_bvp_solver_settings_from_document(&settings_only).unwrap();
     let options = settings
         .solver_options
-        .cantera
+        .correction_newton
         .unwrap()
         .build_options(&settings.solver)
         .unwrap();
@@ -41,14 +46,14 @@ fn cantera_full_document_forwards_native_options() {
 }
 
 #[test]
-fn cantera_full_document_runs_all_lambdify_routes_and_exports_results() {
+fn correction_newton_full_document_runs_all_lambdify_routes_and_exports_results() {
     for frontend in ["ExprLegacy", "AtomViewNative"] {
         for layout in ["Dense", "Sparse", "Banded"] {
             let dir = tempdir().unwrap();
-            let output = dir.path().join("cantera.csv");
+            let output = dir.path().join("correction_newton.csv");
             let input = format!(
                 "{}\npostprocessing\nsave_csv: true\ncsv_path: {}\n",
-                CANTERA_TASK
+                CORRECTION_NEWTON_TASK
                     .replace("frontend: ExprLegacy", &format!("frontend: {frontend}"))
                     .replace("method: Dense", &format!("method: {layout}")),
                 output.display()
@@ -61,14 +66,14 @@ fn cantera_full_document_runs_all_lambdify_routes_and_exports_results() {
             assert_eq!((mesh[0], mesh[16]), (0.0, 1.0));
             assert_eq!(result[(0, 0)], 1.0);
             assert!((result[(0, 16)] - (-1.0_f64).exp()).abs() < 2e-4);
-            assert!(run.cantera_report.is_some());
+            assert!(run.correction_newton_report.is_some());
             assert!(output.is_file());
         }
     }
 }
 
 #[test]
-fn cantera_full_document_rejects_unsupported_capabilities_with_typed_errors() {
+fn correction_newton_full_document_rejects_unsupported_capabilities_with_typed_errors() {
     for field in [
         "max_nodes: 100",
         "max_mesh_refinements: 2",
@@ -79,7 +84,8 @@ fn cantera_full_document_rejects_unsupported_capabilities_with_typed_errors() {
         "execution_policy: parallel",
         "aot_output_dir: generated/unused",
     ] {
-        let input = CANTERA_TASK.replace("solver_options\n", &format!("solver_options\n{field}\n"));
+        let input = CORRECTION_NEWTON_TASK
+            .replace("solver_options\n", &format!("solver_options\n{field}\n"));
         assert!(
             matches!(
                 parse_bvp_task_from_str(&input),
@@ -89,23 +95,24 @@ fn cantera_full_document_rejects_unsupported_capabilities_with_typed_errors() {
         );
     }
     for field in ["strategy: damped", "scheme: forward"] {
-        let input = CANTERA_TASK.replace("task\n", &format!("task\n{field}\n"));
+        let input = CORRECTION_NEWTON_TASK.replace("task\n", &format!("task\n{field}\n"));
         assert!(matches!(
             parse_bvp_task_from_str(&input),
             Err(BvpTaskError::UnsupportedOption { .. })
         ));
     }
-    let input = format!("{CANTERA_TASK}\ncontinuation\nparameters: rate\nvalue_grid: 1.0, 2.0\n");
+    let input =
+        format!("{CORRECTION_NEWTON_TASK}\ncontinuation\nparameters: rate\nvalue_grid: 1.0, 2.0\n");
     assert!(matches!(
         parse_bvp_task_from_str(&input),
         Err(BvpTaskError::UnsupportedContinuation(_))
     ));
-    let input = format!("{CANTERA_TASK}\ngrid_refinement\nmax_refinements: 2\n");
+    let input = format!("{CORRECTION_NEWTON_TASK}\ngrid_refinement\nmax_refinements: 2\n");
     assert!(matches!(
         parse_bvp_task_from_str(&input),
         Err(BvpTaskError::UnsupportedOption { .. })
     ));
-    let input = CANTERA_TASK.replace("telemetry: detailed", "telemetry: timings");
+    let input = CORRECTION_NEWTON_TASK.replace("telemetry: detailed", "telemetry: timings");
     assert!(matches!(
         parse_bvp_task_from_str(&input),
         Err(BvpTaskError::HybridSettings(
@@ -115,20 +122,28 @@ fn cantera_full_document_rejects_unsupported_capabilities_with_typed_errors() {
 }
 
 #[test]
-fn cantera_full_document_aot_is_validated_without_compilation() {
-    use crate::numerical::BVP_Cantera::{CanteraSymbolicExecution, CanteraSymbolicFrontend};
-    let input = CANTERA_TASK.replace("execution: Lambdify", "execution: AOT")
+fn correction_newton_full_document_aot_is_validated_without_compilation() {
+    use crate::numerical::BVP_CorrectionNewton::{
+        CorrectionNewtonSymbolicExecution, CorrectionNewtonSymbolicFrontend,
+    };
+    let input = CORRECTION_NEWTON_TASK.replace("execution: Lambdify", "execution: AOT")
         .replace("frontend: ExprLegacy", "frontend: AtomViewNative")
-        .replace("solver_options\n", "solver_options\naot_build_policy: require_prebuilt\naot_codegen_backend: c\naot_output_dir: generated/cantera\naot_residual_chunking: target_chunks\naot_residual_chunk_size: 32\n");
+        .replace("solver_options\n", "solver_options\naot_build_policy: require_prebuilt\naot_codegen_backend: c\naot_output_dir: generated/correction_newton\naot_residual_chunking: target_chunks\naot_residual_chunk_size: 32\n");
     let spec = parse_bvp_task_from_str(&input).unwrap();
     let options = spec
         .solver_options
-        .cantera
+        .correction_newton
         .unwrap()
         .build_options(&spec.solver)
         .unwrap();
-    assert_eq!(options.symbolic_execution, CanteraSymbolicExecution::Aot);
-    assert_eq!(options.symbolic_frontend, CanteraSymbolicFrontend::AtomView);
+    assert_eq!(
+        options.symbolic_execution,
+        CorrectionNewtonSymbolicExecution::Aot
+    );
+    assert_eq!(
+        options.symbolic_frontend,
+        CorrectionNewtonSymbolicFrontend::AtomView
+    );
     let config = options.aot_config.unwrap();
     assert!(matches!(
         config.build_policy,
@@ -136,7 +151,7 @@ fn cantera_full_document_aot_is_validated_without_compilation() {
     ));
     assert_eq!(
         config.output_parent_dir,
-        Some(PathBuf::from("generated/cantera"))
+        Some(PathBuf::from("generated/correction_newton"))
     );
     assert_eq!(
         config.residual_chunking_strategy,
@@ -147,7 +162,7 @@ fn cantera_full_document_aot_is_validated_without_compilation() {
 }
 
 #[test]
-fn cantera_full_document_rejects_bad_native_values_and_state_names() {
+fn correction_newton_full_document_rejects_bad_native_values_and_state_names() {
     for (old, new) in [
         ("max_iterations: 60", "max_iterations: 0"),
         ("max_jacobian_age: 3", "max_jacobian_age: -1"),
@@ -155,10 +170,10 @@ fn cantera_full_document_rejects_bad_native_values_and_state_names() {
         ("Y: 0.0, 2.0", "Y: 2.0, 0.0"),
         ("Y: 2e-7", "Z: 2e-7"),
     ] {
-        let input = CANTERA_TASK.replace(old, new);
+        let input = CORRECTION_NEWTON_TASK.replace(old, new);
         assert!(
             parse_bvp_task_from_str(&input).is_err(),
-            "invalid Cantera field was accepted: {new}"
+            "invalid CorrectionNewton field was accepted: {new}"
         );
     }
 }
@@ -788,10 +803,11 @@ mode: warm
 
     let run = run_bvp_task_from_str(input).expect("warm BVP_sci continuation should execute");
     assert_eq!(run.continuation_segments.len(), 2);
-    assert!(run
-        .continuation_segments
-        .iter()
-        .all(|segment| segment.result.iter().all(|value| value.is_finite())));
+    assert!(
+        run.continuation_segments
+            .iter()
+            .all(|segment| segment.result.iter().all(|value| value.is_finite()))
+    );
 }
 
 #[test]
@@ -828,10 +844,11 @@ mode: fresh
 
     let run = run_bvp_task_from_str(input).expect("BVP_Damp continuation should execute");
     assert_eq!(run.continuation_segments.len(), 2);
-    assert!(run
-        .continuation_segments
-        .iter()
-        .all(|segment| segment.result.iter().all(|value| value.is_finite())));
+    assert!(
+        run.continuation_segments
+            .iter()
+            .all(|segment| segment.result.iter().all(|value| value.is_finite()))
+    );
 }
 
 #[test]
@@ -870,10 +887,11 @@ mode: warm
     assert_eq!(run.continuation_segments.len(), 2);
     assert_eq!(run.continuation_telemetry.fresh_preparations, 1);
     assert_eq!(run.continuation_telemetry.prepared_reuses, 1);
-    assert!(run
-        .continuation_segments
-        .iter()
-        .all(|segment| segment.result.iter().all(|value| value.is_finite())));
+    assert!(
+        run.continuation_segments
+            .iter()
+            .all(|segment| segment.result.iter().all(|value| value.is_finite()))
+    );
 }
 
 #[test]
@@ -928,10 +946,11 @@ restart_each: false
         .expect("long continuation should publish a result");
     assert!(result.iter().all(|value| value.is_finite()));
     assert_eq!(telemetry.peak_result_elements, result.len());
-    assert!(run
-        .continuation_segments
-        .iter()
-        .all(|segment| segment.result.len() == telemetry.peak_result_elements));
+    assert!(
+        run.continuation_segments
+            .iter()
+            .all(|segment| segment.result.len() == telemetry.peak_result_elements)
+    );
 }
 
 #[test]

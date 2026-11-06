@@ -10,9 +10,9 @@ use nalgebra::DMatrix;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use rustedscithe_core::Utils::postprocessing::{PostprocessPlan, PostprocessStatus};
-use rustedscithe_core::numerical::BVP_Cantera::{
-    CanteraExprBvpOptions, CanteraMatrixLayout, CanteraSymbolicExecution, CanteraSymbolicFrontend,
-    CanteraTelemetryMode,
+use rustedscithe_core::numerical::BVP_CorrectionNewton::{
+    CorrectionNewtonOptions, CorrectionNewtonMatrixLayout, CorrectionNewtonSymbolicExecution, CorrectionNewtonSymbolicFrontend,
+    CorrectionNewtonTelemetryMode,
 };
 use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
 use rustedscithe_core::numerical::BVP_Damp::telemetry::BvpLoggingMode;
@@ -31,9 +31,9 @@ use crate::errors::{
 };
 use crate::expr::PyExpr;
 
-#[path = "bvp_api_cantera_loop.rs"]
-mod cantera_loop;
-pub use cantera_loop::{BvpCanteraParameterLoopPoint, BvpCanteraParameterLoopReport};
+#[path = "bvp_api_correction_newton_loop.rs"]
+mod correction_newton_loop;
+pub use correction_newton_loop::{BvpCorrectionNewtonParameterLoopPoint, BvpCorrectionNewtonParameterLoopReport};
 
 /// Turn a row-major `[node][state]` Python guess into the native state-major
 /// matrix. Route factories validate the route-specific number of nodes first.
@@ -129,26 +129,26 @@ fn map_api_error(error: BvpApiError) -> PyErr {
         BvpApiError::Damped(error) | BvpApiError::Frozen(error) => {
             return crate::bvp_damp::map_native_error(error);
         }
-        BvpApiError::Cantera(error) => {
+        BvpApiError::CorrectionNewton(error) => {
             let kind = native_variant(&error);
             let message = error.to_string();
             let mapped = match error {
-                rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::InvalidConfiguration { .. }
-                | rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::MissingParameterValues { .. }
-                | rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::FrontendContract { .. } => {
+                rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::InvalidConfiguration { .. }
+                | rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::MissingParameterValues { .. }
+                | rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::FrontendContract { .. } => {
                     InvalidConfigurationError::new_err(message)
                 }
-                rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::SymbolicPreparation { .. }
-                | rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::Logging { .. } => {
+                rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::SymbolicPreparation { .. }
+                | rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::Logging { .. } => {
                     PreparationError::new_err(message)
                 }
-                rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::ResidualCallback { .. }
-                | rustedscithe_core::numerical::BVP_Cantera::CanteraSolverError::JacobianCallback { .. } => {
+                rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::ResidualCallback { .. }
+                | rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::JacobianCallback { .. } => {
                     CallbackError::new_err(message)
                 }
                 _ => SolverError::new_err(message),
             };
-            (mapped, kind, "bvp_cantera", "native")
+            (mapped, kind, "bvp_correction_newton", "native")
         }
         BvpApiError::Sci(error) => {
             let kind = native_variant(&error);
@@ -212,7 +212,7 @@ pub struct PyBvpSolverRequest {
 pub struct PyPreparedBvpSolver {
     inner: BvpSolver,
     route: &'static str,
-    cantera_telemetry_mode: Option<&'static str>,
+    correction_newton_telemetry_mode: Option<&'static str>,
     panic_state: SolverPanicState,
     callback_failure: CallbackFailureState,
 }
@@ -465,13 +465,13 @@ impl PyBvpSolverRequest {
         })
     }
 
-    /// Configure the fixed-grid Cantera-style Newton route. The guess has one
+    /// Configure the fixed-grid correction-Newton route. The guess has one
     /// row per interval; the endpoint values constrained by boundary
     /// conditions are eliminated from the native unknown vector.
     #[staticmethod]
     #[pyo3(signature=(expressions, state_variables, independent_variable, mesh, boundary_conditions, initial_guess, options=None, tolerance=1e-8, max_iterations=100, max_jacobian_age=5, max_damping_trials=7, bounds=None, external_parameters=None, external_parameter_values=None))]
     #[allow(clippy::too_many_arguments)]
-    fn cantera(
+    fn correction_newton(
         expressions: Vec<PyExpr>,
         state_variables: Vec<String>,
         independent_variable: String,
@@ -490,7 +490,7 @@ impl PyBvpSolverRequest {
         let options = shared_options(options)?;
         if options.execution_policy() != "sequential" {
             return Err(UnsupportedOptionError::new_err(
-                "BVP_Cantera currently supports execution_policy='sequential' only",
+                "BVP_CorrectionNewton currently supports execution_policy='sequential' only",
             ));
         }
         let problem = problem(
@@ -506,44 +506,44 @@ impl PyBvpSolverRequest {
             mesh.len().saturating_sub(1),
         )?;
         let frontend = match options.frontend() {
-            "expr_legacy" => CanteraSymbolicFrontend::ExprLegacy,
-            "atom_native" | "atom_view" => CanteraSymbolicFrontend::AtomView,
+            "expr_legacy" => CorrectionNewtonSymbolicFrontend::ExprLegacy,
+            "atom_native" | "atom_view" => CorrectionNewtonSymbolicFrontend::AtomView,
             other => {
                 return Err(UnsupportedOptionError::new_err(format!(
-                    "unsupported Cantera symbolic frontend '{other}'"
+                    "unsupported CorrectionNewton symbolic frontend '{other}'"
                 )));
             }
         };
         let execution = match options.execution() {
-            "lambdify" => CanteraSymbolicExecution::Lambdify,
-            "aot" => CanteraSymbolicExecution::Aot,
+            "lambdify" => CorrectionNewtonSymbolicExecution::Lambdify,
+            "aot" => CorrectionNewtonSymbolicExecution::Aot,
             other => {
                 return Err(UnsupportedOptionError::new_err(format!(
-                    "unsupported Cantera symbolic execution '{other}'"
+                    "unsupported CorrectionNewton symbolic execution '{other}'"
                 )));
             }
         };
         let matrix_layout = match options.matrix_layout() {
-            "dense" => CanteraMatrixLayout::Dense,
-            "sparse" => CanteraMatrixLayout::Sparse,
-            "banded" => CanteraMatrixLayout::BandedAuto,
+            "dense" => CorrectionNewtonMatrixLayout::Dense,
+            "sparse" => CorrectionNewtonMatrixLayout::Sparse,
+            "banded" => CorrectionNewtonMatrixLayout::BandedAuto,
             other => {
                 return Err(UnsupportedOptionError::new_err(format!(
-                    "unsupported Cantera linear layout '{other}'"
+                    "unsupported CorrectionNewton linear layout '{other}'"
                 )));
             }
         };
         let telemetry_mode = match options.telemetry() {
-            "off" => CanteraTelemetryMode::Off,
-            "counters" => CanteraTelemetryMode::Counters,
-            "timings" | "detailed" => CanteraTelemetryMode::Timings,
+            "off" => CorrectionNewtonTelemetryMode::Off,
+            "counters" => CorrectionNewtonTelemetryMode::Counters,
+            "timings" | "detailed" => CorrectionNewtonTelemetryMode::Timings,
             other => {
                 return Err(InvalidConfigurationError::new_err(format!(
-                    "unsupported Cantera telemetry mode '{other}'"
+                    "unsupported CorrectionNewton telemetry mode '{other}'"
                 )));
             }
         };
-        let mut native_options = CanteraExprBvpOptions {
+        let mut native_options = CorrectionNewtonOptions {
             symbolic_frontend: frontend,
             symbolic_execution: execution,
             matrix_layout,
@@ -553,21 +553,21 @@ impl PyBvpSolverRequest {
             max_iterations,
             max_jacobian_age,
             max_damping_trials,
-            logging_level: crate::contract::native_logging_level(&options, "bvp_cantera")?,
+            logging_level: crate::contract::native_logging_level(&options, "bvp_correction_newton")?,
             telemetry_mode,
-            ..CanteraExprBvpOptions::default()
+            ..CorrectionNewtonOptions::default()
         };
-        if execution == CanteraSymbolicExecution::Aot {
+        if execution == CorrectionNewtonSymbolicExecution::Aot {
             native_options =
                 native_options.with_aot_config(crate::aot::generated_config(&options)?);
         }
         Ok(Self {
             problem: Some(problem),
-            config: Some(BvpSolverConfig::Cantera {
+            config: Some(BvpSolverConfig::CorrectionNewton {
                 options: native_options,
                 initial_guess: guess,
             }),
-            route: "cantera",
+            route: "correction_newton",
             parameters: parameter_pair(external_parameters, external_parameter_values)?,
             callback_failure: CallbackFailureState::default(),
         })
@@ -788,11 +788,11 @@ impl PyBvpSolverRequest {
         let config = self.config.take().ok_or_else(|| {
             InvalidConfigurationError::new_err("request has already been prepared")
         })?;
-        let cantera_telemetry_mode = match &config {
-            BvpSolverConfig::Cantera { options, .. } => Some(match options.telemetry_mode {
-                CanteraTelemetryMode::Off => "off",
-                CanteraTelemetryMode::Counters => "counters",
-                CanteraTelemetryMode::Timings => "timings",
+        let correction_newton_telemetry_mode = match &config {
+            BvpSolverConfig::CorrectionNewton { options, .. } => Some(match options.telemetry_mode {
+                CorrectionNewtonTelemetryMode::Off => "off",
+                CorrectionNewtonTelemetryMode::Counters => "counters",
+                CorrectionNewtonTelemetryMode::Timings => "timings",
             }),
             _ => None,
         };
@@ -810,7 +810,7 @@ impl PyBvpSolverRequest {
         Ok(PyPreparedBvpSolver {
             inner: solver,
             route,
-            cantera_telemetry_mode,
+            correction_newton_telemetry_mode,
             panic_state: SolverPanicState::default(),
             callback_failure: self.callback_failure.clone(),
         })
@@ -852,7 +852,7 @@ impl PyPreparedBvpSolver {
             BvpSolution::Damped { .. } => "damped",
             BvpSolution::Frozen { .. } => "frozen",
             BvpSolution::Sci(_) => "sci",
-            BvpSolution::Cantera { .. } => "cantera",
+            BvpSolution::CorrectionNewton { .. } => "correction_newton",
         };
         let sci_details = match (solution, self.inner.telemetry_snapshot()) {
             (BvpSolution::Sci(native), BvpSolverTelemetrySnapshot::Sci(snapshot)) => {
@@ -894,7 +894,7 @@ impl PyPreparedBvpSolver {
             BvpSolution::Damped { .. } => "damped",
             BvpSolution::Frozen { .. } => "frozen",
             BvpSolution::Sci(_) => "sci",
-            BvpSolution::Cantera { .. } => "cantera",
+            BvpSolution::CorrectionNewton { .. } => "correction_newton",
         };
         let sci_details = match (solution, self.inner.telemetry_snapshot()) {
             (BvpSolution::Sci(native), BvpSolverTelemetrySnapshot::Sci(snapshot)) => {
@@ -935,11 +935,11 @@ impl PyPreparedBvpSolver {
             })?;
 
         Python::attach(|py| match report {
-            BvpParameterLoopReport::Cantera(report) => {
-                let report = cantera_loop::from_native(
+            BvpParameterLoopReport::CorrectionNewton(report) => {
+                let report = correction_newton_loop::from_native(
                     py,
                     report,
-                    self.cantera_telemetry_mode.unwrap_or("off"),
+                    self.correction_newton_telemetry_mode.unwrap_or("off"),
                 )?;
                 Ok(Py::new(py, report)?.into_any())
             }
@@ -1125,10 +1125,10 @@ impl PyPreparedBvpSolver {
                     .collect::<PyResult<Vec<_>>>()?;
                 output.set_item("scopes", scopes)?;
             }
-            BvpSolverTelemetrySnapshot::Cantera(snapshot) => {
-                let mode = self.cantera_telemetry_mode.unwrap_or("not_started");
+            BvpSolverTelemetrySnapshot::CorrectionNewton(snapshot) => {
+                let mode = self.correction_newton_telemetry_mode.unwrap_or("not_started");
                 output.set_item("mode", mode)?;
-                let (counters, timings) = cantera_loop::telemetry_maps(snapshot.as_ref(), mode);
+                let (counters, timings) = correction_newton_loop::telemetry_maps(snapshot.as_ref(), mode);
                 output.set_item("counters", counters)?;
                 output.set_item("timings_ms", timings)?;
             }

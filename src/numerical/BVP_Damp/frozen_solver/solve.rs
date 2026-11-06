@@ -1,6 +1,25 @@
 impl NRBVP {
+    fn validate_active_bounds(&self) -> Result<(), BvpBackendIntegrationError> {
+        if let Some((index, value, _lower, _upper)) =
+            first_bound_violation(&*self.y, &self.bounds_vec)
+        {
+            if !value.is_finite() {
+                return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                    stage: "Frozen Newton iterate".into(),
+                    index,
+                });
+            }
+            return Err(BvpBackendIntegrationError::BoundStateOutsideBounds {
+                iteration: self.telemetry_counters.iterations() as usize,
+                index,
+            });
+        }
+        Ok(())
+    }
+
     /// Fallible Newton iteration used by the typed solve path.
     pub fn try_iteration(&mut self) -> Result<Box<dyn VectorType>, BvpBackendIntegrationError> {
+        self.validate_active_bounds()?;
         let p = self.p;
         let y = &*self.y;
         let fun = &self.fun;
@@ -155,20 +174,16 @@ impl NRBVP {
         } else {
             let additive_step = delta.mul_float(-1.0);
             let maximum_step_factor = bound_step_Cantera2(y, &*additive_step, &self.bounds_vec);
-            if !maximum_step_factor.is_finite() || maximum_step_factor < 1e-10 {
+            if !maximum_step_factor.is_finite() || maximum_step_factor < 1.0 {
                 return Err(BvpBackendIntegrationError::BoundStepBlocked {
                     iteration: self.telemetry_counters.iterations() as usize,
                 });
             }
-            if maximum_step_factor < 1.0 {
-                self.telemetry_counters
-                    .record_bound_limited_step(maximum_step_factor);
-            }
             self.last_bound_step_factor = maximum_step_factor;
-            delta.mul_float(maximum_step_factor)
+            delta
         };
-        // Bounds limit the Newton update before it is applied; no post-step
-        // clipping is allowed because that could manufacture false convergence.
+        // Frozen applies the full Newton update or rejects it; it does not
+        // silently convert a full step into a fraction-to-boundary step.
         let new_y = y - &*applied_step;
 
         Ok(new_y)

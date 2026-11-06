@@ -96,6 +96,64 @@ pub(crate) fn bound_step_Cantera2_with_update_sign_and_limit(
     (fbound, limiting_index)
 }
 
+pub(crate) fn first_bound_violation(
+    state: &dyn VectorType,
+    bounds: &[(f64, f64)],
+) -> Option<(usize, f64, f64, f64)> {
+    if bounds.is_empty() {
+        return None;
+    }
+    debug_assert_eq!(state.len(), bounds.len());
+    state.iterate().enumerate().find_map(|(index, value)| {
+        let (lower, upper) = bounds[index];
+        (!value.is_finite() || value < lower || value > upper)
+            .then_some((index, value, lower, upper))
+    })
+}
+
+/// Repair a fraction-to-boundary factor if floating-point rounding makes its
+/// resulting state fall outside an inclusive bound. The common feasible path
+/// is one allocation-free scan; the bitwise bisection runs only on rounding
+/// edge cases and returns the largest representable feasible factor.
+pub(crate) fn feasible_update_factor(
+    state: &dyn VectorType,
+    step: &dyn VectorType,
+    bounds: &[(f64, f64)],
+    sign: f64,
+    maximum_factor: f64,
+) -> f64 {
+    debug_assert_eq!(state.len(), step.len());
+    debug_assert_eq!(state.len(), bounds.len());
+
+    let is_feasible = |factor: f64| {
+        state.iterate().enumerate().all(|(index, value)| {
+            let candidate = value + sign * (step.get_val(index) * factor);
+            let (lower, upper) = bounds[index];
+            candidate.is_finite() && candidate >= lower && candidate <= upper
+        })
+    };
+
+    if is_feasible(maximum_factor) {
+        return maximum_factor;
+    }
+    if !is_feasible(0.0) {
+        return 0.0;
+    }
+
+    let mut feasible_bits = 0.0_f64.to_bits();
+    let mut infeasible_bits = maximum_factor.to_bits();
+    while infeasible_bits - feasible_bits > 1 {
+        let midpoint_bits = feasible_bits + (infeasible_bits - feasible_bits) / 2;
+        let midpoint = f64::from_bits(midpoint_bits);
+        if is_feasible(midpoint) {
+            feasible_bits = midpoint_bits;
+        } else {
+            infeasible_bits = midpoint_bits;
+        }
+    }
+    f64::from_bits(feasible_bits)
+}
+
 // This function calculates the minimum damping factor necessary to keep the solution within specified bounds after taking a Newton step.
 // twopnt version
 pub fn bound_step(y: &dyn VectorType, step: &dyn VectorType, bounds: &Vec<(f64, f64)>) -> f64 {
@@ -368,6 +426,21 @@ mod bound_step_tests {
     }
 
     #[test]
+    fn feasible_factor_repairs_one_ulp_boundary_overshoot() {
+        let state = dense(&[1.1]);
+        let step = dense(&[1.2000000000000002]);
+        let bounds = [(-0.1, 2.0)];
+        let raw_factor = bound_step_Cantera2_with_update_sign(&state, &step, &bounds, -1.0);
+        let raw_candidate = 1.1 - step.get_val(0) * raw_factor;
+        assert!(raw_candidate < bounds[0].0, "fixture must reproduce rounding overshoot");
+
+        let safe_factor = feasible_update_factor(&state, &step, &bounds, -1.0, raw_factor);
+        let safe_candidate = 1.1 - step.get_val(0) * safe_factor;
+        assert!(safe_factor <= raw_factor);
+        assert!(safe_candidate >= bounds[0].0 && safe_candidate <= bounds[0].1);
+    }
+
+    #[test]
     fn subtractive_newton_update_blocks_only_a_true_outward_boundary_direction() {
         let at_lower = dense(&[0.0]);
         let inward_delta = dense(&[-0.1]);
@@ -439,6 +512,9 @@ pub fn jac_recalc(
     }
 }
 /////////////////////////////////////////////CONVERGENCE CONDITIONS////////////////////////////////////
+/// Legacy Damped scalar threshold, retained only by the legacy Newton policy.
+/// The CorrectionNewton candidate uses a full-grid component-scaled RMS cutoff
+/// of one instead.
 pub fn convergence_condition(
     y: &dyn VectorType,
     abs_tolerance: &f64,

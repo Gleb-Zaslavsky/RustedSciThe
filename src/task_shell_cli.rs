@@ -369,8 +369,8 @@ fn print_run_summary(result: &TaskRunResult) {
                     "BVP_Damp"
                 }
                 crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => "BVP_sci",
-                crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera => {
-                    "BVP_Cantera"
+                crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::CorrectionNewton => {
+                    "BVP_CorrectionNewton"
                 }
             };
             let frontend = bvp
@@ -500,8 +500,8 @@ fn render_run_summary_json(result: &TaskRunResult) -> String {
                     "BVP_Damp"
                 }
                 crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => "BVP_sci",
-                crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera => {
-                    "BVP_Cantera"
+                crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::CorrectionNewton => {
+                    "BVP_CorrectionNewton"
                 }
             };
             let frontend = bvp

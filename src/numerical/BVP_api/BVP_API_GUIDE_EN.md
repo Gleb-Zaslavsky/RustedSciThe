@@ -65,13 +65,13 @@ shapes, see
 [`examples/bvp_api_damped_frozen.rs`](../../../../examples/bvp_api_damped_frozen.rs).
 For a prepared BVP_sci external-input parameter loop, see
 [`examples/bvp_api_parameter_loop.rs`](../../../../examples/bvp_api_parameter_loop.rs).
-The Cantera-derived fixed-mesh route supports ExprLegacy and native AtomView,
+The fixed-mesh correction-Newton route supports ExprLegacy and native AtomView,
 Lambdify and configured AOT execution, and Dense, Sparse, or automatically
 inferred Banded linear storage. It remains an onboarding route, not yet a
 first-tier production solver. Its facade usage is in
-[`examples/bvp_api_cantera.rs`](../../../../examples/bvp_api_cantera.rs).
+[`examples/bvp_api_correction_newton.rs`](../../../../examples/bvp_api_correction_newton.rs).
 Its native numerical contract and limitations are documented in the
-[`BVP_Cantera guide`](../BVP_Cantera/BVP_CANTERA_USER_GUIDE_EN.md).
+[`BVP_CorrectionNewton guide`](../BVP_CorrectionNewton/BVP_CORRECTION_NEWTON_USER_GUIDE_EN.md).
 For fixed-input loops through both BVP_Damp routes, including their distinct
 checkpoint and failure-report behavior, see
 [`examples/bvp_api_damped_frozen_parameter_loop.rs`](../../../../examples/bvp_api_damped_frozen_parameter_loop.rs).
@@ -86,11 +86,11 @@ The facade requires one scalar condition per equation in total, but permits
 both endpoints to constrain the same state when that matches the mathematical
 problem; the native solver remains responsible for solvability.
 
-Initial-guess layout is solver-specific by design. Damped and Cantera expect
+Initial-guess layout is solver-specific by design. Damped and CorrectionNewton expect
 `state_count x interval_count`; Frozen/Naive and BVP_sci expect
 `state_count x mesh_point_count`. Damped and Frozen accept only uniform meshes
 because their native constructors take interval endpoints and a point/step
-count. BVP_sci receives the explicit mesh directly. Cantera also requires a
+count. BVP_sci receives the explicit mesh directly. CorrectionNewton also requires a
 uniform mesh and performs a fixed-mesh solve without refinement.
 
 BVP_Damp's adaptive refinement is solver-managed inside the solve lifecycle;
@@ -100,7 +100,7 @@ which can preserve its prepared symbolic model while starting from a supplied
 mesh and profile.
 
 The facade does not invent a Cartesian capability matrix. It forwards native
-`DampedSolverOptions`, `FrozenSolverOptions`, `CanteraExprBvpOptions`, or
+`DampedSolverOptions`, `FrozenSolverOptions`, `CorrectionNewtonOptions`, or
 `BvpSciOptions`; BVP_sci also
 retains its sparse-factorization selection and optional AOT configuration. For
 fixed model inputs on Damped/Frozen, call `bind_parameters(names, values)`
@@ -114,7 +114,7 @@ warm-starts from the last successful profile. This external-input schema is
 distinct from free parameter unknowns and their parameter-dependent boundary
 residuals. For numerical RHS or Jacobian callbacks, use the native BVP_Damp API.
 
-The Cantera route also accepts fixed external inputs inferred from its symbolic
+The CorrectionNewton route also accepts fixed external inputs inferred from its symbolic
 equations. Declare their names and initial values with
 `BvpProblem::with_external_parameters` before preparation, then update them
 through `set_parameter_values` or `solve_with_parameter_values`. Prepared
@@ -125,23 +125,23 @@ recent successful point, and a failed point is reported without poisoning the
 next attempt. The loop returns the physical mesh, full node-major profiles,
 and per-attempt native reports/telemetry. Mesh restart and refinement remain
 unsupported on this fixed-mesh route; use
-[`examples/bvp_api_cantera_combustion_continuation.rs`](../../../../examples/bvp_api_cantera_combustion_continuation.rs)
-or [`examples/bvp_api_cantera_bratu_continuation.rs`](../../../../examples/bvp_api_cantera_bratu_continuation.rs).
+[`examples/bvp_api_correction_newton_combustion_continuation.rs`](../../../../examples/bvp_api_correction_newton_combustion_continuation.rs)
+or [`examples/bvp_api_correction_newton_bratu_continuation.rs`](../../../../examples/bvp_api_correction_newton_bratu_continuation.rs).
 
-The Cantera facade prepares fixed-trapezoid coordinate callbacks using either
-`CanteraSymbolicFrontend::ExprLegacy` or native
-`CanteraSymbolicFrontend::AtomView` (ExprLegacy is the default). Select
-`CanteraMatrixLayout::Dense`, `Sparse`, or `BandedAuto` in
-`CanteraExprBvpOptions`; bandwidth is inferred from the symbolic pattern.
+The CorrectionNewton facade prepares fixed-trapezoid coordinate callbacks using either
+`CorrectionNewtonSymbolicFrontend::ExprLegacy` or native
+`CorrectionNewtonSymbolicFrontend::AtomView` (ExprLegacy is the default). Select
+`CorrectionNewtonMatrixLayout::Dense`, `Sparse`, or `BandedAuto` in
+`CorrectionNewtonOptions`; bandwidth is inferred from the symbolic pattern.
 Sparse/Banded avoid global dense materialization. AOT requires an explicit
-`SymbolicIvpGeneratedBackendConfig` through `CanteraExprBvpOptions::with_aot_config`;
+`SymbolicIvpGeneratedBackendConfig` through `CorrectionNewtonOptions::with_aot_config`;
 this route does not silently switch to Lambdify after AOT preparation fails.
-The route preserves the native Cantera
+The route preserves the native CorrectionNewton
 solve report and partial telemetry on failure;
 `BvpSolutionView` and common postprocessing expose the reconstructed full
 node-major profile. The parameter loop reuses the prepared route and keeps
 per-point failure and partial telemetry. Mesh restart remains unsupported.
-Cantera's native telemetry supports
+CorrectionNewton's native telemetry supports
 Off, Counters, and Timings (Timings includes counters); the facade rejects a
 Timings-only request and maps `Detailed` to the native combined mode. This
 route remains an onboarding pilot until broad large-workload parity, release

@@ -92,13 +92,13 @@ pub(crate) mod ivp_test_support;
 pub mod ivp_workloads;
 /// Backward-Euler Newton implementation, retained at its historical path.
 pub use BE::NR_for_Euler;
-/// Independent fixed-mesh implementation of the Cantera `MultiNewton` core.
+/// Independent fixed-mesh implementation of the CorrectionNewton `MultiNewton` core.
 ///
 /// This experimental solver is isolated from `BVP_Damp`: it currently accepts
 /// residual/Jacobian callbacks and uses a dense linear solve so the numerical
 /// iteration can be validated before symbolic or alternate-backend adapters
 /// are considered.
-pub mod BVP_Cantera;
+pub mod BVP_CorrectionNewton;
 /// Boundary value problems solvers for stiff nonlinear ODEs
 ///
 /// solver NR_Damp_solver_frozen implements NR method with damping
@@ -181,7 +181,7 @@ pub mod BVP_Cantera;
 /// Modified Newton method or Damped Newton method with adaptive grid for solving Boundary value problems for systems of nonlinear ordinary differential equations.
 ///
 /// The code mostly inspired by sources listed below:
-/// Cantera MultiNewton solver (MultiNewton.cpp )
+/// CorrectionNewton MultiNewton solver (MultiNewton.cpp )
 /// TWOPNT fortran solver (see "The Twopnt Program for Boundary Value Problems" by J. F. Grcar and Chemkin Theory Manual p.261)
 ///
 

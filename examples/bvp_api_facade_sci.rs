@@ -47,7 +47,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 solution.y[4], solution.iterations
             );
         }
-        BvpSolution::Damped { .. } | BvpSolution::Frozen { .. } => {
+        BvpSolution::Damped { .. }
+        | BvpSolution::Frozen { .. }
+        | BvpSolution::CorrectionNewton { .. } => {
             unreachable!("the configured route is BVP_sci")
         }
     }

@@ -2,7 +2,9 @@
 #![allow(non_snake_case)]
 
 use crate::numerical::BVP_Damp::BVP_utils::round_to_n_digits;
-use crate::numerical::logging::{solver_error as error, solver_info as info};
+use crate::numerical::logging::{
+    solver_debug as debug, solver_error as error, solver_info as info,
+};
 use nalgebra::{DMatrix, DVector};
 
 pub fn twpnt_refinement(
@@ -78,16 +80,16 @@ impl Grid {
     }
     fn assert_monotonically_growing(vector: &[f64]) {
         for window in vector.windows(2) {
-            if !(window[0] <= window[1]) {
+            if !(window[0] < window[1]) {
                 println!(
-                    "  vector of length {} is non-monotonically growing{:?}, ",
+                    "  vector of length {} is not strictly increasing{:?}, ",
                     vector.len(),
                     vector
                 )
             }
             assert!(
-                window[0] <= window[1],
-                "Vector elements are not monotonously growing"
+                window[0] < window[1],
+                "Vector elements are not strictly increasing"
             );
         }
     }
@@ -182,7 +184,7 @@ impl Grid {
                 let right = list_dy_i[i];
                 let differ_dy = (right - left).abs();
                 if differ_dy > gamma {
-                    println!(
+                    debug!(
                         "differ_dy/gamma = {}",
                         round_to_n_digits(differ_dy / gamma, 3)
                     )
@@ -261,7 +263,7 @@ impl Grid {
         let more = usize::max(0, most);
 
         let least = if more > 0 {
-            sorted_weights[more]
+            sorted_weights[sorted_weights.len() - more]
         }
         //  If the number of intervals to halve is greater than zero, the least weight is set to the weight of the interval with the corresponding index
         else {
@@ -276,6 +278,7 @@ impl Grid {
                 counted += 1;
             }
         }
+        debug_assert_eq!(counted, more);
         info!(
             "number of marked intervals {} ",
             Self::count_non_false_elements(&mark)
@@ -381,5 +384,32 @@ impl Grid {
         Self::assert_monotonically_growing(&new_grid);
         self.new_grid = new_grid;
         self.y_DMatrix = new_initial_guess;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Grid;
+    use nalgebra::{DMatrix, DVector};
+
+    #[test]
+    fn interval_selection_marks_every_nonzero_interval_when_many_are_flagged() {
+        let mut grid = Grid::new(
+            DMatrix::zeros(1, 10),
+            DVector::from_iterator(10, (0..10).map(|index| index as f64)),
+            0.02,
+            0.02,
+            2.5,
+            1e-8,
+        );
+        grid.vary_y = DVector::from_iterator(10, (0..10).map(|index| usize::from(index < 8)));
+        grid.vary_dy_dx = DVector::zeros(10);
+
+        grid.select_intervals();
+
+        assert_eq!(grid.more, 8);
+        assert_eq!(grid.mark.iter().filter(|&&marked| marked).count(), 8);
+        assert!(grid.mark[..8].iter().all(|&marked| marked));
+        assert!(!grid.mark[8]);
     }
 }

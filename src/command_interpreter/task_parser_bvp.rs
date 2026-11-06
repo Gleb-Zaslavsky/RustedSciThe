@@ -1,6 +1,6 @@
 //! BVP task-shell built on top of the generic [`DocumentParser`].
 //!
-//! This module routes BVP task documents to BVP_Damp, BVP_sci, or BVP_Cantera.
+//! This module routes BVP task documents to BVP_Damp, BVP_sci, or BVP_CorrectionNewton.
 //!
 //! The parser supports two usage modes:
 //! - full end-to-end task documents, where equations, boundary conditions,
@@ -25,24 +25,26 @@
 //! - postprocessing is routed through the unified postprocessing facade, while
 //!   the historical plot flag remains available for legacy plotters output
 
+use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
 use crate::command_interpreter::task_parser::{DocumentMap, DocumentParser, ParseError, Value};
 use crate::command_interpreter::task_parser_bvp_hybrid::HybridBvpSettingsError;
 use crate::command_interpreter::task_parser_common::{
-    parse_continuation_spec, parse_symbolic_equation_system, ContinuationMode, ContinuationSpec,
-    SharedEquationParseError,
+    ContinuationMode, ContinuationSpec, SharedEquationParseError, parse_continuation_spec,
+    parse_symbolic_equation_system,
 };
-use crate::numerical::BVP_Cantera::{CanteraSolveReport, CanteraSolverError};
+use crate::numerical::BVP_CorrectionNewton::{
+    CorrectionNewtonSolveReport, CorrectionNewtonSolverError,
+};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
-    DampedSolverOptions, SolverParams, NRBVP as DampedBvpSolver,
+    DampedSolverOptions, NRBVP as DampedBvpSolver, SolverParams,
 };
-use crate::Utils::postprocessing::{PostprocessDataset, PostprocessError, PostprocessPlan};
-#[path = "task_parser_bvp_cantera.rs"]
-mod cantera;
-use crate::numerical::BVP_Damp::generated_solver_handoff::{
-    AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
-};
+#[path = "task_parser_bvp_correction_newton.rs"]
+mod correction_newton;
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::{
     FrozenSolverOptions, NRBVP as FrozenBvpSolver,
+};
+use crate::numerical::BVP_Damp::generated_solver_handoff::{
+    AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
 };
 use crate::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciExecutionPolicy, BvpSciMatrixLayout, BvpSciNewError,
@@ -59,7 +61,7 @@ use crate::symbolic::symbolic_functions_BVP::BvpSymbolicAssemblyBackend;
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
-pub use cantera::BvpCanteraOptionsSpec;
+pub use correction_newton::BvpCorrectionNewtonOptionsSpec;
 use nalgebra::{DMatrix, DVector};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -85,7 +87,7 @@ pub enum BvpTaskKindSpec {
 pub enum BvpSolverFamilySpec {
     Damp,
     Sci,
-    Cantera,
+    CorrectionNewton,
 }
 
 /// Static CLI/parser description of the choices intentionally exposed for one
@@ -121,15 +123,16 @@ const BVP_SCI_CAPABILITIES: BvpSolverCapabilityDescriptor = BvpSolverCapabilityD
     supports_singular_term: true,
 };
 
-const BVP_CANTERA_CAPABILITIES: BvpSolverCapabilityDescriptor = BvpSolverCapabilityDescriptor {
-    family: BvpSolverFamilySpec::Cantera,
-    name: "BVP_Cantera",
-    frontends: &["ExprLegacy", "AtomViewNative"],
-    executions: &["Lambdify", "AOT"],
-    layouts: &["Dense", "Sparse", "Banded"],
-    supports_continuation: false,
-    supports_singular_term: false,
-};
+const BVP_CORRECTION_NEWTON_CAPABILITIES: BvpSolverCapabilityDescriptor =
+    BvpSolverCapabilityDescriptor {
+        family: BvpSolverFamilySpec::CorrectionNewton,
+        name: "BVP_CorrectionNewton",
+        frontends: &["ExprLegacy", "AtomViewNative"],
+        executions: &["Lambdify", "AOT"],
+        layouts: &["Dense", "Sparse", "Banded"],
+        supports_continuation: false,
+        supports_singular_term: false,
+    };
 
 pub fn bvp_solver_capabilities(
     family: BvpSolverFamilySpec,
@@ -137,7 +140,7 @@ pub fn bvp_solver_capabilities(
     match family {
         BvpSolverFamilySpec::Damp => &BVP_DAMP_CAPABILITIES,
         BvpSolverFamilySpec::Sci => &BVP_SCI_CAPABILITIES,
-        BvpSolverFamilySpec::Cantera => &BVP_CANTERA_CAPABILITIES,
+        BvpSolverFamilySpec::CorrectionNewton => &BVP_CORRECTION_NEWTON_CAPABILITIES,
     }
 }
 
@@ -296,8 +299,8 @@ pub struct BvpInitialGuessSpec {
 /// Scalar solver options and generated-backend knobs.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BvpSolverOptionsSpec {
-    /// Native Cantera settings, validated through the settings-only parser.
-    pub cantera: Option<BvpCanteraOptionsSpec>,
+    /// Native CorrectionNewton settings, validated through the settings-only parser.
+    pub correction_newton: Option<BvpCorrectionNewtonOptionsSpec>,
     pub tolerance: Option<f64>,
     pub boundary_tolerance: Option<f64>,
     /// Compatibility alias for BVP_sci `max_newton_iterations` and the
@@ -514,7 +517,7 @@ pub struct BvpTaskRunResult {
     /// means this solver route has no task-level telemetry adapter.
     pub runtime_telemetry: Option<BvpTaskRuntimeTelemetry>,
     /// Complete native fixed-mesh Newton report, including opt-in telemetry.
-    pub cantera_report: Option<CanteraSolveReport>,
+    pub correction_newton_report: Option<CorrectionNewtonSolveReport>,
 }
 
 /// Runtime facts retained for task-shell summaries without storing the full
@@ -730,7 +733,7 @@ pub enum BvpTaskError {
     UnsupportedContinuation(String),
     BvpDamp(BvpBackendIntegrationError),
     BvpSci(BvpSciNewError),
-    Cantera(CanteraSolverError),
+    CorrectionNewton(CorrectionNewtonSolverError),
     HybridSettings(HybridBvpSettingsError),
     InvalidConfiguration {
         field: String,
@@ -772,7 +775,7 @@ impl BvpTaskError {
             Self::UnsupportedOption { .. } => "unsupported_option",
             Self::UnsupportedContinuation(_) => "continuation",
             Self::BvpSci(error) => bvp_sci_error_category(error),
-            Self::Cantera(_) => "solver",
+            Self::CorrectionNewton(_) => "solver",
             Self::HybridSettings(_) => "configuration",
             Self::BvpDamp(_) | Self::Solver(_) => "solver",
             Self::SolverResult(_) => "solver_result",
@@ -815,7 +818,7 @@ impl std::fmt::Display for BvpTaskError {
                 write!(f, "unsupported BVP continuation: {message}")
             }
             Self::BvpSci(error) => write!(f, "BVP_sci failed: {error}"),
-            Self::Cantera(error) => write!(f, "BVP_Cantera failed: {error}"),
+            Self::CorrectionNewton(error) => write!(f, "BVP_CorrectionNewton failed: {error}"),
             Self::HybridSettings(error) => write!(f, "BVP settings: {error}"),
             Self::BvpDamp(error) => write!(f, "BVP_Damp failed: {error}"),
             Self::InvalidConfiguration { field, message } => {
@@ -847,7 +850,7 @@ impl std::error::Error for BvpTaskError {
             Self::Io { source, .. } => Some(source),
             Self::Document(error) => Some(error),
             Self::BvpSci(error) => Some(error),
-            Self::Cantera(error) => Some(error),
+            Self::CorrectionNewton(error) => Some(error),
             Self::HybridSettings(error) => Some(error),
             Self::BvpDamp(error) => Some(error),
             Self::Postprocess(error) => Some(error),
@@ -1081,9 +1084,9 @@ pub fn parse_bvp_solver_settings_from_document(
     document: &DocumentMap,
 ) -> Result<BvpSolverSettingsSpec, BvpTaskError> {
     let solver = parse_bvp_solver_selection(document)?;
-    let solver_options = if solver.family == BvpSolverFamilySpec::Cantera {
+    let solver_options = if solver.family == BvpSolverFamilySpec::CorrectionNewton {
         BvpSolverOptionsSpec {
-            cantera: Some(cantera::parse_options(document, &solver)?),
+            correction_newton: Some(correction_newton::parse_options(document, &solver)?),
             ..Default::default()
         }
     } else {
@@ -1450,7 +1453,7 @@ pub fn run_bvp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError>
     match spec.solver.family {
         BvpSolverFamilySpec::Damp => run_bvp_damp_task(spec),
         BvpSolverFamilySpec::Sci => run_bvp_sci_task(spec),
-        BvpSolverFamilySpec::Cantera => cantera::run_task(spec),
+        BvpSolverFamilySpec::CorrectionNewton => correction_newton::run_task(spec),
     }
 }
 
@@ -1508,7 +1511,7 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
         continuation_segments: executed,
         continuation_telemetry,
         runtime_telemetry: None,
-        cantera_report: None,
+        correction_newton_report: None,
     })
 }
 
@@ -1675,7 +1678,7 @@ fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResul
         continuation_segments: executed,
         continuation_telemetry: telemetry,
         runtime_telemetry: None,
-        cantera_report: None,
+        correction_newton_report: None,
     })
 }
 
@@ -1683,8 +1686,8 @@ fn validate_bvp_task_spec(spec: &BvpTaskSpec) -> Result<(), BvpTaskError> {
     validate_bvp_problem_spec(&spec.problem_spec())?;
     validate_bvp_solver_options(&spec.solver_options)?;
     validate_bvp_option_compatibility(&spec.solver, &spec.solver_options)?;
-    if spec.solver.family == BvpSolverFamilySpec::Cantera {
-        cantera::validate_task(spec)?;
+    if spec.solver.family == BvpSolverFamilySpec::CorrectionNewton {
+        correction_newton::validate_task(spec)?;
     }
     if spec.solver.family == BvpSolverFamilySpec::Sci
         && spec
@@ -1980,17 +1983,17 @@ fn validate_bvp_option_compatibility(
     solver: &BvpSolverSelectionSpec,
     options: &BvpSolverOptionsSpec,
 ) -> Result<(), BvpTaskError> {
-    if solver.family == BvpSolverFamilySpec::Cantera {
-        return cantera::validate_options(solver, options);
+    if solver.family == BvpSolverFamilySpec::CorrectionNewton {
+        return correction_newton::validate_options(solver, options);
     }
-    if options.cantera.is_some() {
+    if options.correction_newton.is_some() {
         return Err(BvpTaskError::UnsupportedOption {
-            option: "solver_options.cantera".into(),
+            option: "solver_options.correction_newton".into(),
             solver: bvp_solver_capabilities(solver.family).name.into(),
         });
     }
     let unsupported: Vec<(&str, bool)> = match solver.family {
-        BvpSolverFamilySpec::Cantera => unreachable!("validated above"),
+        BvpSolverFamilySpec::CorrectionNewton => unreachable!("validated above"),
         BvpSolverFamilySpec::Damp => vec![
             ("boundary_tolerance", options.boundary_tolerance.is_some()),
             ("max_nodes", options.max_nodes.is_some()),
@@ -2069,7 +2072,7 @@ fn validate_bvp_option_compatibility(
             solver: match solver.family {
                 BvpSolverFamilySpec::Damp => "BVP_Damp".to_string(),
                 BvpSolverFamilySpec::Sci => "BVP_sci".to_string(),
-                BvpSolverFamilySpec::Cantera => "BVP_Cantera".to_string(),
+                BvpSolverFamilySpec::CorrectionNewton => "BVP_CorrectionNewton".to_string(),
             },
         });
     }
@@ -2167,7 +2170,7 @@ fn run_bvp_sci_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError>
         continuation_segments: executed,
         continuation_telemetry,
         runtime_telemetry: Some(runtime_telemetry),
-        cantera_report: None,
+        correction_newton_report: None,
     })
 }
 
@@ -2264,7 +2267,7 @@ fn run_bvp_sci_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResult
         continuation_segments: executed,
         continuation_telemetry,
         runtime_telemetry: Some(runtime_telemetry),
-        cantera_report: None,
+        correction_newton_report: None,
     })
 }
 
@@ -2738,13 +2741,16 @@ fn parse_bvp_solver_selection(
     let family = match normalize_token(&solver_name).as_str() {
         "bvp" | "bvp_damp" | "bvp_damped" => BvpSolverFamilySpec::Damp,
         "bvp_sci" | "bvpsci" | "bvp_scipy" | "scipy_bvp" => BvpSolverFamilySpec::Sci,
-        "bvp_cantera" | "cantera" => BvpSolverFamilySpec::Cantera,
+        "bvp_correction_newton"
+        | "correction_newton"
+        | "bvp_correctionnewton"
+        | "correctionnewton" => BvpSolverFamilySpec::CorrectionNewton,
         _ => {
             return Err(BvpTaskError::InvalidField {
                 section: "task".to_string(),
                 field: "solver".to_string(),
                 message: format!(
-                    "expected `BVP`, `BVP_sci`, or `BVP_Cantera`, got `{solver_name}`"
+                    "expected `BVP`, `BVP_sci`, or `BVP_CorrectionNewton`, got `{solver_name}`"
                 ),
             });
         }
@@ -2765,7 +2771,7 @@ fn parse_bvp_solver_selection(
         &get_optional_string(task_section, "strategy", "task")?.unwrap_or_else(|| "Damped".into()),
     )?;
     let scheme = get_optional_string(task_section, "scheme", "task")?.unwrap_or_else(|| {
-        if family == BvpSolverFamilySpec::Cantera {
+        if family == BvpSolverFamilySpec::CorrectionNewton {
             "trapezoid"
         } else {
             "forward"
@@ -2783,7 +2789,7 @@ fn parse_bvp_solver_selection(
         });
     }
     let backend = BvpLinearBackendSpec::from_str(method.or(backend_alias).as_deref().unwrap_or(
-        if family == BvpSolverFamilySpec::Cantera {
+        if family == BvpSolverFamilySpec::CorrectionNewton {
             "Dense"
         } else {
             "Sparse"
@@ -2985,7 +2991,7 @@ fn parse_bvp_solver_options(document: &DocumentMap) -> Result<BvpSolverOptionsSp
     }
 
     Ok(BvpSolverOptionsSpec {
-        cantera: None,
+        correction_newton: None,
         tolerance: get_optional_float(section, "tolerance", "solver_options")?,
         boundary_tolerance: get_optional_float(section, "boundary_tolerance", "solver_options")?,
         max_iterations: get_optional_usize(section, "max_iterations", "solver_options")?,

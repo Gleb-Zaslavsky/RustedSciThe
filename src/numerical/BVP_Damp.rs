@@ -77,9 +77,9 @@ pub(crate) mod test_large_native_regressions;
 /// This is feature-gated so the test fixture does not enter ordinary builds.
 #[cfg(feature = "perf-gates")]
 #[doc(hidden)]
-pub fn cantera_kithe_combustion_perf_fixture()
--> crate::numerical::BVP_Cantera::CanteraExprBvpProblem {
-    test_large_native_regressions::cantera_fixed_grid_expr_problem()
+pub fn correction_newton_kithe_combustion_perf_fixture()
+-> crate::numerical::BVP_CorrectionNewton::CorrectionNewtonProblem {
+    test_large_native_regressions::correction_newton_fixed_grid_expr_problem()
 }
 /// typed Dense/faer/Banded linear-solve boundary gates
 #[cfg(test)]

@@ -554,16 +554,16 @@ machine/environment-specific; record them only from the intended source
 revision after the Release matrix passes. `-Facade All` selects both facade
 groups, while `-PlanOnly` prints the commands without running them.
 
-## BVP_Cantera Gates
+## BVP_CorrectionNewton Gates
 
-The independent fixed-grid Cantera Newton route has its own
-`bvp-cantera-matrix` group. Eight stable IDs cover the nonlinear six-state
+The independent fixed-grid CorrectionNewton Newton route has its own
+`bvp-correction-newton-matrix` group. Eight stable IDs cover the nonlinear six-state
 combustion fixture on 24000 intervals across ExprLegacy/AtomView, Lambdify/AOT,
 and Sparse/automatic-Banded storage. Additional single-solve scenarios cover
 the 26-state KiThe combustion fixture at 256 intervals and symmetric
 half-domain Bratu at 32768 intervals. Every registry sample performs one fresh
 solve, not a batch of repeated small solves. An independently selectable
-`bvp-cantera-parameter-continuation` group covers ten fixed-rate points on the
+`bvp-correction-newton-parameter-continuation` group covers ten fixed-rate points on the
 12000-interval six-state model across the same eight frontend/execution/layout
 routes through the native `solve_parameter_loop` API. The first point uses the
 configured guess, later points reuse the latest successful profile, and every
@@ -574,14 +574,14 @@ separate Timings pass reports residual/Jacobian callbacks, coordinate
 assembly, factorization and linear-solve stages plus work counters. Dense is
 retained as a small correctness/control route, not a large-system performance
 route. The PowerShell wrapper writes a Tabled summary and transcripts to
-`test_reports/BVP_Cantera_perf_gates/`; native scenario reports stay in
+`test_reports/BVP_CorrectionNewton_perf_gates/`; native scenario reports stay in
 `performance/runs/`.
 
 Record or compare only this solver group:
 
 ```powershell
-.\scripts\bvp_cantera_perf_gates.ps1 -Action RecordCompare -Machine windows-dev -Warmups 10 -Runs 101
-.\scripts\bvp_cantera_perf_gates.ps1 -Action RecordCompare -Group bvp-cantera-parameter-continuation -Machine windows-dev -Warmups 10 -Runs 101
+.\scripts\bvp_correction_newton_perf_gates.ps1 -Action RecordCompare -Machine windows-dev -Warmups 10 -Runs 101
+.\scripts\bvp_correction_newton_perf_gates.ps1 -Action RecordCompare -Group bvp-correction-newton-parameter-continuation -Machine windows-dev -Warmups 10 -Runs 101
 ```
 
 For an intentional baseline replacement, use `-Action Record -Force`; the
@@ -589,5 +589,5 @@ usual clean-source and environment-specific baseline rules still apply. The
 focused Release correctness/report matrix is independent:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bvp_cantera_release_matrix.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\bvp_correction_newton_release_matrix.ps1
 ```

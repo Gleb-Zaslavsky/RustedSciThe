@@ -108,12 +108,12 @@ macro_rules! lsode2_route {
     };
 }
 
-macro_rules! bvp_cantera_route {
+macro_rules! bvp_correction_newton_route {
     ($id:literal, $frontend:literal, $execution:literal, $layout:literal, $run:path) => {
         Scenario {
             id: $id,
-            solver: "bvp_cantera",
-            groups: &["bvp", "bvp-large", "bvp-cantera-matrix"],
+            solver: "bvp_correction_newton",
+            groups: &["bvp", "bvp-large", "bvp-correction-newton-matrix"],
             workload: "six-state nonlinear combustion BVP, fixed trapezoid grid=24000 intervals, one fresh solve per sample",
             frontend: $frontend,
             execution: $execution,
@@ -122,19 +122,19 @@ macro_rules! bvp_cantera_route {
             telemetry: "off single-solve wall gate + Timings native stage diagnostic",
             version: 4,
             gate_metrics: &["scenario_wall_ms"],
-            description: "Large fixed-grid nonlinear combustion workload through the Cantera core; boundary values, bounds, finiteness, and residual are checked on every solve",
+            description: "Large fixed-grid nonlinear combustion workload through the CorrectionNewton core; boundary values, bounds, finiteness, and residual are checked on every solve",
             run: $run,
-            diagnose: Some(crate::scenarios::bvp_cantera::diagnose),
+            diagnose: Some(crate::scenarios::bvp_correction_newton::diagnose),
         }
     };
 }
 
-macro_rules! bvp_cantera_continuation_route {
+macro_rules! bvp_correction_newton_continuation_route {
     ($id:literal, $frontend:literal, $execution:literal, $layout:literal, $run:path) => {
         Scenario {
             id: $id,
-            solver: "bvp_cantera",
-            groups: &["bvp", "bvp-large", "bvp-cantera-matrix", "bvp-cantera-parameter-continuation"],
+            solver: "bvp_correction_newton",
+            groups: &["bvp", "bvp-large", "bvp-correction-newton-matrix", "bvp-correction-newton-parameter-continuation"],
             workload: "six-state linear decay BVP, 12000 intervals, 10 native parameter-loop points with previous successful profile reused",
             frontend: $frontend,
             execution: $execution,
@@ -145,7 +145,7 @@ macro_rules! bvp_cantera_continuation_route {
             gate_metrics: &["scenario_wall_ms"],
             description: "Native solve_parameter_loop reuses prepared symbolic callbacks across ten rate values; the first point uses the configured guess, later points use the previous success, and every discrete profile is checked analytically",
             run: $run,
-            diagnose: Some(crate::scenarios::bvp_cantera::diagnose),
+            diagnose: Some(crate::scenarios::bvp_correction_newton::diagnose),
         }
     };
 }
@@ -167,122 +167,122 @@ static CORE_SCENARIOS: &[Scenario] = &[
         run: crate::scenarios::banded::run_tridiagonal,
         diagnose: None,
     },
-    bvp_cantera_route!(
-        "bvp_cantera_combustion24000_expr_sparse_lambdify",
+    bvp_correction_newton_route!(
+        "bvp_correction_newton_combustion24000_expr_sparse_lambdify",
         "ExprLegacy",
         "Lambdify",
         "Sparse",
-        crate::scenarios::bvp_cantera::expr_sparse_lambdify
+        crate::scenarios::bvp_correction_newton::expr_sparse_lambdify
     ),
-    bvp_cantera_route!(
-        "bvp_cantera_combustion24000_atom_sparse_lambdify",
+    bvp_correction_newton_route!(
+        "bvp_correction_newton_combustion24000_atom_sparse_lambdify",
         "AtomView",
         "Lambdify",
         "Sparse",
-        crate::scenarios::bvp_cantera::atom_sparse_lambdify
+        crate::scenarios::bvp_correction_newton::atom_sparse_lambdify
     ),
-    bvp_cantera_route!(
-        "bvp_cantera_combustion24000_expr_banded_lambdify",
+    bvp_correction_newton_route!(
+        "bvp_correction_newton_combustion24000_expr_banded_lambdify",
         "ExprLegacy",
         "Lambdify",
         "BandedAuto",
-        crate::scenarios::bvp_cantera::expr_banded_lambdify
+        crate::scenarios::bvp_correction_newton::expr_banded_lambdify
     ),
-    bvp_cantera_route!(
-        "bvp_cantera_combustion24000_atom_banded_lambdify",
+    bvp_correction_newton_route!(
+        "bvp_correction_newton_combustion24000_atom_banded_lambdify",
         "AtomView",
         "Lambdify",
         "BandedAuto",
-        crate::scenarios::bvp_cantera::atom_banded_lambdify
+        crate::scenarios::bvp_correction_newton::atom_banded_lambdify
     ),
-    bvp_cantera_route!(
-        "bvp_cantera_combustion24000_expr_sparse_aot",
+    bvp_correction_newton_route!(
+        "bvp_correction_newton_combustion24000_expr_sparse_aot",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Sparse",
-        crate::scenarios::bvp_cantera::expr_sparse_aot
+        crate::scenarios::bvp_correction_newton::expr_sparse_aot
     ),
-    bvp_cantera_route!(
-        "bvp_cantera_combustion24000_atom_sparse_aot",
+    bvp_correction_newton_route!(
+        "bvp_correction_newton_combustion24000_atom_sparse_aot",
         "AtomView",
         "AOT(warm-cache)",
         "Sparse",
-        crate::scenarios::bvp_cantera::atom_sparse_aot
+        crate::scenarios::bvp_correction_newton::atom_sparse_aot
     ),
-    bvp_cantera_route!(
-        "bvp_cantera_combustion24000_expr_banded_aot",
+    bvp_correction_newton_route!(
+        "bvp_correction_newton_combustion24000_expr_banded_aot",
         "ExprLegacy",
         "AOT(warm-cache)",
         "BandedAuto",
-        crate::scenarios::bvp_cantera::expr_banded_aot
+        crate::scenarios::bvp_correction_newton::expr_banded_aot
     ),
-    bvp_cantera_route!(
-        "bvp_cantera_combustion24000_atom_banded_aot",
+    bvp_correction_newton_route!(
+        "bvp_correction_newton_combustion24000_atom_banded_aot",
         "AtomView",
         "AOT(warm-cache)",
         "BandedAuto",
-        crate::scenarios::bvp_cantera::atom_banded_aot
+        crate::scenarios::bvp_correction_newton::atom_banded_aot
     ),
-    bvp_cantera_continuation_route!(
-        "bvp_cantera_parameter_continuation12000x10_expr_sparse_lambdify",
-        "ExprLegacy",
-        "Lambdify",
-        "Sparse",
-        crate::scenarios::bvp_cantera::continuation_expr_sparse_lambdify
-    ),
-    bvp_cantera_continuation_route!(
-        "bvp_cantera_parameter_continuation12000x10_atom_sparse_lambdify",
-        "AtomView",
-        "Lambdify",
-        "Sparse",
-        crate::scenarios::bvp_cantera::continuation_atom_sparse_lambdify
-    ),
-    bvp_cantera_continuation_route!(
-        "bvp_cantera_parameter_continuation12000x10_expr_banded_lambdify",
+    bvp_correction_newton_continuation_route!(
+        "bvp_correction_newton_parameter_continuation12000x10_expr_sparse_lambdify",
         "ExprLegacy",
         "Lambdify",
-        "BandedAuto",
-        crate::scenarios::bvp_cantera::continuation_expr_banded_lambdify
+        "Sparse",
+        crate::scenarios::bvp_correction_newton::continuation_expr_sparse_lambdify
     ),
-    bvp_cantera_continuation_route!(
-        "bvp_cantera_parameter_continuation12000x10_atom_banded_lambdify",
+    bvp_correction_newton_continuation_route!(
+        "bvp_correction_newton_parameter_continuation12000x10_atom_sparse_lambdify",
+        "AtomView",
+        "Lambdify",
+        "Sparse",
+        crate::scenarios::bvp_correction_newton::continuation_atom_sparse_lambdify
+    ),
+    bvp_correction_newton_continuation_route!(
+        "bvp_correction_newton_parameter_continuation12000x10_expr_banded_lambdify",
+        "ExprLegacy",
+        "Lambdify",
+        "BandedAuto",
+        crate::scenarios::bvp_correction_newton::continuation_expr_banded_lambdify
+    ),
+    bvp_correction_newton_continuation_route!(
+        "bvp_correction_newton_parameter_continuation12000x10_atom_banded_lambdify",
         "AtomView",
         "Lambdify",
         "BandedAuto",
-        crate::scenarios::bvp_cantera::continuation_atom_banded_lambdify
+        crate::scenarios::bvp_correction_newton::continuation_atom_banded_lambdify
     ),
-    bvp_cantera_continuation_route!(
-        "bvp_cantera_parameter_continuation12000x10_expr_sparse_aot",
+    bvp_correction_newton_continuation_route!(
+        "bvp_correction_newton_parameter_continuation12000x10_expr_sparse_aot",
         "ExprLegacy",
         "AOT(warm-cache)",
         "Sparse",
-        crate::scenarios::bvp_cantera::continuation_expr_sparse_aot
+        crate::scenarios::bvp_correction_newton::continuation_expr_sparse_aot
     ),
-    bvp_cantera_continuation_route!(
-        "bvp_cantera_parameter_continuation12000x10_atom_sparse_aot",
+    bvp_correction_newton_continuation_route!(
+        "bvp_correction_newton_parameter_continuation12000x10_atom_sparse_aot",
         "AtomView",
         "AOT(warm-cache)",
         "Sparse",
-        crate::scenarios::bvp_cantera::continuation_atom_sparse_aot
+        crate::scenarios::bvp_correction_newton::continuation_atom_sparse_aot
     ),
-    bvp_cantera_continuation_route!(
-        "bvp_cantera_parameter_continuation12000x10_expr_banded_aot",
+    bvp_correction_newton_continuation_route!(
+        "bvp_correction_newton_parameter_continuation12000x10_expr_banded_aot",
         "ExprLegacy",
         "AOT(warm-cache)",
         "BandedAuto",
-        crate::scenarios::bvp_cantera::continuation_expr_banded_aot
+        crate::scenarios::bvp_correction_newton::continuation_expr_banded_aot
     ),
-    bvp_cantera_continuation_route!(
-        "bvp_cantera_parameter_continuation12000x10_atom_banded_aot",
+    bvp_correction_newton_continuation_route!(
+        "bvp_correction_newton_parameter_continuation12000x10_atom_banded_aot",
         "AtomView",
         "AOT(warm-cache)",
         "BandedAuto",
-        crate::scenarios::bvp_cantera::continuation_atom_banded_aot
+        crate::scenarios::bvp_correction_newton::continuation_atom_banded_aot
     ),
     Scenario {
-        id: "bvp_cantera_bratu32768_expr_sparse_lambdify",
-        solver: "bvp_cantera",
-        groups: &["bvp", "bvp-large", "bvp-cantera-matrix"],
+        id: "bvp_correction_newton_bratu32768_expr_sparse_lambdify",
+        solver: "bvp_correction_newton",
+        groups: &["bvp", "bvp-large", "bvp-correction-newton-matrix"],
         workload: "symmetric half-domain Bratu y'=z, z'=-2*exp(y), 32768 intervals, one fresh solve per sample",
         frontend: "ExprLegacy",
         execution: "Lambdify",
@@ -292,13 +292,13 @@ static CORE_SCENARIOS: &[Scenario] = &[
         version: 2,
         gate_metrics: &["scenario_wall_ms"],
         description: "Large nonlinear Bratu BVP with boundary, bounds, finiteness, and residual checks",
-        run: crate::scenarios::bvp_cantera::bratu32768_expr_sparse_lambdify,
-        diagnose: Some(crate::scenarios::bvp_cantera::diagnose),
+        run: crate::scenarios::bvp_correction_newton::bratu32768_expr_sparse_lambdify,
+        diagnose: Some(crate::scenarios::bvp_correction_newton::diagnose),
     },
     Scenario {
-        id: "bvp_cantera_kithe_combustion26x256_atom_sparse_lambdify",
-        solver: "bvp_cantera",
-        groups: &["bvp", "bvp-large", "bvp-cantera-matrix"],
+        id: "bvp_correction_newton_kithe_combustion26x256_atom_sparse_lambdify",
+        solver: "bvp_correction_newton",
+        groups: &["bvp", "bvp-large", "bvp-correction-newton-matrix"],
         workload: "KiThe 26-state fixed-grid combustion, 256 intervals, one fresh solve per sample",
         frontend: "AtomView",
         execution: "Lambdify",
@@ -308,8 +308,8 @@ static CORE_SCENARIOS: &[Scenario] = &[
         version: 2,
         gate_metrics: &["scenario_wall_ms"],
         description: "Large KiThe-derived combustion fixture with profile, boundary and residual checks",
-        run: crate::scenarios::bvp_cantera::kithe_combustion26x256_atom_sparse_lambdify,
-        diagnose: Some(crate::scenarios::bvp_cantera::diagnose),
+        run: crate::scenarios::bvp_correction_newton::kithe_combustion26x256_atom_sparse_lambdify,
+        diagnose: Some(crate::scenarios::bvp_correction_newton::diagnose),
     },
     bdf_route!(
         "bdf_diff256_lambdify_expr_seq",
@@ -1297,9 +1297,11 @@ mod tests {
 
     #[test]
     fn submillisecond_robertson_sanity_cases_are_not_performance_scenarios() {
-        assert!(!SCENARIOS
-            .iter()
-            .any(|scenario| scenario.workload.starts_with("Robertson,")));
+        assert!(
+            !SCENARIOS
+                .iter()
+                .any(|scenario| scenario.workload.starts_with("Robertson,"))
+        );
     }
 
     #[test]
@@ -1634,15 +1636,15 @@ mod tests {
     }
 
     #[test]
-    fn bvp_cantera_gate_registers_large_matched_symbolic_routes() {
+    fn bvp_correction_newton_gate_registers_large_matched_symbolic_routes() {
         let scenarios = select(&Selector {
-            group: Some("bvp-cantera-matrix".into()),
+            group: Some("bvp-correction-newton-matrix".into()),
             ..Selector::default()
         })
         .unwrap();
         assert_eq!(scenarios.len(), 18);
         let parameter_continuation = select(&Selector {
-            group: Some("bvp-cantera-parameter-continuation".into()),
+            group: Some("bvp-correction-newton-parameter-continuation".into()),
             ..Selector::default()
         })
         .unwrap();
@@ -1659,7 +1661,8 @@ mod tests {
         assert_eq!(
             scenarios
                 .iter()
-                .filter(|scenario| scenario.id == "bvp_cantera_bratu32768_expr_sparse_lambdify")
+                .filter(|scenario| scenario.id
+                    == "bvp_correction_newton_bratu32768_expr_sparse_lambdify")
                 .count(),
             1
         );
@@ -1667,7 +1670,7 @@ mod tests {
             scenarios
                 .iter()
                 .filter(|scenario| scenario.id
-                    == "bvp_cantera_kithe_combustion26x256_atom_sparse_lambdify")
+                    == "bvp_correction_newton_kithe_combustion26x256_atom_sparse_lambdify")
                 .count(),
             1
         );
@@ -1687,7 +1690,7 @@ mod tests {
                             })
                             .count(),
                         1,
-                        "missing/duplicate Cantera route {frontend}/{execution}/{layout}"
+                        "missing/duplicate CorrectionNewton route {frontend}/{execution}/{layout}"
                     );
                 }
             }

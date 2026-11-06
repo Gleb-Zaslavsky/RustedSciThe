@@ -1,4 +1,170 @@
 impl NRBVP {
+    fn validate_active_bounds(&self) -> Result<(), BvpBackendIntegrationError> {
+        if let Some((index, value, _lower, _upper)) =
+            first_bound_violation(&*self.y, &self.bounds_vec)
+        {
+            if !value.is_finite() {
+                return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                    stage: "Newton iterate".to_string(),
+                    index,
+                });
+            }
+            return Err(BvpBackendIntegrationError::BoundStateOutsideBounds {
+                iteration: self.telemetry_counters.iterations() as usize,
+                index,
+            });
+        }
+        Ok(())
+    }
+
+    /// Select the CorrectionNewton acceptance rules for the internal matched A/B gate.
+    ///
+    /// This remains test-only until fixed-mesh and adaptive-grid correctness gates
+    /// justify exposing or promoting the candidate policy.
+    #[cfg(test)]
+    pub(crate) fn enable_correction_newton_criteria_for_test(&mut self) {
+        self.newton_criteria = DampedNewtonCriteria::CorrectionNewton;
+    }
+
+    fn ensure_newton_norm_layout(&mut self) -> Result<(), BvpBackendIntegrationError> {
+        let components = self.values.len();
+        let full_len = self.y.len() + self.BC_position_and_value.len();
+        if components == 0 || full_len != components.saturating_mul(self.n_steps + 1) {
+            return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                field: "CorrectionNewton weighted-RMS layout".to_string(),
+                value: format!(
+                    "packed={}, boundaries={}, components={}, intervals={}",
+                    self.y.len(),
+                    self.BC_position_and_value.len(),
+                    components,
+                    self.n_steps
+                ),
+                message:
+                    "packed unknowns and boundary entries do not cover the full node-major grid"
+                        .to_string(),
+            });
+        }
+        if self.newton_full_state_positions.len() == self.y.len()
+            && self.newton_component_sum_scratch.len() == components
+        {
+            return Ok(());
+        }
+
+        let mut boundary_mask = vec![false; full_len];
+        for &(position, _boundary_side, _) in &self.BC_position_and_value {
+            let component = position % components;
+            if position >= full_len || std::mem::replace(&mut boundary_mask[position], true) {
+                return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                    field: "CorrectionNewton weighted-RMS boundary layout".to_string(),
+                    value: format!("position={position}, component={component}"),
+                    message:
+                        "boundary coordinates must be unique and match node-major component indices"
+                            .to_string(),
+                });
+            }
+        }
+        let positions = boundary_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(position, is_boundary)| (!is_boundary).then_some(position))
+            .collect::<Vec<_>>();
+        if positions.len() != self.y.len() {
+            return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                field: "CorrectionNewton weighted-RMS packed layout".to_string(),
+                value: format!("mapped={}, packed={}", positions.len(), self.y.len()),
+                message: "free full-grid positions do not match packed Newton state".to_string(),
+            });
+        }
+        self.newton_full_state_positions = positions;
+        self.newton_component_sum_scratch = vec![0.0; components];
+        Ok(())
+    }
+
+    /// CorrectionNewton's full-grid component-scaled RMS, with eliminated BC
+    /// corrections treated as zero and BC values included in component scales.
+    fn correction_newton_weighted_rms(
+        abs_tolerance: f64,
+        rel_tolerances: &[f64],
+        components: usize,
+        boundary_values: &[(usize, usize, f64)],
+        full_state_positions: &[usize],
+        component_sums: &mut [f64],
+        state: &dyn VectorType,
+        correction: &dyn VectorType,
+    ) -> Result<f64, BvpBackendIntegrationError> {
+        let full_len = full_state_positions.len() + boundary_values.len();
+        if state.len() != full_state_positions.len()
+            || correction.len() != state.len()
+            || rel_tolerances.len() != state.len()
+            || component_sums.len() != components
+        {
+            return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                field: "CorrectionNewton weighted-RMS input".to_string(),
+                value: format!(
+                    "state={}, correction={}, relative_tolerances={}",
+                    state.len(),
+                    correction.len(),
+                    rel_tolerances.len()
+                ),
+                message: "state, correction, and per-unknown tolerance dimensions must agree"
+                    .to_string(),
+            });
+        }
+
+        component_sums.fill(0.0);
+        for &(position, _, value) in boundary_values {
+            let component = position % components;
+            if !value.is_finite() {
+                return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                    field: "CorrectionNewton weighted-RMS boundary value".to_string(),
+                    value: value.to_string(),
+                    message: "boundary values must be finite".to_string(),
+                });
+            }
+            component_sums[component] += value.abs();
+        }
+        for (index, &position) in full_state_positions.iter().enumerate() {
+            let value = state.get_val(index);
+            if !value.is_finite() {
+                return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                    stage: "Newton state for weighted correction norm".to_string(),
+                    index,
+                });
+            }
+            component_sums[position % components] += value.abs();
+        }
+
+        let point_count = full_len / components;
+        let mut scaled_rms = 0.0_f64;
+        for (index, &position) in full_state_positions.iter().enumerate() {
+            let component = position % components;
+            let relative_tolerance = rel_tolerances[index];
+            let scale =
+                abs_tolerance + relative_tolerance * component_sums[component] / point_count as f64;
+            let value = correction.get_val(index);
+            if !relative_tolerance.is_finite()
+                || relative_tolerance < 0.0
+                || !scale.is_finite()
+                || scale <= 0.0
+                || !value.is_finite()
+            {
+                return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                    stage: "Newton correction weighted RMS".to_string(),
+                    index,
+                });
+            }
+            scaled_rms = scaled_rms.hypot(value / scale);
+        }
+        let result = scaled_rms / (full_len as f64).sqrt();
+        if !result.is_finite() {
+            return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                stage: "Newton correction weighted RMS".to_string(),
+                index: 0,
+            });
+        }
+        Ok(result)
+    }
+
     /// Computes undamped Newton step and solves linear system.
     ///
     /// This evaluates the residual and solves the current linearized system.
@@ -10,7 +176,7 @@ impl NRBVP {
         Box<dyn VectorType>,
         (std::time::Duration, std::time::Duration),
     ) {
-        let (step, timings, _, _) = self.step_with_linear_telemetry(p, y);
+        let (step, timings, _, _, _) = self.step_with_linear_telemetry(p, y);
         (step, timings)
     }
 
@@ -29,17 +195,40 @@ impl NRBVP {
             (std::time::Duration, std::time::Duration),
             std::time::Duration,
             std::time::Duration,
+            f64,
         ),
         BvpBackendIntegrationError,
     > {
         let mut factor_owner = self.factor_owner.borrow_mut();
-        self.solve_step_with_linear_telemetry(p, y, factor_owner.as_mut())
+        self.solve_step_with_linear_telemetry(p, y, None, factor_owner.as_mut())
+    }
+
+    fn try_step_with_residual(
+        &self,
+        p: f64,
+        y: &dyn VectorType,
+        residual: Box<dyn VectorType>,
+    ) -> Result<
+        (
+            Box<dyn VectorType>,
+            (std::time::Duration, std::time::Duration),
+            std::time::Duration,
+            std::time::Duration,
+            f64,
+        ),
+        BvpBackendIntegrationError,
+    > {
+        // The loop already evaluated this state before refreshing its Jacobian;
+        // reuse that validated vector rather than repeating the callback.
+        let mut factor_owner = self.factor_owner.borrow_mut();
+        self.solve_step_with_linear_telemetry(p, y, Some(residual), factor_owner.as_mut())
     }
 
     fn solve_step_with_linear_telemetry(
         &self,
         p: f64,
         y: &dyn VectorType,
+        residual: Option<Box<dyn VectorType>>,
         mut factor_owner: Option<&mut OwnedLinearFactorRuntime>,
     ) -> Result<
         (
@@ -47,19 +236,24 @@ impl NRBVP {
             (std::time::Duration, std::time::Duration),
             std::time::Duration,
             std::time::Duration,
+            f64,
         ),
         BvpBackendIntegrationError,
     > {
-        let fun_time_start = Instant::now();
-        let fun = &self.fun;
-        self.telemetry_counters.record_residual_call();
-        let F_k = fun.try_call(p, y).map_err(|error| {
-            BvpBackendIntegrationError::CallbackExecutionFailed {
-                stage: "residual".to_string(),
-                message: error.to_string(),
-            }
-        })?;
-        let fun_time_end = fun_time_start.elapsed();
+        let (F_k, fun_time) = if let Some(residual) = residual {
+            (residual, std::time::Duration::ZERO)
+        } else {
+            let fun_time_start = Instant::now();
+            let fun = &self.fun;
+            self.telemetry_counters.record_residual_call();
+            let residual = fun.try_call(p, y).map_err(|error| {
+                BvpBackendIntegrationError::CallbackExecutionFailed {
+                    stage: "residual".to_string(),
+                    message: error.to_string(),
+                }
+            })?;
+            (residual, fun_time_start.elapsed())
+        };
         let J_k = self.factor_owner.jacobian().ok_or_else(|| {
             BvpBackendIntegrationError::PipelinePanicked(
                 "Damped BVP Newton step requires a cached Jacobian matrix".to_string(),
@@ -151,12 +345,13 @@ impl NRBVP {
                 });
             }
         }
-        let pair_of_times = (fun_time_end, reported_linear_time);
+        let pair_of_times = (fun_time, reported_linear_time);
         Ok((
             undamped_step_k,
             pair_of_times,
             linear_timing.factorization,
             linear_timing.rhs_solve,
+            residual_norm,
         ))
     }
 
@@ -169,8 +364,9 @@ impl NRBVP {
         (std::time::Duration, std::time::Duration),
         std::time::Duration,
         std::time::Duration,
+        f64,
     ) {
-        self.solve_step_with_linear_telemetry(p, y, None)
+        self.solve_step_with_linear_telemetry(p, y, None, None)
             .unwrap_or_else(|error| panic!("Damped BVP step failed: {error:?}"))
     }
 
@@ -190,6 +386,18 @@ impl NRBVP {
     pub fn try_damped_step(
         &mut self,
     ) -> Result<(i32, Option<Box<dyn VectorType>>), BvpBackendIntegrationError> {
+        let (status, state, _) = self.try_damped_step_with_residual(None)?;
+        Ok((status, state))
+    }
+
+    fn try_damped_step_with_residual(
+        &mut self,
+        initial_residual: Option<Box<dyn VectorType>>,
+    ) -> Result<(i32, Option<Box<dyn VectorType>>, Option<f64>), BvpBackendIntegrationError> {
+        self.validate_active_bounds()?;
+        if self.newton_criteria == DampedNewtonCriteria::CorrectionNewton {
+            self.ensure_newton_norm_layout()?;
+        }
         // macro for saving times
         macro_rules! save_operation_times {
             ($self:expr, $pair_of_times:expr) => {
@@ -219,18 +427,27 @@ impl NRBVP {
                 message: "at least one damping trial is required".to_string(),
             });
         }
-        let damp_factor = self
-            .strategy_params
-            .as_ref()
-            .and_then(|params| params.damp_factor)
-            .unwrap_or(0.5);
-        if !damp_factor.is_finite() || !(0.0 < damp_factor && damp_factor < 1.0) {
-            return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
-                field: "strategy_params.damp_factor".to_string(),
-                value: damp_factor.to_string(),
-                message: "the fixed geometric reduction exponent must be finite and strictly between 0 and 1".to_string(),
-            });
-        }
+        let damp_factor = if self.newton_criteria == DampedNewtonCriteria::Legacy {
+            let value = self
+                .strategy_params
+                .as_ref()
+                .and_then(|params| params.damp_factor)
+                .unwrap_or(0.5);
+            if !value.is_finite() || !(0.0 < value && value < 1.0) {
+                return Err(BvpBackendIntegrationError::InvalidSolverConfiguration {
+                    field: "strategy_params.damp_factor".to_string(),
+                    value: value.to_string(),
+                    message:
+                        "the legacy damping exponent must be finite and strictly between 0 and 1"
+                            .to_string(),
+                });
+            }
+            value
+        } else {
+            // CorrectionNewton uses a fixed sqrt(2) reduction and does not
+            // consult the legacy exponent-offset option.
+            0.5
+        };
         let now = Instant::now();
         // compute the undamped Newton step
         let y_k_minus_1 = &*self.y;
@@ -246,8 +463,13 @@ impl NRBVP {
                 .as_ref()
                 .map(|jacobian| jacobian.factorization_ready())
                 .unwrap_or(false);
-        let (undamped_step_k_minus_1, pair_of_times, factorization_time, rhs_solve_time) =
-            self.try_step_with_linear_telemetry(p, y_k_minus_1)?;
+        let base_step = if let Some(residual) = initial_residual {
+            self.try_step_with_residual(p, y_k_minus_1, residual)?
+        } else {
+            self.try_step_with_linear_telemetry(p, y_k_minus_1)?
+        };
+        let (undamped_step_k_minus_1, pair_of_times, factorization_time, rhs_solve_time, _) =
+            base_step;
         // saving times of corresponding operations
         save_operation_times!(
             self,
@@ -269,7 +491,7 @@ impl NRBVP {
         // The linear solve returns delta = J^-1 F, while the Newton state
         // update below is y_next = y - lambda * delta. Bound feasibility must
         // be evaluated using that same subtractive direction.
-        let (fbound, limiting_index) = bound_step_Cantera2_with_update_sign_and_limit(
+        let (mut fbound, limiting_index) = bound_step_Cantera2_with_update_sign_and_limit(
             y_k_minus_1,
             &*undamped_step_k_minus_1,
             &self.bounds_vec,
@@ -285,6 +507,13 @@ impl NRBVP {
             error!("\n \n fbound is infinite \n \n");
             panic!("Damped BVP damping failed: boundary step factor is infinite")
         }
+        fbound = feasible_update_factor(
+            y_k_minus_1,
+            &*undamped_step_k_minus_1,
+            &self.bounds_vec,
+            -1.0,
+            fbound,
+        );
         if fbound < 1.0 {
             self.telemetry_counters
                 .record_bound_limited_step_at(fbound, limiting_index);
@@ -318,13 +547,28 @@ impl NRBVP {
         // algorithm fails, so return an error condition.
         if fbound < 1e-10 {
             warn!("\n  No damped step can be taken without violating solution component bounds.");
-            return Ok((-3, None));
+            return Ok((-3, None, None));
         }
 
         let mut S_k: Option<f64> = None;
         let mut damped_step_result: Option<Box<dyn VectorType>> = None;
+        let mut accepted_residual_norm: Option<f64> = None;
         let mut conv: f64 = 0.0;
-        let s0 = undamped_step_k_minus_1.norm();
+        // Legacy acceptance used a raw Euclidean correction; the candidate
+        // policy uses CorrectionNewton's dimensionless component-scaled RMS.
+        let s0 = match self.newton_criteria {
+            DampedNewtonCriteria::Legacy => undamped_step_k_minus_1.norm(),
+            DampedNewtonCriteria::CorrectionNewton => Self::correction_newton_weighted_rms(
+                self.abs_tolerance,
+                &self.rel_tolerance_vec,
+                self.values.len(),
+                &self.BC_position_and_value,
+                &self.newton_full_state_positions,
+                &mut self.newton_component_sum_scratch,
+                y_k_minus_1,
+                &*undamped_step_k_minus_1,
+            )?,
+        };
 
         let mut k = 0;
         while k < max_damp_iter {
@@ -363,7 +607,13 @@ impl NRBVP {
                 self.telemetry_counters
                     .finish_damping_trial_scope(damping_trial_started);
             }
-            let (undamped_step_k, pair_of_times, factorization_time, rhs_solve_time) = step_result?;
+            let (
+                undamped_step_k,
+                pair_of_times,
+                factorization_time,
+                rhs_solve_time,
+                trial_residual_norm,
+            ) = step_result?;
             // saving times of corresponding operations
             save_operation_times!(
                 self,
@@ -382,11 +632,27 @@ impl NRBVP {
                 self.telemetry_counters.record_factorization();
             }
 
-            let s1 = undamped_step_k.norm();
+            let s1 = match self.newton_criteria {
+                DampedNewtonCriteria::Legacy => undamped_step_k.norm(),
+                DampedNewtonCriteria::CorrectionNewton => Self::correction_newton_weighted_rms(
+                    self.abs_tolerance,
+                    &self.rel_tolerance_vec,
+                    self.values.len(),
+                    &self.BC_position_and_value,
+                    &self.newton_full_state_positions,
+                    &mut self.newton_component_sum_scratch,
+                    &*y_k,
+                    &*undamped_step_k,
+                )?,
+            };
             self.error_old = s1;
-            info!("\n \n L2 norm of undamped step = {}", s1);
-            let convergence_cond_for_step =
-                convergence_condition(&*y_k, &self.abs_tolerance, &self.rel_tolerance_vec);
+            info!("\n \n Newton correction norm = {}", s1);
+            let convergence_cond_for_step = match self.newton_criteria {
+                DampedNewtonCriteria::Legacy => {
+                    convergence_condition(&*y_k, &self.abs_tolerance, &self.rel_tolerance_vec)
+                }
+                DampedNewtonCriteria::CorrectionNewton => 1.0,
+            };
 
             // If the norm of s1 is less than the norm of s0, then accept this
             // damping coefficient. Also accept it if this step would result in a
@@ -395,7 +661,8 @@ impl NRBVP {
             let elapsed = now.elapsed();
             elapsed_time(elapsed);
 
-            // C++ acceptance criteria: if (s1 < 1.0 || s1 < s0)
+            // Both policies retain the same acceptance shape. Legacy used raw
+            // L2 here; CorrectionNewton applies it to normalized weighted RMS.
             let accepted = (s1 < 1.0) || (s1 < s0);
             self.telemetry_counters
                 .finish_damping_trial_scope(damping_trial_started);
@@ -404,11 +671,21 @@ impl NRBVP {
                 // magnitude, This prevents the iteration from stepping away from the region where there is good reason to believe a solution lies
                 S_k = Some(s1);
                 damped_step_result = Some(y_k.clone_box());
+                accepted_residual_norm = Some(trial_residual_norm);
                 conv = convergence_cond_for_step;
                 break;
             }
             // if fail this criterion we must reject it and retries the step with a reduced damping parameter
-            lambda /= 2.0f64.powf(k as f64 + damp_factor);
+            match self.newton_criteria {
+                DampedNewtonCriteria::Legacy => {
+                    // Legacy schedule: exponent offset increases after every rejection.
+                    lambda /= 2.0f64.powf(k as f64 + damp_factor);
+                }
+                DampedNewtonCriteria::CorrectionNewton => {
+                    // Match CorrectionNewton's fixed geometric backtracking.
+                    lambda /= 2.0_f64.sqrt();
+                }
+            }
             self.telemetry_counters.record_damping_rejection_at(
                 self.telemetry_counters.iterations(),
                 lambda,
@@ -432,19 +709,19 @@ impl NRBVP {
                     "\n \n  step norm =  {}, weight norm = {}, convergence condition = {}",
                     self.error_old, step_norm, conv
                 );
-                Ok((0, damped_step_result))
+                Ok((0, damped_step_result, accepted_residual_norm))
             } else {
                 info!("\n \n  Damping coefficient found (solution has converged)");
                 info!(
                     "\n \n step norm =  {}, weight norm = {}, convergence condition = {}",
                     self.error_old, step_norm, conv
                 );
-                Ok((1, damped_step_result))
+                Ok((1, damped_step_result, accepted_residual_norm))
             }
         } else {
             //  if we have reached max damping iterations without finding a damping coefficient we must reject the step
             warn!("\n \n  No damping coefficient found (max damping trials reached)");
-            Ok((-2, None))
+            Ok((-2, None, None))
         }
     } // end of damped step
 
@@ -467,6 +744,13 @@ impl NRBVP {
         &self,
         y: Box<dyn VectorType>,
     ) -> Result<f64, BvpBackendIntegrationError> {
+        Ok(self.try_eval_residual(y)?.norm())
+    }
+
+    fn try_eval_residual(
+        &self,
+        y: Box<dyn VectorType>,
+    ) -> Result<Box<dyn VectorType>, BvpBackendIntegrationError> {
         let fun = &self.fun;
         self.telemetry_counters.record_residual_call();
         let expected_len = y.len();
@@ -494,7 +778,7 @@ impl NRBVP {
                 });
             }
         }
-        Ok(residual.norm())
+        Ok(residual)
     }
     /// Main iteration loop for damped Newton-Raphson method
     ///
@@ -527,12 +811,22 @@ impl NRBVP {
             let y: Vec<f64> = y.iter().cloned().collect();
             let y: DVector<f64> = DVector::from_vec(y);
             self.result = Some(y.clone()); // save into result in case the very first iteration
-            // with the current n_steps will go wrong and we shall need grid refinement
+                                           // with the current n_steps will go wrong and we shall need grid refinement
             self.y = Vectors_type_casting(&y.clone(), self.effective_runtime_method());
         } else {
         }
-        let initial_res_nornal = self.try_calc_residual(self.y.clone_box())?;
-        info!("norm of the initial residual = {}", initial_res_nornal);
+        self.validate_active_bounds()?;
+        let initial_residual_started = Instant::now();
+        // Keep the legacy initial-residual error ordering, then consume this
+        // validated vector as the first Newton step's base residual.
+        let mut initial_residual = Some(self.try_eval_residual(self.y.clone_box())?);
+        let initial_residual_norm = initial_residual
+            .as_ref()
+            .expect("initial residual was just evaluated")
+            .norm();
+        self.custom_timer
+            .append_to_fun_time(initial_residual_started.elapsed());
+        info!("norm of the initial residual = {}", initial_residual_norm);
         // println!("y = {:?}", &y);
         let mut nJacReeval = 0;
         let mut i = 0;
@@ -553,12 +847,12 @@ impl NRBVP {
             self.m += 1;
             i += 1; // increment the number of iterations
             self.telemetry_counters.record_iteration();
-            let step_result = self.try_damped_step();
+            let step_result = self.try_damped_step_with_residual(initial_residual.take());
             if step_result.is_err() {
                 self.telemetry_counters
                     .finish_iteration_scope(iteration_started);
             }
-            let (status, damped_step_result) = step_result?;
+            let (status, damped_step_result, accepted_residual_norm) = step_result?;
 
             if status == 0 {
                 // status == 0 means convergence is not reached yet we're going to another iteration
@@ -587,15 +881,15 @@ impl NRBVP {
                         )
                     }
                 };
-                let residual_result = self.try_calc_residual(y_k_plus_1.clone_box());
-                if residual_result.is_err() {
-                    self.telemetry_counters
-                        .finish_iteration_scope(iteration_started);
-                }
-                let resid_norm = residual_result?;
+                let resid_norm = accepted_residual_norm.ok_or_else(|| {
+                    BvpBackendIntegrationError::PipelinePanicked(
+                        "converged damping step did not retain its accepted residual norm"
+                            .to_string(),
+                    )
+                })?;
                 info!("residual norm of the solution = {}", resid_norm);
                 let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
-                // before refining in case it will go wrong
+                                                                // before refining in case it will go wrong
                 self.y = y_k_plus_1.clone_box();
                 self.result = result.clone();
                 info!(

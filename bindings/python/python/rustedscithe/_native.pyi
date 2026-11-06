@@ -7,7 +7,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 __all__ = [
-    "BvpCanteraParameterLoopPoint", "BvpCanteraParameterLoopReport",
+    "BvpCorrectionNewtonParameterLoopPoint", "BvpCorrectionNewtonParameterLoopReport",
     "Expr", "ExprVector", "ExprMatrix", "BandedMatrix", "LapackStyleBandedLuFaithful", "BandedRefinementResult", "PivotedTridiagonalLu", "BlockTridiagonalLuConsistent", "BlockTridiagonalRefinementResult", "BdfSolver", "BdfCallbackSolver", "BdfSolution",
     "BackwardEulerSolver", "BackwardEulerSolution", "UniversalNonStiffSolver", "UniversalNonStiffSolution", "BvpSciSolver",
     "BvpSciSolution", "BvpSciParameterLoopPoint", "BvpSciParameterLoopReport", "BvpSolverRequest", "PreparedBvpSolver", "BvpApiSolution", "BvpPostprocessPlan", "BvpDampSolver", "BvpDampNaiveSolver", "BvpDampFrozenSolver", "BvpDampSolution", "BvpDampParameterLoopPoint", "BvpDampParameterLoopReport", "RadauSolver",
@@ -956,9 +956,9 @@ class BvpSciParameterLoopReport:
 
 
 class BvpSolverRequest:
-    """Typed request for Damped, Frozen, Cantera or symbolic BVP_sci."""
+    """Typed request for Damped, Frozen, CorrectionNewton or symbolic BVP_sci."""
     @staticmethod
-    def cantera(
+    def correction_newton(
         expressions: Sequence[Expr], state_variables: Sequence[str], independent_variable: str,
         mesh: Sequence[float], boundary_conditions: Sequence[tuple[int, Literal["left", "right"], float]],
         initial_guess: Sequence[Sequence[float]], options: SolverOptions | None = ...,
@@ -1011,12 +1011,12 @@ class BvpSolverRequest:
 
 class PreparedBvpSolver:
     @property
-    def route(self) -> Literal["damped", "frozen", "naive", "sci", "cantera"]: ...
+    def route(self) -> Literal["damped", "frozen", "naive", "sci", "correction_newton"]: ...
     @property
     def telemetry_route(self) -> str: ...
     def solve(self) -> BvpApiSolution: ...
     def solve_with_parameter_values(self, values: Sequence[float]) -> BvpApiSolution: ...
-    def solve_parameter_loop(self, parameter_vectors: Sequence[Sequence[float]]) -> BvpDampParameterLoopReport | BvpSciParameterLoopReport | BvpCanteraParameterLoopReport: ...
+    def solve_parameter_loop(self, parameter_vectors: Sequence[Sequence[float]]) -> BvpDampParameterLoopReport | BvpSciParameterLoopReport | BvpCorrectionNewtonParameterLoopReport: ...
     def set_parameter_values(self, values: Sequence[float]) -> None: ...
     def set_parameter_guess(self, values: Sequence[float]) -> None: ...
     def parameter_guess(self) -> list[float]: ...
@@ -1035,7 +1035,7 @@ class BvpApiSolution:
     def sci_details(self) -> BvpSciSolution | None: ...
 
 
-class BvpCanteraParameterLoopPoint:
+class BvpCorrectionNewtonParameterLoopPoint:
     index: int
     parameters: list[float]
     guess_source_index: int | None
@@ -1050,8 +1050,8 @@ class BvpCanteraParameterLoopPoint:
     def telemetry_timings_ms(self) -> dict[str, float]: ...
 
 
-class BvpCanteraParameterLoopReport:
-    points: list[BvpCanteraParameterLoopPoint]
+class BvpCorrectionNewtonParameterLoopReport:
+    points: list[BvpCorrectionNewtonParameterLoopPoint]
     stop_error: Exception | None
     def completed_count(self) -> int: ...
 

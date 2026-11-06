@@ -465,7 +465,7 @@ mod tets {
 
         let t0 = 0.0;
         let t_end = 1.0;
-        let n_steps = 5; // Dense: 200 -300ms, 400 - 2s, 800 - 22s, 1600 - 2 min,
+        let n_steps = 10;
         let grid_method = GridRefinementMethod::GrcarSmooke(0.6, 0.6, 1.5);
         //:Pearson(0.5);
         // GridRefinementMethod::TwoPoint(0.3, 0.5, 1.2);
@@ -481,9 +481,18 @@ mod tets {
             damp_factor: None,
             adaptive: Some(config),
         });
-        let ones = vec![0.0; values.len() * n_steps];
-        let initial_guess: DMatrix<f64> =
-            DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(ones).as_slice());
+        let mut guess = Vec::with_capacity(values.len() * n_steps);
+        for _ in 0..n_steps {
+            // Use a positive neutral profile close to both endpoint values;
+            // the former all-zero seed violated both endpoint conditions.
+            guess.push(1.0);
+            guess.push(1.0);
+        }
+        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(
+            values.len(),
+            n_steps,
+            DVector::from_vec(guess).as_slice(),
+        );
         let mut BorderConditions = HashMap::new();
         BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
         BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);
@@ -514,9 +523,15 @@ mod tets {
         );
 
         println!("solving system");
-        nr.try_solve()
+        let solved = nr
+            .try_solve()
             .expect("test_BVP_Damp1 should solve through the fallible API");
-        let solution = nr.get_result().unwrap();
+        assert!(
+            solved.is_some(),
+            "test_BVP_Damp1 did not converge; telemetry: {:#?}",
+            nr.get_statistics().telemetry
+        );
+        let solution = nr.get_result().expect("converged result is published");
 
         // assert_eq!(n, n_steps + 1);
         println!("result = {:?}", solution);

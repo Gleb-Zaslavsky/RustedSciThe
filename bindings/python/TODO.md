@@ -1,8 +1,8 @@
 # RustedSciThe Python bindings TODO
 
-## Cantera Continuation Follow-Up (2026-11-05)
+## CorrectionNewton Continuation Follow-Up (2026-11-05)
 
-- [ ] Expose the native Cantera continuation loop through PreparedBvpSolver,
+- [ ] Expose the native CorrectionNewton continuation loop through PreparedBvpSolver,
   with typed per-point errors, optional partial telemetry and detached NumPy
   profiles; no Python implementation of numerical recovery.
 - [ ] Test success/failure/success and preflight validation, telemetry Off,
@@ -473,7 +473,7 @@ concrete adapter.
 | `BvpSciSolver` | ExprLegacy/AtomNative + Lambdify/AOT on Dense/Sparse/Banded; Numerical frontend/execution on Dense with RHS and optional analytic `df/dy`, `df/dp`; free-parameter initial guesses via `parameter_guess` / `set_parameter_guess`, previous-profile continuation/restart, output, singular terms, boundary callbacks and AOT lifecycle | `parameters` are free Newton unknowns, not fixed inputs; constructor `parameter_values` remains a deprecated alias; numerical callback route cannot be mixed with symbolic execution or non-Dense layouts; SuperLU remains opt-in and can fall back to StandardFaer | native telemetry currently labels guess changes `parameter_rebinds`; rename/report the counter as a guess update in a telemetry-contract pass |
 | `ShootingBvpSolver` | ExprLegacy/AtomNative, Lambdify, Dense, Sequential/Parallel, native telemetry and logging | No AOT, continuation, or Python numerical callback route; intended for scalar/very small systems | no missing setting found in the current native ShootingBVP API |
 | `BvpDampSolver` / `BvpDampNaiveSolver` / `BvpDampFrozenSolver` | Damped route: ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded, execution policies, damping/Jacobian budgets, six grid methods, bounds and adaptive refinement. Naive and Frozen routes: symbolic frontend/execution/layout axes, fixed uniform mesh, native prepare, fixed-input rebind and prepared iterate replacement; all three expose `solve_with_parameter_values` for rebind plus last-successful-profile warm start and telemetry; Frozen also exposes all five native reuse policies | Non-standard sparse factorization belongs to BVP_sci and is typed-rejected here; Naive/Frozen do not claim adaptive mesh or interval restart | Native `GeneratedBackendConfig` lacks direct AOT output-directory support; fixed-mesh routes cannot replace their interval in place |
-| `BvpSolverRequest` / `PreparedBvpSolver` | Typed native `BVP_api` request for Damped, Frozen, symbolic BVP_sci and BVP_Cantera; node-major guesses/results, fixed parameter binding/rebinding and ordered per-route loops, BVP_sci free-parameter callbacks, native telemetry maps/scopes, typed errors and native postprocessing plan; EN/RU guide and route-selection examples | Python numerical callbacks, experimental sparse factorizations and arbitrary nonuniform Damped/Frozen meshes remain explicitly unsupported by this facade; direct solver APIs retain their own routes | Python contracts cover Cantera continuation failures/checkpoints and Off/Counters/Detailed telemetry on both symbolic frontends; general route telemetry, Damped/Frozen schemas, BVP_sci consistency and AOT policy forwarding remain covered; boundary-overhead measurement remains open |
+| `BvpSolverRequest` / `PreparedBvpSolver` | Typed native `BVP_api` request for Damped, Frozen, symbolic BVP_sci and BVP_CorrectionNewton; node-major guesses/results, fixed parameter binding/rebinding and ordered per-route loops, BVP_sci free-parameter callbacks, native telemetry maps/scopes, typed errors and native postprocessing plan; EN/RU guide and route-selection examples | Python numerical callbacks, experimental sparse factorizations and arbitrary nonuniform Damped/Frozen meshes remain explicitly unsupported by this facade; direct solver APIs retain their own routes | Python contracts cover CorrectionNewton continuation failures/checkpoints and Off/Counters/Detailed telemetry on both symbolic frontends; general route telemetry, Damped/Frozen schemas, BVP_sci consistency and AOT policy forwarding remain covered; boundary-overhead measurement remains open |
 | `UniversalNonStiffSolver` | ODE_api2 RK45/DOPRI/AB4; ExprLegacy/Lambdify, Dense, Sequential; step size and named stop conditions | No AOT, AtomNative, parallel mode, telemetry, parameters, restart or continuation; fixed-step end may overshoot by less than one step | Stiff methods use their direct solver wrappers; do not route stiff workloads through ODE_api2 |
 
 The policy is now explicit: a convenience constructor may choose native
@@ -2910,17 +2910,17 @@ grow a second solver-dispatch table.
   Keep native solver performance outside these measurements; it is covered by
   Rust story tests, benches and performance gates.
 
-## BVP_Cantera Facade Continuation (2026-11-05)
+## BVP_CorrectionNewton Facade Continuation (2026-11-05)
 
-- [x] Expose Cantera parameter-loop points/reports through the shared BVP
+- [x] Expose CorrectionNewton parameter-loop points/reports through the shared BVP
   facade, with detached full-grid solutions, typed per-point failures,
   last-success guess provenance, and mode-aware counter/timing maps.
 - [x] Cover success/failure/success, all-failed restoration, malformed input,
   both ExprLegacy and AtomView, and Off/Counters/Detailed telemetry in
-  `tests/test_bvp_cantera_continuation.py`.
+  `tests/test_bvp_correction_newton_continuation.py`.
 - [x] Add combustion-like six-state and analytic Bratu continuation examples;
   both sweep ten fixed parameter values and verify boundaries and discretized
   residuals. The Bratu example additionally checks the analytic branch.
-- [ ] Include the focused Cantera Python contract and examples in the clean
+- [ ] Include the focused CorrectionNewton Python contract and examples in the clean
   installed-wheel release gate; current local editable-build tests establish
   source-tree ABI correctness only.

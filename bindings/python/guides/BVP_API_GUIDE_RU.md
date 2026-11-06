@@ -36,7 +36,7 @@ print(solver.telemetry_snapshot())
 ```
 
 Фабрики фасада выбирают семейство native-солвера: `damped`, `frozen`, `sci`
-или `cantera`. Маршрут `cantera` реализует fixed-grid trapezoid/Newton для
+или `correction_newton`. Маршрут `correction_newton` реализует fixed-grid trapezoid/Newton для
 равномерной сетки и поддерживает ExprLegacy или нативный AtomView, Lambdify
 или AOT, а также Dense, Sparse и автоматически определяемый Banded backend.
 Начальное приближение содержит одну строку на интервал; граничные значения
@@ -49,9 +49,9 @@ Lambdify/AOT callbacks. `solve_parameter_loop(parameter_vectors)` выполня
 следующие — последний успешный профиль. Ошибка точки сохраняется как typed
 error с доступной telemetry, но не прерывает последующие точки и не заменяет
 последнее успешное решение. Простой пример находится в
-`examples/bvp_api_cantera.py`, нетривиальные sweeps — в
-`examples/bvp_api_cantera_combustion_continuation.py` и
-`examples/bvp_api_cantera_bratu_continuation.py`.
+`examples/bvp_api_correction_newton.py`, нетривиальные sweeps — в
+`examples/bvp_api_correction_newton_combustion_continuation.py` и
+`examples/bvp_api_correction_newton_bratu_continuation.py`.
 
 ## Маршруты и формы данных
 

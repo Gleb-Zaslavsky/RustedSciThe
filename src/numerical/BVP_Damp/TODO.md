@@ -1,5 +1,218 @@
 # BVP_Damp Architecture Review And Migration TODO
 
+## Approved Damped Newton Stabilization Plan (2026-11-06)
+
+Goal: make the production Damped solver reliably solve the established KiThe
+combustion problem and the COMB-01/COMB-02 fixtures, while retaining Damped's
+symbolic frontends, callback lifecycle, linear backends, telemetry/logging and
+adaptive-grid strategies. `BVP_CorrectionNewton` is the validated production
+reference for its fixed-mesh correction-Newton mechanics; it is not a replacement
+for Damped's BVP API or grid-refinement layer. The earlier KiThe failures caused
+by the Trapezoid Jacobian dependency defect are historical and must not be
+treated as current failures or as evidence that the Newton core remains broken.
+
+Work in this order; keep the historical investigations and results below intact:
+
+- [x] **Freeze matched numerical fixtures.** Use unchanged KiThe equations,
+  boundary conditions and physical bounds, plus COMB-01 and COMB-02. Record
+  mesh, discretization, tolerances, iteration/damping limits and initial guess
+  for each run. Classify guesses (production/inlet, independent smooth, and
+  perturbed/reference-derived); do not require convergence from every arbitrary
+  seed. In particular, COMB-02's current successful Rust gate uses a perturbed
+  reference profile, while its simple analytic guess is known to be
+  `BoundsBlocked`. The fixed-mesh gate also reuses canonical COMB-01 analytic
+  and COMB-02 perturbed-reference fixtures at 128 intervals.
+- [x] **Establish fixed-mesh parity before comparing Newton behavior.** For each
+  matched fixture, verify residual and Jacobian values independently (including
+  finite-difference checks for representative columns), boundary residuals,
+  bounds and discrete invariants on ExprLegacy and AtomView routes. Keep
+  frontend/backend preparation failures distinct from numerical nonconvergence.
+  On COMB-01/02 at 128 intervals, both frontends agree with the independent
+  CorrectionNewton callbacks: max residual difference `1.908e-16`, max
+  Jacobian difference `5.551e-17`; centered finite differences over six
+  representative packed columns have maximum scaled error `1.842e-11`.
+  The existing matched production A/B separately checks canonical physical
+  bounds, endpoint values, invariants and solution parity. This closes the
+  fixed-mesh callback/Jacobian gate for these fixtures, not the public
+  mixed-boundary initial-guess packing contract or adaptive-refinement parity.
+- [x] **Run production-to-production fixed-mesh A/B.** Compare current Damped
+  against `BVP_CorrectionNewton` on identical fixture data and numerical
+  settings wherever the APIs permit. Inspect accepted profiles, scaled
+  correction and residual criteria, bound-limited steps, Jacobian refreshes,
+  damping trials/rejections, linear work and typed terminal status. Do not
+  require identical Newton trajectories or counters where the algorithms
+  intentionally differ; require independently acceptable solutions and explain
+  every outcome difference.
+  Initial KiThe fixed-grid Debug gate is now in
+  `tests/large_native_regressions.rs`:
+  `rst_native_damped_vs_correction_newton_fixed_mesh_kithe_combustion_ab`.
+  Both production solvers converge on the same 26-state/34-node Sparse +
+  ExprLegacy + trapezoid fixture and preserve boundary values and the species
+  sum invariant. Their profiles differ by at most `2.650592e-5`; the
+  independently evaluated maximum trapezoid defect is `2.595039e-4` for
+  Damped and `3.449615e-6` for CorrectionNewton. These are not yet directly
+  equivalent accuracy claims: Damped tests an Euclidean Newton-step norm
+  against a scalar tolerance, while CorrectionNewton stops at component-scaled
+  weighted RMS correction `<= 1`. A post-solve recomputation confirms Damped's
+  final correction is `7.779710e-5` against its own `3.307296e-4` threshold;
+  CorrectionNewton reports `0.00503281` against `1`. Neither solver violates
+  its own stop condition on this fixture, so the defect difference is not yet
+  explained by a false terminal acceptance here. At both final profiles,
+  production residual callbacks agree within `1.33e-17` and assembled
+  Jacobians within `9.89e-13`; this rules out a route-formula mismatch on this
+  fixture. The comparable CorrectionNewton weighted RMS for Damped's terminal
+  correction is `0.261175`, versus `0.005033` for CorrectionNewton, consistent
+  with different distances to the root. At that stage, mesh scaling and
+  COMB-01/COMB-02 were still pending; see their completed matched sweep below.
+- 2026-11-06 enum-policy pilot: the test-only `DampedNewtonCriteria` switch
+  changes only the norm and rejected-trial reduction inside the existing
+  production Damped loop. On the matched KiThe 26-state/34-node fixture,
+  Legacy Damped, enum-policy Damped and `BVP_CorrectionNewton` all take
+  `3 / 2 / 3 / 6` iterations/Jacobians/trials/linear solves, with identical
+  profiles and maximum trapezoid defect `3.449615e-6`. Changing only these two
+  policies does not change this fixture's result or work.
+- Distinct test-local Cantera-style core: `large_kithe_fixed_mesh_ab` runs a
+  separate Newton loop, not the enum policy. It reports legacy Damped
+  `4 / 2 / 8 / 12` and raw residual L2 `5.846389e-4`; the local candidate uses
+  `5 / 3 / 15 / 20` and residual L2 `1.854102e-5`, with packed profile delta
+  `2.641362e-5`. The local loop also owns its Jacobian-age/refresh and retry
+  lifecycle, so this residual/work tradeoff cannot be attributed solely to
+  weighted RMS plus `alpha /= sqrt(2)`. It is not a wall-clock result and did
+  not measure the independent trapezoid defect. Keep it as a separate
+  diagnostic; do not conflate it with the enum A/B or promote it to
+  production based on raw residual alone.
+- 2026-11-06 matched COMB Debug A/B:
+  `rst_native_damped_vs_correction_newton_comb01_comb02_ab` runs Damped Legacy,
+  the test-only candidate, and CorrectionNewton on the same ExprLegacy/Sparse/
+  trapezoid fixtures, tolerance `1e-8`, 128 intervals, and identical physical
+  seed profiles. Bounds are deliberately wide and inactive for this
+  Newton-loop-only comparison; Damped's matrix input is explicitly repacked to
+  its packed unknown order. With that controlled representation, COMB-01 and
+  COMB-02 all converge with matching profiles (max difference `4.44e-16` and
+  `1.78e-15`) and independent trapezoid defects `4.364118e-10` and
+  `1.760807e-8`. For both fixtures, Legacy Damped, candidate Damped and
+  CorrectionNewton have identical iteration/Jacobian/factorization/linear-
+  solve/trial counts: COMB-01 `5 / 3 / 3 / 10 / 5`; COMB-02
+  `3 / 2 / 2 / 6 / 3`. There are no rejected trials. All three terminal
+  CorrectionNewton-scaled RMS values also match: COMB-01 `0.08404881`, COMB-02
+  `0.05733719`. On these seeds the new criterion does not change the Newton
+  trajectory or add search work; this does not establish benefit on the KiThe
+  workload or harder seeds.
+- Extra-work finding from those same runs: Damped records 12 residual calls
+  versus CorrectionNewton's 10 on COMB-01, and 8 versus 6 on COMB-02, while
+  all other core work counts match. The two-call Damped surplus is explained
+  by `try_main_loop_damped`: it evaluates an initial residual before the loop
+  that is only logged, then reevaluates the accepted final trial residual
+  after the loop. That final trial residual was already computed to form the
+  next correction and decide acceptance. Both cores also reevaluate each
+  accepted trial as the next iteration's base residual; this is shared
+  repeated work, not a candidate-specific regression. The initial proposal to
+  cache the loop-boundary values was pending lifecycle review; see the follow-up
+  below for the resolved fixed-mesh change and remaining adaptive-refinement
+  verification.
+- 2026-11-06 follow-up, now resolved in the fixed-mesh loop: `Detailed`
+  telemetry measured residual-stage time before reuse as 2.142/2.173 ms for
+  legacy/candidate Damped versus 0.696 ms for CorrectionNewton on COMB-01, and
+  2.132/2.055 ms versus 0.665 ms on COMB-02. These are single-run Debug
+  diagnostics, not a performance claim. Lambdify callback telemetry was then
+  explicitly enabled: after reuse, its callback time remained higher on Damped
+  (COMB-01 2.314/1.942 ms legacy/candidate; COMB-02 1.942/1.641 ms) than
+  CorrectionNewton's residual callback time (0.607/0.661 ms). Since call counts
+  now match, this is a separate callback-route/stage-timing question for the
+  later matched Release matrix, not residual over-invocation. Damped now
+  evaluates the initial residual once, preserves its
+  original typed-error ordering, and consumes that validated vector in the
+  first Newton step. It also returns the accepted trial's already-computed
+  residual norm for terminal logging instead of calling the callback again.
+  The public `try_damped_step` result shape is unchanged. The matched A/B now
+  reports residual calls equal to CorrectionNewton on both cases: 10/10 for
+  COMB-01 and 6/6 for COMB-02. Iterations, Jacobian/factorization counts,
+  damping trials, linear solves, terminal correction RMS, profile parity and
+  discrete defect remain unchanged. The separate repeated base residual on
+  each later iteration is shared with CorrectionNewton and intentionally not
+  changed in this focused cleanup.
+- Historical matched-seed caveat (superseded by the 2026-11-06 follow-up
+  below): passing the canonical COMB-01 row-oriented seed directly
+  to Damped with its physical bounds stops before the first damping trial:
+  packed index 232 is limited at factor zero because the raw flattened guess
+  presents `theta=1.204454964` where the prepared coordinate bounds identify
+  `Y` with upper bound `1.2`. The A/B gate therefore converts the identical
+  physical profile into Damped's packed unknown ordering and uses inactive
+  wide bounds. This was not a valid physical-bounds comparison and is retained
+  only as the diagnostic that exposed the seed-layout distinction.
+- 2026-11-06 matched physical-bounds follow-up: the KiThe, COMB-01 and COMB-02
+  production A/Bs now use CorrectionNewton's canonical physical bounds. For
+  COMB, the same feasible free-state is installed into Damped through its
+  prepared-iterate API after safe preparation; this avoids conflating the
+  row-oriented fixture matrix with Damped's compact node-major vector when
+  endpoint BCs are mixed. No free values needed projection on COMB-01/02.
+  Both fixtures pass with legacy Damped, candidate Damped and CorrectionNewton
+  agreeing on iterations, Jacobian refreshes, linear solves and line-search
+  trials: COMB-01 `5 / 3 / 10 / 5`, COMB-02 `3 / 2 / 6 / 3`. Residual calls
+  are now also equal (`10` and `6` respectively). Profiles agree within
+  `4.45e-16` / `1.78e-15`; independent trapezoid defects are
+  `4.364118e-10` / `1.760807e-8`; terminal weighted RMS values agree at
+  `0.08404881` / `0.05733719`. Thus the test-only CorrectionNewton criterion
+  does not alter the COMB trajectories or reduce work on these fixtures. The
+  separate local-core KiThe residual/work result above is not an A/B of the
+  enum-only policy. On
+  common legacy-Damped and CorrectionNewton
+  shared seed and terminal profiles, ExprLegacy residuals differ by at most
+  `2.23e-16` and sparse Jacobians by at most `9.06e-18` for COMB-01/02.
+  AtomView callback parity and finite-difference Jacobian checks were closed
+  by the 2026-11-06 both-frontend gate below. A separate audit of the public
+  Damped initial-guess matrix versus compact
+  iterate packing remains necessary before claiming facade-level seed parity
+  for mixed-side BC systems.
+- 2026-11-06 mesh-size sweep: the matched COMB A/B runs at `N=32, 64, 128, 256`
+  all pass with the same legacy Damped, candidate Damped and CorrectionNewton
+  counts at each resolution. COMB-01 is `5` iterations / `3` Jacobians / `10`
+  residual calls / `10` solves / `5` trials at every mesh; COMB-02 is `3 / 2 /
+  6 / 6 / 3`. Maximum callback differences over the common seed and both
+  terminal profiles are residual `<= 6.67e-16` and Jacobian `<= 3.63e-17`.
+  The independent trapezoid defects decrease monotonically with refinement:
+  COMB-01 `1.729e-9, 8.712e-10, 4.364e-10, 2.183e-10`; COMB-02
+  `6.358e-8, 3.447e-8, 1.761e-8, 8.857e-9`. Thus measured Newton work and
+  terminal criteria are mesh-size stable on these fixtures. Together with the
+  both-frontend callback/finite-difference gate, this closes fixed-mesh
+  ExprLegacy/AtomView numerical parity for COMB-01/02.
+- [x] **Evaluate the CorrectionNewton mechanics before considering integration.**
+  The same physical-bounds KiThe and COMB-01/02 fixed-mesh A/Bs show no
+  trajectory, profile, defect or work-count advantage for the test-only
+  enum policy (weighted RMS + fixed geometric backtracking) over legacy
+  Damped. On KiThe and COMB-01/02 it follows the same trajectory and has
+  identical measured work counters; profiles match within floating-point
+  roundoff. A separate test-local Cantera-style core yields a lower raw KiThe
+  residual at additional work, but changes Jacobian-age/retry lifecycle too
+  and has no wall-clock or independent-defect comparison. Therefore no
+  production opt-in selector or duplicate Newton loop is added. Keep the
+  candidate only as a test-local historical comparison control; it is not a
+  runtime route and must not be copied into production without new evidence.
+- [x] **Check production adaptive refinement after the fixed-mesh gates.** The
+  existing Damped route passes TwoPoint (101 nodes, 2 refinements, 8
+  iterations), Pearson (3082, 2, 6), Grcar-Smooke (3088, 2, 6), and
+  DoublePoints (133, 2, 6). All finish Converged with finite profiles and
+  telemetry records mesh revisions/termination; DoublePoints additionally
+  records Jacobian/factor invalidation after mesh changes and completes 10
+  damping trials / 16 linear solves without panic. These validate the current
+  production route, not a candidate route; candidate adaptive integration is
+  unnecessary because the candidate was not justified on fixed meshes.
+- [x] **Close the experimental-route lifecycle explicitly.** No opt-in
+  CorrectionNewton runtime route was created. The alternate norm/search policy
+  is confined to test code, documented as a comparison control, and is not a
+  second production implementation or selector.
+- [ ] **Finish the solver gates.** Run focused Debug tests after each numerical
+  change, then the complete ignored-inclusive BVP_Damp correctness suite. After
+  correctness passes, run the BVP_Damp Release matrix and matched performance
+  gates on substantial workloads; record numerical outcomes, stage timings and
+  work counters in the Damped story documents and `test_reports`. Replace a
+  baseline only after a stable, reviewed comparison. The release/performance
+  gates are acceptance steps, not a reason to weaken tolerances or alter the
+  physical fixtures. Debug correctness is now green: the ordinary filter passes
+  350 tests and the ignored-inclusive filter passes 416 tests. The latter took
+  3620.40 seconds and includes the previously failing classic Forward test.
+  Release matrix/perf gates have not yet been run for this stabilization cycle.
+
 ## Newton Reliability Recovery Plan (2026-11-04)
 
 Active correctness/reliability investigation; production stabilization is not
@@ -10,7 +223,7 @@ physical problem. Measurements and interpretation belong in
 ### Current Scope Decision
 
 - First mirror the pinned Cantera 3.1.0 numerical core in the independent
-  `numerical::BVP_Cantera` module on a fixed mesh. Do not keep expanding the
+  `numerical::BVP_CorrectionNewton` module on a fixed mesh. Do not keep expanding the
   Damped-local candidate as if it were the standalone solver, and do not mix
   in RST-specific grid-refinement strategies while establishing parity.
 - Keep symbolic frontends, callback policies, linear-algebra backends and their
@@ -41,7 +254,7 @@ physical problem. Measurements and interpretation belong in
   symbolic frontend selection, matrix backend selection, or public backend
   configuration while implementing the reference algorithm.
 - Required order: (1) fixed-mesh `MultiNewton` contract tests in standalone
-  `BVP_Cantera`; (2) connect exactly one symbolic input path and Dense backend,
+  `BVP_CorrectionNewton`; (2) connect exactly one symbolic input path and Dense backend,
   then run the large combustion fixtures with correctness/telemetry parity;
   (3) only after those gates, decide which validated core mechanics to port to
   `BVP_Damp`; (4) validate RST refinement strategies on top of the accepted
@@ -82,15 +295,11 @@ physical problem. Measurements and interpretation belong in
   without panic: 2 refinements, 133 nodes, 6 iterations, 10 damping trials,
   and 16 linear solves. Its earlier typed `MissingResult` was another symptom
   of the incomplete Jacobian, not a lasting grid failure.
-- **Debug regression gate:** `cargo test --lib symbolic::View:: -- --test-threads=1`
-  passed 206 tests (8 ignored). The latest full `numerical::BVP_Damp::` filter
-  passed 345 tests and ignored 63, with one remaining failure:
-  `test_classic_examples::tets::test_BVP_Damp1` unwraps a missing result. Its
-  isolated run reproduces the failure; the separate correctness test with the
-  same short name passes. This classic test uses the default Forward scheme,
-  so it is outside the Trapezoid Jacobian correction and remains an open,
-  separately tracked solver/test issue. All new Trapezoid and large-fixture
-  gates pass.
+- **Debug regression gate (historical; superseded 2026-11-06):**
+  `cargo test --lib symbolic::View:: -- --test-threads=1` passed 206 tests
+  (8 ignored). An earlier ordinary BVP_Damp run had one classic Forward
+  failure; see the 2026-11-06 follow-up below for its diagnosis and the full
+  green rerun.
 - **Fixed-Jacobian local control:** Debug tests compare the actual legacy
   damping telemetry with an independent pinned-Cantera schedule calculation;
   they also verify base-state preservation after exhausted trials and a
@@ -119,7 +328,7 @@ physical problem. Measurements and interpretation belong in
   above the Cantera threshold; this rules out stale Jacobian alone as the
   source of the false acceptance.
 - [ ] **Deferred Damped production-port debt:** after the independent
-  `BVP_Cantera` solver has passed difficult combustion workloads, validate the
+  `BVP_CorrectionNewton` solver has passed difficult combustion workloads, validate the
   Cantera stopping metric's accept/fail behavior and typed nonconvergence on
   independent fixed-mesh controls and Dense/Sparse/Banded backends before any
   Cantera-core opt-in is added to production `BVP_Damp`. Do not use this item
@@ -206,16 +415,19 @@ physical problem. Measurements and interpretation belong in
   below its lower bound `-0.1`. The next Newton direction points farther out,
   yielding a negative factor. This is a floating-point boundary overshoot, not a
   packed-layout or bounds-remapping mismatch.
-- [ ] Choose a robust fraction-to-boundary implementation that guarantees the
-  representable updated value stays feasible without broad interior clipping.
+- [x] Choose a robust fraction-to-boundary implementation that guarantees the
+  representable updated value stays feasible without broad interior clipping
+  (2026-11-06). After computing the Cantera-style maximum factor, a fast
+  allocation-free feasibility scan accepts it unchanged; only a rounding-edge
+  violation triggers a binary search over representable `f64` factors. The
+  scalar regression reproduces and repairs the one-ULP lower-bound overshoot.
   Before the Jacobian fix, a trial `factor * (1 - 1e-12)` fixed this one ULP
   case but was rejected: on Pearson it still returned `NoResult` and grew work from 7 iterations / 9
   solves to 25 iterations / 206 solves. A narrower one-ULP factor reduction
   passed the scalar arithmetic test, but the integrated Pearson A/B was stopped
   at iteration 13 after the residual returned to `~4.13989e3` without clear
-  progress. Do not retain either experimental policy; the baseline factor
-  calculation remains active while a better line-search/Newton recovery is
-  investigated.
+  progress. Neither experimental policy is retained; the current guard adjusts
+  the factor only when the actual floating-point candidate would be infeasible.
 
 ### Scope And Method Contracts
 
@@ -225,11 +437,13 @@ physical problem. Measurements and interpretation belong in
 - [x] Keep Frozen/Naive simple: fixed mesh, full Newton/chord updates, supported
   Jacobian reuse strategies and optional bounds. Do not add damping-factor
   searches, automatic grid refinement, or pseudo-time integration to this route.
-- [ ] Reconcile the recently added Frozen fraction-to-boundary scaling with
+- [x] Reconcile the recently added Frozen fraction-to-boundary scaling with
   this simple-method contract: validate the full undamped candidate; if it
   violates configured bounds, return a typed failure without applying it.
   Do not silently shorten or clip the update. If feasibility-only scaling is
   desired later, discuss that explicit contract separately before retaining it.
+  Implemented 2026-11-06: Frozen accepts only a fully feasible Newton/chord
+  update and otherwise returns `BoundStepBlocked`, preserving the prior iterate.
 - [x] Treat the original 26-state KiThe problem as a mandatory acceptance case.
   Preserve RHS, BCs, physical bounds, initial guess, tolerances and original
   solver limits for the primary before/after comparison. Additional meshes,
@@ -279,16 +493,21 @@ physical problem. Measurements and interpretation belong in
   direction without allocating a negated vector; focused Debug tests cover the
   helper and a complete identity-Jacobian Newton update. The large KiThe case
   subsequently converged after the separate Trapezoid Jacobian correction.
-- [ ] Add Debug tests at both bounds for inward/outward directions, interior
+- [x] Add Debug tests at both bounds for inward/outward directions, interior
   crossings, full feasible steps and multiple limiting components. Include a
   complete scalar Newton attempt and Dense/Sparse/Banded integration coverage,
   not just standalone helper tests. Assert the accepted candidate is in bounds.
-- [ ] Validate every active iterate against configured bounds before deriving a
+  Completed 2026-11-06 with existing scalar/layout gates, one-ULP regression,
+  and the bounded large KiThe/combustion routes in the full Debug filter.
+- [x] Validate every active iterate against configured bounds before deriving a
   step fraction. A negative factor means the base state is already infeasible;
   surface this as a typed solver-state/bounds failure rather than passing a
   negative `lambda` into damping. Record the exact state/node and whether the
   infeasibility first appears at initialization, after a Newton update or after
-  mesh transfer.
+  mesh transfer. Implemented 2026-11-06: initial/prepared inputs and each live
+  iterate are checked; an out-of-range state returns typed
+  `BoundStateOutsideBounds` before callback or linear work. Non-finite values
+  remain typed `NonFiniteCallbackValue`s.
 - [ ] Re-run the unchanged large fixture after the sign correction alone.
   Attribute any outcome change to that correction, not to simultaneous changes
   of the norm, search schedule, mesh, bounds, tolerances or initial guess.
@@ -441,11 +660,38 @@ physical problem. Measurements and interpretation belong in
 - [ ] Validate Off/Counters/Timings/Detailed semantics, failure snapshots and
   bounded event logging. Match native and facade outcomes/diagnostics; preserve
   typed error sources and previously accepted results across failed retries.
+- [ ] **Establish grid-refinement correctness and value on the three canonical
+  combustion fixtures:** the unchanged 26-state KiThe case, COMB-01 and COMB-02.
+  Start each from a deliberately coarse 10-interval mesh, then exercise the
+  supported refinement strategies (TwoPoint, Pearson, Grcar-Smooke and
+  DoublePoints where applicable) with the same equations, BCs, bounds and
+  declared tolerances. Record whether each strategy reaches an acceptable
+  solution, its final mesh/refinement count and work, and independently check
+  boundary values, bounds, discrete residual/defect, invariants and reference
+  profile quality where a reference exists. Keep fixed-mesh controls separate;
+  a strategy that cannot solve a case must report a typed non-convergence rather
+  than publish a low-quality profile. Do not relax tolerances or alter the
+  physical constraints to make a strategy pass.
+- [ ] **Turn the established A/B evidence into regression alarms before Release.**
+  Strengthen the comparisons in `tests/large_native_regressions.rs` between
+  Damped Legacy, the test-only `DampedNewtonCriteria::CorrectionNewton` policy
+  and `BVP_CorrectionNewton` with assertions on solution/BC/bounds/invariant
+  quality, independently evaluated defect or residual, and the documented
+  counter relationships. Add explicit counter-contract assertions to the
+  corresponding `BVP_Damp.rs` tests against `BVP_CorrectionNewton`: protect
+  such counts as Jacobian refreshes, residual/Jacobian evaluations, accepted
+  updates, damping trials/rejections, factorizations and linear solves where
+  both APIs expose them. Pin exact counts only for deterministic fixtures and
+  stable telemetry contracts; where the algorithms intentionally differ,
+  assert documented bounds/relationships and numerical acceptance instead of
+  requiring identical trajectories. Include a diagnostic message with actual
+  and expected values so an algorithm/work change fails loudly and is easy to
+  investigate.
 
 ### F. Final Four-Stage Stabilization (No Early Baseline Refresh)
 
 - [ ] F1: run affected Release correctness tests including applicable ignored
-  tests and the E1-E3 matrix. Cover Damped, Frozen/Naive and BVP_api; run Sci
+  tests and the completed E1-E5 matrix. Cover Damped, Frozen/Naive and BVP_api; run Sci
   control/related regressions without changing its algorithm. Verify Python
   bindings/examples where bounds/error/configuration semantics are affected.
 - [ ] F2: compare compatible existing BVP performance gates before overwriting
@@ -3763,3 +4009,63 @@ recovery contracts.
 - [ ] Consider Bratu/Lane-Emden and the established Grcar/Pearson/Twopnt cases
   as additional BVP workloads only where their native fixture exposes a
   meaningful parameter and the whole sweep has a stable success region.
+
+## Bounds And Debug Filter Follow-Up (2026-11-06)
+
+- [x] Enforce a typed failure when Damped or Frozen begins an iteration with a
+  finite active state outside configured bounds; validate prepared guesses and
+  boundary values before solving. Non-finite states retain the typed
+  `NonFiniteCallbackValue` path.
+- [x] Ensure Damped applies only a representably feasible fraction-to-boundary
+  update, including the one-ULP boundary case, without clipping the state.
+- [x] Fix and document Frozen's contract: full Newton/chord update or typed
+  `BoundStepBlocked`; never silently shorten a step. Verify the old state is
+  retained on rejection.
+- [x] Diagnose `test_classic_examples::tets::test_BVP_Damp1`: five initial
+  intervals still return `NoResult` with a unit seed, while ten intervals with
+  the same seed converge. The old all-zero seed also contradicted the unit
+  endpoint values, so both fixture issues are recorded without claiming one
+  isolated cause. The test now asserts convergence and prints telemetry on
+  regression.
+- [x] Rerun the complete ordinary and ignored-inclusive Debug filters. Results
+  and bounded large-workload evidence are recorded in
+  `BVP_DAMP_STORY_CORRECTNESS.md`.
+- [ ] Complete the remaining stabilization gates: Release matrix, stable
+  performance-gate comparison and reviewed baseline update. Debug correctness
+  results do not substitute for these release/performance acceptance steps.
+- [x] Run targeted Release regressions for the changed area: crowded TwoPoint
+  selection, the full 12-case combustion refinement matrix and COMB-01/02
+  fixed-mesh A/B counter assertions all pass. This does not close the full
+  BVP_Damp Release matrix or justify a perf-gate baseline update; wait for a
+  clean source revision before those final gates.
+- [x] Add and run a 10-interval Debug matrix for the KiThe, COMB-01 and
+  COMB-02 combustion fixtures across TwoPoint, Pearson, Grcar-Smooke and
+  DoublePoints. Check typed failure publication, strict mesh growth, BCs,
+  bounds, invariants and independent trapezoid defect; record SciPy profile
+  deltas rather than hiding them behind discrete convergence.
+- [x] Fix TwoPoint's cutoff rank: select `sorted_weights[len - more]`, assert
+  all counted nonzero intervals are selected, and reject non-strict refined
+  meshes. The 10-interval test had exposed unfilled zero mesh entries when
+  `sorted_weights[more]` under-selected marked intervals.
+- [x] Strengthen the COMB-01/02 fixed-mesh A/B regression across N=32,64,128,
+  256 to assert factorization and rejected damping-trial counters as well as
+  existing iteration, Jacobian, residual, solve and trial counts.
+- [x] Localize the large aggregate SciPy profile deltas. The COMB-01 maximum is
+  flux `q` (`1.356e-2` at `x=0.9`); COMB-02 maximum is derivative `J_B`
+  (`4.616e-2` at `x=0.125`). Temperature/species max errors are respectively
+  `2.388e-3` and `7.246e-3`; the diagnostic now asserts <=1% absolute error
+  across those physical states and reports each derivative-state error.
+- [x] Probe one additional refinement for the two largest deltas. COMB-02
+  TwoPoint at 81 nodes improves all-state error `4.616e-2 -> 1.159e-2`,
+  physical-state error `7.246e-3 -> 1.826e-3`, and independent defect
+  `1.621e-7 -> 2.303e-11`. COMB-01 Pearson adds only 16 nodes and retains its
+  profile/flux delta, while temperature/species remain within 1%; treat it as
+  a stable alternative discrete branch until a model-level reference selects
+  which branch is intended, not as mesh under-resolution.
+- [ ] Confirm with the combustion-model owner that the alternate COMB-01
+  Pearson/Grcar flux branch is acceptable for the physical model. Keep the
+  numerical result and the 1% temperature/species criterion explicit; do not
+  change tolerances or grid policies without that evidence.
+- [ ] Decide whether the 26-state Pearson/Grcar diagnostic that reaches 3939
+  nodes in two refinements belongs in routine ignored Debug suites; it is
+  computationally expensive but captures a meaningful large workload.

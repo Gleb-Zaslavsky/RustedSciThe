@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.4.31"
+version = "0.4.32"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing:BVP ( Newton-Raphson frozen/damped/with collocations ), IVP( BDF, Radau, Backward Euler, LSODE, LSODA, RK45, DoPri), nonlinear equations ( Levenberg, Gavin) and more"
 author = "Gleb Zaslavsky"
@@ -140,8 +140,13 @@ name = "bvp_damp_workloads"
 harness = false
 
 [[bench]]
-name = "bvp_cantera_workloads"
+name = "bvp_correction_newton_workloads"
 harness = false
+
+[[bench]]
+name = "bvp_combustion_solver_matrix"
+harness = false
+required-features = ["perf-gates"]
 
 [[bench]]
 name = "bvp_sci_lambdify"

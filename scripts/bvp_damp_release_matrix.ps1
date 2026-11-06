@@ -36,7 +36,10 @@ $env:BVP_DAMP_BENCH_ROUTES = if ($IncludeAot) { "lambdify,aot" } else { "lambdif
 
 $results = New-Object System.Collections.Generic.List[object]
 function Invoke-BvpStep([string]$Name, [scriptblock]$Action) {
-    $technicalLog = Join-Path $technical "$Name.log"
+    # Module filters can contain `::`, which Windows interprets as an alternate
+    # data stream separator rather than as part of a regular file name.
+    $safeLogName = $Name -replace '[^A-Za-z0-9_.-]', '_'
+    $technicalLog = Join-Path $technical "$safeLogName.log"
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $exitCode = 0
     try {
@@ -95,6 +98,10 @@ if ($IncludeIgnoredStories) {
 
 Invoke-BvpStep "compact_workload_matrix" {
     cargo bench --no-default-features --bench bvp_damp_workloads -- --noplot
+}
+
+Invoke-BvpStep "combustion_solver_family_matrix" {
+    cargo bench --features perf-gates --bench bvp_combustion_solver_matrix -- --noplot
 }
 
 if ($IncludeCriterion) {

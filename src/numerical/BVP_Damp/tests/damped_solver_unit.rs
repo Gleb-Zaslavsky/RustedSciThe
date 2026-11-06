@@ -229,6 +229,35 @@ fn damped_newton_bounds_allow_a_correction_toward_the_feasible_interior() {
 }
 
 #[test]
+fn damped_rejects_an_active_iterate_outside_bounds_as_typed_error() {
+    let mut solver = sparse_surface_test_solver();
+    solver.set_bvp_telemetry_mode(BvpTelemetryMode::Counters);
+    let size = solver.values.len() * solver.n_steps;
+    solver.bounds_vec = vec![(0.0, 1.0); size];
+    solver.y = Box::new(DVector::from_element(size, 1.0001));
+
+    let error = solver
+        .try_damped_step()
+        .expect_err("an already infeasible base iterate must not enter the Newton solve");
+    assert!(matches!(
+        error,
+        BvpBackendIntegrationError::BoundStateOutsideBounds {
+            iteration: 0,
+            index: 0
+        }
+    ));
+    assert!(
+        solver
+            .get_statistics()
+            .telemetry
+            .counters
+            .linear_solves
+            == 0,
+        "bounds validation must happen before linear algebra"
+    );
+}
+
+#[test]
 fn try_calc_residual_surfaces_callback_shape_mismatch() {
     let mut solver = sparse_surface_test_solver();
     let expected_len = solver.y.len();

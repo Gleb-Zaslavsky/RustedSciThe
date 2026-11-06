@@ -7,11 +7,11 @@
 //!   into other Rust programs
 
 use crate::command_interpreter::task_parser_bvp::{
-    parse_bvp_task_from_str, run_bvp_task, BvpTaskError, BvpTaskRunResult, BvpTaskSpec,
+    BvpTaskError, BvpTaskRunResult, BvpTaskSpec, parse_bvp_task_from_str, run_bvp_task,
 };
 use crate::command_interpreter::task_parser_ivp::{
-    parse_ivp_task_from_str, run_ivp_task, IvpMethodSpec, IvpTaskError, IvpTaskRunResult,
-    IvpTaskSpec, IvpTelemetryModeSpec, Lsode2TaskExecutionSpec,
+    IvpMethodSpec, IvpTaskError, IvpTaskRunResult, IvpTaskSpec, IvpTelemetryModeSpec,
+    Lsode2TaskExecutionSpec, parse_ivp_task_from_str, run_ivp_task,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -589,8 +589,15 @@ pub fn detect_task_kind_from_str(input: &str) -> Result<TaskDocumentKind, TaskRu
         let solver = value.trim().to_ascii_lowercase();
         return match solver.as_str() {
             "ivp" => Ok(TaskDocumentKind::Ivp),
-            "bvp" | "bvp_damp" | "bvp_damped" | "bvp_sci" | "bvpsci" | "bvp_scipy"
-            | "scipy_bvp" | "bvp_cantera" | "cantera" => Ok(TaskDocumentKind::Bvp),
+            "bvp"
+            | "bvp_damp"
+            | "bvp_damped"
+            | "bvp_sci"
+            | "bvpsci"
+            | "bvp_scipy"
+            | "scipy_bvp"
+            | "bvp_correction_newton"
+            | "correction_newton" => Ok(TaskDocumentKind::Bvp),
             _ => Err(TaskRunnerError::UnsupportedSolver { value: solver }),
         };
     }
@@ -687,7 +694,9 @@ fn render_bvp_preview(spec: &BvpTaskSpec) -> String {
     let family = match spec.solver.family {
         crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Damp => "BVP_Damp",
         crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => "BVP_sci",
-        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera => "BVP_Cantera",
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::CorrectionNewton => {
+            "BVP_CorrectionNewton"
+        }
     };
     out.push_str(&format!(
         "solver={family}, layout={:?}, arg={}, t0={}, t_end={}, n_steps={}\n",
@@ -700,9 +709,9 @@ fn render_bvp_preview(spec: &BvpTaskSpec) -> String {
             spec.solver.strategy, spec.solver.scheme
         ));
     } else if spec.solver.family
-        == crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera
+        == crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::CorrectionNewton
     {
-        out.push_str(&render_cantera_settings(spec));
+        out.push_str(&render_correction_newton_settings(spec));
     } else {
         out.push_str(&format!(
             "frontend={:?}, execution={:?}, callback_policy={:?}, tolerance={}, max_nodes={}\n",
@@ -913,7 +922,9 @@ fn render_bvp_check(spec: &BvpTaskSpec) -> String {
     let family = match spec.solver.family {
         crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Damp => "BVP_Damp",
         crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci => "BVP_sci",
-        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera => "BVP_Cantera",
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::CorrectionNewton => {
+            "BVP_CorrectionNewton"
+        }
     };
     let capabilities =
         crate::command_interpreter::task_parser_bvp::bvp_solver_capabilities(spec.solver.family);
@@ -945,8 +956,8 @@ fn render_bvp_check(spec: &BvpTaskSpec) -> String {
         out.push_str("continuation: none\n");
     }
     match spec.solver.family {
-        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Cantera => {
-            out.push_str(&render_cantera_settings(spec));
+        crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::CorrectionNewton => {
+            out.push_str(&render_correction_newton_settings(spec));
         }
         crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Damp => {
             out.push_str(&format!(
@@ -1054,16 +1065,26 @@ fn render_bvp_check(spec: &BvpTaskSpec) -> String {
     out
 }
 
-fn render_cantera_settings(spec: &BvpTaskSpec) -> String {
-    match spec.solver_options.cantera.as_ref().map(|options| options.build_options(&spec.solver)) {
+fn render_correction_newton_settings(spec: &BvpTaskSpec) -> String {
+    match spec
+        .solver_options
+        .correction_newton
+        .as_ref()
+        .map(|options| options.build_options(&spec.solver))
+    {
         Some(Ok(options)) => format!(
             "symbolic_frontend={:?}, execution={:?}, fixed_mesh_intervals={}, absolute_tolerance={}, default_relative_tolerance={}, max_iterations={}, max_jacobian_age={}, max_damping_trials={}, telemetry={:?}\n",
-            options.symbolic_frontend, options.symbolic_execution, spec.mesh.n_steps,
-            options.absolute_tolerance, options.default_relative_tolerance,
-            options.max_iterations, options.max_jacobian_age, options.max_damping_trials,
+            options.symbolic_frontend,
+            options.symbolic_execution,
+            spec.mesh.n_steps,
+            options.absolute_tolerance,
+            options.default_relative_tolerance,
+            options.max_iterations,
+            options.max_jacobian_age,
+            options.max_damping_trials,
             options.telemetry_mode,
         ),
-        _ => "Cantera settings are invalid\n".into(),
+        _ => "CorrectionNewton settings are invalid\n".into(),
     }
 }
 

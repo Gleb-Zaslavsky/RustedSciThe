@@ -7,8 +7,9 @@ pub struct SolverParams {
     pub max_jac: Option<usize>,
     /// Maximum damping trials per Newton step (default: 7; Cantera MultiNewton default)
     pub max_damp_iter: Option<usize>,
-    /// Legacy damping exponent offset. On rejection `k`, the current route
-    /// applies `lambda /= 2^(k + damp_factor)` (default: 0.5).
+    /// Legacy damping exponent offset. On rejection `k`, the legacy Newton
+    /// policy applies `lambda /= 2^(k + damp_factor)` (default: 0.5). The
+    /// CorrectionNewton candidate uses fixed `lambda /= sqrt(2)` and ignores it.
     pub damp_factor: Option<f64>,
     /// Adaptive grid refinement configuration
     pub adaptive: Option<AdaptiveGridConfig>,

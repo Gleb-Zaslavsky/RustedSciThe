@@ -1058,6 +1058,20 @@ impl NRBVP {
                 index,
             });
         }
+        if let Some(bounds) = &self.Bounds {
+            for (row, state) in self.values.iter().enumerate() {
+                let (lower, upper) = bounds[state];
+                for column in 0..iterate.ncols() {
+                    let value = iterate[(row, column)];
+                    if value < lower || value > upper {
+                        return Err(BvpBackendIntegrationError::BoundStateOutsideBounds {
+                            iteration: self.telemetry_counters.iterations() as usize,
+                            index: column * self.values.len() + row,
+                        });
+                    }
+                }
+            }
+        }
 
         self.initial_guess = iterate;
         self.result = None;

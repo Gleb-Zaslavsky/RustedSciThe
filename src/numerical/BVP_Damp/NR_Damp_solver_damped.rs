@@ -54,8 +54,8 @@ use crate::numerical::BVP_Damp::BVP_utils::{
     CustomTimer, construct_full_solution, elapsed_time, extract_unknown_variables, task_check_mem,
 };
 use crate::numerical::BVP_Damp::BVP_utils_damped::{
-    bound_step_Cantera2_with_update_sign_and_limit, convergence_condition,
-    if_initial_guess_inside_bounds, jac_recalc,
+    bound_step_Cantera2_with_update_sign_and_limit, convergence_condition, feasible_update_factor,
+    first_bound_violation, if_initial_guess_inside_bounds, jac_recalc,
 };
 use crate::numerical::BVP_Damp::factor_runtime::{
     OwnedLinearFactorRuntime, prepare_factor_owner_runtime,

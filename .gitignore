@@ -87,6 +87,8 @@
 !/bindings/python/**/*.py
 !/src/somelinalg/TODO.md
 !/src/numerical/BVP_api/TODO.md
+!/src/numerical/BVP_CorrectionNewton/TODO.md
+!/examples/README_correction_newton_continuation.md
 /bindings/python/**/__pycache__/
 /bindings/python/**/*.py[cod]
 
@@ -173,3 +175,9 @@
 /src/somelinalg/sparse_lu_reference/**/*.egg-info/
 /src/somelinalg/sparse_lu_reference/.venv/
 /src/somelinalg/sparse_lu_reference/venv/
+
+# Independent frozen references for the BVP_CorrectionNewton stiff-combustion gates.
+!/scripts/bvp_correction_newton_stiff_combustion_reference.py
+!/src/numerical/BVP_CorrectionNewton/reference/README.md
+!/src/numerical/BVP_CorrectionNewton/reference/comb01_scipy.csv
+!/src/numerical/BVP_CorrectionNewton/reference/comb02_scipy.csv

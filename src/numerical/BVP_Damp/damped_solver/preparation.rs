@@ -202,6 +202,9 @@ impl NRBVP {
             generated_backend_selected_backend: None,
             generated_backend_runtime_diagnostics: HashMap::new(),
             telemetry_counters: BvpTelemetryRecorder::default(),
+            newton_criteria: DampedNewtonCriteria::Legacy,
+            newton_full_state_positions: Vec::new(),
+            newton_component_sum_scratch: Vec::new(),
             generation_telemetry: None,
             atom_discretization_telemetry: None,
             legacy_lambdify_telemetry: None,
@@ -1233,6 +1236,18 @@ impl NRBVP {
                         ));
                     }
                 }
+            }
+            if self
+                .BorderConditions
+                .get(name)
+                .into_iter()
+                .flatten()
+                .any(|(_, value)| !value.is_finite() || *value < lower || *value > upper)
+            {
+                return Err(invalid_problem(
+                    "boundary_conditions",
+                    format!("boundary value for {name} lies outside [{lower}, {upper}]"),
+                ));
             }
         }
         let rel_tolerance = self.rel_tolerance.as_ref().ok_or_else(|| {

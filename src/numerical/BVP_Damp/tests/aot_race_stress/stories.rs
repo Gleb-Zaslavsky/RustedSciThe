@@ -1186,15 +1186,18 @@ fn run_combustion_3000_banded_isolated_stress_story(
         let solution = solution
             .as_ref()
             .expect("isolated stress child should provide its converged solution");
-        println!("{ISOLATED_RACE_PID_MARKER}\t{}", std::process::id());
-        println!(
+        emit_isolated_race_protocol_line(format!(
+            "{ISOLATED_RACE_PID_MARKER}\t{}",
+            std::process::id()
+        ));
+        emit_isolated_race_protocol_line(format!(
             "{ISOLATED_RACE_ROW_MARKER}\t{}",
             encode_isolated_race_row(&row)
-        );
-        println!(
+        ));
+        emit_isolated_race_protocol_line(format!(
             "{ISOLATED_RACE_SOLUTION_MARKER}\t{}",
             encode_isolated_solution(solution)
-        );
+        ));
         return;
     }
 
@@ -1422,15 +1425,18 @@ fn run_combustion_1000_symbolic_frontend_honest_wall_clock_table(
         let solution = solution
             .as_ref()
             .expect("isolated symbolic-frontend child should provide its converged solution");
-        println!("{ISOLATED_RACE_PID_MARKER}\t{}", std::process::id());
-        println!(
+        emit_isolated_race_protocol_line(format!(
+            "{ISOLATED_RACE_PID_MARKER}\t{}",
+            std::process::id()
+        ));
+        emit_isolated_race_protocol_line(format!(
             "{ISOLATED_RACE_ROW_MARKER}\t{}",
             encode_isolated_race_row(&row)
-        );
-        println!(
+        ));
+        emit_isolated_race_protocol_line(format!(
             "{ISOLATED_RACE_SOLUTION_MARKER}\t{}",
             encode_isolated_solution(solution)
-        );
+        ));
         return;
     }
 
@@ -1513,6 +1519,14 @@ fn run_combustion_1000_symbolic_frontend_honest_wall_clock_table(
             .all(|row| row.post_build_symbolic_jacobian_ms.mean.is_nan()),
         "fresh AOT rebinding must not rebuild either symbolic frontend after compilation"
     );
+}
+
+fn emit_isolated_race_protocol_line(line: String) {
+    let mut stdout = io::stdout().lock();
+    io::Write::write_all(&mut stdout, line.as_bytes())
+        .expect("isolated race protocol should write to stdout");
+    io::Write::write_all(&mut stdout, b"\n")
+        .expect("isolated race protocol should terminate its line");
 }
 
 #[test]

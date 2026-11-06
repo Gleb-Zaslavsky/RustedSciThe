@@ -1381,6 +1381,8 @@ pub enum BvpBackendIntegrationError {
     NonFiniteCallbackValue { stage: String, index: usize },
     /// A configured BVP state bound leaves no admissible Frozen Newton step.
     BoundStepBlocked { iteration: usize },
+    /// The current packed Newton iterate is already outside a configured bound.
+    BoundStateOutsideBounds { iteration: usize, index: usize },
     /// A prepared solve was requested after a problem input changed. The caller
     /// must regenerate the residual/Jacobian callbacks before reusing the
     /// prepared-solver entry point.
@@ -1491,6 +1493,10 @@ impl fmt::Display for BvpBackendIntegrationError {
             Self::BoundStepBlocked { iteration } => write!(
                 f,
                 "Frozen BVP bounds block the Newton step at iteration {iteration}"
+            ),
+            Self::BoundStateOutsideBounds { iteration, index } => write!(
+                f,
+                "BVP Newton iterate at iteration {iteration}, packed index {index}, is outside configured bounds"
             ),
             Self::PreparedRuntimeInvalidated { reason } => {
                 write!(f, "prepared BVP runtime invalidated: {reason}")

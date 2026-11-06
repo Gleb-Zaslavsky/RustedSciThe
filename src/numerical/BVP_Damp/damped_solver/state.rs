@@ -4,6 +4,15 @@ use crate::numerical::logging::{
 
 use super::BVP_utils::checkmem;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DampedNewtonCriteria {
+    /// Historical Euclidean correction norm and configurable reduction schedule.
+    #[default]
+    Legacy,
+    /// CorrectionNewton's component-scaled full-grid RMS and fixed sqrt(2) search.
+    CorrectionNewton,
+}
+
 /// Main solver structure for damped Newton-Raphson method
 ///
 /// Contains all problem parameters, solution state, and solver configuration.
@@ -73,6 +82,12 @@ pub struct NRBVP {
     /// when statistics are requested, outside callback hot paths.
     aot_telemetry: Option<BvpAotTelemetry>,
     telemetry_counters: BvpTelemetryRecorder,
+    /// Candidate Newton acceptance policy; production remains on Legacy until A/B gates pass.
+    pub(crate) newton_criteria: DampedNewtonCriteria,
+    /// Packed-index to full node-major index mapping for the candidate RMS metric.
+    pub(crate) newton_full_state_positions: Vec<usize>,
+    /// Reused component sums for candidate weighted-RMS evaluations.
+    pub(crate) newton_component_sum_scratch: Vec<f64>,
     generation_telemetry: Option<BvpGenerationTelemetrySnapshot>,
     atom_discretization_telemetry:
         Option<crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot>,
@@ -107,6 +122,8 @@ impl ApplyDampedGeneratedSolverState for NRBVP {
         self.variable_string = state.variable_string;
         self.bandwidth = state.bandwidth;
         self.BC_position_and_value = state.bc_position_and_value;
+        self.newton_full_state_positions.clear();
+        self.newton_component_sum_scratch.clear();
         self.generated_backend_selected_backend = Some(state.selected_backend);
         let backend_fallback = matches!(
             self.generated_backend_config

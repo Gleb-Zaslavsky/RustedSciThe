@@ -1,20 +1,20 @@
 # BVP_api: Hybrid Client Settings And Full-Fidelity Route Contract
 
-## Cantera route onboarding (2026-11-05)
+## CorrectionNewton route onboarding (2026-11-05)
 
 ### Parameter continuation and document clients
 
-- [x] Delegate ordered Cantera parameter loops to the native solver; publish
+- [x] Delegate ordered CorrectionNewton parameter loops to the native solver; publish
   only successful full-grid profiles and retain per-point typed failures and
   partial telemetry. A failed point must never supply the next guess.
 - [x] Cover last-success checkpoint restoration, all-failed/invalid loops,
   parameter ordering, facade postprocessing and Python report parity in Debug.
-- [x] Support Cantera in both full task documents and settings-only hybrid
+- [x] Support CorrectionNewton in both full task documents and settings-only hybrid
   documents without coupling client equations to the settings parser.
 - [x] Add combustion-like and Bratu parameter-continuation examples in Rust
   and Python, with honest model scope, bounds, output shapes and failure policy.
 
-- [x] Add an explicit Cantera variant to `BvpSolverSettings`/
+- [x] Add an explicit CorrectionNewton variant to `BvpSolverSettings`/
   `BvpSolverConfig` and route it through the existing `Bvp_api`; no separate
   facade is introduced. Preserve the native report, build the common node-major
   profile only after successful solve, and expose the native telemetry snapshot.
@@ -22,15 +22,15 @@
   binding/rebinding is supported; mesh restart remains explicitly unsupported.
 - [x] Expose route-tagged partial telemetry without conflating an unattempted
   solve with a zero-cost measured solve. Reject facade `Timings`-only for
-  Cantera because its native `Timings` mode also collects counters; `Detailed`
+  CorrectionNewton because its native `Timings` mode also collects counters; `Detailed`
   maps to its combined native mode.
-- [x] Add a basic facade contract test for Cantera routing, full-grid result
+- [x] Add a basic facade contract test for CorrectionNewton routing, full-grid result
   reconstruction, postprocessing, native report and telemetry; add a runnable
   Rust example and document current pilot limitations in both guides.
-- [x] Add native Cantera continuation, including failed-point retention,
+- [x] Add native CorrectionNewton continuation, including failed-point retention,
   last-success guess selection, exact entry rollback when all points fail,
   callback/AOT reuse, per-point telemetry, and restoration of the last success.
-- [x] Add the Cantera route to full task-document parsing and the hybrid
+- [x] Add the CorrectionNewton route to full task-document parsing and the hybrid
   settings-only parser; the latter accepts solver settings without requiring
   client equations, while full task execution retains typed capability errors.
 - [x] Add Python facade loop result types, typed point errors, telemetry maps,
@@ -38,7 +38,7 @@
   Both 10-point example sweeps validate endpoint constraints and the discrete
   trapezoid residual; Bratu is additionally checked against its analytic lower
   branch. Python tests cover both frontends and Off/Counters/Detailed modes.
-- [x] Add the parser and continuation examples to the Cantera release matrix.
+- [x] Add the parser and continuation examples to the CorrectionNewton release matrix.
 - [ ] Complete clean-source repeated perf-gate record/compare for the new
   parameter-loop workload before recording or replacing its baseline.
 - [x] Add multi-state facade parity and retry-lifecycle tests, including

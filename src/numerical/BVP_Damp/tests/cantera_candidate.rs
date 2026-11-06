@@ -134,7 +134,7 @@ fn solve_fixed_mesh_with_controls(
             age = 0;
             force_jacobian = false;
         }
-        let (correction, _, _, _) = solver
+        let (correction, _, _, _, _) = solver
             .try_step_with_linear_telemetry(solver.p, &*solver.y)
             .map_err(|error| format!("base correction: {error:?}"))?;
         report.iterations += 1;
@@ -163,7 +163,7 @@ fn solve_fixed_mesh_with_controls(
             for trial_index in 0..max_trials {
                 let scaled = correction.mul_float(alpha);
                 let trial = &*solver.y - &*scaled;
-                let (next, _, _, _) = solver
+                let (next, _, _, _, _) = solver
                     .try_step_with_linear_telemetry(solver.p, &*trial)
                     .map_err(|error| format!("trial correction: {error:?}"))?;
                 report.trials += 1;

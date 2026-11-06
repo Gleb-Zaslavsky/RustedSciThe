@@ -3992,10 +3992,10 @@ def test_bvp_api_typed_request_builds_native_sci_route_and_keeps_telemetry():
     assert telemetry["timings_ms"] == {}
 
 
-def test_bvp_api_cantera_route_exposes_frontend_backend_and_native_telemetry():
+def test_bvp_api_correction_newton_route_exposes_frontend_backend_and_native_telemetry():
     y = Expr.variable("y")
     rate = Expr.variable("rate")
-    request = BvpSolverRequest.cantera(
+    request = BvpSolverRequest.correction_newton(
         [-rate * y],
         ["y"],
         "x",
@@ -4013,9 +4013,9 @@ def test_bvp_api_cantera_route_exposes_frontend_backend_and_native_telemetry():
         external_parameter_values=[0.5],
     )
     solver = request.prepare()
-    assert solver.route == "cantera"
+    assert solver.route == "correction_newton"
     solution = solver.solve()
-    assert solution.route == "cantera"
+    assert solution.route == "correction_newton"
     assert solution.values_array().shape == (17, 1)
     assert solution.values()[0][0] == pytest.approx(1.0, abs=1e-12)
     first_endpoint = solution.values()[-1][0]
@@ -4023,16 +4023,16 @@ def test_bvp_api_cantera_route_exposes_frontend_backend_and_native_telemetry():
     assert rebound.values()[-1][0] == pytest.approx(math.exp(-1.0), abs=2e-3)
     assert rebound.values()[-1][0] < first_endpoint
     telemetry = solver.telemetry_snapshot()
-    assert telemetry["route"] == "cantera"
+    assert telemetry["route"] == "correction_newton"
     assert telemetry["mode"] == "timings"
     assert telemetry["counters"]["jacobian_evaluations"] >= 1
     assert "factorization" in telemetry["timings_ms"]
 
 
-def test_bvp_api_cantera_rejects_unsupported_parallel_policy():
+def test_bvp_api_correction_newton_rejects_unsupported_parallel_policy():
     y = Expr.variable("y")
     with pytest.raises(UnsupportedOptionError, match="execution_policy='sequential'"):
-        BvpSolverRequest.cantera(
+        BvpSolverRequest.correction_newton(
             [-y],
             ["y"],
             "x",

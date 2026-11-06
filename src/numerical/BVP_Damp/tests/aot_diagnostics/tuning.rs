@@ -486,16 +486,27 @@ fn run_isolated_tuning_child(index: usize, n_steps: usize) {
         .get_result()
         .expect("isolated cold tuning variant should produce a solution");
     let metrics = isolated_cold_metrics_from_solver(&solver);
-    println!("{ISOLATED_TUNING_PID_MARKER}\t{}", std::process::id());
-    println!("{ISOLATED_TUNING_TIME_MARKER}\t{elapsed_ms}");
-    println!(
+    emit_isolated_tuning_protocol_line(format!(
+        "{ISOLATED_TUNING_PID_MARKER}\t{}",
+        std::process::id()
+    ));
+    emit_isolated_tuning_protocol_line(format!("{ISOLATED_TUNING_TIME_MARKER}\t{elapsed_ms}"));
+    emit_isolated_tuning_protocol_line(format!(
         "{ISOLATED_TUNING_METRICS_MARKER}\t{}",
         encode_isolated_cold_metrics(&metrics)
-    );
-    println!(
+    ));
+    emit_isolated_tuning_protocol_line(format!(
         "{ISOLATED_TUNING_SOLUTION_MARKER}\t{}",
         encode_isolated_tuning_solution(&solution)
-    );
+    ));
+}
+
+fn emit_isolated_tuning_protocol_line(line: String) {
+    let mut stdout = std::io::stdout().lock();
+    std::io::Write::write_all(&mut stdout, line.as_bytes())
+        .expect("isolated tuning protocol should write to stdout");
+    std::io::Write::write_all(&mut stdout, b"\n")
+        .expect("isolated tuning protocol should terminate its line");
 }
 
 fn solve_isolated_cold_tuning_variant_for(

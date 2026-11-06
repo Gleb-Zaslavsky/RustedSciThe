@@ -9,32 +9,32 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use crate::numerical::logging::SolverLogLevel;
-use crate::numerical::BVP_Cantera::CanteraExprBvpProblem;
-use crate::numerical::BVP_Cantera::{
-    CanteraExprBvpOptions, CanteraNewtonSolver, CanteraParameterLoopOutcome,
-    CanteraParameterLoopReport, CanteraSolveReport, CanteraSolverError, CanteraTelemetryMode,
-    CanteraTelemetrySnapshot,
+use crate::Utils::postprocessing::{
+    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
 };
-use crate::numerical::BVP_Damp::telemetry::BvpTelemetrySnapshot;
+use crate::numerical::BVP_CorrectionNewton::CorrectionNewtonProblem;
+use crate::numerical::BVP_CorrectionNewton::{
+    CorrectionNewtonOptions, CorrectionNewtonParameterLoopOutcome,
+    CorrectionNewtonParameterLoopReport, CorrectionNewtonSolveReport, CorrectionNewtonSolver,
+    CorrectionNewtonSolverError, CorrectionNewtonTelemetryMode, CorrectionNewtonTelemetrySnapshot,
+};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
     DampedParameterLoopReport, DampedSolverOptions, NRBVP as DampedSolver,
 };
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::{
     FrozenParameterLoopReport, FrozenSolverOptions, NRBVP as FrozenSolver,
 };
+use crate::numerical::BVP_Damp::telemetry::BvpTelemetrySnapshot;
 use crate::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciNewError, BvpSciOptions, BvpSciParameterLoopReport,
     BvpSciSolution, BvpSciSolver, BvpSciSparseFactorization as NativeBvpSciSparseFactorization,
     BvpSciTelemetryMode, BvpSciTelemetrySnapshot,
 };
+use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
 use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
-use crate::Utils::postprocessing::{
-    PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
-};
 use nalgebra::{DMatrix, DVector};
 use thiserror::Error;
 
@@ -216,11 +216,11 @@ impl BvpProblem {
     }
 
     /// Declare fixed symbolic inputs before constructing a BVP_sci or
-    /// BVP_Cantera solver.
+    /// BVP_CorrectionNewton solver.
     ///
     /// This is separate from [`BvpSciFreeParameters`], which adds unknowns to
     /// the Newton system. On BVP_sci, the declared evaluator schema is prepared
-    /// once and its parameter loop supplies successive values. BVP_Cantera
+    /// once and its parameter loop supplies successive values. BVP_CorrectionNewton
     /// supports binding/rebinding the same fixed-input schema but not a loop.
     pub fn with_external_parameters(
         mut self,
@@ -324,9 +324,9 @@ impl BvpProblem {
 
 /// Solver-specific native configuration. No shared lossy option bag is used.
 pub enum BvpSolverConfig {
-    /// Fixed-mesh Cantera-derived Newton core using ExprLegacy/Lambdify.
-    Cantera {
-        options: CanteraExprBvpOptions,
+    /// Fixed-mesh damped correction-Newton core using ExprLegacy/Lambdify.
+    CorrectionNewton {
+        options: CorrectionNewtonOptions,
         /// State-major initial guess with one value per non-fixed node.
         initial_guess: DMatrix<f64>,
     },
@@ -368,8 +368,8 @@ pub enum BvpSolverConfig {
 /// [`BvpSolverConfig`]. Native option structs are retained intact; this type is
 /// not a normalized, lossy option bag.
 pub enum BvpSolverSettings {
-    /// Fixed-mesh Cantera-derived Newton route with its native options.
-    Cantera(CanteraExprBvpOptions),
+    /// Fixed-mesh correction-Newton route with its native options.
+    CorrectionNewton(CorrectionNewtonOptions),
     /// Damped Newton route with its complete native options.
     Damped(DampedSolverOptions),
     /// Frozen/Naive route with its complete native options.
@@ -409,6 +409,18 @@ pub enum BvpSettingsError {
 }
 
 impl BvpSolverSettings {
+    /// Applies the shared text-logging policy before attaching problem data.
+    /// Logging defaults to `Off`; enabling it uses the crate-wide logger.
+    pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
+        match &mut self {
+            Self::CorrectionNewton(options) => options.logging_level = level,
+            Self::Damped(options) => *options = options.clone().with_logging_level(level),
+            Self::Frozen(options) => *options = options.clone().with_logging_level(level),
+            Self::Sci { options, .. } => *options = options.clone().with_logging_level(level),
+        }
+        self
+    }
+
     /// Apply one telemetry policy without conflating logging or decision traces.
     ///
     /// BVP_Damp AOT callback telemetry has no Timings-only mode. Damped/Frozen
@@ -420,19 +432,19 @@ impl BvpSolverSettings {
         mode: BvpApiTelemetryMode,
     ) -> Result<Self, BvpSettingsError> {
         match &mut self {
-            Self::Cantera(options) => {
+            Self::CorrectionNewton(options) => {
                 if mode == BvpApiTelemetryMode::Timings {
                     return Err(BvpSettingsError::UnsupportedTelemetry {
-                        solver: "BVP_Cantera",
+                        solver: "BVP_CorrectionNewton",
                         mode,
-                        reason: "Cantera currently collects counters together with timings; request Detailed instead",
+                        reason: "CorrectionNewton currently collects counters together with timings; request Detailed instead",
                     });
                 }
                 options.telemetry_mode = match mode {
-                    BvpApiTelemetryMode::Off => CanteraTelemetryMode::Off,
-                    BvpApiTelemetryMode::Counters => CanteraTelemetryMode::Counters,
+                    BvpApiTelemetryMode::Off => CorrectionNewtonTelemetryMode::Off,
+                    BvpApiTelemetryMode::Counters => CorrectionNewtonTelemetryMode::Counters,
                     BvpApiTelemetryMode::Timings | BvpApiTelemetryMode::Detailed => {
-                        CanteraTelemetryMode::Timings
+                        CorrectionNewtonTelemetryMode::Timings
                     }
                 };
             }
@@ -566,7 +578,7 @@ impl BvpSolverSettings {
     /// and Sci expect one column per mesh node.
     pub fn with_initial_guess(self, initial_guess: DMatrix<f64>) -> BvpSolverConfig {
         match self {
-            Self::Cantera(options) => BvpSolverConfig::Cantera {
+            Self::CorrectionNewton(options) => BvpSolverConfig::CorrectionNewton {
                 options,
                 initial_guess,
             },
@@ -597,7 +609,7 @@ impl BvpSolverConfig {
     /// Native telemetry and bounded typed decision traces remain independent.
     pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
         match &mut self {
-            Self::Cantera { options, .. } => options.logging_level = level,
+            Self::CorrectionNewton { options, .. } => options.logging_level = level,
             Self::Damped { options, .. } => {
                 *options = options.clone().with_logging_level(level);
             }
@@ -615,8 +627,8 @@ impl BvpSolverConfig {
 /// Native solver retained by the facade so callers can reach solver-specific
 /// lifecycle and diagnostics without those details being erased.
 pub enum BvpNativeSolver {
-    /// Standalone fixed-mesh Cantera Newton solver.
-    Cantera(CanteraNewtonSolver),
+    /// Standalone fixed-mesh CorrectionNewton Newton solver.
+    CorrectionNewton(CorrectionNewtonSolver),
     /// Native BVP_Damp damped Newton solver.
     Damped(DampedSolver),
     /// Native BVP_Damp Frozen/Naive solver.
@@ -628,11 +640,11 @@ pub enum BvpNativeSolver {
 /// One successful native result, preserving the route's result contract.
 #[derive(Clone, Debug)]
 pub enum BvpSolution {
-    /// Cantera fixed-mesh Newton result with its complete native report.
-    Cantera {
+    /// CorrectionNewton fixed-mesh Newton result with its complete native report.
+    CorrectionNewton {
         mesh: DVector<f64>,
         values: DMatrix<f64>,
-        report: CanteraSolveReport,
+        report: CorrectionNewtonSolveReport,
     },
     /// Damped result; values are node-major (`mesh.len() x state_count`).
     Damped {
@@ -665,7 +677,7 @@ impl<'a> BvpSolutionView<'a> {
     /// Borrow the actual mesh retained by the selected solver.
     pub fn mesh(&self) -> &'a [f64] {
         match self.solution {
-            BvpSolution::Cantera { mesh, .. } => mesh.as_slice(),
+            BvpSolution::CorrectionNewton { mesh, .. } => mesh.as_slice(),
             BvpSolution::Damped { mesh, .. } | BvpSolution::Frozen { mesh, .. } => mesh.as_slice(),
             BvpSolution::Sci(solution) => &solution.x,
         }
@@ -674,7 +686,7 @@ impl<'a> BvpSolutionView<'a> {
     /// Number of state variables represented in each mesh row.
     pub fn state_count(&self) -> usize {
         match self.solution {
-            BvpSolution::Cantera { values, .. } => values.ncols(),
+            BvpSolution::CorrectionNewton { values, .. } => values.ncols(),
             BvpSolution::Damped { values, .. } | BvpSolution::Frozen { values, .. } => {
                 values.ncols()
             }
@@ -689,7 +701,7 @@ impl<'a> BvpSolutionView<'a> {
             return None;
         }
         Some(match self.solution {
-            BvpSolution::Cantera { values, .. } => values[(node, state)],
+            BvpSolution::CorrectionNewton { values, .. } => values[(node, state)],
             BvpSolution::Damped { values, .. } | BvpSolution::Frozen { values, .. } => {
                 values[(node, state)]
             }
@@ -702,8 +714,8 @@ impl<'a> BvpSolutionView<'a> {
 /// original fields, scopes, units, and absent-versus-zero semantics.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BvpSolverTelemetrySnapshot {
-    /// Cantera core counters/timings and their native scopes.
-    Cantera(Option<CanteraTelemetrySnapshot>),
+    /// CorrectionNewton core counters/timings and their native scopes.
+    CorrectionNewton(Option<CorrectionNewtonTelemetrySnapshot>),
     /// Damped Newton counters, timings, scopes, storage, and logging trace.
     Damped(BvpTelemetrySnapshot),
     /// Frozen/Naive counters, timings, scopes, storage, and logging trace.
@@ -715,8 +727,8 @@ pub enum BvpSolverTelemetrySnapshot {
 /// Ordered continuation output retaining the route's complete native report.
 #[derive(Debug)]
 pub enum BvpParameterLoopReport {
-    /// Fixed-mesh Cantera outcomes; failed points never become the next guess.
-    Cantera(CanteraParameterLoopReport),
+    /// Fixed-mesh CorrectionNewton outcomes; failed points never become the next guess.
+    CorrectionNewton(CorrectionNewtonParameterLoopReport),
     /// Adaptive Damped loop outcomes, meshes and typed errors.
     Damped(DampedParameterLoopReport),
     /// Frozen/Naive loop outcomes and telemetry snapshots.
@@ -741,8 +753,8 @@ pub enum BvpApiError {
     Frozen(#[source] BvpBackendIntegrationError),
     #[error("BVP_sci route failed")]
     Sci(#[from] BvpSciNewError),
-    #[error("Cantera BVP route failed")]
-    Cantera(#[from] CanteraSolverError),
+    #[error("CorrectionNewton BVP route failed")]
+    CorrectionNewton(#[from] CorrectionNewtonSolverError),
     #[error("postprocessing failed for {solver}")]
     Postprocessing {
         solver: &'static str,
@@ -790,7 +802,7 @@ pub struct BvpSolver {
     problem: BvpProblem,
     native: BvpNativeSolver,
     last_solution: Option<BvpSolution>,
-    last_cantera_telemetry: Option<CanteraTelemetrySnapshot>,
+    last_correction_newton_telemetry: Option<CorrectionNewtonTelemetrySnapshot>,
 }
 
 impl BvpSolver {
@@ -798,13 +810,13 @@ impl BvpSolver {
     pub fn new(problem: BvpProblem, config: BvpSolverConfig) -> Result<Self, BvpApiError> {
         problem.validate()?;
         let native = match config {
-            BvpSolverConfig::Cantera {
+            BvpSolverConfig::CorrectionNewton {
                 options,
                 initial_guess,
             } => {
-                require_uniform_interval_mesh(&problem.mesh, "BVP_Cantera")?;
+                require_uniform_interval_mesh(&problem.mesh, "BVP_CorrectionNewton")?;
                 validate_initial_guess(&problem, &initial_guess, problem.mesh.len() - 1)?;
-                let cantera_problem = CanteraExprBvpProblem {
+                let correction_newton_problem = CorrectionNewtonProblem {
                     equations: problem.equations.clone(),
                     initial_guess,
                     state_names: problem.state_names.clone(),
@@ -816,13 +828,14 @@ impl BvpSolver {
                     ),
                     steps: problem.mesh.len() - 1,
                 };
-                let mut solver = CanteraNewtonSolver::from_symbolic(cantera_problem, options)?;
+                let mut solver =
+                    CorrectionNewtonSolver::from_symbolic(correction_newton_problem, options)?;
                 if let Some(parameters) = problem.external_parameters.as_ref() {
                     solver
                         .bind_parameters(parameters.names.clone(), parameters.values.clone())
-                        .map_err(BvpApiError::Cantera)?;
+                        .map_err(BvpApiError::CorrectionNewton)?;
                 }
-                BvpNativeSolver::Cantera(solver)
+                BvpNativeSolver::CorrectionNewton(solver)
             }
             BvpSolverConfig::Damped {
                 options,
@@ -911,14 +924,14 @@ impl BvpSolver {
             problem,
             native,
             last_solution: None,
-            last_cantera_telemetry: None,
+            last_correction_newton_telemetry: None,
         })
     }
 
     /// Access the selected native solver for its complete specialized API.
     pub fn native_mut(&mut self) -> &mut BvpNativeSolver {
         self.last_solution = None;
-        self.last_cantera_telemetry = None;
+        self.last_correction_newton_telemetry = None;
         &mut self.native
     }
 
@@ -927,7 +940,7 @@ impl BvpSolver {
         &self.native
     }
 
-    /// Declare fixed model inputs for BVP_Damp or BVP_Cantera before solving.
+    /// Declare fixed model inputs for BVP_Damp or BVP_CorrectionNewton before solving.
     ///
     /// These values are evaluator inputs, not Newton unknowns. BVP_sci's
     /// `parameters` have different semantics and are deliberately rejected by
@@ -957,9 +970,9 @@ impl BvpSolver {
         }
         let name_refs = names.iter().map(String::as_str).collect::<Vec<_>>();
         match &mut self.native {
-            BvpNativeSolver::Cantera(solver) => solver
+            BvpNativeSolver::CorrectionNewton(solver) => solver
                 .bind_parameters(names, values)
-                .map_err(BvpApiError::Cantera)?,
+                .map_err(BvpApiError::CorrectionNewton)?,
             BvpNativeSolver::Damped(solver) => {
                 solver
                     .try_set_parameter_names(Some(&name_refs))
@@ -995,9 +1008,9 @@ impl BvpSolver {
             ));
         }
         match &mut self.native {
-            BvpNativeSolver::Cantera(solver) => solver
+            BvpNativeSolver::CorrectionNewton(solver) => solver
                 .set_parameter_values(values)
-                .map_err(BvpApiError::Cantera)?,
+                .map_err(BvpApiError::CorrectionNewton)?,
             BvpNativeSolver::Damped(solver) => solver
                 .try_set_parameter_values(Some(values))
                 .map_err(BvpApiError::Damped)?,
@@ -1022,11 +1035,11 @@ impl BvpSolver {
     /// diagnostics from the failed attempt.
     pub fn solve(&mut self) -> Result<&BvpSolution, BvpApiError> {
         let solution = match &mut self.native {
-            BvpNativeSolver::Cantera(solver) => match solver.solve() {
+            BvpNativeSolver::CorrectionNewton(solver) => match solver.solve() {
                 Ok(report) => {
-                    self.last_cantera_telemetry = Some(report.telemetry.clone());
+                    self.last_correction_newton_telemetry = Some(report.telemetry.clone());
                     let values = solver.full_grid_values(&report.state)?;
-                    BvpSolution::Cantera {
+                    BvpSolution::CorrectionNewton {
                         mesh: DVector::from_vec(self.problem.mesh.clone()),
                         values,
                         report,
@@ -1034,9 +1047,9 @@ impl BvpSolver {
                 }
                 Err(error) => {
                     if let Some(report) = error.partial_report() {
-                        self.last_cantera_telemetry = Some(report.telemetry.clone());
+                        self.last_correction_newton_telemetry = Some(report.telemetry.clone());
                     }
-                    return Err(BvpApiError::Cantera(error));
+                    return Err(BvpApiError::CorrectionNewton(error));
                 }
             },
             BvpNativeSolver::Damped(solver) => {
@@ -1070,9 +1083,9 @@ impl BvpSolver {
     pub fn parameter_guess(&self) -> Result<Vec<f64>, BvpApiError> {
         match &self.native {
             BvpNativeSolver::Sci(solver) => Ok(solver.state().2.to_vec()),
-            BvpNativeSolver::Cantera(_) => Err(BvpApiError::UnsupportedRoute {
-                solver: "BVP_Cantera",
-                reason: "the fixed-mesh Cantera route has no free Newton parameters",
+            BvpNativeSolver::CorrectionNewton(_) => Err(BvpApiError::UnsupportedRoute {
+                solver: "BVP_CorrectionNewton",
+                reason: "the fixed-mesh CorrectionNewton route has no free Newton parameters",
             }),
             BvpNativeSolver::Damped(_) | BvpNativeSolver::Frozen(_) => {
                 Err(BvpApiError::UnsupportedRoute {
@@ -1086,9 +1099,9 @@ impl BvpSolver {
     /// Set BVP_sci free-parameter Newton guesses without changing their schema.
     pub fn set_parameter_guess(&mut self, values: Vec<f64>) -> Result<(), BvpApiError> {
         match &mut self.native {
-            BvpNativeSolver::Cantera(_) => Err(BvpApiError::UnsupportedRoute {
-                solver: "BVP_Cantera",
-                reason: "the fixed-mesh Cantera route has no free Newton parameters",
+            BvpNativeSolver::CorrectionNewton(_) => Err(BvpApiError::UnsupportedRoute {
+                solver: "BVP_CorrectionNewton",
+                reason: "the fixed-mesh CorrectionNewton route has no free Newton parameters",
             }),
             BvpNativeSolver::Sci(solver) => {
                 solver
@@ -1115,21 +1128,21 @@ impl BvpSolver {
         self.solve()
     }
 
-    /// Re-solve a prepared BVP_Damp or BVP_Cantera model with new fixed inputs.
+    /// Re-solve a prepared BVP_Damp or BVP_CorrectionNewton model with new fixed inputs.
     ///
     /// BVP_Damp retains its current Newton iterate and may rebuild mesh-sized
-    /// work after adaptive refinement. BVP_Cantera reuses its fixed-mesh
+    /// work after adaptive refinement. BVP_CorrectionNewton reuses its fixed-mesh
     /// symbolic callbacks and current packed state.
     pub fn solve_with_parameter_values(
         &mut self,
         values: Vec<f64>,
     ) -> Result<&BvpSolution, BvpApiError> {
-        if let BvpNativeSolver::Cantera(solver) = &mut self.native {
+        if let BvpNativeSolver::CorrectionNewton(solver) = &mut self.native {
             match solver.continue_with_parameter_values(values) {
                 Ok(report) => {
                     let values = solver.full_grid_values(&report.state)?;
-                    self.last_cantera_telemetry = Some(report.telemetry.clone());
-                    self.last_solution = Some(BvpSolution::Cantera {
+                    self.last_correction_newton_telemetry = Some(report.telemetry.clone());
+                    self.last_solution = Some(BvpSolution::CorrectionNewton {
                         mesh: DVector::from_vec(self.problem.mesh.clone()),
                         values,
                         report,
@@ -1140,10 +1153,10 @@ impl BvpSolver {
                         .expect("converged profile stored"));
                 }
                 Err(error) => {
-                    self.last_cantera_telemetry = error
+                    self.last_correction_newton_telemetry = error
                         .partial_report()
                         .map(|report| report.telemetry.clone());
-                    return Err(BvpApiError::Cantera(error));
+                    return Err(BvpApiError::CorrectionNewton(error));
                 }
             }
         }
@@ -1153,7 +1166,9 @@ impl BvpSolver {
             return self.solve();
         }
         let solution = match &mut self.native {
-            BvpNativeSolver::Cantera(_) => unreachable!("Cantera route returned above"),
+            BvpNativeSolver::CorrectionNewton(_) => {
+                unreachable!("CorrectionNewton route returned above")
+            }
             BvpNativeSolver::Damped(solver) => {
                 let current = solver.y.to_DVectorType();
                 let expected = solver.values.len() * solver.n_steps;
@@ -1236,16 +1251,16 @@ impl BvpSolver {
         &mut self,
         parameter_vectors: &[Vec<f64>],
     ) -> Result<BvpParameterLoopReport, BvpApiError> {
-        if let BvpNativeSolver::Cantera(solver) = &mut self.native {
+        if let BvpNativeSolver::CorrectionNewton(solver) = &mut self.native {
             let report = solver.solve_parameter_loop(parameter_vectors)?;
             // Native recovery owns the checkpoint. The facade publishes only
             // converged profiles; telemetry describes the last attempted point.
             if let Some(point) = report.points.last() {
-                self.last_cantera_telemetry = match &point.outcome {
-                    CanteraParameterLoopOutcome::Converged { report, .. } => {
+                self.last_correction_newton_telemetry = match &point.outcome {
+                    CorrectionNewtonParameterLoopOutcome::Converged { report, .. } => {
                         Some(report.telemetry.clone())
                     }
-                    CanteraParameterLoopOutcome::Failed { error } => error
+                    CorrectionNewtonParameterLoopOutcome::Failed { error } => error
                         .partial_report()
                         .map(|report| report.telemetry.clone()),
                 };
@@ -1256,25 +1271,27 @@ impl BvpSolver {
                     .iter()
                     .rev()
                     .find_map(|point| match &point.outcome {
-                        CanteraParameterLoopOutcome::Converged {
+                        CorrectionNewtonParameterLoopOutcome::Converged {
                             mesh,
                             values,
                             report,
                         } => Some((mesh, values, report)),
-                        CanteraParameterLoopOutcome::Failed { .. } => None,
+                        CorrectionNewtonParameterLoopOutcome::Failed { .. } => None,
                     })
             {
-                self.last_solution = Some(BvpSolution::Cantera {
+                self.last_solution = Some(BvpSolution::CorrectionNewton {
                     mesh: DVector::from_vec(mesh.clone()),
                     values: values.clone(),
                     report: solve_report.clone(),
                 });
             }
-            return Ok(BvpParameterLoopReport::Cantera(report));
+            return Ok(BvpParameterLoopReport::CorrectionNewton(report));
         }
         self.last_solution = None;
         match &mut self.native {
-            BvpNativeSolver::Cantera(_) => unreachable!("Cantera loop returned above"),
+            BvpNativeSolver::CorrectionNewton(_) => {
+                unreachable!("CorrectionNewton loop returned above")
+            }
             BvpNativeSolver::Damped(solver) => solver
                 .try_solve_parameter_loop(parameter_vectors)
                 .map(BvpParameterLoopReport::Damped)
@@ -1304,7 +1321,7 @@ impl BvpSolver {
         if !matches!(&self.native, BvpNativeSolver::Sci(_)) {
             return Err(BvpApiError::UnsupportedRoute {
                 solver: match &self.native {
-                    BvpNativeSolver::Cantera(_) => "BVP_Cantera",
+                    BvpNativeSolver::CorrectionNewton(_) => "BVP_CorrectionNewton",
                     BvpNativeSolver::Damped(_) => "BVP_Damp Damped",
                     BvpNativeSolver::Frozen(_) => "BVP_Damp Frozen/Naive",
                     BvpNativeSolver::Sci(_) => unreachable!("Sci route was checked above"),
@@ -1353,9 +1370,9 @@ impl BvpSolver {
     /// into a facade-defined counter or timing schema.
     pub fn telemetry_snapshot(&self) -> BvpSolverTelemetrySnapshot {
         match &self.native {
-            BvpNativeSolver::Cantera(_) => {
-                BvpSolverTelemetrySnapshot::Cantera(self.last_cantera_telemetry.clone())
-            }
+            BvpNativeSolver::CorrectionNewton(_) => BvpSolverTelemetrySnapshot::CorrectionNewton(
+                self.last_correction_newton_telemetry.clone(),
+            ),
             BvpNativeSolver::Damped(solver) => {
                 BvpSolverTelemetrySnapshot::Damped(solver.get_statistics().telemetry)
             }
@@ -1379,7 +1396,9 @@ impl BvpSolver {
             BvpSolution::Damped { mesh, values } | BvpSolution::Frozen { mesh, values } => {
                 (mesh.as_slice().to_vec(), values.clone())
             }
-            BvpSolution::Cantera { mesh, values, .. } => (mesh.as_slice().to_vec(), values.clone()),
+            BvpSolution::CorrectionNewton { mesh, values, .. } => {
+                (mesh.as_slice().to_vec(), values.clone())
+            }
             BvpSolution::Sci(solution) => {
                 let dimension = solution.dimension();
                 let node_count = solution.x.len();
@@ -1409,7 +1428,7 @@ impl BvpSolver {
             return Err(BvpApiError::MissingResult);
         }
         let solver = match &self.native {
-            BvpNativeSolver::Cantera(_) => "BVP_Cantera",
+            BvpNativeSolver::CorrectionNewton(_) => "BVP_CorrectionNewton",
             BvpNativeSolver::Damped(_) => "BVP_Damp Damped",
             BvpNativeSolver::Frozen(_) => "BVP_Damp Frozen/Naive",
             BvpNativeSolver::Sci(_) => "BVP_sci",

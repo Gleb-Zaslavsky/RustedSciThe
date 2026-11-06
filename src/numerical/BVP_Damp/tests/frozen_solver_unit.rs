@@ -306,6 +306,75 @@ fn frozen_try_iteration_surfaces_residual_callback_panic_as_typed_error() {
     ));
 }
 
+#[test]
+fn frozen_rejects_out_of_bounds_prepared_and_active_guesses() {
+    let mut solver = sparse_surface_test_solver_with_naive_strategy();
+    solver.Bounds = Some(HashMap::from([
+        ("z".to_string(), (0.0, 1.0)),
+        ("y".to_string(), (0.0, 1.0)),
+    ]));
+    solver
+        .try_eq_generate()
+        .expect("bounded Frozen problem should prepare");
+
+    let error = solver
+        .try_set_prepared_iterate(DMatrix::from_element(2, 8, 1.1))
+        .expect_err("prepared guesses outside bounds must be rejected");
+    assert!(matches!(
+        error,
+        BvpBackendIntegrationError::BoundStateOutsideBounds { index: 0, .. }
+    ));
+
+    solver.y = Box::new(DVector::from_element(solver.bounds_vec.len(), 1.1));
+    let error = solver
+        .try_iteration()
+        .expect_err("an infeasible active iterate must fail before callbacks");
+    assert!(matches!(
+        error,
+        BvpBackendIntegrationError::BoundStateOutsideBounds { index: 0, .. }
+    ));
+    assert_eq!(solver.telemetry_counters.snapshot().residual_calls, 0);
+}
+
+#[test]
+fn frozen_rejects_an_infeasible_full_newton_step_without_shortening_it() {
+    let options = FrozenSolverOptions::dense_naive()
+        .with_bounds(HashMap::from([("y".to_string(), (0.0, 1.0))]))
+        .with_tolerance(1e-8);
+    let mut solver = NRBVP::new_with_options(
+        vec![Expr::parse_expression("0.0")],
+        DMatrix::from_element(1, 2, 0.9),
+        vec!["y".to_string()],
+        "x".to_string(),
+        HashMap::from([("y".to_string(), vec![(0usize, 0.9)])]),
+        0.0,
+        1.0,
+        2,
+        options,
+    );
+    solver
+        .try_eq_generate()
+        .expect("bounded scalar Frozen problem should prepare");
+
+    let size = solver.y.len();
+    solver.y = Box::new(DVector::from_element(size, 0.9));
+    solver.fun = convert_to_fun(Box::new(move |_, _| {
+        Box::new(DVector::from_element(size, -0.2)) as Box<dyn VectorType>
+    }));
+    solver.factor_owner.old_jac = Some(Box::new(DMatrix::identity(size, size)));
+    solver.jac_recalc = false;
+
+    let error = solver
+        .try_iteration()
+        .expect_err("Frozen must reject rather than shorten an infeasible full step");
+    assert!(matches!(
+        error,
+        BvpBackendIntegrationError::BoundStepBlocked { iteration: 0 }
+    ));
+    assert!(solver.y.iterate().all(|value| value == 0.9));
+    assert_eq!(solver.last_bound_step_factor, 1.0);
+}
+
 use crate::numerical::BVP_Damp::BVP_traits::convert_to_fun;
 use crate::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotChunkingPolicy, AotExecutionPolicy,

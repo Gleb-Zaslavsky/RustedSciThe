@@ -8,8 +8,8 @@ from ._native import StiffPostprocessPlan as StiffPostprocessPlan
 from ._native import BvpSolverRequest as BvpSolverRequest
 from ._native import PreparedBvpSolver as PreparedBvpSolver
 from ._native import BvpApiSolution as BvpApiSolution
-from ._native import BvpCanteraParameterLoopPoint as BvpCanteraParameterLoopPoint
-from ._native import BvpCanteraParameterLoopReport as BvpCanteraParameterLoopReport
+from ._native import BvpCorrectionNewtonParameterLoopPoint as BvpCorrectionNewtonParameterLoopPoint
+from ._native import BvpCorrectionNewtonParameterLoopReport as BvpCorrectionNewtonParameterLoopReport
 from ._native import BvpPostprocessPlan as BvpPostprocessPlan
 from .facade import (
     animate_solution_2d as animate_solution_2d,
@@ -44,7 +44,7 @@ from ._native import savgol_filter as savgol_filter
 from ._native import spline_resample as spline_resample
 
 __all__ = [
-    "BvpCanteraParameterLoopPoint", "BvpCanteraParameterLoopReport",
+    "BvpCorrectionNewtonParameterLoopPoint", "BvpCorrectionNewtonParameterLoopReport",
     "Expr", "ExprVector", "ExprMatrix", "BandedMatrix", "LapackStyleBandedLuFaithful", "BandedRefinementResult", "PivotedTridiagonalLu", "BlockTridiagonalLuConsistent", "BlockTridiagonalRefinementResult", "BdfSolver", "BdfCallbackSolver", "BdfSolution",
     "BackwardEulerSolver", "BackwardEulerSolution", "UniversalNonStiffSolver", "UniversalNonStiffSolution", "BvpSciSolver",
     "BvpSciSolution", "BvpSciParameterLoopPoint", "BvpSciParameterLoopReport", "BvpSolverRequest", "PreparedBvpSolver", "BvpApiSolution", "BvpPostprocessPlan", "BvpDampSolver", "BvpDampNaiveSolver", "BvpDampFrozenSolver", "BvpDampSolution", "BvpDampParameterLoopPoint", "BvpDampParameterLoopReport", "RadauSolver",
