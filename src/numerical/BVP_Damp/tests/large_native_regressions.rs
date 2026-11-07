@@ -11,9 +11,9 @@ use crate::numerical::BVP_CorrectionNewton::{
 use crate::numerical::BVP_Damp::BVP_traits::VectorType;
 use crate::numerical::BVP_Damp::BVP_traits::{Fun, Jac, MatrixType, Vectors_type_casting};
 use crate::numerical::BVP_Damp::BVP_utils::construct_full_solution;
-use crate::numerical::BVP_Damp::BVP_utils_damped::{
-    convergence_condition, weighted_norm_reduced_unknowns,
-};
+use crate::numerical::BVP_Damp::BVP_utils_damped::convergence_condition;
+#[cfg(test)]
+use crate::numerical::BVP_Damp::BVP_utils_damped::weighted_norm_reduced_unknowns;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
     AdaptiveGridConfig, DampedSolverOptions, SolverParams,
 };
@@ -612,6 +612,7 @@ fn interpolated_reference_error(
     worst
 }
 
+#[cfg(test)]
 fn damped_terminal_weighted_rms(
     solver: &BvpSolver,
     profile: &DMatrix<f64>,

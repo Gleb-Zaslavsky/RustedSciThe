@@ -152,6 +152,29 @@ macro_rules! bvp_correction_newton_continuation_route {
 
 static CORE_SCENARIOS: &[Scenario] = &[
     Scenario {
+        id: "bvp_combustion_solver_matrix_10x8",
+        solver: "bvp-combustion-matrix",
+        groups: &["bvp", "bvp-large", "bvp-combustion-solver-matrix"],
+        workload: "KiThe, COMB-01 and COMB-02; 10-interval seed; CorrectionNewton fixed mesh, BVP_sci native adaptation, and four BVP_Damp refinement routes",
+        frontend: "ExprLegacy",
+        execution: "Lambdify",
+        linear_algebra: "Sparse",
+        parallel_policy: "Sequential",
+        telemetry: "off summed route timings; detailed stage/counter telemetry is in the paired release benchmark",
+        version: 1,
+        gate_metrics: &[
+            "correction_newton_wall_ms",
+            "bvp_sci_wall_ms",
+            "bvp_damp_twopoint_wall_ms",
+            "bvp_damp_pearson_wall_ms",
+            "bvp_damp_grcar_smooke_wall_ms",
+            "bvp_damp_double_points_wall_ms",
+        ],
+        description: "Matched three-fixture BVP comparison; each gate metric sums the same solver route across KiThe, COMB-01, and COMB-02 so the short coarse-grid runs have useful measurement resolution",
+        run: crate::scenarios::bvp_combustion_matrix::run,
+        diagnose: None,
+    },
+    Scenario {
         id: "banded_faithful_tridiagonal",
         solver: "somelinalg",
         groups: &["linear-algebra", "banded"],
@@ -1633,6 +1656,21 @@ mod tests {
             scenario.gate_metrics == ["scenario_wall_ms"]
                 && scenario.telemetry.starts_with("off wall gate")
         }));
+    }
+
+    #[test]
+    fn combustion_solver_matrix_gate_has_one_metric_per_comparison_route() {
+        let scenarios = select(&Selector {
+            group: Some("bvp-combustion-solver-matrix".into()),
+            ..Selector::default()
+        })
+        .unwrap();
+        assert_eq!(scenarios.len(), 1);
+        let scenario = scenarios[0];
+        assert_eq!(scenario.id, "bvp_combustion_solver_matrix_10x8");
+        assert_eq!(scenario.gate_metrics.len(), 6);
+        assert!(scenario.workload.contains("10-interval seed"));
+        assert!(scenario.diagnose.is_none());
     }
 
     #[test]

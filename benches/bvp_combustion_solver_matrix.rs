@@ -3,7 +3,8 @@
 //! CorrectionNewton uses its fixed seed mesh, BVP_sci uses its native adaptive
 //! collocation controller, and BVP_Damp is measured independently with each of
 //! its four mesh-refinement strategies. This is a workload matrix, not a
-//! perf-gate: use repeated perf-gate runs for baseline decisions.
+//! The perf-gate runner reuses the same fixtures and off-mode solve path,
+//! aggregating each route across all three combustion cases.
 
 use std::collections::HashMap;
 use std::time::Instant;
@@ -329,7 +330,10 @@ fn bounds(fixture: &CorrectionNewtonProblem) -> HashMap<String, (f64, f64)> {
         .collect()
 }
 
-fn correction_options(fixture: &CorrectionNewtonProblem) -> CorrectionNewtonOptions {
+fn correction_options(
+    fixture: &CorrectionNewtonProblem,
+    detailed: bool,
+) -> CorrectionNewtonOptions {
     CorrectionNewtonOptions {
         symbolic_frontend: CorrectionNewtonSymbolicFrontend::ExprLegacy,
         matrix_layout: CorrectionNewtonMatrixLayout::Sparse,
@@ -339,7 +343,11 @@ fn correction_options(fixture: &CorrectionNewtonProblem) -> CorrectionNewtonOpti
         max_iterations: 100,
         max_jacobian_age: 1,
         max_damping_trials: 12,
-        telemetry_mode: CorrectionNewtonTelemetryMode::Timings,
+        telemetry_mode: if detailed {
+            CorrectionNewtonTelemetryMode::Timings
+        } else {
+            CorrectionNewtonTelemetryMode::Off
+        },
         ..CorrectionNewtonOptions::default()
     }
 }
@@ -347,13 +355,18 @@ fn correction_options(fixture: &CorrectionNewtonProblem) -> CorrectionNewtonOpti
 fn damped_options(
     fixture: &CorrectionNewtonProblem,
     strategy: GridRefinementMethod,
+    detailed: bool,
 ) -> DampedSolverOptions {
     let generated = GeneratedBackendConfig::sparse_defaults()
         .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly))
         .with_symbolic_assembly_backend(BvpSymbolicAssemblyBackend::ExprLegacy);
     DampedSolverOptions::sparse_damped()
         .with_generated_backend_config(generated)
-        .with_bvp_telemetry_mode(BvpTelemetryMode::Detailed)
+        .with_bvp_telemetry_mode(if detailed {
+            BvpTelemetryMode::Detailed
+        } else {
+            BvpTelemetryMode::Off
+        })
         .with_bvp_logging_mode(BvpLoggingMode::Off)
         .with_scheme_name("trapezoid")
         .with_abs_tolerance(1e-5)
@@ -427,36 +440,65 @@ fn one_run(
     refinement: &'static str,
     config: BvpSolverConfig,
     repeat: usize,
-) -> Row {
+) -> (Row, f64) {
     let prep = Instant::now();
     let mut solver = match BvpSolver::new(as_bvp_problem(&fixture.problem), config) {
         Ok(solver) => solver,
         Err(error) => {
-            return failed_row(
-                fixture,
-                solver_name,
-                refinement,
-                repeat,
-                prep.elapsed().as_secs_f64() * 1e3,
-                format!("construct: {error}"),
+            return (
+                failed_row(
+                    fixture,
+                    solver_name,
+                    refinement,
+                    repeat,
+                    prep.elapsed().as_secs_f64() * 1e3,
+                    format!("construct: {error}"),
+                ),
+                0.0,
             );
         }
     };
     let construct_ms = prep.elapsed().as_secs_f64() * 1e3;
     let solve_started = Instant::now();
-    let result = solver.solve();
+    let solve_status = solver
+        .solve()
+        .map(|_| ())
+        .map_err(|error| error.to_string());
     let solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
     let stats = telemetry(&solver.telemetry_snapshot());
+    let mut correctness_error = None;
     let (nodes, minimum, maximum) = solver.solution_view().map_or_else(
         || ("-".into(), "-".into(), "-".into()),
         |view| {
             let mut minimum = f64::INFINITY;
             let mut maximum = 0.0_f64;
+            let mut finite = true;
             for node in 0..view.mesh().len() {
                 for state in 0..view.state_count() {
                     let value = view.value(node, state).unwrap_or(f64::NAN);
+                    finite &= value.is_finite();
                     minimum = minimum.min(value);
                     maximum = maximum.max(value.abs());
+                }
+            }
+            if !finite {
+                correctness_error = Some("profile contains non-finite values".to_owned());
+            }
+            for (state_name, conditions) in &fixture.problem.boundary_conditions {
+                let state = fixture
+                    .problem
+                    .state_names
+                    .iter()
+                    .position(|name| name == state_name)
+                    .expect("boundary state is declared");
+                for &(endpoint, expected) in conditions {
+                    let node = if endpoint == 0 { 0 } else { view.mesh().len() - 1 };
+                    let actual = view.value(node, state).unwrap_or(f64::NAN);
+                    if !actual.is_finite() || (actual - expected).abs() > 1e-8 {
+                        correctness_error = Some(format!(
+                            "boundary mismatch at state={state_name}, endpoint={endpoint}: {actual:e} != {expected:e}"
+                        ));
+                    }
                 }
             }
             (
@@ -466,7 +508,7 @@ fn one_run(
             )
         },
     );
-    Row {
+    let row = Row {
         fixture: fixture.name,
         solver: solver_name,
         refinement,
@@ -478,8 +520,15 @@ fn one_run(
         telemetry: stats,
         profile_min: minimum,
         profile_max_abs: maximum,
-        status: result.map_or_else(|error| format!("solve: {error}"), |_| "ok".into()),
-    }
+        status: solve_status.map_or_else(
+            |error| format!("solve: {error}"),
+            |_| {
+                correctness_error
+                    .map_or_else(|| "ok".into(), |error| format!("correctness: {error}"))
+            },
+        ),
+    };
+    (row, construct_ms + solve_ms)
 }
 
 fn failed_row(
@@ -506,7 +555,7 @@ fn failed_row(
     }
 }
 
-fn main() {
+fn collect_rows(repeats: usize, detailed: bool) -> Vec<(Row, f64)> {
     let strategies = [
         ("TwoPoint", GridRefinementMethod::TwoPoint(0.02, 0.02, 2.5)),
         ("Pearson", GridRefinementMethod::Pearson(1e-3, 1.4)),
@@ -516,15 +565,15 @@ fn main() {
         ),
         ("DoublePoints", GridRefinementMethod::DoublePoints),
     ];
-    let mut rows = Vec::with_capacity(18 * REPEATS);
+    let mut rows = Vec::with_capacity(18 * repeats);
     for fixture in fixtures() {
-        for repeat in 1..=REPEATS {
+        for repeat in 1..=repeats {
             rows.push(one_run(
                 &fixture,
                 "CorrectionNewton",
                 "fixed mesh",
                 BvpSolverConfig::CorrectionNewton {
-                    options: correction_options(&fixture.problem),
+                    options: correction_options(&fixture.problem, detailed),
                     initial_guess: fixture.problem.initial_guess.clone(),
                 },
                 repeat,
@@ -539,7 +588,11 @@ fn main() {
             sci.max_nodes = 4096;
             sci.max_newton_iterations = 100;
             sci.max_mesh_refinements = 8;
-            sci.telemetry = BvpSciTelemetryMode::Detailed;
+            sci.telemetry = if detailed {
+                BvpSciTelemetryMode::Detailed
+            } else {
+                BvpSciTelemetryMode::Off
+            };
             rows.push(one_run(
                 &fixture,
                 "BVP_sci",
@@ -559,7 +612,7 @@ fn main() {
                     "BVP_Damp",
                     name,
                     BvpSolverConfig::Damped {
-                        options: damped_options(&fixture.problem, method.clone()),
+                        options: damped_options(&fixture.problem, method.clone(), detailed),
                         initial_guess: fixture.problem.initial_guess.clone(),
                     },
                     repeat,
@@ -567,6 +620,60 @@ fn main() {
             }
         }
     }
+    rows
+}
+
+/// Run one complete off-mode perf-gate sample and aggregate each route over
+/// the three combustion fixtures. The six independent metrics share one
+/// isolated scenario process but retain per-route baseline comparisons.
+pub fn perf_gate_metrics() -> Result<Vec<(String, String, f64)>, String> {
+    let rows = collect_rows(1, false);
+    let mut totals = HashMap::<String, f64>::new();
+    for (row, solve_ms) in rows {
+        if row.status != "ok" {
+            return Err(format!(
+                "{} / {} / {} failed: {}",
+                row.fixture, row.solver, row.refinement, row.status
+            ));
+        }
+        let metric = match (row.solver, row.refinement) {
+            ("CorrectionNewton", _) => "correction_newton_wall_ms",
+            ("BVP_sci", _) => "bvp_sci_wall_ms",
+            ("BVP_Damp", "TwoPoint") => "bvp_damp_twopoint_wall_ms",
+            ("BVP_Damp", "Pearson") => "bvp_damp_pearson_wall_ms",
+            ("BVP_Damp", "GrcarSmooke") => "bvp_damp_grcar_smooke_wall_ms",
+            ("BVP_Damp", "DoublePoints") => "bvp_damp_double_points_wall_ms",
+            _ => {
+                return Err(format!(
+                    "unexpected benchmark route: {}/{}",
+                    row.solver, row.refinement
+                ));
+            }
+        };
+        *totals.entry(metric.into()).or_default() += solve_ms;
+    }
+    let ids = [
+        "correction_newton_wall_ms",
+        "bvp_sci_wall_ms",
+        "bvp_damp_twopoint_wall_ms",
+        "bvp_damp_pearson_wall_ms",
+        "bvp_damp_grcar_smooke_wall_ms",
+        "bvp_damp_double_points_wall_ms",
+    ];
+    ids.into_iter()
+        .map(|id| {
+            totals
+                .get(id)
+                .copied()
+                .map(|value| (id.to_owned(), "ms/3-fixture sweep".to_owned(), value))
+                .ok_or_else(|| format!("benchmark did not emit gate metric {id}"))
+        })
+        .collect()
+}
+
+fn main() {
+    let measured = collect_rows(REPEATS, true);
+    let rows = measured.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
     let report = format!(
         "# Combustion BVP solver and refinement matrix\n\nThree independent samples per route. CorrectionNewton uses its fixed uniform 10-interval mesh; BVP_sci uses its native adaptive collocation controller; BVP_Damp starts from 10 intervals and is run independently with each named refinement strategy. All routes use 1e-5 absolute/relative tolerances, ExprLegacy/Lambdify and Sparse linear algebra. `construct_ms` measures solver construction only. BVP_Damp may lazily prepare generated callbacks during `solve_ms`; its native symbolic/preparation stages are reported separately in telemetry. Failed attempts remain visible and do not abort the matrix.\n\n{}\n",
         tabled::Table::new(&rows)
