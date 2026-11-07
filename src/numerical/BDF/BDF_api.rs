@@ -1493,6 +1493,14 @@ impl ODEsolver {
         self.try_restart_prepared_runtime()
     }
 
+    /// Starts a fresh solve from a new initial state on the configured
+    /// interval, retaining the current parameter binding and prepared backend.
+    pub fn try_solve_with_initial_state(&mut self, y0: DVector<f64>) -> Result<(), BdfSolveError> {
+        let (t0, t_bound) = (self.t0, self.t_bound);
+        self.try_restart_with_initial_state(t0, y0, t_bound)?;
+        self.try_solve()
+    }
+
     /// Starts a fresh solve with new parameters and initial state while using
     /// the currently configured time interval. Prepared symbolic callbacks and
     /// generated artifacts are retained; BDF's numerical history is reset.

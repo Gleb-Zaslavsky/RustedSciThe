@@ -93,6 +93,13 @@ let outcome = prepared.try_solve_with_parameter_values_in_interval(
 хранят начальное состояние в native-конфигурации. Число параметров Radau должно
 совпадать с декларацией `RadauProblem::with_parameter_names`.
 
+Если меняется только начальное состояние на текущем интервале, используйте
+`try_solve_with_initial_state(y0)`. Вариант
+`try_solve_with_initial_state_in_interval(t0, y0, t_bound)` также задаёт новый
+интервал. Оба метода сохраняют текущую привязку параметров и подготовленные
+symbolic/AOT callbacks, сбрасывая численную историю интегратора. Это новые
+solve, а не continuation по параметру или времени.
+
 ## Результаты и ошибки
 
 `StiffSolveOutcome` не маскирует различия владения результатом:

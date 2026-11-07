@@ -156,6 +156,55 @@ fn symbolic_fixed_inputs_bind_and_rebind_without_repreparing_callbacks() {
 }
 
 #[test]
+fn symbolic_boundary_values_rebind_without_repreparing_callbacks() {
+    let problem = CorrectionNewtonProblem {
+        equations: vec![Expr::parse_expression("-y")],
+        initial_guess: DMatrix::from_element(1, 16, 1.0),
+        state_names: vec!["y".into()],
+        independent_variable: "x".into(),
+        boundary_conditions: std::collections::HashMap::from([("y".into(), vec![(0, 1.0)])]),
+        interval: (0.0, 1.0),
+        steps: 16,
+    };
+    let options = CorrectionNewtonOptions {
+        bounds: std::collections::HashMap::from([("y".into(), (0.0, 2.0))]),
+        ..CorrectionNewtonOptions::default()
+    };
+    let mut solver = CorrectionNewtonSolver::from_symbolic(problem, options)
+        .expect("symbolic callbacks should prepare");
+    let first = solver
+        .solve()
+        .expect("initial boundary solve should converge");
+    let first_profile = solver.full_grid_values(&first.state).unwrap();
+    assert!((first_profile[(0, 0)] - 1.0).abs() < 1e-14);
+
+    solver
+        .set_boundary_values(vec![2.0])
+        .expect("numeric endpoint values should rebind");
+    let second = solver
+        .solve()
+        .expect("rebound boundary solve should converge");
+    let second_profile = solver.full_grid_values(&second.state).unwrap();
+    assert!((second_profile[(0, 0)] - 2.0).abs() < 1e-14);
+    assert!((second_profile[(16, 0)] - 2.0 * (-1.0_f64).exp()).abs() < 2e-3);
+
+    let error = solver
+        .set_boundary_values(vec![3.0])
+        .expect_err("out-of-bounds boundary values must be rejected");
+    assert!(matches!(
+        error,
+        CorrectionNewtonSolverError::InvalidConfiguration {
+            source: super::super::CorrectionNewtonConfigurationError::BoundaryValueOutsideBounds { .. }
+        }
+    ));
+    let retained = solver
+        .solve()
+        .expect("rejected rebinding must preserve the previous boundary value");
+    let retained_profile = solver.full_grid_values(&retained.state).unwrap();
+    assert!((retained_profile[(0, 0)] - 2.0).abs() < 1e-14);
+}
+
+#[test]
 fn symbolic_fixed_boundary_values_must_respect_component_bounds() {
     let problem = CorrectionNewtonProblem {
         equations: vec![Expr::parse_expression("0")],

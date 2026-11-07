@@ -7,6 +7,7 @@
 //! aggregating each route across all three combustion cases.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use RustedSciThe::Utils::test_reporting::write_test_report;
@@ -36,6 +37,7 @@ use tabled::Tabled;
 const START_INTERVALS: usize = 10;
 const FIXED_COMBUSTION_INTERVALS: usize = 128;
 const REPEATS: usize = 3;
+static PERF_GATE_SWEEP: AtomicUsize = AtomicUsize::new(0);
 
 struct Fixture {
     name: &'static str,
@@ -655,6 +657,18 @@ fn failed_row(
 }
 
 fn collect_rows(repeats: usize, detailed: bool) -> Vec<(Row, f64)> {
+    collect_rows_inner(repeats, detailed, None)
+}
+
+fn collect_rows_with_progress(repeats: usize, detailed: bool, sweep: usize) -> Vec<(Row, f64)> {
+    collect_rows_inner(repeats, detailed, Some(sweep))
+}
+
+fn collect_rows_inner(
+    repeats: usize,
+    detailed: bool,
+    progress_sweep: Option<usize>,
+) -> Vec<(Row, f64)> {
     let strategies = [
         ("TwoPoint", GridRefinementMethod::TwoPoint(0.02, 0.02, 2.5)),
         ("Pearson", GridRefinementMethod::Pearson(1e-3, 1.4)),
@@ -665,7 +679,20 @@ fn collect_rows(repeats: usize, detailed: bool) -> Vec<(Row, f64)> {
         ("DoublePoints", GridRefinementMethod::DoublePoints),
     ];
     let mut rows = Vec::with_capacity(18 * repeats);
-    for fixture in fixtures() {
+    let fixtures = fixtures();
+    for (fixture_index, fixture) in fixtures.iter().enumerate() {
+        let fixture_started = Instant::now();
+        let first_row = rows.len();
+        if let Some(sweep) = progress_sweep {
+            eprintln!(
+                "bvp-combustion: sweep={sweep} fixture={}/{} START name={} fixed_intervals={} damped_seed_intervals={} routes=6",
+                fixture_index + 1,
+                fixtures.len(),
+                fixture.name,
+                fixture.problem.steps,
+                START_INTERVALS
+            );
+        }
         let damped_fixture = damped_start_fixture(&fixture);
         for repeat in 1..=repeats {
             rows.push(one_run(
@@ -706,6 +733,33 @@ fn collect_rows(repeats: usize, detailed: bool) -> Vec<(Row, f64)> {
                 ));
             }
         }
+        if let Some(sweep) = progress_sweep {
+            let fixture_rows = &rows[first_row..];
+            let passed = fixture_rows
+                .iter()
+                .filter(|(row, _)| row.status == "ok")
+                .count();
+            let route_stats = fixture_rows
+                .iter()
+                .map(|(row, _)| {
+                    format!(
+                        "{}/{}={}ms nodes={} status={}",
+                        row.solver, row.refinement, row.solve_ms, row.result_nodes, row.status
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            eprintln!(
+                "bvp-combustion: sweep={sweep} fixture={}/{} DONE name={} routes_ok={}/{} elapsed_s={:.3} [{}]",
+                fixture_index + 1,
+                fixtures.len(),
+                fixture.name,
+                passed,
+                fixture_rows.len(),
+                fixture_started.elapsed().as_secs_f64(),
+                route_stats
+            );
+        }
     }
     rows
 }
@@ -714,7 +768,8 @@ fn collect_rows(repeats: usize, detailed: bool) -> Vec<(Row, f64)> {
 /// the three combustion fixtures. The six independent metrics share one
 /// isolated scenario process but retain per-route baseline comparisons.
 pub fn perf_gate_metrics() -> Result<Vec<(String, String, f64)>, String> {
-    let rows = collect_rows(1, false);
+    let sweep = PERF_GATE_SWEEP.fetch_add(1, Ordering::Relaxed) + 1;
+    let rows = collect_rows_with_progress(1, false, sweep);
     let mut totals = HashMap::<String, f64>::new();
     for (row, solve_ms) in rows {
         if row.status != "ok" {

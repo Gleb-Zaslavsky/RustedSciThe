@@ -2502,6 +2502,9 @@ def test_bdf_callback_solver_supports_analytic_and_fd_jacobians():
 
         assert solution.status == "finished"
         assert solution.states()[-1][0] == pytest.approx(math.exp(-0.5), rel=5e-3)
+        fresh = solver.solve_with_initial_state([2.0])
+        assert fresh.states()[0][0] == pytest.approx(2.0)
+        assert fresh.states()[-1][0] == pytest.approx(2.0 * math.exp(-0.5), rel=5e-3)
         assert solver.provenance()["jacobian_source"] == expected_source
         assert solver.provenance()["matrix_layout"] == "dense"
 
@@ -4022,6 +4025,9 @@ def test_bvp_api_correction_newton_route_exposes_frontend_backend_and_native_tel
     rebound = solver.solve_with_parameter_values([1.0])
     assert rebound.values()[-1][0] == pytest.approx(math.exp(-1.0), abs=2e-3)
     assert rebound.values()[-1][0] < first_endpoint
+    boundary_rebound = solver.solve_with_boundary_values([2.0])
+    assert boundary_rebound.values()[0][0] == pytest.approx(2.0, abs=1e-12)
+    assert boundary_rebound.values()[-1][0] == pytest.approx(2.0 * math.exp(-1.0), abs=2e-3)
     telemetry = solver.telemetry_snapshot()
     assert telemetry["route"] == "correction_newton"
     assert telemetry["mode"] == "timings"
@@ -4132,6 +4138,37 @@ def test_bvp_api_damped_and_frozen_requests_keep_route_specific_guess_shapes(rou
     telemetry = solver.telemetry_snapshot()
     assert telemetry["route"] == route
     assert telemetry["counters"]
+
+
+@pytest.mark.parametrize(
+    ("route", "guess"),
+    [
+        ("damped", [[1.0], [math.exp(-0.5)]]),
+        ("frozen", [[math.exp(-0.5)], [math.exp(-1.0)]]),
+    ],
+)
+def test_bvp_api_damped_and_frozen_rebind_symbolic_boundary_values(route, guess):
+    y = Expr.variable("y")
+    options = SolverOptions(frontend="atom_native", telemetry="counters")
+    if route == "damped":
+        request = BvpSolverRequest.damped(
+            [-y], ["y"], "x", [0.0, 0.5, 1.0], [(0, "left", 1.0)], guess,
+            options=options, bounds={"y": (-10.0, 10.0)}, tolerance=1e-5,
+        )
+    else:
+        request = BvpSolverRequest.frozen(
+            [-y], ["y"], "x", [0.0, 0.5, 1.0], [(0, "left", 1.0)], guess,
+            options=options, tolerance=1e-5,
+        )
+
+    solver = request.prepare()
+    initial = solver.solve()
+    rebound = solver.solve_with_boundary_values([2.0])
+
+    assert initial.values()[0][0] == pytest.approx(1.0, abs=1e-12)
+    assert rebound.values()[0][0] == pytest.approx(2.0, abs=1e-12)
+    assert rebound.values_array().shape == (3, 1)
+    assert solver.telemetry_snapshot()["counters"]
 
 
 def test_bvp_api_frozen_accepts_shared_text_logging_level():
@@ -5633,6 +5670,7 @@ def test_core_ivp_pyo3_types_and_lifecycle_methods_have_python_docstrings():
             (
                 "prepare",
                 "solve",
+                "solve_with_initial_state",
                 "solve_with_parameter_values",
                 "solve_with_parameter_values_in_interval",
                 "restart",
@@ -5644,6 +5682,7 @@ def test_core_ivp_pyo3_types_and_lifecycle_methods_have_python_docstrings():
             (
                 "validate",
                 "solve",
+                "solve_with_initial_state",
                 "solve_with_parameter_values",
                 "solve_with_parameter_values_in_interval",
                 "continue_to",
@@ -5655,6 +5694,7 @@ def test_core_ivp_pyo3_types_and_lifecycle_methods_have_python_docstrings():
             (
                 "prepare",
                 "solve",
+                "solve_with_initial_state",
                 "solve_with_parameter_values",
                 "solve_with_parameter_values_in_interval",
                 "restart",
@@ -5665,6 +5705,7 @@ def test_core_ivp_pyo3_types_and_lifecycle_methods_have_python_docstrings():
             (
                 "prepare",
                 "solve",
+                "solve_with_initial_state",
                 "solve_with_parameter_values",
                 "solve_with_parameter_values_in_interval",
                 "continue_with_parameters",
@@ -5749,6 +5790,11 @@ def test_ivp_solver_fresh_parameterized_solve_shortcuts():
         prepare = getattr(solver, "prepare", None)
         if prepare is not None:
             prepare()
+        fresh_initial = solver.solve_with_initial_state([1.5])
+        assert terminal_state(fresh_initial) == pytest.approx(
+            1.5 * math.exp(-1.0 * 0.1), rel=3e-3,
+        )
+        assert end_time(fresh_initial) == pytest.approx(0.1)
         first = solve_configured_interval(solver)
         assert terminal_state(first) == pytest.approx(
             2.0 * math.exp(-1.5 * 0.1), rel=3e-3,
@@ -5868,7 +5914,7 @@ def test_callback_ivp_and_nonlinear_pyo3_docs_cover_public_contracts():
     documented = (
         (
             BdfCallbackSolver,
-            ("prepare", "is_prepared", "solve", "restart", "telemetry_counters", "telemetry_report", "provenance"),
+            ("prepare", "is_prepared", "solve", "solve_with_initial_state", "restart", "telemetry_counters", "telemetry_report", "provenance"),
         ),
         (
             RadauCallbackSolver,
@@ -6977,10 +7023,16 @@ def test_stiff_api_time_segments_and_fresh_radau_solve_keep_native_semantics():
         parameters=["rate"], parameter_values=[0.5],
     ).prepare()
     bdf_first = bdf.solve()
+    bdf_fresh = bdf.solve_with_initial_state([2.0])
+    assert isinstance(bdf_fresh, BdfSolution)
+    assert bdf_fresh.states()[-1][0] == pytest.approx(2.0 * math.exp(-0.5 * 0.1), rel=2e-6)
+    bdf_interval = bdf.solve_with_initial_state_in_interval(0.0, [1.0], 0.1)
+    assert bdf_interval.states()[0][0] == pytest.approx(1.0)
+    assert bdf_interval.states()[-1][0] == pytest.approx(math.exp(-0.5 * 0.1), rel=2e-6)
     bdf_next = bdf.continue_bdf_with_parameters([1.2], 0.2)
     assert isinstance(bdf_first, BdfSolution) and isinstance(bdf_next, BdfSolution)
     assert bdf_next.states()[-1][0] == pytest.approx(
-        bdf_first.states()[-1][0] * math.exp(-1.2 * 0.1), rel=2e-6
+        bdf_interval.states()[-1][0] * math.exp(-1.2 * 0.1), rel=2e-6
     )
 
     backward_euler = StiffSolverRequest.backward_euler(
@@ -6988,10 +7040,13 @@ def test_stiff_api_time_segments_and_fresh_radau_solve_keep_native_semantics():
         h=0.001, parameters=["rate"], parameter_values=[0.5],
     ).prepare()
     be_first = backward_euler.solve()
+    be_fresh = backward_euler.solve_with_initial_state([2.0])
+    assert isinstance(be_fresh, BackwardEulerSolution)
+    assert be_fresh.states()[-1][0] == pytest.approx(2.0 * math.exp(-0.5 * 0.1), rel=2e-3)
     be_next = backward_euler.continue_backward_euler(0.2, [1.2])
     assert isinstance(be_first, BackwardEulerSolution) and isinstance(be_next, BackwardEulerSolution)
     assert be_next.states()[-1][0] == pytest.approx(
-        be_first.states()[-1][0] * math.exp(-1.2 * 0.1), rel=2e-3
+        be_fresh.states()[-1][0] * math.exp(-1.2 * 0.1), rel=2e-3
     )
 
     radau = StiffSolverRequest.radau(
@@ -6999,8 +7054,10 @@ def test_stiff_api_time_segments_and_fresh_radau_solve_keep_native_semantics():
         parameters=["rate"], parameter_values=[0.5], output="dense",
     ).prepare()
     radau.solve()
+    radau_fresh = radau.solve_with_initial_state([0.8])
+    assert isinstance(radau_fresh, RadauSolution)
+    assert radau_fresh.sample(0.1)[0] == pytest.approx(0.8 * math.exp(-0.5 * 0.1), rel=2e-6)
     radau_next = radau.solve_with_parameter_values([0.8], [1.2])
-    assert isinstance(radau_next, RadauSolution)
     assert radau_next.sample(0.1)[0] == pytest.approx(0.8 * math.exp(-1.2 * 0.1), rel=2e-6)
 
     lsode2 = StiffSolverRequest.lsode2(
@@ -7008,10 +7065,13 @@ def test_stiff_api_time_segments_and_fresh_radau_solve_keep_native_semantics():
         parameters=["rate"], parameter_values=[0.5],
     ).prepare()
     lsode_first = lsode2.solve()
+    lsode_fresh = lsode2.solve_with_initial_state([2.0])
+    assert isinstance(lsode_fresh, Lsode2Solution)
+    assert lsode_fresh.states()[-1][0] == pytest.approx(2.0 * math.exp(-0.5 * 0.1), rel=2e-5)
     lsode_next = lsode2.continue_lsode2_with_parameters([1.2], 0.2)
     assert isinstance(lsode_first, Lsode2Solution) and isinstance(lsode_next, Lsode2Solution)
     assert lsode_next.states()[-1][0] == pytest.approx(
-        lsode_first.states()[-1][0] * math.exp(-1.2 * 0.1), rel=2e-5
+        lsode_fresh.states()[-1][0] * math.exp(-1.2 * 0.1), rel=2e-5
     )
 
 

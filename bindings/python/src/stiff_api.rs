@@ -1028,6 +1028,47 @@ impl PyPreparedStiffSolver {
         solve_with_parameter_values(self, py, Some((t0, t_end)), y0, parameter_values)
     }
 
+    /// Start a fresh solve with a new initial state on the configured interval.
+    /// The parameter binding, prepared callbacks and solver policy are retained.
+    fn solve_with_initial_state(&mut self, py: Python<'_>, y0: Vec<f64>) -> PyResult<Py<PyAny>> {
+        crate::radau::finite_vector(&y0, "y0")?;
+        let solver = solver_name(self.inner.kind());
+        let route = self
+            .callback_route
+            .as_deref()
+            .unwrap_or("stiff_api")
+            .to_owned();
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", solver, &route, || {
+            if let Some(failure) = &self.callback_failure {
+                failure.clear();
+            }
+            let outcome = self
+                .inner
+                .try_solve_with_initial_state(DVector::from_vec(y0))
+                .map_err(map_solve_error)?;
+            if let Some(callback_error) = self
+                .callback_failure
+                .as_ref()
+                .and_then(|failure| failure.take_pyerr("solve", solver, &route))
+            {
+                return Err(callback_error);
+            }
+            stiff_outcome_to_python(py, &self.inner, outcome)
+        })
+    }
+
+    /// Start a fresh solve with replacement initial state and a supplied interval.
+    fn solve_with_initial_state_in_interval(
+        &mut self,
+        py: Python<'_>,
+        t0: f64,
+        y0: Vec<f64>,
+        t_end: f64,
+    ) -> PyResult<Py<PyAny>> {
+        self.restart(py, t0, y0, t_end)
+    }
+
     /// Restart the prepared native route from a new state and interval.
     /// Symbolic preparation, generated artifacts and solver policy are retained.
     fn restart(
@@ -1204,30 +1245,34 @@ impl PyPreparedStiffSolver {
             {
                 return Err(callback_error);
             }
-            match outcome {
-                StiffSolveOutcome::Bdf => {
-                    let solver = self.inner.as_bdf().expect("BDF outcome retains solver");
-                    Py::new(py, BdfSolution::from_solver(solver)).map(Py::into_any)
-                }
-                StiffSolveOutcome::Radau(solution) => {
-                    Py::new(py, RadauSolution::from_native(solution)).map(Py::into_any)
-                }
-                StiffSolveOutcome::BackwardEuler => {
-                    let solver = self
-                        .inner
-                        .as_backward_euler()
-                        .expect("BE outcome retains solver");
-                    Py::new(py, BackwardEulerSolution::from_solver(solver)).map(Py::into_any)
-                }
-                StiffSolveOutcome::Lsode2(_) => {
-                    let solver = self
-                        .inner
-                        .as_lsode2()
-                        .expect("LSODE2 outcome retains solver");
-                    Py::new(py, Lsode2Solution::from_solver(solver)).map(Py::into_any)
-                }
-            }
+            stiff_outcome_to_python(py, &self.inner, outcome)
         })
+    }
+}
+
+fn stiff_outcome_to_python(
+    py: Python<'_>,
+    solver: &PreparedStiffSolver,
+    outcome: StiffSolveOutcome,
+) -> PyResult<Py<PyAny>> {
+    match outcome {
+        StiffSolveOutcome::Bdf => {
+            let native = solver.as_bdf().expect("BDF outcome retains solver");
+            Py::new(py, BdfSolution::from_solver(native)).map(Py::into_any)
+        }
+        StiffSolveOutcome::Radau(solution) => {
+            Py::new(py, RadauSolution::from_native(solution)).map(Py::into_any)
+        }
+        StiffSolveOutcome::BackwardEuler => {
+            let native = solver
+                .as_backward_euler()
+                .expect("BE outcome retains solver");
+            Py::new(py, BackwardEulerSolution::from_solver(native)).map(Py::into_any)
+        }
+        StiffSolveOutcome::Lsode2(_) => {
+            let native = solver.as_lsode2().expect("LSODE2 outcome retains solver");
+            Py::new(py, Lsode2Solution::from_solver(native)).map(Py::into_any)
+        }
     }
 }
 
@@ -1500,6 +1545,7 @@ fn map_prepare_error(error: rustedscithe_core::numerical::StiffAPI::StiffApiErro
 
 fn map_solve_error(error: StiffSolveError) -> PyErr {
     match error {
+        StiffSolveError::Restart(error) => map_restart_error(error),
         StiffSolveError::Bdf(error) => map_bdf_error(error),
         StiffSolveError::Radau(error) => map_radau_error(error),
         StiffSolveError::BackwardEuler(error) => map_be_error(error),

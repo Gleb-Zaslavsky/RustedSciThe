@@ -895,6 +895,13 @@ impl RadauSolver {
         })
     }
 
+    /// Alias emphasizing that this is a fresh solve from the supplied state.
+    /// Radau already accepts `y0` on every solve and retains no integration
+    /// history between calls.
+    pub fn solve_with_initial_state(&mut self, y0: Vec<f64>) -> PyResult<RadauSolution> {
+        self.solve(y0, None)
+    }
+
     /// Solve from `y0` after binding new values on the prepared symbolic model.
     ///
     /// This retains symbolic preparation and uses exactly the supplied `y0`.

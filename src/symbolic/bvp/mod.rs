@@ -16,6 +16,7 @@ pub(crate) mod aot_adapters;
 pub(crate) mod aot_telemetry;
 pub(crate) mod atom_aot;
 pub(crate) mod atom_lambdify;
+pub(crate) mod boundary_binding;
 pub mod direct;
 pub mod legacy;
 pub mod legacy_lambdify;

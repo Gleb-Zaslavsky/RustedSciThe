@@ -45,7 +45,12 @@ initial state and parameter values on the configured interval;
 the interval. Both reuse the prepared symbolic route. `continue_with_parameters`
 is different: it advances a time segment from BDF's last accepted state.
 `restart(t0, y0, t_end)` starts a fresh segment without rebinding parameters.
-Use a new solver when the equation structure or dimensions change.
+For only a new initial state on the configured interval, use
+`solve_with_initial_state(y0)`. It retains the current parameters and prepared
+route, resets numerical history, and runs a fresh solve. Use a new solver when
+the equation structure or dimensions change.
+`BdfCallbackSolver` exposes the same fresh-initial-state operation for its
+prepared Python callback route.
 
 ## AOT, telemetry and errors
 

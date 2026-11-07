@@ -215,6 +215,10 @@ parameter continuation would instead seed the next solve from a previous
 solution. The first solve pays preparation cost, so report it separately from
 subsequent solves when benchmarking.
 
+To change only the initial state, pass the replacement `y0` to the next
+`solve`/`try_solve_with_parameter_values` call while retaining the desired
+parameter vector. Radau retains no integration history between these calls.
+
 To reuse the prepared callbacks on a new interval:
 
 ```rust

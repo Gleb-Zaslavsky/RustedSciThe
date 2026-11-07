@@ -46,6 +46,10 @@ cargo run --no-default-features --example rus_bdf_time_segment_parameter_update_
 продолжение по параметру. Изменение формы уравнений, размерности состояния,
 layout якобиана или политики бэкенда требует новой подготовленной сборки.
 
+Если нужно изменить только `y0`, не меняя настроенный интервал, используйте
+`try_solve_with_initial_state(y0)`. Это новый расчет с прежними параметрами и
+подготовленными callbacks; численная история BDF сбрасывается.
+
 ## AOT и toolchain
 
 `examples/rus/bdf_aot_guide.rs` использует AtomView и генерируемые

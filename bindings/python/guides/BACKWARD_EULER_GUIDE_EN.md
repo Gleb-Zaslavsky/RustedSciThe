@@ -48,6 +48,11 @@ the fixed step. `restart(t0, y0, t_end)` starts a new segment without changing
 parameter values. To change `h` or the equation structure, construct a new
 solver.
 
+`solve_with_initial_state(y0)` starts a fresh solve on the configured interval
+while preserving parameter values and prepared callbacks. It resets the
+numerical trajectory and Newton state; it does not continue from the previous
+endpoint.
+
 ## AOT and diagnostics
 
 AOT shares the native build/cache lifecycle. A compiler is optional for

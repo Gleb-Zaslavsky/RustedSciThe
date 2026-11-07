@@ -459,6 +459,17 @@ impl Lsode2Solver {
         Ok(())
     }
 
+    /// Starts a fresh solve from a new initial state on the configured
+    /// interval, retaining the current parameter binding and prepared route.
+    pub fn try_solve_with_initial_state(
+        &mut self,
+        y0: DVector<f64>,
+    ) -> Result<Lsode2SolveSummary, Lsode2Error> {
+        let (t0, t_bound) = (self.config.t0, self.config.t_bound);
+        self.try_restart_with_initial_state(t0, y0, t_bound)?;
+        self.solve_with_summary()
+    }
+
     /// Returns the generated-backend resolver after preparation.
     ///
     /// AOT preparation may publish a new resolver snapshot inside the BDF

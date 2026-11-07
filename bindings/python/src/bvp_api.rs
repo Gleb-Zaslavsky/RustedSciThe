@@ -910,6 +910,66 @@ impl PyPreparedBvpSolver {
         })
     }
 
+    /// Rebind values for the prepared problem's existing boundary slots.
+    /// State indices and left/right endpoints are fixed by construction.
+    pub fn set_boundary_values(&mut self, values: Vec<f64>) -> PyResult<()> {
+        crate::radau::finite_vector(&values, "boundary_values")?;
+        self.inner
+            .set_boundary_values(values)
+            .map_err(map_api_error)
+    }
+
+    /// Solve again with new numeric boundary values, reusing prepared callbacks.
+    pub fn solve_with_boundary_values(
+        &mut self,
+        values: Vec<f64>,
+    ) -> PyResult<PyBvpApiSolution> {
+        crate::radau::finite_vector(&values, "boundary_values")?;
+        let route = self.route;
+        let solution = self.panic_state.run(
+            "solve_with_boundary_values",
+            "bvp_api",
+            route,
+            || {
+                Ok(self
+                    .inner
+                    .solve_with_boundary_values(values)
+                    .map_err(map_api_error)?
+                    .clone())
+            },
+        )?;
+        let view = self
+            .inner
+            .solution_view()
+            .expect("successful solve stores a result");
+        let mesh = view.mesh().to_vec();
+        let values = (0..mesh.len())
+            .map(|node| {
+                (0..view.state_count())
+                    .map(|state| view.value(node, state).expect("view bounds are valid"))
+                    .collect()
+            })
+            .collect();
+        let route = match &solution {
+            BvpSolution::Damped { .. } => "damped",
+            BvpSolution::Frozen { .. } => "frozen",
+            BvpSolution::Sci(_) => "sci",
+            BvpSolution::CorrectionNewton { .. } => "correction_newton",
+        };
+        let sci_details = match (solution, self.inner.telemetry_snapshot()) {
+            (BvpSolution::Sci(native), BvpSolverTelemetrySnapshot::Sci(snapshot)) => {
+                Some(crate::bvp::BvpSciSolution::from_native(native, snapshot))
+            }
+            _ => None,
+        };
+        Ok(PyBvpApiSolution {
+            route: route.to_owned(),
+            mesh,
+            values,
+            sci_details,
+        })
+    }
+
     /// Run an ordered parameter continuation loop and return the selected
     /// solver family's native Python report class. Point failures remain in
     /// the report; only preflight or unrecoverable stop errors raise here.

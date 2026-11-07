@@ -285,6 +285,7 @@ fn sparse_bundle_from_solver_request(
     let request = solver.build_solver_request(None, None);
     let mut jacobian = Jacobian::new();
     jacobian.set_symbolic_assembly_backend(request.symbolic_assembly_backend);
+    jacobian.enable_runtime_boundary_value_binding();
     jacobian.set_aot_telemetry_mode(request.aot_telemetry_mode);
     if let Some(param_names) = request.param_names.as_ref() {
         let param_refs: Vec<&str> = param_names.iter().map(|name| name.as_str()).collect();
@@ -737,7 +738,8 @@ fn bootstrap_callable_aot_backend(
     assert_eq!(
         bundle.effective_backend(),
         SelectedBackendKind::AotCompiled,
-        "{label}: sparse bundle should resolve to compiled AOT after bootstrap"
+        "{label}: sparse bundle should resolve to compiled AOT after bootstrap; diagnostics={:?}",
+        bundle.runtime_diagnostics()
     );
     assert!(
         bundle.resolved_aot_artifact().is_some(),

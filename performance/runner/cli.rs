@@ -8,7 +8,7 @@ use crate::registry::{self, Scenario, Selector};
 use crate::report;
 use clap::{Args, Parser, Subcommand};
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
@@ -471,7 +471,7 @@ fn isolated_measure(
         .stdout
         .take()
         .ok_or_else(|| RunnerError::Child("child stdout was not captured".into()))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| RunnerError::Child("child stderr was not captured".into()))?;
@@ -479,9 +479,24 @@ fn isolated_measure(
         let mut bytes = Vec::new();
         stdout.read_to_end(&mut bytes).map(|_| bytes)
     });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    let scenario_id = scenario.id.to_owned();
+    let stderr_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut output = Vec::new();
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let bytes_read = reader.read_until(b'\n', &mut line)?;
+            if bytes_read == 0 {
+                break;
+            }
+            output.extend_from_slice(&line);
+            let mut stderr = std::io::stderr().lock();
+            let _ = write!(stderr, "[perf-gates child {scenario_id}] ");
+            let _ = stderr.write_all(&line);
+            let _ = stderr.flush();
+        }
+        Ok(output)
     });
     let status = wait_for_child(&mut child, timeout, scenario.id)?;
     let stdout = stdout_reader

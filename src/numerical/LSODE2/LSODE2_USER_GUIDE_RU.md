@@ -700,6 +700,11 @@ for k in [1.0, 2.0, 4.0] {
 параметров. Запускаемые примеры: `lsode2_parameter_rebind_lambdify` и
 `lsode2_parameter_rebind_aot`.
 
+`try_solve_with_initial_state(y0)` запускает новый solve на настроенном
+интервале с текущей привязкой параметров. Подготовленные symbolic/AOT-маршрут
+и артефакты переиспользуются, а native/bridge история интегрирования
+сбрасывается. Это не продолжение по времени.
+
 ## Параллелизм/чанкинг в AOT: как это связано с производительностью
 
 В generated backend есть `aot_options`, где задаётся стратегия «нарезки» residual/Jacobian на куски. Это влияет на размер функций, стоимость компиляции и поведение runtime-плана. Для residual используются стратегии вроде `Whole`, `ByTargetChunkCount`, `ByOutputCount`; для dense Jacobian — `Whole`, `ByTargetChunkCount`, `ByRowCount`.

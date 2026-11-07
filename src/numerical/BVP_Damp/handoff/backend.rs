@@ -11,6 +11,7 @@ fn prepared_bvp_jacobian(
 ) -> Jacobian {
     let mut jacobian_instance = Jacobian::new();
     jacobian_instance.set_symbolic_assembly_backend(symbolic_assembly_backend);
+    jacobian_instance.enable_runtime_boundary_value_binding();
     jacobian_instance.set_params(param_name_refs);
     jacobian_instance.set_param_values(param_values);
     jacobian_instance.set_banded_linear_solver_config(banded_linear_solver_config);

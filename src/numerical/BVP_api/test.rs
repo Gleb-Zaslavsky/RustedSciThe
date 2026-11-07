@@ -107,6 +107,161 @@ fn correction_newton_facade_routes_solution_profile_postprocessing_and_native_te
 }
 
 #[test]
+fn boundary_value_rebind_reuses_correction_newton_symbolic_route() {
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("0")],
+        vec!["y".into()],
+        "x",
+        vec![0.0, 0.5, 1.0],
+        vec![BvpBoundaryCondition {
+            state: 0,
+            side: BvpBoundarySide::Left,
+            value: 1.0,
+        }],
+    )
+    .unwrap();
+    let config = BvpSolverSettings::CorrectionNewton(CorrectionNewtonOptions::default())
+        .with_initial_guess(DMatrix::from_element(1, 2, 1.0));
+    let mut solver = BvpSolver::new(problem, config).unwrap();
+    solver.solve().unwrap();
+    solver
+        .solve_with_boundary_values(vec![2.0])
+        .expect("same-schema boundary values should rebind");
+    let solution = solver.solution_view().unwrap();
+    assert!((solution.value(0, 0).unwrap() - 2.0).abs() < 1e-14);
+    assert!((solution.value(2, 0).unwrap() - 2.0).abs() < 1e-14);
+}
+
+#[test]
+fn boundary_value_rebind_reuses_bvp_sci_boundary_callback() {
+    let mesh = vec![0.0, 0.5, 1.0];
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("0")],
+        vec!["y".into()],
+        "x",
+        mesh.clone(),
+        vec![BvpBoundaryCondition {
+            state: 0,
+            side: BvpBoundarySide::Left,
+            value: 1.0,
+        }],
+    )
+    .unwrap();
+    let config = BvpSolverSettings::Sci {
+        options: BvpSciOptions::default()
+            .with_execution(BvpSciExecution::Lambdify)
+            .with_assembly(BvpSciAssembly::ExprLegacy),
+        sparse_factorization: BvpSciSparseFactorization::default(),
+        aot_config: None,
+    }
+    .with_initial_guess(DMatrix::from_element(1, mesh.len(), 1.0));
+    let mut solver = BvpSolver::new(problem, config).unwrap();
+    solver.solve().unwrap();
+    solver
+        .solve_with_boundary_values(vec![2.0])
+        .expect("same-schema boundary values should rebind");
+    let solution = solver.solution_view().unwrap();
+    for node in 0..mesh.len() {
+        assert!((solution.value(node, 0).unwrap() - 2.0).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn boundary_value_rebind_reuses_damped_and_frozen_symbolic_callbacks() {
+    for frontend in [
+        BvpSymbolicAssemblyBackend::ExprLegacy,
+        BvpSymbolicAssemblyBackend::AtomView,
+    ] {
+        let problem = BvpProblem::new(
+            vec![Expr::parse_expression("-a*y")],
+            vec!["y".into()],
+            "x",
+            vec![0.0, 0.5, 1.0],
+            vec![BvpBoundaryCondition {
+                state: 0,
+                side: BvpBoundarySide::Left,
+                value: 1.0,
+            }],
+        )
+        .expect("symbolic boundary-rebind fixture should construct");
+
+        let generated = crate::numerical::BVP_Damp::generated_solver_handoff::GeneratedBackendConfig::banded_lambdify_defaults()
+            .with_symbolic_assembly_backend(frontend);
+        let damped_options = DampedSolverOptions::banded_damped()
+            .with_banded_lambdify()
+            .with_bounds(HashMap::from([("y".to_string(), (-10.0, 10.0))]))
+            .with_rel_tolerance(HashMap::from([("y".to_string(), 1e-6)]))
+            .with_generated_backend_config(generated.clone());
+        let mut damped = BvpSolver::new(
+            problem.clone(),
+            BvpSolverConfig::Damped {
+                options: damped_options,
+                initial_guess: DMatrix::from_element(1, 2, 1.0),
+            },
+        )
+        .expect("Damped symbolic route should prepare");
+        damped
+            .bind_parameters(vec!["a".into()], vec![1.0])
+            .expect("Damped external evaluator parameter should bind");
+        damped.solve().expect("initial Damped solve should succeed");
+        assert!(damped.set_boundary_values(vec![f64::NAN]).is_err());
+        assert!(
+            damped.solution().is_some(),
+            "invalid Damped rebind must preserve the accepted result"
+        );
+        damped
+            .solve_with_boundary_values(vec![2.0])
+            .expect("Damped should rebind the numeric boundary value");
+        let damped_result = damped.solution_view().expect("rebound result is published");
+        assert!((damped_result.value(0, 0).unwrap() - 2.0).abs() < 1e-10);
+        let damped_right_a1 = damped_result.value(2, 0).unwrap();
+        damped
+            .set_parameter_values(vec![2.0])
+            .expect("Damped external parameter should remain independently rebindable");
+        damped
+            .solve()
+            .expect("Damped should solve after both rebinds");
+        let damped_right_a2 = damped.solution_view().unwrap().value(2, 0).unwrap();
+        assert!((damped_right_a1 - damped_right_a2).abs() > 1e-5);
+
+        let frozen_options = FrozenSolverOptions::default()
+            .with_bounds(HashMap::from([("y".to_string(), (-10.0, 10.0))]))
+            .with_generated_backend_config(generated);
+        let mut frozen = BvpSolver::new(
+            problem,
+            BvpSolverConfig::Frozen {
+                options: frozen_options,
+                initial_guess: DMatrix::from_element(1, 2, 1.0),
+            },
+        )
+        .expect("Frozen symbolic route should prepare");
+        frozen
+            .bind_parameters(vec!["a".into()], vec![1.0])
+            .expect("Frozen external evaluator parameter should bind");
+        frozen.solve().expect("initial Frozen solve should succeed");
+        assert!(frozen.set_boundary_values(vec![f64::NAN]).is_err());
+        assert!(
+            frozen.solution().is_some(),
+            "invalid Frozen rebind must preserve the accepted result"
+        );
+        frozen
+            .solve_with_boundary_values(vec![2.0])
+            .expect("Frozen should rebind the numeric boundary value");
+        let frozen_result = frozen.solution_view().expect("rebound result is published");
+        assert!((frozen_result.value(0, 0).unwrap() - 2.0).abs() < 1e-10);
+        let frozen_right_a1 = frozen_result.value(2, 0).unwrap();
+        frozen
+            .set_parameter_values(vec![2.0])
+            .expect("Frozen external parameter should remain independently rebindable");
+        frozen
+            .solve()
+            .expect("Frozen should solve after both rebinds");
+        let frozen_right_a2 = frozen.solution_view().unwrap().value(2, 0).unwrap();
+        assert!((frozen_right_a1 - frozen_right_a2).abs() > 1e-5);
+    }
+}
+
+#[test]
 fn correction_newton_facade_routes_symbolic_sparse_and_automatic_banded_backends() {
     for frontend in [
         crate::numerical::BVP_CorrectionNewton::CorrectionNewtonSymbolicFrontend::ExprLegacy,

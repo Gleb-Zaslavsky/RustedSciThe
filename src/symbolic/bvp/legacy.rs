@@ -164,6 +164,7 @@ use crate::symbolic::bvp::atom_aot::{
     AtomAotMatrixLayout, AtomAotPreparedPlan, AtomAotRuntimeError,
 };
 use crate::symbolic::bvp::atom_lambdify;
+use crate::symbolic::bvp::boundary_binding::BvpBoundaryValueSchema;
 use crate::symbolic::bvp::direct::{
     BandedJacobianChunking, BandedLambdifyConfig, BandedStructurePlan, DirectBandedJacobianRuntime,
     DirectBandedProblem,
@@ -475,6 +476,18 @@ pub struct Jacobian {
     /// order `[params..., unknowns...]`, while the outer Newton solver still
     /// passes only the unknown vector.
     pub parameter_values: Option<Vec<f64>>,
+
+    /// Full evaluator ABI values, including internal boundary slots when the
+    /// generated BVP route enables numeric boundary rebinding.
+    callback_parameter_values: Option<Vec<f64>>,
+    /// Number of user-declared parameters before internal ABI slots are added.
+    external_parameter_count: usize,
+    /// Opt-in used by generated Damped/Frozen routes; standalone legacy APIs
+    /// retain their historical eager BC substitution.
+    runtime_boundary_value_binding: bool,
+    boundary_value_schema: Option<BvpBoundaryValueSchema>,
+    /// Names of discretized endpoint variables mapped to hidden callback inputs.
+    runtime_boundary_parameter_names: HashMap<String, String>,
 
     /// Shared numeric binding used by prepared Lambdify callbacks. Changing
     /// values can therefore rebind an existing evaluator without symbolic
@@ -947,7 +960,7 @@ impl<'a> BvpSparseSolverProvider<'a> {
             });
         }
         let expected_parameters = self.execution.selected().prepared_problem.param_names.len();
-        if let Some(parameters) = self.jacobian.parameter_values.as_deref() {
+        if let Some(parameters) = self.jacobian.callback_parameter_values.as_deref() {
             if parameters.len() != expected_parameters {
                 return Err(BvpBackendIntegrationError::ParameterCountMismatch {
                     expected: expected_parameters,
@@ -1029,7 +1042,7 @@ impl<'a> BvpSparseSolverProvider<'a> {
                         },
                     )?;
                 let flat_args =
-                    flatten_runtime_args(self.jacobian.parameter_values.as_deref(), args);
+                    flatten_runtime_args(self.jacobian.callback_parameter_values.as_deref(), args);
                 let parallel_config = self.parallel_config;
                 let chunks = linked_execution_chunk_count(&linked, parallel_config, false);
                 let callback = |flat_args: &[f64], callback_out: &mut [f64]| {
@@ -1165,7 +1178,7 @@ impl<'a> BvpSparseSolverProvider<'a> {
                         },
                     )?;
                 let flat_args =
-                    flatten_runtime_args(self.jacobian.parameter_values.as_deref(), args);
+                    flatten_runtime_args(self.jacobian.callback_parameter_values.as_deref(), args);
                 let parallel_config = self.parallel_config;
                 let chunks = linked_execution_chunk_count(&linked, parallel_config, true);
                 let callback = |flat_args: &[f64], callback_out: &mut [f64]| {
@@ -1261,6 +1274,8 @@ pub struct BvpSparseSolverBundle {
     pub rel_tolerance_vec: Option<Vec<f64>>,
     pub bandwidth: Option<(usize, usize)>,
     pub bc_position_and_value: Vec<(usize, usize, f64)>,
+    /// Fixed runtime boundary schema used by generated Damped/Frozen routes.
+    pub(crate) boundary_value_schema: Option<BvpBoundaryValueSchema>,
     pub sparse_structure: SparseJacobianStructure,
     pub atom_discretization_telemetry:
         Option<crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot>,
@@ -1294,6 +1309,8 @@ pub struct BvpLegacySolverBundle {
     pub rel_tolerance_vec: Option<Vec<f64>>,
     pub bandwidth: Option<(usize, usize)>,
     pub bc_position_and_value: Vec<(usize, usize, f64)>,
+    /// Fixed runtime boundary schema used by generated Damped/Frozen routes.
+    pub(crate) boundary_value_schema: Option<BvpBoundaryValueSchema>,
     /// Runtime callback telemetry for the ExprLegacy Lambdify route.
     pub legacy_lambdify_telemetry: Option<crate::symbolic::bvp::telemetry::BvpLambdifyTelemetry>,
     /// Runtime callback telemetry for the AtomView Lambdify route.
@@ -1685,10 +1702,42 @@ impl BvpSparseSolverBundle {
         let Some(linked_runtime) = linked_runtime else {
             return false;
         };
+        let callback_binding = if let Some(parameter_values) = parameter_values {
+            let mut combined = parameter_values.to_vec();
+            if let Some(schema) = self.boundary_value_schema.as_ref() {
+                combined.extend(schema.values());
+            }
+            let binding = self
+                .parameter_binding
+                .get_or_insert_with(|| BvpParameterBindingHandle::new(None));
+            binding.replace(Some(combined));
+            binding.clone()
+        } else if let Some(binding) = &self.parameter_binding {
+            binding.clone()
+        } else {
+            let boundary_values = self
+                .boundary_value_schema
+                .as_ref()
+                .map(BvpBoundaryValueSchema::values)
+                .unwrap_or_default();
+            let values = match self.parameter_values.clone() {
+                Some(mut external_values) => {
+                    external_values.extend(boundary_values);
+                    Some(external_values)
+                }
+                None if self.boundary_value_schema.is_some()
+                    && prepared_problem.param_names.len() == boundary_values.len() =>
+                {
+                    Some(boundary_values)
+                }
+                None => None,
+            };
+            BvpParameterBindingHandle::new(values)
+        };
         let Some((residual, jacobian)) = linked_runtime_callbacks_for_matrix_backend(
             &prepared_problem,
             matrix_backend,
-            parameter_values.or(self.parameter_values.as_deref()),
+            callback_binding,
             parallel_config,
             self.banded_linear_solver_config,
         ) else {
@@ -1937,7 +1986,7 @@ impl Jacobian {
         if let Some(binding) = &self.parameter_binding {
             return binding.clone();
         }
-        let binding = BvpParameterBindingHandle::new(self.parameter_values.clone());
+        let binding = BvpParameterBindingHandle::new(self.callback_parameter_values.clone());
         self.parameter_binding = Some(binding.clone());
         binding
     }
@@ -1959,6 +2008,7 @@ impl Jacobian {
             rel_tolerance_vec: self.rel_tolerance_vec,
             bandwidth: self.bandwidth,
             bc_position_and_value: self.BC_pos_n_values,
+            boundary_value_schema: self.boundary_value_schema,
             legacy_lambdify_telemetry,
             atom_lambdify_telemetry,
             direct_banded_jacobian_telemetry,
@@ -3475,7 +3525,7 @@ fn infer_atom_bandwidth(codegen: &PreparedSparseAtomBvpCodegen) -> (usize, usize
 fn linked_runtime_callbacks_for_matrix_backend(
     prepared_problem: &BvpPreparedSparseAotProblem,
     matrix_backend: MatrixBackend,
-    parameter_values: Option<&[f64]>,
+    parameter_binding: BvpParameterBindingHandle,
     parallel_config: Option<ParallelExecutorConfig>,
     banded_linear_solver_config: LinearSolverConfig,
 ) -> Option<(Box<dyn Fun>, Box<dyn Jac>)> {
@@ -3484,12 +3534,11 @@ fn linked_runtime_callbacks_for_matrix_backend(
     )
     .ok()
     .flatten()?;
-    let parameter_values = parameter_values.unwrap_or(&[]).to_vec();
     let shape = prepared_problem.shape;
     let residual_len = prepared_problem.shape.0;
 
     let residual_link = linked.clone();
-    let residual_parameter_values = parameter_values.clone();
+    let residual_parameter_binding = parameter_binding.clone();
     let residual_parallel_config = parallel_config;
     let residual_aot_telemetry = prepared_problem
         .atom_aot_plan()
@@ -3500,8 +3549,8 @@ fn linked_runtime_callbacks_for_matrix_backend(
             .and_then(|telemetry| telemetry.start_timing());
         let input_start = std::time::Instant::now();
         let dense = vec.to_DVectorType();
-        let flat_args =
-            flatten_runtime_args(Some(residual_parameter_values.as_slice()), dense.as_slice());
+        let parameter_values = residual_parameter_binding.snapshot();
+        let flat_args = flatten_runtime_args(parameter_values.as_deref(), dense.as_slice());
         record_callback_stage_time("Callback Residual Input Prep", input_start.elapsed());
 
         let mut out = vec![0.0; residual_len];
@@ -3527,7 +3576,7 @@ fn linked_runtime_callbacks_for_matrix_backend(
     }));
 
     let jacobian_link = linked;
-    let jacobian_parameter_values = parameter_values.clone();
+    let jacobian_parameter_binding = parameter_binding;
     let jacobian_parallel_config = parallel_config;
     let jacobian_aot_telemetry = prepared_problem
         .atom_aot_plan()
@@ -3545,10 +3594,8 @@ fn linked_runtime_callbacks_for_matrix_backend(
                     .and_then(|telemetry| telemetry.start_timing());
                 let input_start = std::time::Instant::now();
                 let dense = vec.to_DVectorType();
-                let flat_args = flatten_runtime_args(
-                    Some(jacobian_parameter_values.as_slice()),
-                    dense.as_slice(),
-                );
+                let parameter_values = jacobian_parameter_binding.snapshot();
+                let flat_args = flatten_runtime_args(parameter_values.as_deref(), dense.as_slice());
                 record_callback_stage_time("Callback Jacobian Input Prep", input_start.elapsed());
 
                 let output_len = match compact_layout {
@@ -3614,10 +3661,8 @@ fn linked_runtime_callbacks_for_matrix_backend(
             convert_to_jac(Box::new(move |_x: f64, vec: &dyn VectorType| {
                 let input_start = std::time::Instant::now();
                 let dense = vec.to_DVectorType();
-                let flat_args = flatten_runtime_args(
-                    Some(jacobian_parameter_values.as_slice()),
-                    dense.as_slice(),
-                );
+                let parameter_values = jacobian_parameter_binding.snapshot();
+                let flat_args = flatten_runtime_args(parameter_values.as_deref(), dense.as_slice());
                 record_callback_stage_time("Callback Jacobian Input Prep", input_start.elapsed());
 
                 let mut values = vec![0.0; structure.nnz()];
@@ -4895,7 +4940,7 @@ mod bvp_sparse_chunking_tests {
             linked_runtime_callbacks_for_matrix_backend(
                 &prepared,
                 MatrixBackend::Banded,
-                Some(&[parameter]),
+                BvpParameterBindingHandle::new(Some(vec![parameter])),
                 None,
                 LinearSolverConfig::faithful_banded(),
             )
@@ -4985,16 +5030,50 @@ impl Jacobian {
         scheme: String,
         method: String,
         bandwidth: Option<(usize, usize)>,
-    ) -> (
-        String,
-        Vec<String>,
-        BvpMatrixBackend,
-        HashMap<String, f64>,
-        Instant,
-    ) {
+    ) -> Result<
+        (
+            String,
+            Vec<String>,
+            BvpMatrixBackend,
+            HashMap<String, f64>,
+            Instant,
+        ),
+        BvpBackendIntegrationError,
+    > {
         let total_start = Instant::now();
         let mut timer_hash: HashMap<String, f64> = HashMap::new();
         self.set_params(params);
+        if self.runtime_boundary_value_binding {
+            let mesh_points = mesh
+                .as_ref()
+                .map(Vec::len)
+                .unwrap_or_else(|| n_steps.unwrap_or(100).saturating_add(1));
+            let mut occupied_names = self.parameters_string.clone();
+            occupied_names.push(arg.clone());
+            occupied_names.extend(values.iter().cloned());
+            occupied_names.extend(eq_system.iter().flat_map(|equation| {
+                equation
+                    .all_arguments_are_variables()
+                    .into_iter()
+                    .map(|name| name.to_string())
+            }));
+            let schema = BvpBoundaryValueSchema::new(
+                &values,
+                mesh_points,
+                &BorderConditions,
+                occupied_names,
+            )
+            .map_err(|error| BvpBackendIntegrationError::InvalidProblem {
+                field: "boundary_conditions".to_string(),
+                message: error.to_string(),
+            })?;
+            self.parameters_string
+                .extend(schema.names().map(str::to_string));
+            self.boundary_value_schema = Some(schema);
+            self.refresh_callback_parameter_values();
+        } else {
+            self.callback_parameter_values = self.parameter_values.clone();
+        }
         self.atom_discretized_system = None;
         self.atom_symbolic_jacobian_sparse = None;
         let param = arg.clone();
@@ -5018,19 +5097,40 @@ impl Jacobian {
                 scheme,
             ),
             BvpSymbolicAssemblyBackend::AtomView => {
-                let discretized = discretization_system_bvp_par_atom(
-                    eq_system,
-                    values,
-                    arg,
-                    t0,
-                    n_steps,
-                    h,
-                    mesh,
-                    BorderConditions,
-                    Bounds,
-                    rel_tolerance,
-                    scheme,
-                );
+                let discretized = if let Some(schema) = self.boundary_value_schema.as_ref() {
+                    crate::symbolic::View::bvp::try_discretization_system_bvp_par_atom_with_boundary_schema(
+                        eq_system,
+                        values,
+                        arg,
+                        t0,
+                        n_steps,
+                        h,
+                        mesh,
+                        BorderConditions,
+                        Bounds,
+                        rel_tolerance,
+                        scheme,
+                        schema,
+                    )
+                    .map_err(|error| BvpBackendIntegrationError::InvalidProblem {
+                        field: "AtomView boundary discretization".to_string(),
+                        message: error.to_string(),
+                    })?
+                } else {
+                    discretization_system_bvp_par_atom(
+                        eq_system,
+                        values,
+                        arg,
+                        t0,
+                        n_steps,
+                        h,
+                        mesh,
+                        BorderConditions,
+                        Bounds,
+                        rel_tolerance,
+                        scheme,
+                    )
+                };
                 self.install_atom_discretized_system(discretized);
             }
         }
@@ -5099,13 +5199,13 @@ impl Jacobian {
             timer_hash.extend(jacobian_breakdown);
         }
 
-        (
+        Ok((
             param,
             indexed_values,
             matrix_backend,
             timer_hash,
             total_start,
-        )
+        ))
     }
 
     /// Finalizes the legacy timing table for `generate_BVP*` style entrypoints.
@@ -5177,6 +5277,11 @@ impl Jacobian {
             variable_string: Vec::new(),
             parameters_string: Vec::new(),
             parameter_values: None,
+            callback_parameter_values: None,
+            external_parameter_count: 0,
+            runtime_boundary_value_binding: false,
+            boundary_value_schema: None,
+            runtime_boundary_parameter_names: HashMap::new(),
             parameter_binding: None,
             symbolic_jacobian: Vec::new(),
             symbolic_jacobian_sparse: Vec::new(),
@@ -5434,10 +5539,40 @@ impl Jacobian {
         self.parameters_string = params
             .map(|params| params.iter().map(|name| (*name).to_string()).collect())
             .unwrap_or_default();
+        self.external_parameter_count = self.parameters_string.len();
+        self.boundary_value_schema = None;
+        self.runtime_boundary_parameter_names.clear();
+        self.callback_parameter_values = self.parameter_values.clone();
         // Changing names changes the callback ABI, so an old compiled
         // evaluator cannot be rebound safely. Numeric-only updates are
         // handled by the shared binding below.
         self.parameter_binding = None;
+    }
+
+    /// Enables reserved runtime inputs for numeric BC values on the next
+    /// symbolic preparation. This is intended for generated native solvers.
+    pub(crate) fn enable_runtime_boundary_value_binding(&mut self) {
+        self.runtime_boundary_value_binding = true;
+    }
+
+    fn refresh_callback_parameter_values(&mut self) {
+        let boundary_values = self
+            .boundary_value_schema
+            .as_ref()
+            .map(BvpBoundaryValueSchema::values)
+            .unwrap_or_default();
+        let mut values = match self.parameter_values.clone() {
+            Some(values) => Some(values),
+            None if self.external_parameter_count == 0 => Some(Vec::new()),
+            None => None,
+        };
+        if let Some(values) = values.as_mut() {
+            values.extend(boundary_values);
+        }
+        self.callback_parameter_values = values.clone();
+        if let Some(binding) = &self.parameter_binding {
+            binding.replace(values);
+        }
     }
 
     /// Sets current numeric parameter values.
@@ -5445,14 +5580,12 @@ impl Jacobian {
         if let Some(ref values) = values {
             assert_eq!(
                 values.len(),
-                self.parameters_string.len(),
-                "parameter_values length must match parameters_string length"
+                self.external_parameter_count,
+                "parameter_values length must match the external parameter schema"
             );
         }
         self.parameter_values = values;
-        if let Some(binding) = &self.parameter_binding {
-            binding.replace(self.parameter_values.clone());
-        }
+        self.refresh_callback_parameter_values();
     }
 
     /// Selects the symbolic assembly backend used during BVP discretization.
@@ -6189,9 +6322,28 @@ impl Jacobian {
     /// metadata are packaged together instead of being pulled out from several
     /// `Jacobian` fields manually.
     pub fn into_sparse_solver_bundle(
-        self,
+        mut self,
         execution: BvpSparseExecutionPlan,
     ) -> BvpSparseSolverBundle {
+        let selected = execution.selected().clone();
+        let use_shared_parameter_binding = matches!(
+            execution,
+            BvpSparseExecutionPlan::AotCompiled(_) | BvpSparseExecutionPlan::LambdifyReady(_)
+        ) && (self.runtime_boundary_value_binding
+            || self.boundary_value_schema.is_some()
+            || matches!(selected.effective_backend, SelectedBackendKind::Lambdify));
+        let parameter_binding =
+            use_shared_parameter_binding.then(|| self.parameter_binding_for_callbacks());
+        let linked_parameter_binding =
+            if matches!(execution, BvpSparseExecutionPlan::AotCompiled(_)) {
+                Some(
+                    parameter_binding
+                        .clone()
+                        .unwrap_or_else(|| self.parameter_binding_for_callbacks()),
+                )
+            } else {
+                None
+            };
         let legacy_lambdify_telemetry = self.legacy_lambdify_telemetry;
         let atom_lambdify_telemetry = self.atom_lambdify_telemetry;
         let direct_banded_jacobian_telemetry = self.direct_banded_jacobian_telemetry;
@@ -6208,13 +6360,12 @@ impl Jacobian {
                 );
             }
         }
-        let selected = execution.selected().clone();
         let sparse_structure = selected.prepared_problem.sparse_structure();
         let linked_callbacks = if matches!(execution, BvpSparseExecutionPlan::AotCompiled(_)) {
             linked_runtime_callbacks_for_matrix_backend(
                 &selected.prepared_problem,
                 selected.matrix_backend,
-                self.parameter_values.as_deref(),
+                linked_parameter_binding.expect("linked AOT branch has a parameter binding"),
                 None,
                 self.banded_linear_solver_config,
             )
@@ -6225,13 +6376,6 @@ impl Jacobian {
             || linked_callbacks.is_some();
         let (linked_residual, linked_jacobian) =
             linked_callbacks.map_or((None, None), |(fun, jac)| (Some(fun), Some(jac)));
-        let parameter_binding =
-            if matches!(selected.effective_backend, SelectedBackendKind::Lambdify) {
-                self.parameter_binding
-            } else {
-                None
-            };
-
         BvpSparseSolverBundle {
             execution,
             residual_function: if callbacks_available {
@@ -6264,6 +6408,7 @@ impl Jacobian {
             rel_tolerance_vec: self.rel_tolerance_vec,
             bandwidth: self.bandwidth,
             bc_position_and_value: self.BC_pos_n_values,
+            boundary_value_schema: self.boundary_value_schema,
             sparse_structure,
             atom_discretization_telemetry: selected
                 .prepared_problem
@@ -6313,21 +6458,21 @@ impl Jacobian {
         let result = catch_unwind(AssertUnwindSafe(|| {
             let (arg_name, indexed_values_owned, _matrix_backend, timer_hash, total_start) = self
                 .prepare_symbolic_bvp_stage_with_params(
-                    eq_system,
-                    values,
-                    arg,
-                    params,
-                    t0,
-                    n_steps,
-                    h,
-                    mesh,
-                    BorderConditions,
-                    Bounds,
-                    rel_tolerance,
-                    scheme,
-                    method,
-                    bandwidth,
-                );
+                eq_system,
+                values,
+                arg,
+                params,
+                t0,
+                n_steps,
+                h,
+                mesh,
+                BorderConditions,
+                Bounds,
+                rel_tolerance,
+                scheme,
+                method,
+                bandwidth,
+            )?;
             let effective_arg_name = param.unwrap_or(arg_name);
             let equation_count = self
                 .atom_discretized_system
@@ -6456,21 +6601,21 @@ impl Jacobian {
         let result = catch_unwind(AssertUnwindSafe(|| {
             let (arg_name, indexed_values_owned, _matrix_backend, timer_hash, total_start) = self
                 .prepare_symbolic_bvp_stage_with_params(
-                    eq_system,
-                    values,
-                    arg,
-                    params,
-                    t0,
-                    n_steps,
-                    h,
-                    mesh,
-                    BorderConditions,
-                    Bounds,
-                    rel_tolerance,
-                    scheme,
-                    method,
-                    bandwidth,
-                );
+                eq_system,
+                values,
+                arg,
+                params,
+                t0,
+                n_steps,
+                h,
+                mesh,
+                BorderConditions,
+                Bounds,
+                rel_tolerance,
+                scheme,
+                method,
+                bandwidth,
+            )?;
             let effective_arg_name = param.unwrap_or(arg_name);
             self.try_finish_sparse_backend_generation(
                 effective_arg_name,
@@ -6673,7 +6818,7 @@ impl Jacobian {
             return Ok(());
         }
 
-        let parameter_values = self.parameter_values.as_deref();
+        let parameter_values = self.callback_parameter_values.as_deref();
         let parameter_count = self.parameters_string.len();
         match config.matrix_backend {
             BvpMatrixBackend::Dense | BvpMatrixBackend::FaerSparseCol => {
@@ -7946,6 +8091,7 @@ impl Jacobian {
         let mut timer_hash: HashMap<String, f64> = HashMap::new();
         let (H, T_list, n_steps) = self.create_mesh(n_steps, h, mesh, t0);
         let (matrix_of_expr, matrix_of_names) = Expr::IndexedVarsMatrix(n_steps, values.clone());
+        self.runtime_boundary_parameter_names.clear();
         let bc_handling = Instant::now();
         // Pre-compute boundary conditions lookup for O(1) access
         let bc_lookup: HashMap<String, HashMap<usize, f64>> = BorderConditions
@@ -7981,6 +8127,15 @@ impl Jacobian {
                         _ => {}
                     }
                 }
+            }
+        }
+        if let Some(schema) = self.boundary_value_schema.as_ref() {
+            for slot in schema.slots() {
+                let node = if slot.endpoint == 0 { 0 } else { n_steps - 1 };
+                self.runtime_boundary_parameter_names.insert(
+                    matrix_of_names[node][slot.variable_index].clone(),
+                    slot.parameter_name.clone(),
+                );
             }
         }
         timer_hash.insert(
@@ -8106,8 +8261,13 @@ impl Jacobian {
         let discreditized_system_with_BC: Vec<Expr> = discreditized_system
             .into_par_iter()
             .map(|mut eq_i| {
+                if !self.runtime_boundary_parameter_names.is_empty() {
+                    eq_i = eq_i.rename_variables(&self.runtime_boundary_parameter_names);
+                }
                 for (var_name, &value) in &vars_for_boundary_conditions {
-                    eq_i = eq_i.set_variable(var_name, value);
+                    if !self.runtime_boundary_parameter_names.contains_key(var_name) {
+                        eq_i = eq_i.set_variable(var_name, value);
+                    }
                 }
                 eq_i.simplify()
             })
@@ -8347,7 +8507,8 @@ impl Jacobian {
                 scheme,
                 method,
                 bandwidth,
-            );
+            )
+            .unwrap_or_else(|error| panic!("BVP symbolic preparation failed: {error:?}"));
         let param = param.unwrap_or(arg_name);
         let indexed_values: Vec<&str> = indexed_values_owned.iter().map(|x| x.as_str()).collect();
 
@@ -8440,7 +8601,8 @@ impl Jacobian {
                 scheme,
                 method,
                 bandwidth,
-            );
+            )
+            .unwrap_or_else(|error| panic!("BVP symbolic preparation failed: {error:?}"));
         let effective_arg_name = param.unwrap_or(arg_name);
         let equation_count = self
             .atom_discretized_system
@@ -8505,7 +8667,8 @@ impl Jacobian {
                 scheme,
                 method,
                 bandwidth,
-            );
+            )
+            .unwrap_or_else(|error| panic!("BVP symbolic preparation failed: {error:?}"));
         let effective_arg_name = param.unwrap_or(arg_name);
 
         self.try_finish_sparse_backend_generation(

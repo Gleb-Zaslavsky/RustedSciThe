@@ -352,6 +352,16 @@ impl NRBVP {
     pub fn try_solve(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         self.try_solver()
     }
+
+    /// Re-solves the prepared problem with new values for the unchanged
+    /// boundary-condition topology.
+    pub fn try_solve_with_boundary_values(
+        &mut self,
+        values: Vec<f64>,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_set_boundary_values(values)?;
+        self.try_solve()
+    }
     /// Compatibility-only wrapper over [`NRBVP::try_solve`].
     ///
     /// New code should prefer [`NRBVP::try_solve`] so AOT/logging/runtime failures

@@ -37,8 +37,8 @@ use crate::errors::{
     SolverPanicState, UnsupportedOptionError, annotate, catch_panic,
 };
 use crate::expr::PyExpr;
-use crate::telemetry::write_report;
 use crate::parameter_loop::{PyIvpParameterLoopPoint, run_parameter_loop};
+use crate::telemetry::write_report;
 
 /// Adapt Python callbacks to LSODE2's `Send + Sync` Rust callback contract.
 ///
@@ -1178,6 +1178,36 @@ impl Lsode2PythonSolver {
         })
     }
 
+    /// Starts a fresh solve from `y0` on the configured interval, retaining
+    /// the current parameter values and prepared callbacks/artifacts.
+    pub fn solve_with_initial_state(&mut self, y0: Vec<f64>) -> PyResult<Lsode2Solution> {
+        finite_vector(&y0, "y0")?;
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "lsode2", &route, || {
+            if let Some(failure) = &self.callback_failure {
+                failure.clear();
+            }
+            self.solver
+                .try_solve_with_initial_state(DVector::from_vec(y0))
+                .map_err(map_lsode2_error)?;
+            if let Some(callback_error) = self
+                .callback_failure
+                .as_ref()
+                .and_then(|failure| failure.take_pyerr("solve", "lsode2", &route))
+            {
+                return Err(callback_error);
+            }
+            let solution = Lsode2Solution::from_solver(&self.solver);
+            self.last_time = solution.final_time();
+            self.last_state = solution.final_state();
+            Ok(solution)
+        })
+    }
+
     /// Start a fresh solve with new parameter values and initial state.
     /// The configured interval and prepared callbacks are retained.
     pub fn solve_with_parameter_values(
@@ -1197,7 +1227,10 @@ impl Lsode2PythonSolver {
         parameter_vectors: Vec<Vec<f64>>,
     ) -> PyResult<Vec<Py<PyIvpParameterLoopPoint>>> {
         finite_vector(&y0, "y0")?;
-        let route = format!("{}:{}:{}", self.frontend, self.execution, self.matrix_layout);
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.matrix_layout
+        );
         run_parameter_loop(py, "lsode2", &route, parameter_vectors, |parameters| {
             let solution = self.solve_with_parameter_values(y0.clone(), parameters.to_vec())?;
             Py::new(py, solution).map(Py::into_any)

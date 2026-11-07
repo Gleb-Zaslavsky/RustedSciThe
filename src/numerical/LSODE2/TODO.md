@@ -1,5 +1,13 @@
 # LSODE2 Symbolic Runtime TODO
 
+## Fresh Solve With a Replacement Initial State (2026-11-07)
+
+- [x] Add `try_solve_with_initial_state(y0)` on the configured interval,
+  retaining current parameter values and prepared symbolic/backend routes
+  while resetting native/bridge integration state.
+- [x] Expose it in Python and StiffAPI, with tests and guide/example coverage;
+  keep it semantically separate from time-segment continuation.
+
 ## Independent IVP Parameter Loop
 
 - [x] Add `try_solve_parameter_loop(y0, parameter_vectors)` over the existing

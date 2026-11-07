@@ -81,6 +81,12 @@ Fresh parameterized solves use the common `solve_with_parameter_values(y0,
 values)` or `solve_with_parameter_values_in_interval(t0, y0, t_end, values)`
 methods. Both start a new initial-value solve and retain prepared symbolic/AOT
 resources. The first keeps the configured interval; the second changes it.
+When only the initial state changes on the configured interval, use
+`solve_with_initial_state(y0)`. Use
+`solve_with_initial_state_in_interval(t0, y0, t_end)` when the interval also
+changes. Both keep the current parameter binding and prepared route while
+resetting integrator history. These are fresh solves, not parameter or time
+continuation.
 
 Time-segment continuation remains solver-specific:
 
@@ -146,3 +152,5 @@ time-segment continuation for BDF/BE/LSODE2 and a fresh parameterized Radau
 solve, while `examples/stiff_api_reaction_chain.py`
 selects among the stiff solvers for an exact two-species reaction chain. They
 print results for orientation; they are not performance benchmarks.
+`examples/stiff_api_parameter_rebind.py` also demonstrates a fresh solve with
+a replacement initial state across all four solver routes.

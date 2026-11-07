@@ -76,6 +76,15 @@ successful profile. See `examples/bvp_api_correction_newton.py` for a single sol
 `examples/bvp_api_correction_newton_bratu_continuation.py` for nontrivial parameter
 sweeps.
 
+`PreparedBvpSolver.set_boundary_values(values)` rebinds only the numeric values
+of the original ordered boundary slots; `solve_with_boundary_values(values)`
+also runs the solve. The state/endpoint schema cannot change. Callback reuse is
+implemented for symbolic Sci, CorrectionNewton, Damped and Frozen routes.
+Damped/Frozen support applies to prepared ExprLegacy or AtomView with Lambdify
+or AOT, not numerical callback routes. Rebinding invalidates the accepted
+result/checkpoint but retains prepared residual/Jacobian callbacks and the AOT
+artifact. Changing the state/endpoint schema requires preparing a new solver.
+
 For BVP_sci free parameters, provide all of `free_parameter_names`,
 `free_parameter_guess` and `boundary_residual`. The residual callback receives
 `(ya, yb, parameters)` and returns one extra boundary residual per unknown.

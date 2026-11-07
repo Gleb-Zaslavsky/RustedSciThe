@@ -14,6 +14,9 @@ pub struct DampedGeneratedSolverState {
     pub bandwidth: (usize, usize),
     /// Boundary condition positions and values in the flattened state vector.
     pub bc_position_and_value: Vec<(usize, usize, f64)>,
+    /// Stable endpoint-to-runtime-input mapping for numeric BC rebinding.
+    pub(crate) boundary_value_schema:
+        Option<crate::symbolic::bvp::boundary_binding::BvpBoundaryValueSchema>,
     /// Updated resolver snapshot that includes any newly materialized AOT artifact.
     pub updated_resolver: Option<AotResolver>,
     /// Backend branch that actually supplied the runtime callbacks.
@@ -48,6 +51,9 @@ pub struct FrozenGeneratedSolverState {
     pub variable_string: Vec<String>,
     /// Jacobian bandwidth metadata used by sparse linear solves.
     pub bandwidth: (usize, usize),
+    /// Stable endpoint-to-runtime-input mapping for numeric BC rebinding.
+    pub(crate) boundary_value_schema:
+        Option<crate::symbolic::bvp::boundary_binding::BvpBoundaryValueSchema>,
     /// Updated resolver snapshot that includes any newly materialized AOT artifact.
     pub updated_resolver: Option<AotResolver>,
     /// Backend branch that actually supplied the runtime callbacks.

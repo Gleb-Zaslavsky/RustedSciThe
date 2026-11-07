@@ -395,6 +395,7 @@ pub fn build_numeric_generated_solver_state(
         variable_string,
         bandwidth: bandwidth_hint.unwrap_or_else(|| infer_bandwidth(n_vars)),
         bc_position_and_value: bc_layout,
+        boundary_value_schema: None,
         updated_resolver: None,
         selected_backend: SelectedBackendKind::Numeric,
         runtime_diagnostics: HashMap::new(),

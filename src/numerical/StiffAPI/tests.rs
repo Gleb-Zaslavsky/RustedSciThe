@@ -127,6 +127,165 @@ fn stiff_parameter_loop_keeps_each_native_failure_and_continues() {
     }
 }
 
+#[test]
+fn fresh_solve_with_new_initial_state_retains_current_parameter_binding() {
+    use crate::numerical::BDF::BDF_api::BdfTelemetryMode;
+
+    let options = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-rate*y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.2,
+        0.02,
+        1e-8,
+        1e-10,
+        None,
+        false,
+        Some(0.01),
+    )
+    .with_equation_parameters(vec!["rate".into()])
+    .with_equation_parameter_values(DVector::from_element(1, 2.0))
+    .with_telemetry_mode(BdfTelemetryMode::Counters);
+    let mut prepared = StiffSolverRequest::Bdf { options }
+        .prepare(None)
+        .expect("BDF should prepare");
+
+    prepared
+        .try_solve_with_initial_state_in_interval(0.0, DVector::from_element(1, 3.0), 0.2)
+        .expect("fresh solve with a replacement initial state should succeed");
+    let view = prepared.trajectory_view().expect("trajectory is retained");
+    assert_eq!(view.values[(0, 0)], 3.0);
+    assert!(view.values[(view.values.nrows() - 1, 0)] < 3.0);
+    assert!(prepared.telemetry_snapshot().is_ok());
+}
+
+#[test]
+fn same_interval_initial_state_rebind_is_consistent_across_all_routes() {
+    use crate::numerical::BDF::BDF_api::BdfTelemetryMode;
+    use crate::numerical::BE::BeTelemetryMode;
+    use crate::numerical::LSODE2::IvpTelemetry;
+    use crate::numerical::Radau::api::{
+        RadauConfig, RadauOutputPolicy, RadauProblem, RadauTelemetryMode,
+    };
+
+    let equation = || vec![Expr::parse_expression("-rate*y")];
+    let states = || vec!["y".into()];
+    let parameters = || vec!["rate".into()];
+    let configured_y0 = DVector::from_element(1, 1.0);
+    let replacement_y0 = DVector::from_element(1, 3.0);
+    let expected_final = 3.0 * (-2.0_f64 * 0.2).exp();
+
+    let bdf_options = BdfSolverOptions::for_bdf(
+        equation(),
+        states(),
+        "t".into(),
+        0.0,
+        configured_y0.clone(),
+        0.2,
+        0.01,
+        1e-9,
+        1e-11,
+        None,
+        false,
+        Some(0.01),
+    )
+    .with_equation_parameters(parameters())
+    .with_equation_parameter_values(DVector::from_element(1, 2.0))
+    .with_telemetry_mode(BdfTelemetryMode::Counters);
+    let mut bdf = StiffSolverRequest::Bdf {
+        options: bdf_options,
+    }
+    .prepare(None)
+    .unwrap();
+    bdf.try_solve_with_initial_state(replacement_y0.clone())
+        .unwrap();
+    let bdf_view = bdf.trajectory_view().unwrap();
+    assert_eq!(bdf_view.values[(0, 0)], 3.0);
+    assert!((bdf_view.values[(bdf_view.values.nrows() - 1, 0)] - expected_final).abs() < 2e-7);
+
+    let be_options = BeSolverOptions::new(
+        equation(),
+        states(),
+        "t".into(),
+        1e-10,
+        20,
+        Some(0.001),
+        0.0,
+        0.2,
+        configured_y0.clone(),
+    )
+    .with_telemetry_mode(BeTelemetryMode::Counters);
+    let mut be = StiffSolverRequest::BackwardEuler {
+        options: be_options,
+        equation_parameters: parameters(),
+        parameter_values: vec![2.0],
+    }
+    .prepare(None)
+    .unwrap();
+    be.try_solve_with_initial_state(replacement_y0.clone())
+        .unwrap();
+    let be_view = be.trajectory_view().unwrap();
+    assert_eq!(be_view.values[(0, 0)], 3.0);
+    assert!((be_view.values[(be_view.values.nrows() - 1, 0)] - expected_final).abs() < 0.004);
+
+    let lsode2_config = Lsode2ProblemConfig::new(
+        equation(),
+        states(),
+        "t".into(),
+        0.0,
+        configured_y0.clone(),
+        0.2,
+        0.01,
+        1e-9,
+        1e-11,
+    )
+    .with_equation_parameters(parameters())
+    .with_equation_parameter_values(DVector::from_element(1, 2.0))
+    .with_telemetry(IvpTelemetry::counters());
+    let mut lsode2 = StiffSolverRequest::Lsode2 {
+        config: lsode2_config,
+        logging_level: None,
+    }
+    .prepare(None)
+    .unwrap();
+    lsode2
+        .try_solve_with_initial_state(replacement_y0.clone())
+        .unwrap();
+    let lsode2_view = lsode2.trajectory_view().unwrap();
+    assert_eq!(lsode2_view.values[(0, 0)], 3.0);
+    assert!(
+        (lsode2_view.values[(lsode2_view.values.nrows() - 1, 0)] - expected_final).abs() < 2e-7
+    );
+
+    let radau_problem =
+        RadauProblem::new(equation(), states(), "t").with_parameter_names(parameters());
+    let radau_config = RadauConfig {
+        t_bound: 0.2,
+        first_step: Some(0.01),
+        max_step: 0.02,
+        output: RadauOutputPolicy::Dense,
+        telemetry: RadauTelemetryMode::Counters,
+        ..RadauConfig::default()
+    };
+    let mut radau = StiffSolverRequest::Radau {
+        problem: radau_problem,
+        config: radau_config,
+        initial_state: vec![1.0],
+        parameters: vec![2.0],
+    }
+    .prepare(None)
+    .unwrap();
+    let StiffSolveOutcome::Radau(solution) =
+        radau.try_solve_with_initial_state(replacement_y0).unwrap()
+    else {
+        panic!("Radau facade must preserve the native result type");
+    };
+    assert_eq!(solution.sample(0.0).unwrap()[0], 3.0);
+    assert!((solution.y[0] - expected_final).abs() < 2e-7);
+}
+
 fn assert_parameter_loop_outputs_match<NativeTelemetry, NativeError>(
     native: &crate::numerical::ivp_parameter_loop::IvpParameterLoopReport<
         NativeTelemetry,

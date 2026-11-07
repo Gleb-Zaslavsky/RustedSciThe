@@ -74,6 +74,42 @@ fn real_bvp_inputs() -> (
     (eq_system, values, arg, border_conditions)
 }
 
+fn prepare_runtime_boundary_bridge(
+    eq_system: Vec<Expr>,
+    values: Vec<String>,
+    arg: String,
+    params: Option<&[&str]>,
+    border_conditions: HashMap<String, Vec<(usize, f64)>>,
+    n_steps: usize,
+    method: &str,
+    bandwidth: Option<(usize, usize)>,
+) -> crate::symbolic::bvp::legacy::BvpPreparedSparseAotProblem {
+    let mut staged = Jacobian::new();
+    staged.enable_runtime_boundary_value_binding();
+    let execution = staged
+        .try_generate_BVP_with_backend_selection(
+            eq_system,
+            values,
+            arg,
+            params,
+            0.0,
+            None,
+            Some(n_steps),
+            None,
+            None,
+            border_conditions,
+            None,
+            None,
+            "forward".to_string(),
+            method.to_string(),
+            bandwidth,
+            BackendSelectionPolicy::LambdifyOnly,
+            None,
+        )
+        .expect("runtime-bound BVP test fixture should prepare");
+    execution.selected().prepared_problem.clone()
+}
+
 #[test]
 fn lambdify_telemetry_handles_survive_solver_handoff() {
     let (eq_system, values, arg, _) = real_bvp_inputs();
@@ -296,39 +332,24 @@ fn sparse_presets_allow_explicit_exprlegacy_compatibility_override() {
 
 fn baseline_sparse_residual(args: &Col<f64>) -> Vec<f64> {
     let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
-    let mut staged = Jacobian::new();
-    staged.discretization_system_BVP_par(
+    let prepared_bridge = prepare_runtime_boundary_bridge(
         eq_system,
         values,
         arg,
-        0.0,
-        Some(6),
-        None,
         None,
         border_conditions,
-        None,
-        None,
-        "forward".to_string(),
+        6,
+        "Sparse",
+        Some((2, 2)),
     );
-    staged.calc_jacobian_parallel_smart_optimized();
-    let prepared_bridge = staged.prepare_sparse_aot_problem(
-            "eval_bvp_residual",
-            "eval_bvp_sparse_values",
-            crate::symbolic::codegen::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
-                staged.vector_of_functions.len(),
-                4,
-            ),
-            crate::symbolic::codegen::codegen_runtime_api::recommended_row_chunking_for_parallelism(
-                staged.vector_of_functions.len(),
-                4,
-            ),
-        );
     let input_names = prepared_bridge
-        .variable_names
+        .param_names
         .iter()
-        .map(|name| name.as_str())
+        .chain(prepared_bridge.variable_names.iter())
+        .map(String::as_str)
         .collect::<Vec<_>>();
-    let args_vec = args.iter().copied().collect::<Vec<_>>();
+    let mut args_vec = vec![0.0, 0.0, 1.0, 1.0];
+    args_vec.extend(args.iter().copied());
     prepared_bridge
         .residuals
         .iter()
@@ -374,37 +395,21 @@ fn register_offset_linked_backend_with_chunk_offsets(
     chunk_offset_jacobian: f64,
 ) -> (AotResolver, String) {
     let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
-    let mut staged = Jacobian::new();
-    staged.discretization_system_BVP_par(
+    let prepared_bridge = prepare_runtime_boundary_bridge(
         eq_system,
         values,
         arg,
-        0.0,
-        Some(6),
-        None,
         None,
         border_conditions,
-        None,
-        None,
-        "forward".to_string(),
+        6,
+        "Sparse",
+        Some((2, 2)),
     );
-    staged.calc_jacobian_parallel_smart_optimized();
-    let prepared_bridge = staged.prepare_sparse_aot_problem(
-            "eval_bvp_residual",
-            "eval_bvp_sparse_values",
-            crate::symbolic::codegen::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
-                staged.vector_of_functions.len(),
-                4,
-            ),
-            crate::symbolic::codegen::codegen_runtime_api::recommended_row_chunking_for_parallelism(
-                staged.vector_of_functions.len(),
-                4,
-            ),
-        );
     let problem_key = prepared_bridge.problem_key();
     let input_name_strings = prepared_bridge
-        .variable_names
+        .param_names
         .iter()
+        .chain(prepared_bridge.variable_names.iter())
         .cloned()
         .collect::<Vec<_>>();
     let residual_input_name_strings = input_name_strings.clone();
@@ -521,34 +526,16 @@ fn register_offset_linked_backend_with_chunk_offsets(
 fn register_parameterized_linked_backend() -> (AotResolver, String) {
     let (eq_system, values, arg, params, border_conditions) = parameterized_bvp_inputs();
     let param_refs = params.iter().map(|name| name.as_str()).collect::<Vec<_>>();
-    let mut staged = Jacobian::new();
-    staged.set_params(Some(param_refs.as_slice()));
-    staged.discretization_system_BVP_par(
+    let prepared_bridge = prepare_runtime_boundary_bridge(
         eq_system,
         values,
         arg,
-        0.0,
-        Some(6),
-        None,
-        None,
+        Some(param_refs.as_slice()),
         border_conditions,
-        None,
-        None,
-        "forward".to_string(),
+        6,
+        "Sparse",
+        Some((2, 2)),
     );
-    staged.calc_jacobian_parallel_smart_optimized();
-    let prepared_bridge = staged.prepare_sparse_aot_problem(
-            "eval_bvp_residual",
-            "eval_bvp_sparse_values",
-            crate::symbolic::codegen::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
-                staged.vector_of_functions.len(),
-                4,
-            ),
-            crate::symbolic::codegen::codegen_runtime_api::recommended_row_chunking_for_parallelism(
-                staged.vector_of_functions.len(),
-                4,
-            ),
-        );
     let problem_key = prepared_bridge.problem_key();
     let input_name_strings = prepared_bridge
         .param_names
@@ -619,6 +606,7 @@ fn damped_solver_handoff_prefers_callable_linked_aot_backend() {
     let (resolver, problem_key) = register_offset_linked_backend(100.0, 200.0);
     let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
     let mut probe = Jacobian::new();
+    probe.enable_runtime_boundary_value_binding();
     let execution = probe.generate_BVP_with_backend_selection(
         eq_system.clone(),
         values.clone(),
@@ -736,6 +724,7 @@ fn frozen_solver_handoff_prefers_callable_linked_aot_backend() {
     let (resolver, problem_key) = register_offset_linked_backend(50.0, 75.0);
     let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
     let mut probe = Jacobian::new();
+    probe.enable_runtime_boundary_value_binding();
     let execution = probe.generate_BVP_with_backend_selection(
         eq_system.clone(),
         values.clone(),
@@ -1111,33 +1100,16 @@ fn build_if_missing_materializes_generated_crate_and_keeps_callable_runtime() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
-    let mut staged = Jacobian::new();
-    staged.discretization_system_BVP_par(
+    let prepared_bridge = prepare_runtime_boundary_bridge(
         eq_system.clone(),
         values.clone(),
         arg.clone(),
-        0.0,
-        Some(6),
-        None,
         None,
         border_conditions.clone(),
-        None,
-        None,
-        "forward".to_string(),
+        6,
+        "Sparse",
+        Some((2, 2)),
     );
-    staged.calc_jacobian_parallel_smart_optimized();
-    let prepared_bridge = staged.prepare_sparse_aot_problem(
-            "eval_bvp_residual",
-            "eval_bvp_sparse_values",
-            crate::symbolic::codegen::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
-                staged.vector_of_functions.len(),
-                4,
-            ),
-            crate::symbolic::codegen::codegen_runtime_api::recommended_row_chunking_for_parallelism(
-                staged.vector_of_functions.len(),
-                4,
-            ),
-        );
     let problem_key = prepared_bridge.problem_key();
     let request = FrozenSolverBuildRequest {
         eq_system,
@@ -1380,33 +1352,16 @@ fn frozen_banded_build_if_missing_then_require_prebuilt_keeps_compiled_backend()
 #[test]
 fn require_prebuilt_errors_when_artifact_is_registered_but_not_built() {
     let (eq_system, values, arg, border_conditions) = real_bvp_inputs();
-    let mut staged = Jacobian::new();
-    staged.discretization_system_BVP_par(
+    let prepared_bridge = prepare_runtime_boundary_bridge(
         eq_system.clone(),
         values.clone(),
         arg.clone(),
-        0.0,
-        Some(6),
-        None,
         None,
         border_conditions.clone(),
-        None,
-        None,
-        "forward".to_string(),
+        6,
+        "Sparse",
+        Some((2, 2)),
     );
-    staged.calc_jacobian_parallel_smart_optimized();
-    let prepared_bridge = staged.prepare_sparse_aot_problem(
-            "eval_bvp_residual",
-            "eval_bvp_sparse_values",
-            crate::symbolic::codegen::codegen_runtime_api::recommended_residual_chunking_for_parallelism(
-                staged.vector_of_functions.len(),
-                4,
-            ),
-            crate::symbolic::codegen::codegen_runtime_api::recommended_row_chunking_for_parallelism(
-                staged.vector_of_functions.len(),
-                4,
-            ),
-        );
     let prepared = PreparedProblem::sparse(prepared_bridge.as_prepared_problem());
     let manifest = PreparedProblemManifest::from(&prepared);
     let dir = unique_test_artifact_dir(&prepared_bridge.problem_key());
@@ -1484,6 +1439,7 @@ fn damped_solver_handoff_reuses_compiled_backend_when_only_param_values_change()
     let param_refs = params.iter().map(|name| name.as_str()).collect::<Vec<_>>();
 
     let mut probe_a = Jacobian::new();
+    probe_a.enable_runtime_boundary_value_binding();
     probe_a.set_params(Some(param_refs.as_slice()));
     probe_a.set_param_values(Some(vec![1.0]));
     let execution_a = probe_a.generate_BVP_with_backend_selection(
@@ -1507,6 +1463,7 @@ fn damped_solver_handoff_reuses_compiled_backend_when_only_param_values_change()
     );
 
     let mut probe_b = Jacobian::new();
+    probe_b.enable_runtime_boundary_value_binding();
     probe_b.set_params(Some(param_refs.as_slice()));
     probe_b.set_param_values(Some(vec![3.0]));
     let execution_b = probe_b.generate_BVP_with_backend_selection(

@@ -12,6 +12,8 @@ use super::{
 use crate::numerical::BVP_sci::new::{BvpSciAssembly, BvpSciLambdifyPlan, BvpSciTelemetry};
 use nalgebra::DVector;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy)]
 struct Contribution {
@@ -208,10 +210,26 @@ pub(super) fn prepare(
         .collect::<Vec<_>>();
 
     let initial_state = packed.values;
+    let boundary_positions = packed
+        .fixed_state_values
+        .iter()
+        .map(|(position, _)| *position)
+        .collect::<Vec<_>>();
+    let boundary_binding = Arc::new(
+        packed
+            .fixed_state_values
+            .iter()
+            .map(|(_, value)| AtomicU64::new(value.to_bits()))
+            .collect::<Vec<_>>(),
+    );
     let state_bounds = problem
         .state_names
         .iter()
         .map(|name| options.bounds.get(name).copied().unwrap_or((-1e300, 1e300)))
+        .collect::<Vec<_>>();
+    let boundary_value_bounds = boundary_positions
+        .iter()
+        .map(|position| state_bounds[*position % component_count])
         .collect::<Vec<_>>();
     let relative_tolerances = problem
         .state_names
@@ -233,7 +251,8 @@ pub(super) fn prepare(
     let residual_plan = pointwise.clone();
     let left_endpoint = problem.interval.0;
     let residual_positions = packed.full_state_positions.clone();
-    let residual_fixed = packed.fixed_state_values.clone();
+    let residual_fixed_positions = boundary_positions.clone();
+    let residual_fixed_values = Arc::clone(&boundary_binding);
     let mut residual_full_state = vec![0.0; full_size];
     let mut residual_rhs = vec![0.0; full_size];
     let mut residual_arguments = vec![0.0; 1 + component_count + external_parameter_names.len()];
@@ -243,8 +262,9 @@ pub(super) fn prepare(
             for (unknown, &full_position) in residual_positions.iter().enumerate() {
                 residual_full_state[full_position] = unknowns[unknown];
             }
-            for &(position, value) in &residual_fixed {
-                residual_full_state[position] = value;
+            for (slot, &position) in residual_fixed_positions.iter().enumerate() {
+                residual_full_state[position] =
+                    f64::from_bits(residual_fixed_values[slot].load(Ordering::Relaxed));
             }
             residual_rhs.fill(0.0);
             for node in 0..node_count {
@@ -287,7 +307,8 @@ pub(super) fn prepare(
     let jacobian_plan = pointwise;
     let left_endpoint = problem.interval.0;
     let jacobian_positions = packed.full_state_positions.clone();
-    let jacobian_fixed = packed.fixed_state_values.clone();
+    let jacobian_fixed_positions = boundary_positions;
+    let jacobian_fixed_values = Arc::clone(&boundary_binding);
     let mut jacobian_full_state = vec![0.0; full_size];
     let mut jacobian_pointwise_values = vec![0.0; node_count * local_nnz];
     let mut jacobian_arguments = vec![0.0; 1 + component_count + external_parameter_names.len()];
@@ -323,8 +344,9 @@ pub(super) fn prepare(
         for (unknown, &full_position) in jacobian_positions.iter().enumerate() {
             jacobian_full_state[full_position] = unknowns[unknown];
         }
-        for &(position, value) in &jacobian_fixed {
-            jacobian_full_state[position] = value;
+        for (slot, &position) in jacobian_fixed_positions.iter().enumerate() {
+            jacobian_full_state[position] =
+                f64::from_bits(jacobian_fixed_values[slot].load(Ordering::Relaxed));
         }
         jacobian_pointwise_values.fill(0.0);
         for node in 0..node_count {
@@ -394,6 +416,8 @@ pub(super) fn prepare(
         external_parameter_names,
         config,
     )?;
+    solver.fixed_boundary_values = Some(boundary_binding);
+    solver.fixed_boundary_bounds = Some(boundary_value_bounds);
     solver.symbolic_mesh = Some(
         (0..=steps)
             .map(|node| {

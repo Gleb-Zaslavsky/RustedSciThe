@@ -109,6 +109,14 @@ for value-only updates. Initial values may be supplied at construction; the
 same operation can then update them repeatedly. Do not call this operation
 continuation unless it also carries numerical solution state.
 
+For IVP, replacing numeric `y0` while keeping the equation, configured interval,
+parameter binding and solver policy fixed is a fresh initial-value solve. It
+does not change symbolic preparation and must not be named continuation. Offer
+a same-interval shortcut where the solver retains its interval, and keep an
+explicit interval restart/fresh-solve operation separately named. Native
+reset lifecycles may differ, but prepared callbacks and compiled artifacts
+must remain reusable.
+
 #### Parameter Continuation
 
 Parameter continuation is a narrower numerical strategy over a sequence of

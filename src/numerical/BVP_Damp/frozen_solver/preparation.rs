@@ -137,6 +137,8 @@ impl NRBVP {
             atom_lambdify_telemetry: None,
             direct_banded_jacobian_telemetry: None,
             parameter_binding: None,
+            boundary_value_schema: None,
+            boundary_parameter_values: Vec::new(),
             custom_timer: CustomTimer::new(),
         }
     }
@@ -1014,7 +1016,15 @@ impl NRBVP {
         if self.param_values != values {
             self.param_values = values;
             if let Some(binding) = &self.parameter_binding {
-                binding.replace(self.param_values.clone());
+                let mut callback_values = match self.param_values.clone() {
+                    Some(values) => Some(values),
+                    None if self.param_names.is_empty() => Some(Vec::new()),
+                    None => None,
+                };
+                if let Some(callback_values) = callback_values.as_mut() {
+                    callback_values.extend(self.boundary_parameter_values.iter().copied());
+                }
+                binding.replace(callback_values);
                 let prepared_fingerprint = self.prepared_plan_fingerprint();
                 self.prepared_runtime_revision
                     .refresh_prepared_fingerprint(prepared_fingerprint);
@@ -1025,6 +1035,106 @@ impl NRBVP {
             }
             self.invalidate_linear_runtime();
         }
+        Ok(())
+    }
+
+    /// Rebinds numeric values for the prepared, unchanged boundary schema.
+    /// The symbolic callbacks remain prepared; only their input binding and
+    /// the public reconstruction metadata change.
+    pub fn try_set_boundary_values(
+        &mut self,
+        values: Vec<f64>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        let schema = self.boundary_value_schema.clone().ok_or_else(|| {
+            BvpBackendIntegrationError::InvalidSolverConfiguration {
+                field: "boundary_values".into(),
+                value: format!("{} values", values.len()),
+                message: "boundary-value rebinding requires a prepared symbolic BVP runtime".into(),
+            }
+        })?;
+        if values.len() != schema.slots().len() {
+            return Err(BvpBackendIntegrationError::InvalidProblem {
+                field: "boundary_values".into(),
+                message: format!(
+                    "expected {} values for the prepared boundary schema, got {}",
+                    schema.slots().len(),
+                    values.len()
+                ),
+            });
+        }
+        if let Some(index) = values.iter().position(|value| !value.is_finite()) {
+            return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                stage: "boundary values".into(),
+                index,
+            });
+        }
+        for (slot, &value) in schema.slots().iter().zip(&values) {
+            let variable = self.values.get(slot.variable_index).ok_or_else(|| {
+                BvpBackendIntegrationError::InvalidProblem {
+                    field: "boundary schema".into(),
+                    message: format!("state index {} is out of range", slot.variable_index),
+                }
+            })?;
+            if let Some(&(lower, upper)) =
+                self.Bounds.as_ref().and_then(|bounds| bounds.get(variable))
+                && (value < lower || value > upper)
+            {
+                return Err(BvpBackendIntegrationError::InvalidProblem {
+                    field: "boundary_values".into(),
+                    message: format!(
+                        "boundary value for `{variable}` ({value}) lies outside [{lower}, {upper}]"
+                    ),
+                });
+            }
+        }
+
+        let mut conditions = self.BorderConditions.clone();
+        for (slot, &value) in schema.slots().iter().zip(&values) {
+            let variable = &self.values[slot.variable_index];
+            let entries = conditions.get_mut(variable).ok_or_else(|| {
+                BvpBackendIntegrationError::InvalidProblem {
+                    field: "boundary schema".into(),
+                    message: format!("prepared boundary state `{variable}` is absent"),
+                }
+            })?;
+            let entry = entries
+                .iter_mut()
+                .find(|(endpoint, _)| *endpoint == slot.endpoint)
+                .ok_or_else(|| BvpBackendIntegrationError::InvalidProblem {
+                    field: "boundary schema".into(),
+                    message: format!(
+                        "prepared endpoint {} for `{variable}` is absent",
+                        slot.endpoint
+                    ),
+                })?;
+            entry.1 = value;
+        }
+        let combined = if let Some(mut parameters) = self.param_values.clone() {
+            parameters.extend(values.iter().copied());
+            Some(parameters)
+        } else if self.param_names.is_empty() {
+            Some(values.clone())
+        } else {
+            None
+        };
+        let binding = self.parameter_binding.as_ref().ok_or_else(|| {
+            BvpBackendIntegrationError::InvalidSolverConfiguration {
+                field: "boundary_values".into(),
+                value: format!("{} values", values.len()),
+                message: "prepared callbacks do not expose a runtime parameter binding".into(),
+            }
+        })?;
+
+        self.BorderConditions = conditions;
+        self.boundary_parameter_values = values;
+        binding.replace(combined);
+        let prepared_fingerprint = self.prepared_plan_fingerprint();
+        self.prepared_runtime_revision
+            .refresh_prepared_fingerprint(prepared_fingerprint);
+        self.factor_owner
+            .refresh_prepared_binding(prepared_fingerprint);
+        self.invalidate_linear_runtime();
+        self.result = None;
         Ok(())
     }
 

@@ -200,3 +200,17 @@ This facade must not duplicate Newton logic or compensate for native defects.
   BVP_api tests, hybrid settings parser, native Damped parser and legacy BVP
   task parser all pass. No performance claims are part of this contract-only
   step.
+
+## Numeric Boundary-Value Rebinding (2026-11-07)
+
+- [x] Define the operation as rebinding finite numeric values for the exact
+  boundary-condition schema captured by the prepared problem. The number of
+  conditions, state indices, and left/right endpoints are immutable; changing
+  any of them requires a new symbolic preparation.
+- [x] Add `set_boundary_values` and `solve_with_boundary_values` for symbolic
+  Sci, CorrectionNewton, Damped and Frozen routes. Numeric updates preserve
+  prepared residual/Jacobian callbacks and invalidate the previous result.
+- [x] Add Python forwarding, route validation, finite/count/topology checks,
+  and Rust/Python guide coverage. Damped/Frozen support generated symbolic
+  ExprLegacy/AtomView with Lambdify/AOT; numeric callback routes remain
+  unsupported. Changing boundary topology requires new preparation.

@@ -260,7 +260,9 @@ solver matrix takes about one minute per sample and needs roughly two hours at
 
 The timeout is only a process safety limit; it does not change the workload,
 sample count, stability threshold, or solver behavior. It can be set up to
-86,400 seconds (24 hours).
+86,400 seconds (24 hours). The runner streams child stderr live, including
+warmup/sample boundaries; the combustion matrix also reports each fixture's
+route statuses, solve times and resulting mesh sizes as it completes.
 
 `-Force` replaces an existing baseline only during `Record`; use it only when
 replacement is intentional. `Record` requires a clean source tree by default.

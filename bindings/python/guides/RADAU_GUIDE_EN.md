@@ -41,6 +41,8 @@ Each call is a fresh solve over the configured interval. The caller supplies
 the initial state and parameter values explicitly; no state is inherited from
 the previous result. Use `solve_with_parameter_values_in_interval(t0, y0,
 t_end, values)` to change the interval as well.
+`solve_with_initial_state(y0)` is the explicit same-parameter spelling of
+`solve(y0)`; Radau has no retained integration history to reset.
 
 ## Frontend, execution and layout
 

@@ -247,12 +247,7 @@ fn damped_rejects_an_active_iterate_outside_bounds_as_typed_error() {
         }
     ));
     assert!(
-        solver
-            .get_statistics()
-            .telemetry
-            .counters
-            .linear_solves
-            == 0,
+        solver.get_statistics().telemetry.counters.linear_solves == 0,
         "bounds validation must happen before linear algebra"
     );
 }
@@ -836,6 +831,7 @@ fn damped_statistics_expose_generated_runtime_diagnostics() {
         variable_string: Vec::new(),
         bandwidth: (0, 0),
         bc_position_and_value: Vec::new(),
+        boundary_value_schema: None,
         updated_resolver: None,
         selected_backend:
             crate::symbolic::codegen::codegen_backend_selection::SelectedBackendKind::AotCompiled,

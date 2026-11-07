@@ -57,6 +57,8 @@ pub struct NRBVP {
     direct_banded_jacobian_telemetry:
         Option<crate::symbolic::bvp::telemetry::BvpDirectJacobianTelemetry>,
     parameter_binding: Option<crate::symbolic::bvp::parameter_binding::BvpParameterBindingHandle>,
+    boundary_value_schema: Option<crate::symbolic::bvp::boundary_binding::BvpBoundaryValueSchema>,
+    boundary_parameter_values: Vec<f64>,
     custom_timer: CustomTimer,
 }
 
@@ -103,6 +105,12 @@ impl ApplyFrozenGeneratedSolverState for NRBVP {
         self.atom_lambdify_telemetry = state.atom_lambdify_telemetry;
         self.direct_banded_jacobian_telemetry = state.direct_banded_jacobian_telemetry;
         self.parameter_binding = state.parameter_binding;
+        self.boundary_parameter_values = state
+            .boundary_value_schema
+            .as_ref()
+            .map(crate::symbolic::bvp::boundary_binding::BvpBoundaryValueSchema::values)
+            .unwrap_or_default();
+        self.boundary_value_schema = state.boundary_value_schema;
         self.invalidate_linear_runtime();
         let prepared_fingerprint = self.prepared_plan_fingerprint();
         self.prepared_runtime_revision

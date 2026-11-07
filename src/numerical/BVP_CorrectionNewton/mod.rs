@@ -21,6 +21,8 @@ use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -296,6 +298,15 @@ pub enum CorrectionNewtonConfigurationError {
     MissingEndpointCondition { state: String },
     #[error("boundary-condition schema does not correspond one-to-one with states")]
     BoundarySchemaMismatch,
+    #[error(
+        "boundary value at slot {slot} ({value}) is outside its state bounds [{lower}, {upper}]"
+    )]
+    BoundaryValueOutsideBounds {
+        slot: usize,
+        value: f64,
+        lower: f64,
+        upper: f64,
+    },
     #[error("BVP full-grid state size overflowed usize")]
     FullGridStateSizeOverflow,
     #[error("free mesh node {node} for state {state} cannot be mapped into the initial guess")]
@@ -805,6 +816,8 @@ pub struct CorrectionNewtonSolver {
     external_parameter_values: Vec<f64>,
     parameter_binding_order: Vec<usize>,
     external_parameters_bound: bool,
+    fixed_boundary_values: Option<Arc<Vec<AtomicU64>>>,
+    fixed_boundary_bounds: Option<Vec<(f64, f64)>>,
 }
 
 impl CorrectionNewtonSolver {
@@ -998,6 +1011,8 @@ impl CorrectionNewtonSolver {
             external_parameter_names: Vec::new(),
             parameter_binding_order: Vec::new(),
             external_parameters_bound: true,
+            fixed_boundary_values: None,
+            fixed_boundary_bounds: None,
         })
     }
 
@@ -1141,6 +1156,55 @@ impl CorrectionNewtonSolver {
         {
             *target = values[input_index];
         }
+        Ok(())
+    }
+
+    /// Rebind numerical endpoint values without rebuilding symbolic callbacks.
+    /// The value order is the fixed endpoint order established during symbolic
+    /// preparation; endpoint positions and the reduced Newton layout are fixed.
+    pub fn set_boundary_values(
+        &mut self,
+        values: Vec<f64>,
+    ) -> Result<(), CorrectionNewtonSolverError> {
+        let invalid = || CorrectionNewtonSolverError::InvalidConfiguration {
+            source: CorrectionNewtonConfigurationError::BoundarySchemaMismatch,
+        };
+        if values.len() != self.config.fixed_state_values.len()
+            || values.iter().any(|value| !value.is_finite())
+        {
+            return Err(invalid());
+        }
+        let Some(binding) = self.fixed_boundary_values.as_ref() else {
+            return Err(invalid());
+        };
+        if binding.len() != values.len() {
+            return Err(invalid());
+        }
+        let Some(bounds) = self.fixed_boundary_bounds.as_ref() else {
+            return Err(invalid());
+        };
+        if bounds.len() != values.len() {
+            return Err(invalid());
+        }
+        for (slot, (&value, &(lower, upper))) in values.iter().zip(bounds).enumerate() {
+            if value < lower || value > upper {
+                return Err(CorrectionNewtonSolverError::InvalidConfiguration {
+                    source: CorrectionNewtonConfigurationError::BoundaryValueOutsideBounds {
+                        slot,
+                        value,
+                        lower,
+                        upper,
+                    },
+                });
+            }
+        }
+        for ((_, current), value) in self.config.fixed_state_values.iter_mut().zip(&values) {
+            *current = *value;
+        }
+        for (slot, value) in binding.iter().zip(values) {
+            slot.store(value.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        }
+        self.last_successful_checkpoint = None;
         Ok(())
     }
 

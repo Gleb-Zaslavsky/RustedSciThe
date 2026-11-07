@@ -1,5 +1,20 @@
 # BVP_Damp Architecture Review And Migration TODO
 
+## Numeric Boundary-Value Rebinding (2026-11-07)
+
+- [x] Add `set_boundary_values`/`solve_with_boundary_values` for unchanged
+  boundary topology on generated symbolic Damped/Frozen routes.
+- [x] Carry reserved runtime boundary inputs through ExprLegacy and AtomView,
+  keeping those slots outside user external parameters and retaining prepared
+  Lambdify/AOT callbacks across numeric rebinding.
+- [x] Keep reconstruction, bounds validation, parameter binding, refinement,
+  and result publication coherent with current boundary values. Reject invalid
+  count, non-finite, duplicate/ambiguous topology, and out-of-bounds updates
+  atomically without replacing the current binding.
+- [x] Expose supported routes through `BVP_api` and Python bindings; update
+  Rust/Python guides and regression tests. Numerical callback routes remain
+  unsupported because they have no symbolic boundary-value slots.
+
 ## Approved Damped Newton Stabilization Plan (2026-11-06)
 
 Goal: make the production Damped solver reliably solve the established KiThe

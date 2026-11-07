@@ -37,9 +37,13 @@ use super::{
     atom::FunctionBuilder,
     conversions::{approximate_f64_atom, expr_to_atom},
     state::Symbol,
-    transform::{rename_and_bind_symbol, rename_symbols_view, substitute_symbol_values},
+    transform::{
+        rename_and_bind_symbol, rename_symbols, rename_symbols_view, substitute_symbol_values,
+    },
 };
-use crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot;
+use crate::symbolic::bvp::{
+    boundary_binding::BvpBoundaryValueSchema, telemetry::BvpAtomDiscretizationTelemetrySnapshot,
+};
 use crate::symbolic::symbolic_engine::Expr;
 use log::info;
 use rayon::prelude::*;
@@ -488,7 +492,46 @@ pub fn try_discretization_system_bvp_par_atom(
         .into_iter()
         .map(|(name, conditions)| (Symbol::new(crate::wrap_symbol!(name.as_str())), conditions))
         .collect();
-    try_assemble_atom_bvp_problem(problem, border_conditions, bounds, rel_tolerance, scheme)
+    try_assemble_atom_bvp_problem(
+        problem,
+        border_conditions,
+        bounds,
+        rel_tolerance,
+        scheme,
+        None,
+    )
+}
+
+/// Internal AtomView entry point for a fixed boundary topology whose values
+/// remain runtime evaluator inputs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_discretization_system_bvp_par_atom_with_boundary_schema(
+    eq_system: Vec<Expr>,
+    values: Vec<String>,
+    arg: String,
+    t0: f64,
+    n_steps: Option<usize>,
+    h: Option<f64>,
+    mesh: Option<Vec<f64>>,
+    border_conditions: HashMap<String, Vec<(usize, f64)>>,
+    bounds: Option<HashMap<String, (f64, f64)>>,
+    rel_tolerance: Option<HashMap<String, f64>>,
+    scheme: String,
+    boundary_schema: &BvpBoundaryValueSchema,
+) -> Result<DiscretizedBvpAtomSystem, BvpAtomDiscretizationError> {
+    let problem = AtomBvpProblem::from_expr_system(eq_system, &values, &arg, t0, n_steps, h, mesh);
+    let border_conditions = border_conditions
+        .into_iter()
+        .map(|(name, conditions)| (Symbol::new(crate::wrap_symbol!(name.as_str())), conditions))
+        .collect();
+    try_assemble_atom_bvp_problem(
+        problem,
+        border_conditions,
+        bounds,
+        rel_tolerance,
+        scheme,
+        Some(boundary_schema),
+    )
 }
 
 /// Assemble an already converted and symbol-indexed BVP without crossing
@@ -539,7 +582,14 @@ pub fn try_discretization_system_bvp_par_atom_native(
     scheme: String,
 ) -> Result<DiscretizedBvpAtomSystem, BvpAtomDiscretizationError> {
     let problem = AtomBvpProblem::from_atom_system(eq_system, values, arg, t0, n_steps, h, mesh);
-    try_assemble_atom_bvp_problem(problem, border_conditions, bounds, rel_tolerance, scheme)
+    try_assemble_atom_bvp_problem(
+        problem,
+        border_conditions,
+        bounds,
+        rel_tolerance,
+        scheme,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -549,6 +599,7 @@ fn try_assemble_atom_bvp_problem(
     bounds: Option<HashMap<String, (f64, f64)>>,
     rel_tolerance: Option<HashMap<String, f64>>,
     scheme: String,
+    boundary_schema: Option<&BvpBoundaryValueSchema>,
 ) -> Result<DiscretizedBvpAtomSystem, BvpAtomDiscretizationError> {
     validate_scheme(&scheme)?;
     let total_start = Instant::now();
@@ -565,6 +616,7 @@ fn try_assemble_atom_bvp_problem(
         .collect();
 
     let mut bc_value_map: HashMap<Symbol, f64> = HashMap::default();
+    let mut bc_parameter_rename_map: HashMap<Symbol, Symbol> = HashMap::default();
     let mut vars_to_exclude: HashSet<Symbol> = HashSet::default();
     let mut bc_pos_n_values = Vec::new();
 
@@ -592,6 +644,18 @@ fn try_assemble_atom_bvp_problem(
             }
         }
     }
+    if let Some(schema) = boundary_schema {
+        for slot in schema.slots() {
+            let node = if slot.endpoint == 0 {
+                0
+            } else {
+                n_steps_total - 1
+            };
+            let source = input.matrix_of_symbols[node][slot.variable_index];
+            let target = Symbol::new(crate::wrap_symbol!(slot.parameter_name.as_str()));
+            bc_parameter_rename_map.insert(source, target);
+        }
+    }
     let bc_handling_elapsed = bc_handling.elapsed();
     timer_hash.insert(
         "bc handling".to_string(),
@@ -600,6 +664,15 @@ fn try_assemble_atom_bvp_problem(
     let bc_value_map_names: HashMap<String, f64> = bc_value_map
         .iter()
         .map(|(symbol, value)| (symbol.get_stripped_name().to_string(), *value))
+        .collect();
+    let bc_parameter_rename_map_names: HashMap<String, String> = bc_parameter_rename_map
+        .iter()
+        .map(|(source, target)| {
+            (
+                source.get_stripped_name().to_string(),
+                target.get_stripped_name().to_string(),
+            )
+        })
         .collect();
 
     // Match the ExprLegacy dependency plan: only state symbols actually used
@@ -673,6 +746,7 @@ fn try_assemble_atom_bvp_problem(
                                 step_sizes[j],
                                 &scheme,
                                 &bc_value_map_names,
+                                &bc_parameter_rename_map_names,
                             )
                         } else {
                             // Fully Atom-native callers have no Expr endpoint
@@ -690,10 +764,17 @@ fn try_assemble_atom_bvp_problem(
                                     )
                                 }));
                             if let Ok(eq_step_j) = bound {
-                                let current = substitute_symbol_values(
-                                    &input.matrix_of_atom_vars[j][i],
-                                    &bc_value_map,
-                                );
+                                let current = if boundary_schema.is_some() {
+                                    rename_symbols(
+                                        &input.matrix_of_atom_vars[j][i],
+                                        &bc_parameter_rename_map,
+                                    )
+                                } else {
+                                    substitute_symbol_values(
+                                        &input.matrix_of_atom_vars[j][i],
+                                        &bc_value_map,
+                                    )
+                                };
                                 let rhs = current + atom_num_from_f64(step_sizes[j]) * eq_step_j;
                                 let negative_rhs = atom_mul_raw(&Atom::new_num(-1), &rhs);
                                 atom_add_raw(&input.matrix_of_atom_vars[j + 1][i], &negative_rhs)
@@ -719,7 +800,11 @@ fn try_assemble_atom_bvp_problem(
                             mesh_points[j + 1],
                             &scheme,
                         )?;
-                        let eq_step_j = substitute_symbol_values(&eq_step_j, &bc_value_map);
+                        let eq_step_j = if boundary_schema.is_some() {
+                            rename_symbols(&eq_step_j, &bc_parameter_rename_map)
+                        } else {
+                            substitute_symbol_values(&eq_step_j, &bc_value_map)
+                        };
                         input.matrix_of_atom_vars[j + 1][i].clone()
                             - input.matrix_of_atom_vars[j][i].clone()
                             - atom_num_from_f64(step_sizes[j]) * eq_step_j
@@ -743,7 +828,13 @@ fn try_assemble_atom_bvp_problem(
     let bc_application_start = Instant::now();
     let discretized_with_bc = discretized_system
         .into_par_iter()
-        .map(|eq| substitute_symbol_values(&eq, &bc_value_map))
+        .map(|eq| {
+            if boundary_schema.is_some() {
+                rename_symbols(&eq, &bc_parameter_rename_map)
+            } else {
+                substitute_symbol_values(&eq, &bc_value_map)
+            }
+        })
         .collect::<Vec<_>>();
     let bc_application_elapsed = bc_application_start.elapsed();
     timer_hash.insert(
@@ -907,14 +998,19 @@ fn build_residual_atom_expr_fallback(
     h: f64,
     scheme: &str,
     vars_for_boundary_conditions: &HashMap<String, f64>,
+    boundary_parameter_rename_map: &HashMap<String, String>,
 ) -> Atom {
     let eq_step_j = build_eq_step_expr(matrix_of_names, eq_i, values, arg, j, t, t_next, scheme);
     let y_j_plus_1 = Expr::Var(matrix_of_names[j + 1][eq_index].clone());
     let y_j = Expr::Var(matrix_of_names[j][eq_index].clone());
     let residual = y_j_plus_1 - y_j - Expr::Const(h) * eq_step_j;
-    let residual = residual
-        .set_variable_from_map(vars_for_boundary_conditions)
-        .simplify();
+    let residual = residual.rename_variables(boundary_parameter_rename_map);
+    let residual = if boundary_parameter_rename_map.is_empty() {
+        residual.set_variable_from_map(vars_for_boundary_conditions)
+    } else {
+        residual
+    }
+    .simplify();
     expr_to_atom_no_norm(&residual)
 }
 
@@ -1095,12 +1191,14 @@ mod tests {
             View::{
                 bvp::{
                     BvpAtomDiscretizationError, discretization_system_bvp_par_atom, eq_step_atom,
-                    try_discretization_system_bvp_par_atom, try_eq_step_atom,
+                    try_discretization_system_bvp_par_atom,
+                    try_discretization_system_bvp_par_atom_with_boundary_schema, try_eq_step_atom,
                 },
                 conversions::{atom_to_expr, expr_to_atom},
                 jacobian::PreparedSparseAtomSystem,
                 state::Symbol,
             },
+            bvp::boundary_binding::BvpBoundaryValueSchema,
             symbolic_engine::Expr,
             symbolic_functions_BVP::Jacobian,
         },
@@ -1430,6 +1528,46 @@ mod tests {
         let expected = 0.3 - 0.2 * (0.0 + 0.2) / 2.0;
         assert!((atom_residual - expected).abs() < 1e-12);
         assert!((legacy_residual - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn atom_discretization_keeps_boundary_values_as_runtime_inputs() {
+        let equations = vec![Expr::Var("y".into())];
+        let values = vec!["y".to_string()];
+        let boundary_conditions = HashMap::from([("y".into(), vec![(0, 2.5)])]);
+        let mesh = vec![0.0, 1.0];
+        let schema = BvpBoundaryValueSchema::new(
+            &values,
+            mesh.len(),
+            &boundary_conditions,
+            ["y".to_string(), "x".to_string()],
+        )
+        .unwrap();
+
+        let system = try_discretization_system_bvp_par_atom_with_boundary_schema(
+            equations,
+            values,
+            "x".into(),
+            0.0,
+            Some(1),
+            None,
+            Some(mesh),
+            boundary_conditions,
+            None,
+            None,
+            "forward".into(),
+            &schema,
+        )
+        .unwrap();
+
+        let residual = atom_to_expr(&system.vector_of_functions[0]).to_string();
+        assert!(
+            residual.contains("__rst_bvp_boundary_value_0"),
+            "{residual}"
+        );
+        assert!(!residual.contains("y_0"), "{residual}");
+        assert_eq!(system.variable_string, vec!["y_1"]);
+        assert_eq!(system.bc_pos_n_values, vec![(0, 0, 2.5)]);
     }
 
     #[test]

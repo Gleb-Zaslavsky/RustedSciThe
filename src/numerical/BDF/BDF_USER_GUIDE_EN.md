@@ -66,6 +66,11 @@ initial Jacobian and factorization, but does not repeat symbolic preparation or
 AOT publication. The fallible API rejects non-finite and dimension-mismatched
 states before changing the prepared model.
 
+For a fresh solve with a new `y0` on the existing interval, use
+`try_solve_with_initial_state(y0)`. The method retains the current parameter
+binding and prepared callbacks, resets numerical history, then solves. It is
+not time continuation.
+
 ## AOT And Toolchains
 
 `examples/bdf_aot_guide.rs` uses AtomView and generated C/tcc callbacks:

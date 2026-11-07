@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Utils::postprocessing::{
     PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
@@ -803,12 +804,14 @@ pub struct BvpSolver {
     native: BvpNativeSolver,
     last_solution: Option<BvpSolution>,
     last_correction_newton_telemetry: Option<CorrectionNewtonTelemetrySnapshot>,
+    boundary_values_binding: Option<Arc<Vec<AtomicU64>>>,
 }
 
 impl BvpSolver {
     /// Construct a solver using an explicit solver-family configuration.
     pub fn new(problem: BvpProblem, config: BvpSolverConfig) -> Result<Self, BvpApiError> {
         problem.validate()?;
+        let mut boundary_values_binding = None;
         let native = match config {
             BvpSolverConfig::CorrectionNewton {
                 options,
@@ -892,15 +895,19 @@ impl BvpSolver {
                 sparse_factorization,
                 aot_config,
                 initial_guess,
-            } => BvpNativeSolver::Sci(build_sci_solver(
-                &problem,
-                options,
-                sparse_factorization,
-                aot_config,
-                initial_guess,
-                None,
-                problem.external_parameters.as_ref(),
-            )?),
+            } => {
+                let (solver, binding) = build_sci_solver(
+                    &problem,
+                    options,
+                    sparse_factorization,
+                    aot_config,
+                    initial_guess,
+                    None,
+                    problem.external_parameters.as_ref(),
+                )?;
+                boundary_values_binding = Some(binding);
+                BvpNativeSolver::Sci(solver)
+            }
             BvpSolverConfig::SciWithFreeParameters {
                 options,
                 sparse_factorization,
@@ -909,7 +916,7 @@ impl BvpSolver {
                 free_parameters,
             } => {
                 free_parameters.validate(&problem)?;
-                BvpNativeSolver::Sci(build_sci_solver(
+                let (solver, binding) = build_sci_solver(
                     &problem,
                     options,
                     sparse_factorization,
@@ -917,7 +924,9 @@ impl BvpSolver {
                     initial_guess,
                     Some(free_parameters),
                     problem.external_parameters.as_ref(),
-                )?)
+                )?;
+                boundary_values_binding = Some(binding);
+                BvpNativeSolver::Sci(solver)
             }
         };
         Ok(Self {
@@ -925,6 +934,7 @@ impl BvpSolver {
             native,
             last_solution: None,
             last_correction_newton_telemetry: None,
+            boundary_values_binding,
         })
     }
 
@@ -1026,6 +1036,115 @@ impl BvpSolver {
         }
         self.last_solution = None;
         Ok(())
+    }
+
+    /// Rebind numeric values for the existing boundary-condition slots.
+    ///
+    /// Values follow `BvpProblem::boundary_conditions` order. State/endpoint
+    /// topology is immutable; symbolic callbacks and AOT code are retained.
+    pub fn set_boundary_values(&mut self, values: Vec<f64>) -> Result<(), BvpApiError> {
+        if values.len() != self.problem.boundary_conditions.len()
+            || values.iter().any(|value| !value.is_finite())
+        {
+            return Err(BvpApiError::InvalidProblem(format!(
+                "boundary values must contain {} finite entries in the original condition order",
+                self.problem.boundary_conditions.len()
+            )));
+        }
+        match &mut self.native {
+            BvpNativeSolver::CorrectionNewton(solver) => {
+                let state_count = self.problem.state_names.len();
+                let mut ordered = self
+                    .problem
+                    .boundary_conditions
+                    .iter()
+                    .zip(&values)
+                    .map(|(condition, value)| {
+                        let node = match condition.side {
+                            BvpBoundarySide::Left => 0,
+                            BvpBoundarySide::Right => self.problem.mesh.len() - 1,
+                        };
+                        (node * state_count + condition.state, *value)
+                    })
+                    .collect::<Vec<_>>();
+                ordered.sort_by_key(|(position, _)| *position);
+                solver
+                    .set_boundary_values(ordered.into_iter().map(|(_, value)| value).collect())
+                    .map_err(BvpApiError::CorrectionNewton)?;
+            }
+            BvpNativeSolver::Sci(_) => {
+                let Some(binding) = self.boundary_values_binding.as_ref() else {
+                    return Err(BvpApiError::InvalidProblem(
+                        "BVP_sci boundary value binding was not retained".into(),
+                    ));
+                };
+                for (slot, value) in binding.iter().zip(&values) {
+                    slot.store(value.to_bits(), Ordering::Relaxed);
+                }
+            }
+            BvpNativeSolver::Damped(solver) => {
+                let mut schema_ordered = self
+                    .problem
+                    .boundary_conditions
+                    .iter()
+                    .zip(&values)
+                    .map(|(condition, value)| {
+                        let endpoint = match condition.side {
+                            BvpBoundarySide::Left => 0,
+                            BvpBoundarySide::Right => 1,
+                        };
+                        (condition.state, endpoint, *value)
+                    })
+                    .collect::<Vec<_>>();
+                schema_ordered.sort_by_key(|(state, endpoint, _)| (*state, *endpoint));
+                solver
+                    .try_set_boundary_values(
+                        schema_ordered
+                            .into_iter()
+                            .map(|(_, _, value)| value)
+                            .collect(),
+                    )
+                    .map_err(BvpApiError::Damped)?;
+            }
+            BvpNativeSolver::Frozen(solver) => {
+                let mut schema_ordered = self
+                    .problem
+                    .boundary_conditions
+                    .iter()
+                    .zip(&values)
+                    .map(|(condition, value)| {
+                        let endpoint = match condition.side {
+                            BvpBoundarySide::Left => 0,
+                            BvpBoundarySide::Right => 1,
+                        };
+                        (condition.state, endpoint, *value)
+                    })
+                    .collect::<Vec<_>>();
+                schema_ordered.sort_by_key(|(state, endpoint, _)| (*state, *endpoint));
+                solver
+                    .try_set_boundary_values(
+                        schema_ordered
+                            .into_iter()
+                            .map(|(_, _, value)| value)
+                            .collect(),
+                    )
+                    .map_err(BvpApiError::Frozen)?;
+            }
+        }
+        for (condition, value) in self.problem.boundary_conditions.iter_mut().zip(values) {
+            condition.value = value;
+        }
+        self.last_solution = None;
+        Ok(())
+    }
+
+    /// Solve again with new values for the existing boundary-condition slots.
+    pub fn solve_with_boundary_values(
+        &mut self,
+        values: Vec<f64>,
+    ) -> Result<&BvpSolution, BvpApiError> {
+        self.set_boundary_values(values)?;
+        self.solve()
     }
 
     /// Execute one solve and publish the route-native result on success.
@@ -1449,7 +1568,7 @@ fn build_sci_solver(
     initial_guess: DMatrix<f64>,
     free_parameters: Option<BvpSciFreeParameters>,
     external_parameters: Option<&BvpSciExternalParameters>,
-) -> Result<BvpSciSolver, BvpApiError> {
+) -> Result<(BvpSciSolver, Arc<Vec<AtomicU64>>), BvpApiError> {
     if options.execution == BvpSciExecution::Numerical
         || options.assembly == Some(BvpSciAssembly::Numerical)
     {
@@ -1467,6 +1586,13 @@ fn build_sci_solver(
         }
     }
     let conditions = problem.boundary_conditions.clone();
+    let boundary_values = Arc::new(
+        conditions
+            .iter()
+            .map(|condition| AtomicU64::new(condition.value.to_bits()))
+            .collect::<Vec<_>>(),
+    );
+    let callback_boundary_values = Arc::clone(&boundary_values);
     let sparse_factorization = NativeBvpSciSparseFactorization::from(sparse_factorization);
     let residual_callback = free_parameters
         .as_ref()
@@ -1477,9 +1603,10 @@ fn build_sci_solver(
         .with_boundary_callback(move |ya, yb, parameters, output| {
             output.fill(0.0);
             for (index, condition) in conditions.iter().enumerate() {
+                let value = f64::from_bits(callback_boundary_values[index].load(Ordering::Relaxed));
                 output[index] = match condition.side {
-                    BvpBoundarySide::Left => ya[condition.state] - condition.value,
-                    BvpBoundarySide::Right => yb[condition.state] - condition.value,
+                    BvpBoundarySide::Left => ya[condition.state] - value,
+                    BvpBoundarySide::Right => yb[condition.state] - value,
                 };
             }
             if let Some(callback) = &residual_callback {
@@ -1529,7 +1656,10 @@ fn build_sci_solver(
     if let Some(config) = aot_config {
         builder = builder.with_aot_generated_backend(config);
     }
-    builder.build().map_err(BvpApiError::Sci)
+    builder
+        .build()
+        .map(|solver| (solver, boundary_values))
+        .map_err(BvpApiError::Sci)
 }
 
 fn validate_initial_guess(

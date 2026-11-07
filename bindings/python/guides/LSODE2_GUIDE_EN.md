@@ -31,6 +31,10 @@ solution = solver.solve()
 print(solution.controller_mode, solution.final_state_array())
 ```
 
+`solve_with_initial_state(y0)` starts a fresh solve on the configured interval
+using the current parameter values and prepared route. It resets the native
+integration state and is not time continuation.
+
 ## Layout and symbolic routes
 
 LSODE2 exposes ExprLegacy and AtomNative preparation, Lambdify and AOT

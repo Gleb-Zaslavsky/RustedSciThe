@@ -156,6 +156,11 @@ native telemetry. Typed failures stay attached to their point and do not stop
 the sweep. See `examples/be_parameter_loop.rs` and the shared
 [`IVP parameter-loop guide`](../IVP_PARAMETER_LOOP_GUIDE_EN.md).
 
+To rerun only with a replacement initial state on the current interval, call
+`try_solve_with_initial_state(y0)`. It preserves the current parameter values
+and prepared callbacks, but resets the trajectory and Newton state before the
+new solve. This is not time continuation.
+
 Continuation is expressed explicitly:
 
 ```text

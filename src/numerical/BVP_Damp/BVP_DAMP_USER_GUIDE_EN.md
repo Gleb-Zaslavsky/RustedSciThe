@@ -12,6 +12,16 @@ Frozen Newton, implemented in [`NR_Damp_solver_frozen.rs`](NR_Damp_solver_frozen
 
 Both solvers support symbolic problem setup through `Expr` and generated backend configuration. The pure numerical RHS-closure route is currently implemented for Damped.
 
+For a prepared symbolic Damped/Frozen problem, `try_set_boundary_values(values)`
+and `try_solve_with_boundary_values(values)` can replace only the numeric values
+of the original endpoint conditions. The condition count, state indices and
+left/right topology are fixed at preparation time. ExprLegacy and AtomView
+routes retain their Lambdify/AOT callbacks; no symbolic differentiation or
+artifact rebuild is needed for value-only changes. Numeric callback routes do
+not expose this operation. The shared `BVP_api` facade and Python binding
+provide `set_boundary_values` and `solve_with_boundary_values` for the same
+prepared symbolic routes.
+
 ## 2. What the BVP solver receives
 
 The preferred constructor for new Damped code is `NRBVP::new_with_options(...)`:

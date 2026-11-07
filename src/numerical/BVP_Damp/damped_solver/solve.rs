@@ -811,7 +811,7 @@ impl NRBVP {
             let y: Vec<f64> = y.iter().cloned().collect();
             let y: DVector<f64> = DVector::from_vec(y);
             self.result = Some(y.clone()); // save into result in case the very first iteration
-                                           // with the current n_steps will go wrong and we shall need grid refinement
+            // with the current n_steps will go wrong and we shall need grid refinement
             self.y = Vectors_type_casting(&y.clone(), self.effective_runtime_method());
         } else {
         }
@@ -889,7 +889,7 @@ impl NRBVP {
                 })?;
                 info!("residual norm of the solution = {}", resid_norm);
                 let result = Some(y_k_plus_1.to_DVectorType()); // save the successful result of the iteration
-                                                                // before refining in case it will go wrong
+                // before refining in case it will go wrong
                 self.y = y_k_plus_1.clone_box();
                 self.result = result.clone();
                 info!(
@@ -1326,6 +1326,16 @@ impl NRBVP {
     /// Solution vector if successful, None if failed
     pub fn try_solve(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         self.try_solver()
+    }
+
+    /// Re-solves the prepared problem with new values for the unchanged
+    /// boundary-condition topology.
+    pub fn try_solve_with_boundary_values(
+        &mut self,
+        values: Vec<f64>,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_set_boundary_values(values)?;
+        self.try_solve()
     }
 
     /// Compatibility-only wrapper over [`NRBVP::try_solve`].

@@ -1,5 +1,18 @@
 # StiffAPI: Full-Fidelity Stiff IVP Facade
 
+## Fresh Initial-State Solve Shortcut (2026-11-07)
+
+- [x] Add `try_solve_with_initial_state(y0)` for a fresh solve on the
+  configured interval and retain `try_solve_with_initial_state_in_interval`
+  for an explicit interval change. Both preserve parameter binding and
+  prepared callbacks while resetting native IVP history; neither is
+  continuation.
+- [x] Preserve solver-specific typed restart failures through
+  `StiffSolveError::Restart` and expose matching same-interval and explicit-
+  interval shortcuts in Python.
+- [x] Add all-family parity coverage, Python contract coverage, RU/EN guide
+  documentation and runnable Rust/Python examples.
+
 ## Programmatic and Hybrid Solver-Settings Entry Points
 
 - [x] Make StiffAPI a self-contained public import boundary for the four stiff

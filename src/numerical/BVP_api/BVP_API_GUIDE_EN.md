@@ -223,6 +223,18 @@ retained mesh rows and returns its native report. Export failures are typed and
 do not discard the solution. BVP_sci dense-output sampling is intentionally
 not implied; use the native result API for that route.
 
+## Rebinding Numeric Boundary Values
+
+`set_boundary_values(values)` replaces values for the existing ordered
+boundary-condition slots; `solve_with_boundary_values(values)` performs that
+update and solves immediately. State indices and left/right endpoints are
+fixed by the prepared problem. Prepared symbolic Sci, CorrectionNewton, Damped,
+and Frozen routes reuse their callbacks. Damped/Frozen support applies to
+ExprLegacy or AtomView with Lambdify or AOT, not numerical callback routes.
+Rebinding invalidates the accepted result/checkpoint but does not rebuild the
+residual/Jacobian callbacks or AOT artifact. A changed boundary-condition
+schema always requires a new symbolic preparation.
+
 ## Errors, Telemetry, And Logs
 
 `BvpApiError` distinguishes invalid problem data, unsupported routes, missing

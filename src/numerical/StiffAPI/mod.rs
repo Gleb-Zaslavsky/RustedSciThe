@@ -168,6 +168,7 @@ pub enum StiffSolveOutcome {
 /// remain available after an error.
 #[derive(Debug)]
 pub enum StiffSolveError {
+    Restart(StiffRestartError),
     Bdf(BdfSolveError),
     Radau(RadauError),
     BackwardEuler(BeError),
@@ -219,6 +220,7 @@ pub struct StiffParameterLoopReport {
 impl StiffSolveError {
     pub const fn solver_kind(&self) -> StiffSolverKind {
         match self {
+            Self::Restart(error) => error.solver_kind(),
             Self::Bdf(_) => StiffSolverKind::Bdf,
             Self::Radau(_) => StiffSolverKind::Radau,
             Self::BackwardEuler(_) => StiffSolverKind::BackwardEuler,
@@ -230,6 +232,7 @@ impl StiffSolveError {
 impl fmt::Display for StiffSolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Restart(error) => write!(f, "IVP restart failed: {error}"),
             Self::Bdf(error) => write!(f, "BDF solve failed: {error}"),
             Self::Radau(error) => write!(f, "Radau solve failed: {error}"),
             Self::BackwardEuler(error) => write!(f, "Backward Euler solve failed: {error}"),
@@ -241,6 +244,7 @@ impl fmt::Display for StiffSolveError {
 impl Error for StiffSolveError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Restart(error) => Some(error),
             Self::Bdf(error) => Some(error),
             Self::Radau(error) => Some(error),
             Self::BackwardEuler(error) => Some(error),
@@ -268,6 +272,20 @@ pub enum StiffRestartError {
     Radau(RadauError),
     BackwardEuler(BeError),
     Lsode2(Lsode2Error),
+}
+
+impl StiffRestartError {
+    pub const fn solver_kind(&self) -> StiffSolverKind {
+        match self {
+            Self::InvalidInterval { solver }
+            | Self::InvalidInitialState { solver }
+            | Self::InitialStateDimension { solver, .. } => *solver,
+            Self::Bdf(_) => StiffSolverKind::Bdf,
+            Self::Radau(_) => StiffSolverKind::Radau,
+            Self::BackwardEuler(_) => StiffSolverKind::BackwardEuler,
+            Self::Lsode2(_) => StiffSolverKind::Lsode2,
+        }
+    }
 }
 
 impl fmt::Display for StiffRestartError {
@@ -663,6 +681,69 @@ impl PreparedStiffSolver {
                 .try_solve_with_parameter_values_in_interval(t0, y0, t_bound, values)
                 .map(StiffSolveOutcome::Lsode2)
                 .map_err(StiffSolveError::Lsode2),
+        }
+    }
+
+    /// Start a fresh solve from `y0` on the supplied interval while retaining
+    /// the current symbolic parameter binding and prepared callbacks.
+    ///
+    /// This resets native integrator history before solving; it is not an
+    /// in-time continuation operation.
+    pub fn try_solve_with_initial_state_in_interval(
+        &mut self,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+    ) -> Result<StiffSolveOutcome, StiffSolveError> {
+        self.try_restart_with_initial_state(t0, y0, t_bound)
+            .map_err(StiffSolveError::Restart)?;
+        self.try_solve()
+    }
+
+    /// Starts a fresh solve from `y0` on the currently configured interval,
+    /// preserving bound parameter values and prepared callbacks/artifacts.
+    /// This resets native integration history; it is not time continuation.
+    pub fn try_solve_with_initial_state(
+        &mut self,
+        y0: DVector<f64>,
+    ) -> Result<StiffSolveOutcome, StiffSolveError> {
+        match self {
+            Self::Bdf(solver) => solver
+                .try_solve_with_initial_state(y0)
+                .map(|()| StiffSolveOutcome::Bdf)
+                .map_err(StiffSolveError::Bdf),
+            Self::BackwardEuler(solver) => solver
+                .try_solve_with_initial_state(y0)
+                .map(|()| StiffSolveOutcome::BackwardEuler)
+                .map_err(StiffSolveError::BackwardEuler),
+            Self::Lsode2(solver) => solver
+                .try_solve_with_initial_state(y0)
+                .map(StiffSolveOutcome::Lsode2)
+                .map_err(StiffSolveError::Lsode2),
+            Self::Radau(prepared) => {
+                if y0.len() != prepared.initial_state.len() {
+                    return Err(StiffSolveError::Restart(
+                        StiffRestartError::InitialStateDimension {
+                            solver: StiffSolverKind::Radau,
+                            expected: prepared.initial_state.len(),
+                            actual: y0.len(),
+                        },
+                    ));
+                }
+                if y0.is_empty() || y0.iter().any(|value| !value.is_finite()) {
+                    return Err(StiffSolveError::Restart(
+                        StiffRestartError::InvalidInitialState {
+                            solver: StiffSolverKind::Radau,
+                        },
+                    ));
+                }
+                prepared.initial_state = y0.iter().copied().collect();
+                prepared
+                    .solver
+                    .try_solve_with_parameter_values(&prepared.initial_state, &prepared.parameters)
+                    .map(StiffSolveOutcome::Radau)
+                    .map_err(StiffSolveError::Radau)
+            }
         }
     }
 

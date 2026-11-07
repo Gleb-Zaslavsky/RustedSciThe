@@ -82,8 +82,26 @@ pub fn measure(
             scenario.id
         )));
     }
-    for _ in 0..warmups {
+    eprintln!(
+        "perf-gates: scenario={} measurement starting: warmups={warmups}, gate_samples={runs}",
+        scenario.id
+    );
+    for index in 0..warmups {
+        let started = std::time::Instant::now();
+        eprintln!(
+            "perf-gates: scenario={} warmup {}/{} START",
+            scenario.id,
+            index + 1,
+            warmups
+        );
         (scenario.run)()?;
+        eprintln!(
+            "perf-gates: scenario={} warmup {}/{} DONE elapsed_s={:.3}",
+            scenario.id,
+            index + 1,
+            warmups,
+            started.elapsed().as_secs_f64()
+        );
     }
     let gate = collect_phase(scenario, Phase::Gate, runs, &gate_ids)?;
     let diagnostic = match scenario.diagnose {
@@ -194,7 +212,15 @@ fn collect_phase(
     let mut expected_diagnostics: Option<Vec<(String, String)>> = None;
     let mut last_diagnostics = Vec::new();
 
-    for _ in 0..runs {
+    for index in 0..runs {
+        let started = std::time::Instant::now();
+        eprintln!(
+            "perf-gates: scenario={} phase={} sample {}/{} START",
+            scenario.id,
+            phase.label(),
+            index + 1,
+            runs
+        );
         let output = match phase {
             Phase::Gate => (scenario.run)()?,
             Phase::Diagnostic => (scenario
@@ -203,6 +229,21 @@ fn collect_phase(
                 scenario
             )?,
         };
+        let sample_metrics = output
+            .metrics
+            .iter()
+            .map(|(id, unit, value)| format!("{id}={value:.3} {unit}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "perf-gates: scenario={} phase={} sample {}/{} DONE elapsed_s={:.3} metrics=[{}]",
+            scenario.id,
+            phase.label(),
+            index + 1,
+            runs,
+            started.elapsed().as_secs_f64(),
+            sample_metrics
+        );
         if phase == Phase::Gate && output.metrics.is_empty() {
             return Err(RunnerError::Scenario(format!(
                 "scenario {} returned no gate metrics",

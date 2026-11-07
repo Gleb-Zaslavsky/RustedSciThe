@@ -20,8 +20,8 @@ use crate::errors::{
     SolverPanicState, UnsupportedOptionError, catch_panic,
 };
 use crate::expr::PyExpr;
-use crate::telemetry::write_report;
 use crate::parameter_loop::{PyIvpParameterLoopPoint, run_parameter_loop};
+use crate::telemetry::write_report;
 use rustedscithe_core::numerical::BDF::BDF_api::{
     BdfSolveError, BdfSolverOptions, BdfTelemetryMode, ODEsolver,
 };
@@ -833,6 +833,23 @@ impl BdfSolver {
         panic_state.run("solve", "bdf", &route, || self.solve_inner())
     }
 
+    /// Starts a fresh solve from `y0` on the configured interval, retaining
+    /// the current parameter values and prepared callbacks/artifacts.
+    pub fn solve_with_initial_state(&mut self, y0: Vec<f64>) -> PyResult<BdfSolution> {
+        finite_vector(&y0, "y0")?;
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.execution_policy
+        );
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "bdf", &route, || {
+            self.solver
+                .try_solve_with_initial_state(DVector::from_vec(y0))
+                .map_err(map_bdf_error)?;
+            Ok(BdfSolution::from_solver(&self.solver))
+        })
+    }
+
     /// Start a fresh solve with new parameter values and initial state.
     ///
     /// The configured time interval is retained; prepared callbacks and AOT
@@ -877,7 +894,10 @@ impl BdfSolver {
         parameter_vectors: Vec<Vec<f64>>,
     ) -> PyResult<Vec<Py<PyIvpParameterLoopPoint>>> {
         finite_vector(&y0, "y0")?;
-        let route = format!("{}:{}:{}", self.frontend, self.execution, self.execution_policy);
+        let route = format!(
+            "{}:{}:{}",
+            self.frontend, self.execution, self.execution_policy
+        );
         run_parameter_loop(py, "bdf", &route, parameter_vectors, |parameters| {
             let solution = self.solve_with_parameter_values(y0.clone(), parameters.to_vec())?;
             Py::new(py, solution).map(Py::into_any)
@@ -1243,6 +1263,28 @@ impl BdfCallbackSolver {
                 return Err(error);
             }
             result.map_err(map_bdf_error)?;
+            Ok(BdfSolution::from_solver(&self.solver))
+        })
+    }
+
+    /// Starts a fresh callback-driven solve from `y0` on the configured interval.
+    pub fn solve_with_initial_state(&mut self, y0: Vec<f64>) -> PyResult<BdfSolution> {
+        if y0.len() != self.dimension {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "expected y0 with {} values, got {}",
+                self.dimension,
+                y0.len()
+            )));
+        }
+        finite_vector(&y0, "y0")?;
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "bdf", "callback", || {
+            self.solver
+                .try_solve_with_initial_state(DVector::from_vec(y0))
+                .map_err(map_bdf_error)?;
+            if let Some(error) = self.failure.take_pyerr("solve", "bdf", "callback") {
+                return Err(error);
+            }
             Ok(BdfSolution::from_solver(&self.solver))
         })
     }

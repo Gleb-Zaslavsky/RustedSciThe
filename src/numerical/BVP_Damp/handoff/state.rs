@@ -24,6 +24,7 @@ pub fn try_damped_state_from_sparse_solver_bundle(
     let variable_string = bundle.variable_string.clone();
     let bandwidth = bundle.bandwidth.unwrap_or((0, 0));
     let bc_position_and_value = bundle.bc_position_and_value.clone();
+    let boundary_value_schema = bundle.boundary_value_schema.clone();
     let mut runtime_diagnostics = bundle.runtime_diagnostics().clone();
     let generation_telemetry = bundle.generation_telemetry;
     let atom_discretization_telemetry = bundle.atom_discretization_telemetry;
@@ -75,11 +76,32 @@ pub fn try_damped_state_from_sparse_solver_bundle(
                     message: "selected Banded bundle has no Jacobian solve delegate".to_string(),
                 }
             })?;
+            let boundary_schema = boundary_value_schema.as_ref().ok_or_else(|| {
+                BvpBackendIntegrationError::PreparedCallbackPreparationFailed {
+                    runtime: "PreparedAtom".to_string(),
+                    message: "selected symbolic bundle has no runtime boundary-value schema"
+                        .to_string(),
+                }
+            })?;
+            let boundary_parameter_names = boundary_schema
+                .slots()
+                .iter()
+                .map(|slot| slot.parameter_name.clone())
+                .collect::<Vec<_>>();
+            let parameter_binding = parameter_binding.clone().ok_or_else(|| {
+                BvpBackendIntegrationError::PreparedCallbackPreparationFailed {
+                    runtime: "PreparedAtom".to_string(),
+                    message: "selected symbolic bundle has no runtime parameter binding"
+                        .to_string(),
+                }
+            })?;
             let callbacks =
                 crate::numerical::BVP_Damp::prepared_atom_callbacks::try_build_callbacks(
                     discretized,
                     delegate,
                     bandwidth,
+                    &boundary_parameter_names,
+                    parameter_binding,
                 )
                 .map_err(|message| {
                     BvpBackendIntegrationError::PreparedCallbackPreparationFailed {
@@ -116,6 +138,7 @@ pub fn try_damped_state_from_sparse_solver_bundle(
         variable_string,
         bandwidth,
         bc_position_and_value,
+        boundary_value_schema,
         updated_resolver,
         selected_backend,
         runtime_diagnostics,
@@ -151,6 +174,7 @@ pub fn damped_state_from_legacy_solver_bundle(
         variable_string: bundle.variable_string,
         bandwidth: bundle.bandwidth.unwrap_or((0, 0)),
         bc_position_and_value: bundle.bc_position_and_value,
+        boundary_value_schema: bundle.boundary_value_schema,
         updated_resolver: None,
         selected_backend: SelectedBackendKind::Lambdify,
         runtime_diagnostics: HashMap::new(),
@@ -172,6 +196,7 @@ pub fn frozen_state_from_sparse_solver_bundle(
     let selected_backend = bundle.effective_backend();
     let variable_string = bundle.variable_string.clone();
     let bandwidth = bundle.bandwidth.unwrap_or((0, 0));
+    let boundary_value_schema = bundle.boundary_value_schema.clone();
     let runtime_diagnostics = bundle.runtime_diagnostics().clone();
     let generation_telemetry = bundle.generation_telemetry;
     let atom_discretization_telemetry = bundle.atom_discretization_telemetry;
@@ -189,6 +214,7 @@ pub fn frozen_state_from_sparse_solver_bundle(
         jac: Some(jac),
         variable_string,
         bandwidth,
+        boundary_value_schema,
         updated_resolver,
         selected_backend,
         runtime_diagnostics,
@@ -220,6 +246,7 @@ pub fn frozen_state_from_legacy_solver_bundle(
         jac: bundle.jacobian_function,
         variable_string: bundle.variable_string,
         bandwidth: bundle.bandwidth.unwrap_or((0, 0)),
+        boundary_value_schema: bundle.boundary_value_schema,
         updated_resolver: None,
         selected_backend: SelectedBackendKind::Lambdify,
         runtime_diagnostics: HashMap::new(),

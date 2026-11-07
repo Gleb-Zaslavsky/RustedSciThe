@@ -427,6 +427,10 @@ let config = Lsode2ProblemConfig::new(/* ... */)
 
 The same logic applies to Dense and Banded. Structure selection changes linear algebra backend, while symbolic execution and chunking control callback-evaluation behavior.
 
+`try_solve_with_initial_state(y0)` starts a fresh solve on the configured
+interval with the current parameter binding. It reuses prepared symbolic/AOT
+work and resets native/bridge integration state; it is not time continuation.
+
 ## Independent Parameter Sweeps
 
 `Lsode2Solver::try_solve_parameter_loop(y0, vectors)` retains prepared

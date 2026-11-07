@@ -23,8 +23,8 @@ use crate::errors::{
     UnsupportedOptionError, catch_panic,
 };
 use crate::expr::PyExpr;
-use crate::telemetry::write_report;
 use crate::parameter_loop::{PyIvpParameterLoopPoint, run_parameter_loop};
+use crate::telemetry::write_report;
 
 pub(crate) fn finite_vector(values: &[f64], label: &str) -> PyResult<()> {
     if values.is_empty() {
@@ -557,6 +557,20 @@ impl BackwardEulerSolver {
         })
     }
 
+    /// Starts a fresh solve from `y0` on the configured interval, retaining
+    /// the current parameter values and prepared callbacks/artifacts.
+    pub fn solve_with_initial_state(&mut self, y0: Vec<f64>) -> PyResult<BackwardEulerSolution> {
+        finite_vector(&y0, "y0")?;
+        let route = format!("{}:{}", self.frontend, self.execution);
+        let panic_state = self.panic_state.clone();
+        panic_state.run("solve", "backward_euler", &route, || {
+            self.solver
+                .try_solve_with_initial_state(DVector::from_vec(y0))
+                .map_err(map_be_error)?;
+            Ok(BackwardEulerSolution::from_solver(&self.solver))
+        })
+    }
+
     /// Start a fresh solve with new parameter values and initial state.
     ///
     /// The configured interval is retained while the numerical trajectory is
@@ -598,10 +612,16 @@ impl BackwardEulerSolver {
     ) -> PyResult<Vec<Py<PyIvpParameterLoopPoint>>> {
         finite_vector(&y0, "y0")?;
         let route = format!("{}:{}", self.frontend, self.execution);
-        run_parameter_loop(py, "backward_euler", &route, parameter_vectors, |parameters| {
-            let solution = self.solve_with_parameter_values(y0.clone(), parameters.to_vec())?;
-            Py::new(py, solution).map(Py::into_any)
-        })
+        run_parameter_loop(
+            py,
+            "backward_euler",
+            &route,
+            parameter_vectors,
+            |parameters| {
+                let solution = self.solve_with_parameter_values(y0.clone(), parameters.to_vec())?;
+                Py::new(py, solution).map(Py::into_any)
+            },
+        )
     }
 
     /// Start a fresh solve with new parameters, initial state and interval.

@@ -1,5 +1,13 @@
 # Backward Euler: Audit and Refactoring Plan
 
+## Fresh Solve With a Replacement Initial State (2026-11-07)
+
+- [x] Add `try_solve_with_initial_state(y0)` on the configured interval,
+  retaining the parameter binding and prepared callbacks while resetting the
+  numerical trajectory and Newton state.
+- [x] Expose the operation in Python and document/test it separately from
+  time-segment continuation.
+
 ## Independent IVP Parameter Loop
 
 - [x] Add `try_solve_parameter_loop(y0, parameter_vectors)` over the prepared

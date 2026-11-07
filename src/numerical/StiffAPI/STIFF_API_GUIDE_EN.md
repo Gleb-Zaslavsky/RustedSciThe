@@ -67,6 +67,14 @@ request preparation retains typed `StiffApiError` and native solver errors.
 
 ## Fresh Runs After Parameter Rebinding
 
+When only the initial state changes and the configured interval is unchanged,
+use `try_solve_with_initial_state(y0)`. Use
+`try_solve_with_initial_state_in_interval(t0, y0, t_bound)` when the interval
+also changes. Both reset native integrator history and solve afresh while
+preserving the current parameter binding, prepared symbolic callbacks,
+generated artifacts, and solver policy. These are not parameter continuation
+or continuation in time.
+
 After preparing a route, use `try_solve_with_parameter_values(y0, values)` to
 start a fresh solve with a new initial state and parameter values while keeping
 the configured `t0` and `t_bound`. Use
@@ -76,6 +84,14 @@ the numerical integration state; neither means solution-seeded parameter
 continuation or continuation in time.
 
 ```rust,ignore
+let outcome = prepared.try_solve_with_initial_state(
+    nalgebra::DVector::from_vec(vec![1.5]),
+)?;
+let outcome = prepared.try_solve_with_initial_state_in_interval(
+    0.0,
+    nalgebra::DVector::from_vec(vec![1.5]),
+    1.0,
+)?;
 let outcome = prepared.try_solve_with_parameter_values(
     nalgebra::DVector::from_vec(vec![1.0]),
     nalgebra::DVector::from_vec(vec![1.2]),
@@ -93,6 +109,9 @@ Radau initial values are part of its request (`initial_state` and
 other three routes keep their initial state in native configuration. The
 number of Radau parameter values must match the declarations in
 `RadauProblem::with_parameter_names`.
+
+See `examples/stiff_api_initial_state_rebind.rs` for a complete Rust example
+that changes only `y0` through the common facade.
 
 ## Results and Errors
 

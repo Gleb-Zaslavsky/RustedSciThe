@@ -1,4 +1,4 @@
-"""Run fresh parameterized solves through the common StiffAPI facade.
+"""Run fresh initial-state solves and parameter rebinds through StiffAPI.
 
 The first solve keeps the interval from the request. The second supplies a
 different interval, initial state and parameter values. Both reuse the
@@ -45,6 +45,7 @@ def main() -> None:
         )
 
     prepared = request.prepare()
+    new_initial = prepared.solve_with_initial_state([1.25])
     configured = prepared.solve_with_parameter_values([2.0], [1.5])
     configured_value = terminal_value(configured)
     configured_expected = 2.0 * math.exp(-1.5 * 0.1)
@@ -56,6 +57,7 @@ def main() -> None:
     explicit_expected = 3.0 * math.exp(-0.8 * 0.2)
 
     print(f"solver={prepared.solver}")
+    print(f"new initial state: {terminal_value(new_initial):.10g}")
     print(f"configured interval: {configured_value:.10g} (exact {configured_expected:.10g})")
     print(f"new interval: {explicit_value:.10g} (exact {explicit_expected:.10g})")
     print(explicit_interval.telemetry_report())

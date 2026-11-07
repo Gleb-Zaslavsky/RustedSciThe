@@ -76,6 +76,16 @@ Damped и Frozen требуют равномерную сетку, поскол�
 fallback нет. Generic facade поддерживает символические Lambdify и AOT.
 Численные Python-callback маршруты остаются в прямом API `BvpSciSolver`.
 
+`PreparedBvpSolver.set_boundary_values(values)` меняет только числовые значения
+исходных граничных слотов в исходном порядке; `solve_with_boundary_values(values)`
+также сразу запускает solve. Схему состояний и сторон границ менять нельзя.
+Переиспользование callbacks реализовано для символьных маршрутов Sci,
+CorrectionNewton, Damped и Frozen. Для Damped/Frozen поддерживаются подготовленные
+ExprLegacy или AtomView с Lambdify либо AOT, но не численные callback-маршруты.
+Перепривязка сбрасывает принятый результат/сохранённое приближение, сохраняя
+подготовленные residual/Jacobian callbacks и AOT artifact. Изменение схемы
+состояний или endpoint-ов требует подготовки нового solver.
+
 Для свободных параметров BVP_sci передаются вместе
 `free_parameter_names`, `free_parameter_guess` и `boundary_residual`. Callback
 невязки получает `(ya, yb, parameters)` и возвращает дополнительную граничную

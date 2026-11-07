@@ -1,5 +1,15 @@
 # BDF: Audit and Refactoring Plan
 
+## Fresh Solve With a Replacement Initial State (2026-11-07)
+
+- [x] Add `try_solve_with_initial_state(y0)` to reuse the configured interval,
+  current parameter binding and prepared callback/AOT route while resetting
+  BDF numerical history.
+- [x] Verify dimension/non-finite validation and document this as a fresh
+  initial-value solve, distinct from time continuation.
+- [x] Expose the same operation in Python and cover it through StiffAPI parity
+  tests and runnable examples.
+
 ## Independent IVP Parameter Loop
 
 - [x] Add `try_solve_parameter_loop(y0, parameter_vectors)` over the existing
