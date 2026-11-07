@@ -152,10 +152,10 @@ macro_rules! bvp_correction_newton_continuation_route {
 
 static CORE_SCENARIOS: &[Scenario] = &[
     Scenario {
-        id: "bvp_combustion_solver_matrix_10x8",
+        id: "bvp_combustion_solver_matrix_3comb",
         solver: "bvp-combustion-matrix",
         groups: &["bvp", "bvp-large", "bvp-combustion-solver-matrix"],
-        workload: "KiThe, COMB-01 and COMB-02; 10-interval seed; CorrectionNewton fixed mesh, BVP_sci native adaptation, and four BVP_Damp refinement routes",
+        workload: "KiThe 33-interval fixture and COMB-01/02 128-interval fixtures for CorrectionNewton/BVP_sci; BVP_Damp alone starts from 10 intervals and runs four refinement routes",
         frontend: "ExprLegacy",
         execution: "Lambdify",
         linear_algebra: "Sparse",
@@ -170,7 +170,7 @@ static CORE_SCENARIOS: &[Scenario] = &[
             "bvp_damp_grcar_smooke_wall_ms",
             "bvp_damp_double_points_wall_ms",
         ],
-        description: "Matched three-fixture BVP comparison; each gate metric sums the same solver route across KiThe, COMB-01, and COMB-02 so the short coarse-grid runs have useful measurement resolution",
+        description: "Three-fixture BVP comparison; fixed-grid routes retain their established fixture resolutions while BVP_Damp independently starts each refinement strategy from a 10-interval interpolated seed",
         run: crate::scenarios::bvp_combustion_matrix::run,
         diagnose: None,
     },
@@ -1667,9 +1667,9 @@ mod tests {
         .unwrap();
         assert_eq!(scenarios.len(), 1);
         let scenario = scenarios[0];
-        assert_eq!(scenario.id, "bvp_combustion_solver_matrix_10x8");
+        assert_eq!(scenario.id, "bvp_combustion_solver_matrix_3comb");
         assert_eq!(scenario.gate_metrics.len(), 6);
-        assert!(scenario.workload.contains("10-interval seed"));
+        assert!(scenario.workload.contains("10 intervals"));
         assert!(scenario.diagnose.is_none());
     }
 

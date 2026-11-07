@@ -1,8 +1,8 @@
 //! Tabled release comparison of the established combustion BVP fixtures.
 //!
-//! CorrectionNewton uses its fixed seed mesh, BVP_sci uses its native adaptive
-//! collocation controller, and BVP_Damp is measured independently with each of
-//! its four mesh-refinement strategies. This is a workload matrix, not a
+//! CorrectionNewton and BVP_sci use the established fixture meshes, while
+//! BVP_Damp starts each case from a 10-interval interpolated seed and is
+//! measured independently with each of its four mesh-refinement strategies.
 //! The perf-gate runner reuses the same fixtures and off-mode solve path,
 //! aggregating each route across all three combustion cases.
 
@@ -34,6 +34,7 @@ use nalgebra::DMatrix;
 use tabled::Tabled;
 
 const START_INTERVALS: usize = 10;
+const FIXED_COMBUSTION_INTERVALS: usize = 128;
 const REPEATS: usize = 3;
 
 struct Fixture {
@@ -222,27 +223,19 @@ fn comb02_perturbed_problem(steps: usize) -> CorrectionNewtonProblem {
 }
 
 fn fixtures() -> Vec<Fixture> {
-    let mut kithe =
-        RustedSciThe::numerical::BVP_Damp::correction_newton_kithe_combustion_perf_fixture();
-    let old_steps = kithe.steps;
-    let old_guess = kithe.initial_guess.clone();
-    kithe.steps = START_INTERVALS;
-    kithe.initial_guess =
-        DMatrix::from_fn(kithe.state_names.len(), START_INTERVALS, |state, col| {
-            old_guess[(state, col * old_steps / START_INTERVALS)]
-        });
     vec![
         Fixture {
             name: "KiThe-26-state",
-            problem: kithe,
+            problem:
+                RustedSciThe::numerical::BVP_Damp::correction_newton_kithe_combustion_perf_fixture(),
         },
         Fixture {
             name: "COMB-01",
-            problem: comb01_problem(START_INTERVALS),
+            problem: comb01_problem(FIXED_COMBUSTION_INTERVALS),
         },
         Fixture {
             name: "COMB-02",
-            problem: comb02_perturbed_problem(START_INTERVALS),
+            problem: comb02_perturbed_problem(FIXED_COMBUSTION_INTERVALS),
         },
     ]
 }
@@ -306,6 +299,32 @@ fn full_seed(fixture: &CorrectionNewtonProblem) -> DMatrix<f64> {
             fixture.initial_guess[(state, node)]
         },
     )
+}
+
+fn damped_start_fixture(fixture: &Fixture) -> Fixture {
+    let source = full_seed(&fixture.problem);
+    let mut problem = fixture.problem.clone();
+    problem.steps = START_INTERVALS;
+    problem.initial_guess = DMatrix::from_fn(
+        problem.state_names.len(),
+        START_INTERVALS,
+        |state, column| {
+            let left_boundary = problem.boundary_conditions[&problem.state_names[state]]
+                .iter()
+                .any(|(endpoint, _)| *endpoint == 0);
+            let target_node = column + usize::from(left_boundary);
+            let source_position =
+                target_node as f64 * fixture.problem.steps as f64 / START_INTERVALS as f64;
+            let left = source_position.floor() as usize;
+            let right = (left + 1).min(fixture.problem.steps);
+            let fraction = source_position - left as f64;
+            source[(state, left)] + fraction * (source[(state, right)] - source[(state, left)])
+        },
+    );
+    Fixture {
+        name: fixture.name,
+        problem,
+    }
 }
 
 fn bounds(fixture: &CorrectionNewtonProblem) -> HashMap<String, (f64, f64)> {
@@ -567,6 +586,7 @@ fn collect_rows(repeats: usize, detailed: bool) -> Vec<(Row, f64)> {
     ];
     let mut rows = Vec::with_capacity(18 * repeats);
     for fixture in fixtures() {
+        let damped_fixture = damped_start_fixture(&fixture);
         for repeat in 1..=repeats {
             rows.push(one_run(
                 &fixture,
@@ -608,12 +628,12 @@ fn collect_rows(repeats: usize, detailed: bool) -> Vec<(Row, f64)> {
 
             for (name, method) in &strategies {
                 rows.push(one_run(
-                    &fixture,
+                    &damped_fixture,
                     "BVP_Damp",
                     name,
                     BvpSolverConfig::Damped {
-                        options: damped_options(&fixture.problem, method.clone(), detailed),
-                        initial_guess: fixture.problem.initial_guess.clone(),
+                        options: damped_options(&damped_fixture.problem, method.clone(), detailed),
+                        initial_guess: damped_fixture.problem.initial_guess.clone(),
                     },
                     repeat,
                 ));
@@ -675,7 +695,7 @@ fn main() {
     let measured = collect_rows(REPEATS, true);
     let rows = measured.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
     let report = format!(
-        "# Combustion BVP solver and refinement matrix\n\nThree independent samples per route. CorrectionNewton uses its fixed uniform 10-interval mesh; BVP_sci uses its native adaptive collocation controller; BVP_Damp starts from 10 intervals and is run independently with each named refinement strategy. All routes use 1e-5 absolute/relative tolerances, ExprLegacy/Lambdify and Sparse linear algebra. `construct_ms` measures solver construction only. BVP_Damp may lazily prepare generated callbacks during `solve_ms`; its native symbolic/preparation stages are reported separately in telemetry. Failed attempts remain visible and do not abort the matrix.\n\n{}\n",
+        "# Combustion BVP solver and refinement matrix\n\nThree independent samples per route. CorrectionNewton and BVP_sci use their established fixture meshes (KiThe: 33 intervals; COMB-01/02: 128 intervals); BVP_sci also uses its native adaptive collocation controller. BVP_Damp starts from a linearly interpolated 10-interval seed and is run independently with each named refinement strategy. All routes use 1e-5 absolute/relative tolerances, ExprLegacy/Lambdify and Sparse linear algebra. `construct_ms` measures solver construction only. BVP_Damp may lazily prepare generated callbacks during `solve_ms`; its native symbolic/preparation stages are reported separately in telemetry. Failed attempts remain visible and do not abort the matrix.\n\n{}\n",
         tabled::Table::new(&rows)
     );
     match write_test_report(
