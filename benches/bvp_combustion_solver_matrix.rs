@@ -42,7 +42,7 @@ struct Fixture {
     problem: CorrectionNewtonProblem,
 }
 
-#[derive(Tabled)]
+#[derive(Debug, Tabled)]
 struct Row {
     fixture: &'static str,
     solver: &'static str,
@@ -339,7 +339,7 @@ fn bounds(fixture: &CorrectionNewtonProblem) -> HashMap<String, (f64, f64)> {
                 _ if name.starts_with('u')
                     && name[1..].parse::<usize>().is_ok_and(|i| i % 2 == 0) =>
                 {
-                    (0.0, 1.1)
+                    (-0.1, 1.1)
                 }
                 _ if name.starts_with('u') => (-1.0e4, 1.0e4),
                 _ => (-30.0, 30.0),
@@ -359,7 +359,7 @@ fn correction_options(
         absolute_tolerance: 1e-5,
         default_relative_tolerance: 1e-5,
         bounds: bounds(fixture),
-        max_iterations: 100,
+        max_iterations: 150,
         max_jacobian_age: 1,
         max_damping_trials: 12,
         telemetry_mode: if detailed {
@@ -369,6 +369,24 @@ fn correction_options(
         },
         ..CorrectionNewtonOptions::default()
     }
+}
+
+fn sci_options(detailed: bool) -> BvpSciOptions {
+    let mut options = BvpSciOptions::default();
+    options.execution = BvpSciExecution::Lambdify;
+    options.assembly = Some(BvpSciAssembly::ExprLegacy);
+    options.matrix_layout = BvpSciMatrixLayout::Sparse;
+    options.tolerance = 1e-5;
+    options.boundary_tolerance = Some(1e-5);
+    options.max_nodes = 4096;
+    options.max_newton_iterations = 100;
+    options.max_mesh_refinements = 8;
+    options.telemetry = if detailed {
+        BvpSciTelemetryMode::Detailed
+    } else {
+        BvpSciTelemetryMode::Off
+    };
+    options
 }
 
 fn damped_options(
@@ -482,7 +500,7 @@ fn one_run(
     let solve_status = solver
         .solve()
         .map(|_| ())
-        .map_err(|error| error.to_string());
+        .map_err(|error| format!("{error:?}"));
     let solve_ms = solve_started.elapsed().as_secs_f64() * 1e3;
     let stats = telemetry(&solver.telemetry_snapshot());
     let mut correctness_error = None;
@@ -599,26 +617,12 @@ fn collect_rows(repeats: usize, detailed: bool) -> Vec<(Row, f64)> {
                 repeat,
             ));
 
-            let mut sci = BvpSciOptions::default();
-            sci.execution = BvpSciExecution::Lambdify;
-            sci.assembly = Some(BvpSciAssembly::ExprLegacy);
-            sci.matrix_layout = BvpSciMatrixLayout::Sparse;
-            sci.tolerance = 1e-5;
-            sci.boundary_tolerance = Some(1e-5);
-            sci.max_nodes = 4096;
-            sci.max_newton_iterations = 100;
-            sci.max_mesh_refinements = 8;
-            sci.telemetry = if detailed {
-                BvpSciTelemetryMode::Detailed
-            } else {
-                BvpSciTelemetryMode::Off
-            };
             rows.push(one_run(
                 &fixture,
                 "BVP_sci",
                 "native collocation refinement",
                 BvpSolverConfig::Sci {
-                    options: sci,
+                    options: sci_options(detailed),
                     sparse_factorization: BvpSciSparseFactorization::StandardFaer,
                     aot_config: None,
                     initial_guess: full_seed(&fixture.problem),
@@ -707,4 +711,112 @@ fn main() {
         Err(error) => eprintln!("unable to write combustion solver matrix report: {error}"),
     }
     println!("{}", tabled::Table::new(&rows));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::START_INTERVALS;
+    use super::{
+        bounds, correction_options, damped_start_fixture, fixtures, full_seed, one_run, sci_options,
+    };
+    use RustedSciThe::numerical::BVP_Damp::grid_api::GridRefinementMethod;
+    use RustedSciThe::numerical::BVP_api::BvpSciSparseFactorization;
+    use RustedSciThe::numerical::BVP_api::BvpSolverConfig;
+
+    #[test]
+    fn correction_newton_converges_on_all_maintained_fixture_meshes() {
+        for fixture in fixtures() {
+            let expected_steps = if fixture.name == "KiThe-26-state" {
+                33
+            } else {
+                128
+            };
+            assert_eq!(fixture.problem.steps, expected_steps);
+            let (row, _) = one_run(
+                &fixture,
+                "CorrectionNewton",
+                "fixed mesh",
+                BvpSolverConfig::CorrectionNewton {
+                    options: correction_options(&fixture.problem, false),
+                    initial_guess: fixture.problem.initial_guess.clone(),
+                },
+                1,
+            );
+            assert_eq!(row.status, "ok", "CorrectionNewton row: {row:?}");
+        }
+    }
+
+    #[test]
+    fn damped_seed_resampling_preserves_finite_in_bounds_data() {
+        for fixture in fixtures() {
+            let seed = damped_start_fixture(&fixture);
+            assert_eq!(seed.problem.steps, START_INTERVALS);
+            assert_eq!(seed.problem.initial_guess.ncols(), START_INTERVALS);
+            for (state, name) in seed.problem.state_names.iter().enumerate() {
+                let (lower, upper) = bounds(&seed.problem)[name];
+                for column in 0..START_INTERVALS {
+                    let value = seed.problem.initial_guess[(state, column)];
+                    assert!(
+                        value.is_finite(),
+                        "{} {name}[{column}]={value}",
+                        fixture.name
+                    );
+                    assert!(
+                        value >= lower - 1e-12 && value <= upper + 1e-12,
+                        "{} {name}[{column}]={value} outside [{lower}, {upper}]",
+                        fixture.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bvp_sci_converges_on_all_maintained_combustion_fixtures() {
+        for fixture in fixtures() {
+            let (row, _) = one_run(
+                &fixture,
+                "BVP_sci",
+                "native collocation refinement",
+                BvpSolverConfig::Sci {
+                    options: sci_options(false),
+                    sparse_factorization: BvpSciSparseFactorization::StandardFaer,
+                    aot_config: None,
+                    initial_guess: full_seed(&fixture.problem),
+                },
+                1,
+            );
+            assert_eq!(row.status, "ok", "BVP_sci row: {row:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "large Debug correctness matrix for all resampled Damped combustion routes"]
+    fn damped_refinement_routes_converge_on_resampled_fixtures() {
+        let strategies = [
+            ("TwoPoint", GridRefinementMethod::TwoPoint(0.02, 0.02, 2.5)),
+            ("Pearson", GridRefinementMethod::Pearson(1e-3, 1.4)),
+            (
+                "GrcarSmooke",
+                GridRefinementMethod::GrcarSmooke(1e-3, 1e-2, 1.4),
+            ),
+            ("DoublePoints", GridRefinementMethod::DoublePoints),
+        ];
+        for fixture in fixtures() {
+            let seed = damped_start_fixture(&fixture);
+            for (name, method) in &strategies {
+                let (row, _) = one_run(
+                    &seed,
+                    "BVP_Damp",
+                    name,
+                    BvpSolverConfig::Damped {
+                        options: super::damped_options(&seed.problem, method.clone(), false),
+                        initial_guess: seed.problem.initial_guess.clone(),
+                    },
+                    1,
+                );
+                assert_eq!(row.status, "ok", "BVP_Damp row: {row:?}");
+            }
+        }
+    }
 }
