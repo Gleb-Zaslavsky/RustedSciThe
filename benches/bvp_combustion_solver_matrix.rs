@@ -21,8 +21,8 @@ use RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::GeneratedBacken
 use RustedSciThe::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use RustedSciThe::numerical::BVP_Damp::telemetry::{BvpLoggingMode, BvpTelemetryMode};
 use RustedSciThe::numerical::BVP_api::{
-    BvpBoundaryCondition, BvpBoundarySide, BvpProblem, BvpSciSparseFactorization, BvpSolver,
-    BvpSolverConfig, BvpSolverTelemetrySnapshot,
+    BvpBoundaryCondition, BvpBoundarySide, BvpNativeSolver, BvpProblem, BvpSciSparseFactorization,
+    BvpSolver, BvpSolverConfig, BvpSolverTelemetrySnapshot,
 };
 use RustedSciThe::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciMatrixLayout, BvpSciOptions, BvpSciTelemetryMode,
@@ -327,6 +327,38 @@ fn damped_start_fixture(fixture: &Fixture) -> Fixture {
     }
 }
 
+fn damped_packed_seed(problem: &CorrectionNewtonProblem) -> DMatrix<f64> {
+    let state_count = problem.state_names.len();
+    let node_count = problem.steps + 1;
+    let mut full = vec![f64::NAN; node_count * state_count];
+    let mut fixed = std::collections::HashSet::with_capacity(state_count);
+    for (state_name, conditions) in &problem.boundary_conditions {
+        let state = problem
+            .state_names
+            .iter()
+            .position(|name| name == state_name)
+            .expect("boundary state belongs to the fixture");
+        assert_eq!(conditions.len(), 1, "fixture has one endpoint per state");
+        let (endpoint, value) = conditions[0];
+        let boundary_node = if endpoint == 0 { 0 } else { problem.steps };
+        let position = boundary_node * state_count + state;
+        full[position] = value;
+        fixed.insert(position);
+        for column in 0..problem.steps {
+            let node = if endpoint == 0 { column + 1 } else { column };
+            full[node * state_count + state] = problem.initial_guess[(state, column)];
+        }
+    }
+    assert!(full.iter().all(|value| value.is_finite()));
+    let packed = full
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, value)| (!fixed.contains(&position)).then_some(value))
+        .collect::<Vec<_>>();
+    assert_eq!(packed.len(), state_count * problem.steps);
+    DMatrix::from_column_slice(state_count, problem.steps, &packed)
+}
+
 fn bounds(fixture: &CorrectionNewtonProblem) -> HashMap<String, (f64, f64)> {
     fixture
         .state_names
@@ -421,7 +453,7 @@ fn damped_options(
             max_damp_iter: Some(12),
             adaptive: Some(AdaptiveGridConfig {
                 version: 1,
-                max_refinements: 8,
+                max_refinements: 2,
                 grid_method: strategy,
             }),
             ..SolverParams::default()
@@ -478,6 +510,17 @@ fn one_run(
     config: BvpSolverConfig,
     repeat: usize,
 ) -> (Row, f64) {
+    one_run_with_prepared_damped_iterate(fixture, solver_name, refinement, config, repeat, None)
+}
+
+fn one_run_with_prepared_damped_iterate(
+    fixture: &Fixture,
+    solver_name: &'static str,
+    refinement: &'static str,
+    config: BvpSolverConfig,
+    repeat: usize,
+    prepared_damped_iterate: Option<DMatrix<f64>>,
+) -> (Row, f64) {
     let prep = Instant::now();
     let mut solver = match BvpSolver::new(as_bvp_problem(&fixture.problem), config) {
         Ok(solver) => solver,
@@ -495,6 +538,25 @@ fn one_run(
             );
         }
     };
+    if let Some(iterate) = prepared_damped_iterate {
+        let result = match solver.native_mut() {
+            BvpNativeSolver::Damped(native) => native.try_set_prepared_iterate(iterate),
+            _ => panic!("prepared Damped iterate supplied to non-Damped route"),
+        };
+        if let Err(error) = result {
+            return (
+                failed_row(
+                    fixture,
+                    solver_name,
+                    refinement,
+                    repeat,
+                    prep.elapsed().as_secs_f64() * 1e3,
+                    format!("install prepared Damped iterate: {error:?}"),
+                ),
+                0.0,
+            );
+        }
+    }
     let construct_ms = prep.elapsed().as_secs_f64() * 1e3;
     let solve_started = Instant::now();
     let solve_status = solver
@@ -631,7 +693,7 @@ fn collect_rows(repeats: usize, detailed: bool) -> Vec<(Row, f64)> {
             ));
 
             for (name, method) in &strategies {
-                rows.push(one_run(
+                rows.push(one_run_with_prepared_damped_iterate(
                     &damped_fixture,
                     "BVP_Damp",
                     name,
@@ -640,6 +702,7 @@ fn collect_rows(repeats: usize, detailed: bool) -> Vec<(Row, f64)> {
                         initial_guess: damped_fixture.problem.initial_guess.clone(),
                     },
                     repeat,
+                    Some(damped_packed_seed(&damped_fixture.problem)),
                 ));
             }
         }
@@ -699,7 +762,7 @@ fn main() {
     let measured = collect_rows(REPEATS, true);
     let rows = measured.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
     let report = format!(
-        "# Combustion BVP solver and refinement matrix\n\nThree independent samples per route. CorrectionNewton and BVP_sci use their established fixture meshes (KiThe: 33 intervals; COMB-01/02: 128 intervals); BVP_sci also uses its native adaptive collocation controller. BVP_Damp starts from a linearly interpolated 10-interval seed and is run independently with each named refinement strategy. All routes use 1e-5 absolute/relative tolerances, ExprLegacy/Lambdify and Sparse linear algebra. `construct_ms` measures solver construction only. BVP_Damp may lazily prepare generated callbacks during `solve_ms`; its native symbolic/preparation stages are reported separately in telemetry. Failed attempts remain visible and do not abort the matrix.\n\n{}\n",
+        "# Combustion BVP solver and refinement matrix\n\nThree independent samples per route. CorrectionNewton and BVP_sci use their established fixture meshes (KiThe: 33 intervals; COMB-01/02: 128 intervals); BVP_sci also uses its native adaptive collocation controller. BVP_Damp starts from a linearly interpolated 10-interval seed and is run independently with each named refinement strategy, capped at the two refinements used by the correctness acceptance gate. All routes use 1e-5 absolute/relative tolerances, ExprLegacy/Lambdify and Sparse linear algebra. `construct_ms` measures solver construction only. BVP_Damp may lazily prepare generated callbacks during `solve_ms`; its native symbolic/preparation stages are reported separately in telemetry. Failed attempts remain visible and do not abort the matrix.\n\n{}\n",
         tabled::Table::new(&rows)
     );
     match write_test_report(
@@ -717,7 +780,8 @@ fn main() {
 mod tests {
     use super::START_INTERVALS;
     use super::{
-        bounds, correction_options, damped_start_fixture, fixtures, full_seed, one_run, sci_options,
+        bounds, correction_options, damped_packed_seed, damped_start_fixture, fixtures, full_seed,
+        one_run, one_run_with_prepared_damped_iterate, sci_options,
     };
     use RustedSciThe::numerical::BVP_Damp::grid_api::GridRefinementMethod;
     use RustedSciThe::numerical::BVP_api::BvpSciSparseFactorization;
@@ -805,7 +869,8 @@ mod tests {
         for fixture in fixtures() {
             let seed = damped_start_fixture(&fixture);
             for (name, method) in &strategies {
-                let (row, _) = one_run(
+                println!("Debug BVP_Damp smoke: {} / {name}", fixture.name);
+                let (row, _) = one_run_with_prepared_damped_iterate(
                     &seed,
                     "BVP_Damp",
                     name,
@@ -814,6 +879,7 @@ mod tests {
                         initial_guess: seed.problem.initial_guess.clone(),
                     },
                     1,
+                    Some(damped_packed_seed(&seed.problem)),
                 );
                 assert_eq!(row.status, "ok", "BVP_Damp row: {row:?}");
             }
