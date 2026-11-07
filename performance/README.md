@@ -245,6 +245,23 @@ not the stability threshold:
 .\scripts\perf_gates_run.ps1 -Action Record -Scenario radau_diff512_aot_atom_banded_seq -Machine windows-dev -Runs 201 -Force
 ```
 
+The runner isolates the complete measurement series in one child process, so
+the default 600-second child timeout covers **all warmups and measured runs**,
+not one sample. For a long workload, estimate its one-sample duration times
+`(warmups + runs)` and set `-ChildTimeoutSeconds` explicitly; the default
+remains unchanged for ordinary scenarios. For example, the combustion BVP
+solver matrix takes about one minute per sample and needs roughly two hours at
+10 warmups / 101 runs:
+
+```powershell
+.\scripts\perf_gates_run.ps1 -Action Record -Group bvp-combustion-solver-matrix `
+  -Machine windows-dev -Warmups 10 -Runs 101 -ChildTimeoutSeconds 10800
+```
+
+The timeout is only a process safety limit; it does not change the workload,
+sample count, stability threshold, or solver behavior. It can be set up to
+86,400 seconds (24 hours).
+
 `-Force` replaces an existing baseline only during `Record`; use it only when
 replacement is intentional. `Record` requires a clean source tree by default.
 `-AllowDirtySource` is an explicit local diagnostic escape hatch and should

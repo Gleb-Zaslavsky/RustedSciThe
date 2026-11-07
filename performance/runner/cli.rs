@@ -18,7 +18,8 @@ const DEFAULT_WARMUPS: usize = 3;
 const DEFAULT_RUNS: usize = 15;
 const DEFAULT_MAX_RELATIVE_MAD: f64 = 0.10;
 const DEFAULT_TOLERANCE: f64 = 0.10;
-const CHILD_TIMEOUT: Duration = Duration::from_secs(600);
+const DEFAULT_CHILD_TIMEOUT_SECONDS: u64 = 600;
+const MAX_CHILD_TIMEOUT_SECONDS: u64 = 86_400;
 
 #[derive(Parser)]
 #[command(
@@ -77,6 +78,9 @@ struct RecordArgs {
     warmups: usize,
     #[arg(long, default_value_t = DEFAULT_RUNS)]
     runs: usize,
+    /// Maximum wall time for the isolated process that performs all warmups and samples.
+    #[arg(long, default_value_t = DEFAULT_CHILD_TIMEOUT_SECONDS)]
+    child_timeout_seconds: u64,
     #[arg(long, default_value_t = DEFAULT_TOLERANCE)]
     tolerance: f64,
     #[arg(long, default_value_t = DEFAULT_MAX_RELATIVE_MAD)]
@@ -98,6 +102,9 @@ struct CompareArgs {
     warmups: usize,
     #[arg(long, default_value_t = DEFAULT_RUNS)]
     runs: usize,
+    /// Maximum wall time for the isolated process that performs all warmups and samples.
+    #[arg(long, default_value_t = DEFAULT_CHILD_TIMEOUT_SECONDS)]
+    child_timeout_seconds: u64,
     #[arg(long, default_value_t = DEFAULT_MAX_RELATIVE_MAD)]
     max_relative_mad: f64,
     #[arg(long)]
@@ -176,6 +183,7 @@ fn record(args: RecordArgs) -> Result<(), RunnerError> {
     require_release_measurement()?;
     validate_runs(args.warmups, args.runs, args.tolerance)?;
     validate_runs(args.warmups, args.runs, args.max_relative_mad)?;
+    let child_timeout = child_timeout(args.child_timeout_seconds)?;
     let selected = registry::select(&into_selector(args.selector))?;
     let machine = environment::resolve(&args.machine)?;
     let env = environment::fingerprint();
@@ -202,7 +210,7 @@ fn record(args: RecordArgs) -> Result<(), RunnerError> {
             continue;
         }
         let target = baseline::path(&machine, &env, scenario);
-        match isolated_measure(scenario, args.warmups, args.runs) {
+        match isolated_measure(scenario, args.warmups, args.runs, child_timeout) {
             Ok(series) => {
                 if let Some(metric) = series.metrics.iter().find(|metric| {
                     series.gate_metrics.contains(&metric.id)
@@ -266,6 +274,7 @@ fn record(args: RecordArgs) -> Result<(), RunnerError> {
 
 fn compare(args: CompareArgs) -> Result<(), RunnerError> {
     validate_runs(args.warmups, args.runs, args.max_relative_mad)?;
+    let child_timeout = child_timeout(args.child_timeout_seconds)?;
     if !args.dry_run {
         require_release_measurement()?;
     }
@@ -316,7 +325,7 @@ fn compare(args: CompareArgs) -> Result<(), RunnerError> {
             dry_run_checked += 1;
             continue;
         }
-        let primary = match isolated_measure(scenario, args.warmups, args.runs) {
+        let primary = match isolated_measure(scenario, args.warmups, args.runs, child_timeout) {
             Ok(series) => series,
             Err(error) => {
                 errors.push((error.exit_code(), format!("{}: {error}", scenario.id)));
@@ -332,10 +341,12 @@ fn compare(args: CompareArgs) -> Result<(), RunnerError> {
         };
         let requires_confirmation = primary_rows.iter().any(|row| row.verdict != Verdict::Pass);
         let confirmation = if requires_confirmation {
-            match isolated_measure(scenario, args.warmups, args.runs).and_then(|series| {
-                comparison::compare(&saved, &series, args.max_relative_mad)
-                    .map(|rows| (series, rows))
-            }) {
+            match isolated_measure(scenario, args.warmups, args.runs, child_timeout).and_then(
+                |series| {
+                    comparison::compare(&saved, &series, args.max_relative_mad)
+                        .map(|rows| (series, rows))
+                },
+            ) {
                 Ok((series, rows)) => Some((series, rows)),
                 Err(error) => {
                     errors.push((
@@ -442,6 +453,7 @@ fn isolated_measure(
     scenario: &Scenario,
     warmups: usize,
     runs: usize,
+    timeout: Duration,
 ) -> Result<MeasurementSeries, RunnerError> {
     let mut child = Command::new(std::env::current_exe()?)
         .arg("__measure")
@@ -471,7 +483,7 @@ fn isolated_measure(
         let mut bytes = Vec::new();
         stderr.read_to_end(&mut bytes).map(|_| bytes)
     });
-    let status = wait_for_child(&mut child, CHILD_TIMEOUT, scenario.id)?;
+    let status = wait_for_child(&mut child, timeout, scenario.id)?;
     let stdout = stdout_reader
         .join()
         .map_err(|_| RunnerError::Child("child stdout reader panicked".into()))??;
@@ -490,6 +502,15 @@ fn isolated_measure(
         .map_err(|error| RunnerError::Child(format!("child output is not UTF-8: {error}")))?;
     let value = toml::Value::Table(toml::from_str::<toml::Table>(&stdout)?);
     series_from_toml(&value)
+}
+
+fn child_timeout(seconds: u64) -> Result<Duration, RunnerError> {
+    if seconds == 0 || seconds > MAX_CHILD_TIMEOUT_SECONDS {
+        return Err(RunnerError::Configuration(format!(
+            "--child-timeout-seconds must be between 1 and {MAX_CHILD_TIMEOUT_SECONDS}"
+        )));
+    }
+    Ok(Duration::from_secs(seconds))
 }
 
 fn wait_for_child(
@@ -1175,6 +1196,13 @@ mod tests {
         let error = wait_for_child(&mut child, Duration::from_millis(250), "blocked").unwrap_err();
         assert!(error.to_string().contains("blocked exceeded"));
         assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn child_timeout_accepts_explicit_long_measurements_with_a_sane_upper_bound() {
+        assert_eq!(child_timeout(10_800).unwrap(), Duration::from_secs(10_800));
+        assert!(child_timeout(0).is_err());
+        assert!(child_timeout(MAX_CHILD_TIMEOUT_SECONDS + 1).is_err());
     }
 
     #[cfg(windows)]

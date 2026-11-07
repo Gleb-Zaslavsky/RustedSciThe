@@ -6,6 +6,7 @@ param(
     [string]$Scenario,
     [int]$Warmups = 10,
     [int]$Runs = 101,
+    [ValidateRange(1, 86400)][int]$ChildTimeoutSeconds = 600,
     [double]$MaxRelativeMad = 0.05,
     [double]$Tolerance = 0.10,
     [switch]$Force,
@@ -43,7 +44,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($Solver)) { $cargoArgs += @("--solver", $Solver) }
     if (-not [string]::IsNullOrWhiteSpace($Group)) { $cargoArgs += @("--group", $Group) }
     if (-not [string]::IsNullOrWhiteSpace($Scenario)) { $cargoArgs += @("--scenario", $Scenario) }
-    $cargoArgs += @("--machine", $Machine, "--warmups", $Warmups, "--runs", $Runs, "--max-relative-mad", $MaxRelativeMad)
+    $cargoArgs += @("--machine", $Machine, "--warmups", $Warmups, "--runs", $Runs, "--child-timeout-seconds", $ChildTimeoutSeconds, "--max-relative-mad", $MaxRelativeMad)
     if ($Action -eq "Record") {
         $cargoArgs += @("--tolerance", $Tolerance)
         if ($Force) { $cargoArgs += "--force" }
@@ -52,7 +53,7 @@ try {
 
     Push-Location $repoRoot
     try {
-        Write-Host "perf-gates $($Action.ToLowerInvariant()): machine=$Machine warmups=$Warmups runs=$Runs max-relative-mad=$MaxRelativeMad"
+        Write-Host "perf-gates $($Action.ToLowerInvariant()): machine=$Machine warmups=$Warmups runs=$Runs child-timeout=${ChildTimeoutSeconds}s max-relative-mad=$MaxRelativeMad"
         # Windows PowerShell can surface native stderr (including Cargo
         # warnings) as PowerShell errors. Do not let ErrorActionPreference
         # mistake a warning for process failure; the native exit code remains
