@@ -210,11 +210,11 @@ cargo test --manifest-path bindings/python/Cargo.toml --lib --no-default-feature
 
 ## Linux
 
-**Release gate:** the published `0.1.3` release is Windows-only. The Linux
-`0.1.4` wheel was built and published after the Windows `0.1.4` TestPyPI
-artifact, using the corrected current checkout. Do not attempt to append Linux
-to `0.1.3`; published files are immutable. The older `0.1.3` instructions
-below are retained only as release history and diagnostic guidance.
+**Release status (2026-11-08):** Python `0.1.6` is published with Windows and
+Linux x86_64 wheels plus an sdist. The older `0.1.3`/`0.1.4` instructions
+below are retained as release history and diagnostic guidance. Published files
+are immutable; never try to append another platform wheel to an existing
+version.
 
 ### Codex handoff for a Linux VS Code session
 
@@ -234,11 +234,11 @@ git status, the current branch/tag, package versions, and the available build
 artifacts. Do not assume that notes from an earlier Codex session describe the
 current checkout. Report any mismatch before building.
 
-The only production release so far is 0.1.3 and it is Windows-only. The target
-is to publish 0.1.4 as one coordinated release: Windows and Linux wheels plus
-one sdist, all from the same immutable release source. Do not try to add a
-Linux wheel to 0.1.3. Do not call 0.1.4 release-ready while non-cosmetic items
-in the Python TODO remain open.
+Python 0.1.6 is published to production PyPI. For a new release, first inspect
+the current checkout, package version and TODO; build every artifact from one
+committed immutable source revision. Do not try to add files to a published
+version. Do not call a release-ready while non-cosmetic items in the Python
+TODO remain open.
 
 For Linux, follow the manylinux2014 x86_64 procedure in the Linux section of
 PUBLICATION_GUIDE.md. Build from the exact corrected sdist, inside the official
@@ -535,10 +535,99 @@ env -u PYTHONPATH "$prod_install/venv/bin/python" -m pytest \
   "$repo/bindings/python/tests" -q
 ```
 
-The Windows wheel and sdist already uploaded for `0.1.3` are immutable and
-must not be uploaded again. The next coordinated release is `0.1.4`; upload
-its validated sdist and complete supported wheel set together. See the [PyPI
-release-file policy](https://blog.pypi.org/posts/2026-07-22-releases-now-reject-new-files-after-14-days/) and [Maturin's Linux wheel guidance](https://www.maturin.rs/distribution.html).
+The commands and notes in this Linux subsection are retained as historical
+`0.1.3`/`0.1.4` release procedure; the current validated WSL workflow is
+recorded below. See the [PyPI release-file
+policy](https://blog.pypi.org/posts/2026-07-22-releases-now-reject-new-files-after-14-days/) and [Maturin's Linux wheel guidance](https://www.maturin.rs/distribution.html).
+
+### WSL2 / Docker Desktop workflow (validated for 0.1.6)
+
+Windows remains the source of truth. Build and validate the Windows artifacts
+there, then transfer the exact release sdist to WSL; do not independently sync
+an arbitrary working tree and build Linux from it. Keep the extracted sdist,
+wheel output and Cargo cache in a versioned WSL staging directory.
+
+On Windows, enable the Ubuntu distribution under **Docker Desktop → Settings →
+Resources → WSL Integration**. If `docker` is missing inside Ubuntu even though
+Docker Desktop is running, enable that distribution's integration slider and
+restart its WSL shell. Verify from PowerShell:
+
+```powershell
+wsl.exe -d Ubuntu -- docker version
+wsl.exe -d Ubuntu -- docker run --rm hello-world
+```
+
+Copy the exact `.tar.gz` sdist produced by the Windows publication script into
+WSL and verify its SHA-256 against the Windows artifact before extracting it.
+Then, from a fresh WSL staging directory containing the extracted sdist, build
+inside the pinned official Maturin manylinux image. Use a new Cargo target
+directory for each publication candidate; do not reuse the cache from an
+older sdist, even if its source files appear newer or have the same timestamps.
+
+```bash
+set -euo pipefail
+stage="$HOME/rustedscithe-publication-0.1.6"
+image='ghcr.io/pyo3/maturin@sha256:50bf2ff99eeff7b09332bad9baf4a5e925e2502304ae2f88f48ce8c06fd9957c'
+mkdir -p "$stage/wheels" "$stage/cargo-target"
+cd "$stage"
+
+docker run --rm --entrypoint /bin/bash \
+  --workdir /io/sdist-stage/rustedscithe-0.1.6 \
+  -e CARGO_TARGET_DIR=/cache \
+  -v "$stage:/io" \
+  -v "$stage/cargo-target:/cache" \
+  "$image" \
+  -lc 'yum install -y pkgconfig wayland-devel libX11-devel libXcursor-devel \
+    libXrandr-devel libXi-devel libXinerama-devel libxkbcommon-devel \
+    alsa-lib-devel libudev-devel fontconfig-devel freetype-devel >/dev/null && \
+    maturin build --release --manylinux 2014 --out /io/wheels'
+
+auditwheel show "$stage"/wheels/*.whl
+python -m twine check "$stage"/wheels/*.whl
+sha256sum "$stage"/wheels/*.whl
+```
+
+Confirm the wheel is `cp310-abi3` and tagged `manylinux_2_17_x86_64` (the
+manylinux2014-compatible tag), not a host `linux_x86_64` wheel. Keep the
+resolved container digest, `auditwheel show`, `twine check` output and hashes
+with the release report. Upload the exact validated sdist and wheel files to
+TestPyPI first, install with `--only-binary=rustedscithe`, and inspect verbose
+pip output to ensure it selected the Linux wheel rather than building from the
+sdist. Repeat the clean install and full contract suite from production PyPI
+after upload.
+
+WSL-specific lessons from 0.1.6:
+
+- PowerShell did not have Docker on `PATH`; invoke it through
+  `wsl.exe -d Ubuntu -- docker ...` after enabling Docker Desktop WSL
+  integration.
+- A stale multi-gigabyte `CARGO_TARGET_DIR` reused a previously built crate
+  whose embedded manifest path still pointed into `/io`. Use a fresh target
+  directory per release candidate and build from the verified sdist.
+- Runtime-generated AOT files must go to a writable runtime temporary/cache
+  directory, not the build container's `/io` path. The 0.1.6 Linux installed-
+  wheel test caught this path leak; it was fixed before publication.
+- In WSL contract tests, TCC-selected AOT artifacts could fail to load with
+  `cannot enable executable stack`. For the Linux suite, use GCC as the
+  selected C compiler (remove TCC from that test environment); this is distinct
+  from the Windows TCC coverage.
+- The manylinux CPython 3.10 installed-wheel check needs Xvfb and the X11,
+  Xcursor and xkbcommon runtime/development libraries used by the test image.
+  On the WSL host, also run the clean installed-wheel suite with the host Python.
+
+Recorded 0.1.6 production artifacts and validation:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `rustedscithe-0.1.6.tar.gz` | `216038db129e3e1f449005fcfbb4580e5a1e4c736b340ad9577bac393431e177` |
+| `rustedscithe-0.1.6-cp310-abi3-win_amd64.whl` | `a2ed400e7fcb3f24ddfeb5391ad46bae75056ffd8c9dccb8e106c3d0e2eecb21` |
+| `rustedscithe-0.1.6-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl` | `b6eed9010ac3e6c0a4cf760f4b809b1b9098b4126c7d6a1fae71dce17434b1c7` |
+
+The clean installed-package suite passed on Windows and Linux with CPython
+3.14 (`396 passed, 2 skipped` on each platform). The manylinux wheel was also
+tested with its minimum supported CPython 3.10 in the manylinux test
+environment. TestPyPI and production PyPI artifacts had matching hashes.
+Linux aarch64 remains unsupported/unverified.
 
 ### Linux status
 
@@ -556,10 +645,10 @@ release-file policy](https://blog.pypi.org/posts/2026-07-22-releases-now-reject-
 ## TestPyPI and production handoff
 
 The Windows `0.1.2` upload commands below are retained as release history.
-`0.1.5` is the latest published release. For a later release, build and validate all
-intended platform wheels from the same committed source before uploading the
-sdist and complete wheel set. Linux source installation is not considered
-validated merely because an sdist is available.
+`0.1.6` is the latest published release. For a later release, build and
+validate all intended platform wheels from the same committed source before
+uploading the sdist and complete wheel set. Linux source installation is not
+considered validated merely because an sdist is available.
 
 Create separate accounts/tokens for TestPyPI and PyPI. For a new project, the
 first token generally needs account-level scope because the project does not
@@ -681,30 +770,15 @@ metadata mistake is found after publication, increment the package version,
 rebuild both artifacts, rerun the gates and publish a new release instead of
 reusing an already-published version.
 
-## Coordinated Python 0.1.6 release
+## Coordinated Python 0.1.6 release record
 
-This is the active release checklist. The source revision must be committed and
-immutable before producing distributable artifacts. Build the sdist and
-Windows wheel from that revision with `scripts/build_publication.ps1`, then run
-`scripts/test_installed_wheel.ps1` for each supported Windows CPython version.
-Run the full source Python suite, including slow solver stories, before the
-wheel build; the installed-wheel script runs the contract suite outside the
-checkout.
-
-The 0.1.6 release contains the new StiffAPI/BVP_api and initial/boundary-value
-binding surfaces. Therefore its clean-wheel contract checks must explicitly
-cover StiffAPI dispatch, BVP_api boundary-value rebinding and CorrectionNewton
-parameter loops. Run `benchmarks/python_boundary_stiff_api.py` from the clean
-installed wheel and archive its Tabled report with the release evidence.
-
-Build the Linux manylinux wheel from the exact same committed source, verify
-its tag and SHA-256, and run the clean Linux installed-wheel contract suite.
-Do not stage a partial cross-platform release. Upload the complete matching
-sdist and wheel set to TestPyPI first; inspect pip's verbose output to confirm
-the platform wheel was selected and run the clean-wheel contract gates there.
-Production upload is a separate step after reviewing the TestPyPI results.
-Reuse the exact staged artifact files and hashes; never rebuild between the
-TestPyPI and production uploads. Never overwrite or append files to 0.1.5.
+The coordinated 0.1.6 release is complete. It includes the StiffAPI/BVP_api
+and initial/boundary-value binding surfaces. Windows and Linux artifacts were
+built from the same committed source, validated as clean installed packages,
+staged on TestPyPI, and then published to production without rebuilding or
+changing the artifact hashes. See the WSL2 workflow above for the Linux build
+and validation record. Do not append files to 0.1.6; the next release requires
+a new version and a fresh complete artifact set.
 
 ## Recovery from a defective release
 
