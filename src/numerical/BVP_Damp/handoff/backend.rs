@@ -198,7 +198,11 @@ fn sanitize_generated_name(input: &str) -> String {
 }
 
 fn build_output_parent_for_problem(problem_key: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    // Runtime AOT builds must live in a writable user temp directory. Embedding
+    // CARGO_MANIFEST_DIR here makes installed wheels depend on the build host
+    // (and often points into a read-only or nonexistent packaging container).
+    std::env::temp_dir()
+        .join("rustedscithe")
         .join("target")
         .join("generated-aot")
         .join(sanitize_generated_name(problem_key))
@@ -211,6 +215,18 @@ fn unique_build_output_parent_for_problem(problem_key: &str) -> PathBuf {
         .as_nanos();
     build_output_parent_for_problem(problem_key)
         .join(format!("build-{}-{nonce}", std::process::id()))
+}
+
+#[cfg(test)]
+mod runtime_aot_path_tests {
+    use super::build_output_parent_for_problem;
+
+    #[test]
+    fn runtime_aot_output_is_outside_the_build_manifest() {
+        let output = build_output_parent_for_problem("problem-key");
+        assert!(output.starts_with(std::env::temp_dir()));
+        assert!(!output.starts_with(env!("CARGO_MANIFEST_DIR")));
+    }
 }
 
 fn to_lifecycle_build_profile(profile: AotBuildProfile) -> LifecycleBuildProfile {
