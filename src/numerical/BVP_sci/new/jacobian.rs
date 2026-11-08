@@ -635,4 +635,74 @@ mod tests {
             "assembled={assembled} reference={reference}"
         );
     }
+
+    #[test]
+    fn classic_z_y_system_global_jacobian_matches_discrete_residual_difference() {
+        let plan = BvpSciLambdifyPlan::prepare(
+            BvpSciAssembly::ExprLegacy,
+            &[
+                Expr::parse_expression("y-z"),
+                Expr::parse_expression("-z^3"),
+            ],
+            &["z".into(), "y".into()],
+            &[],
+            "x",
+            BvpSciTelemetry::disabled(),
+        )
+        .unwrap();
+        let boundary = BvpSciBoundaryCallbacks::new(
+            2,
+            |ya, yb, _, output| {
+                output[0] = ya[0] - 1.0;
+                output[1] = yb[1] - 1.0;
+                Ok(())
+            },
+            BvpSciTelemetry::disabled(),
+        );
+        let x = [0.0, 0.5, 1.0];
+        let y = [1.0, 0.0, 0.8, 0.2, 0.4, 1.0];
+        let telemetry = BvpSciTelemetry::disabled();
+        let mut workspace = BvpSciCollocationWorkspace::new(2, x.len(), 0, &telemetry).unwrap();
+        evaluate_collocation(&plan, &x, &y, &[], &[], None, &mut workspace).unwrap();
+        assemble_global_jacobian(&plan, &boundary, &x, &y, &[], &[], None, &mut workspace)
+            .unwrap();
+
+        let residual_at = |state: &[f64]| {
+            let mut probe = BvpSciCollocationWorkspace::new(2, x.len(), 0, &telemetry).unwrap();
+            evaluate_collocation(&plan, &x, state, &[], &[], None, &mut probe).unwrap();
+            boundary
+                .evaluate(
+                    &state[..2],
+                    &state[state.len() - 2..],
+                    &[],
+                    &mut probe.boundary_residual,
+                )
+                .unwrap();
+            let mut residual = probe.collocation_residual;
+            residual.extend_from_slice(&probe.boundary_residual);
+            residual
+        };
+        let base_residual = residual_at(&y);
+        let row_count = base_residual.len();
+        let column_count = y.len();
+        let mut assembled = vec![0.0; row_count * column_count];
+        for &(row, column, value) in &workspace.entries {
+            assembled[row * column_count + column] += value;
+        }
+
+        for column in 0..column_count {
+            let delta = f64::EPSILON.sqrt() * (1.0 + y[column].abs());
+            let mut trial = y;
+            trial[column] += delta;
+            let trial_residual = residual_at(&trial);
+            for row in 0..row_count {
+                let finite_difference = (trial_residual[row] - base_residual[row]) / delta;
+                let analytic = assembled[row * column_count + column];
+                assert!(
+                    (analytic - finite_difference).abs() < 2e-6,
+                    "global Jacobian mismatch at row={row}, column={column}: assembled={analytic}, FD={finite_difference}"
+                );
+            }
+        }
+    }
 }

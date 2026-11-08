@@ -2924,3 +2924,51 @@ grow a second solver-dispatch table.
 - [ ] Include the focused CorrectionNewton Python contract and examples in the clean
   installed-wheel release gate; current local editable-build tests establish
   source-tree ABI correctness only.
+
+## 24. Coordinated Python 0.1.6 Release Stabilization (2026-11-08)
+
+- [x] Strengthen the programmatic BVP_Damp cross-solver Debug diagnostic with
+  assertions for the analytic RHS/Jacobian contract, fixed-mesh Dense/Sparse
+  solution and work-counter parity, typed non-convergence routes, no publication
+  of failed profiles, and selected bounds/mesh controls. The Jacobian table now
+  counts rebuilds rather than callback invocations.
+- [x] Reconcile the Python example inventory, exported CorrectionNewton loop
+  docstrings, and the StiffAPI unsupported-capability test with the current
+  API. Radau logging is supported; the typed-capability test now exercises the
+  actually unsupported BDF+sparse combination.
+- [x] Resolve the BVP_Damp Python combustion story against the native fixture.
+  The Python `J0` equation had the opposite sign from the verified Rust model:
+  the native expression subtracts a term that itself contains `-1`, making the
+  net reaction term positive. The string-parsed native regression and Python
+  story now converge on the 1000-node Sparse route. Native Debug telemetry:
+  4 iterations, 8 residual calls, 1 Jacobian rebuild, 8 linear solves; Python
+  story passes for both ExprLegacy and AtomView.
+- [x] Run the full Python suite including slow stories after fixing the fixture:
+  `396 passed, 2 skipped`.
+- [x] Verify Python facade exposure and typing for the new BVP_CorrectionNewton
+  route, boundary-value rebinding for Sci/CorrectionNewton/Damped/Frozen,
+  parameter loops, and IVP initial-state overrides through direct solvers and
+  StiffAPI. The source-tree contract suite covers these routes; boundary-value
+  rebinding is deliberately offered by the generic prepared BVP facade because
+  the direct solver constructors do not own a shared mutable boundary schema.
+- [x] Add and run `examples/bvp_api_boundary_rebind.py`; link it from the
+  example inventory and both BVP_api Python guides.
+- [ ] Run clean installed-wheel checks for StiffAPI, BVP_api boundary-value
+  rebinding, and CorrectionNewton parameter loops on Windows and Linux, from
+  the same committed release source. Include smoke tests and the complete
+  installed contract suite on supported CPython versions.
+- [x] Add a StiffAPI boundary benchmark for request construction/validation,
+  prepare/dispatch, solve wall time, trajectory array conversion and result
+  extraction. Native timings are retained as nested attribution rather than
+  summed into Python wall time.
+- [x] Run a source-tree benchmark smoke and 11-sample Windows measurement on
+  Python 3.14.6 / core 0.4.32. For the 32-state dense BDF fixture the medians
+  were 0.038 ms request/validation, 0.840 ms prepare/dispatch, 4.106 ms solve,
+  0.019 ms trajectory NumPy copy and 0.056 ms detached result extraction.
+  This is preliminary source-tree evidence, not a clean-wheel release gate.
+- [ ] Run the StiffAPI boundary benchmark from a clean installed wheel on the
+  committed Windows/Linux release source and archive its Tabled report.
+- [ ] Only after the source is committed and the correctness gates are green,
+  prepare the `0.1.6` sdist and Windows/Linux wheels from one immutable source,
+  validate on TestPyPI, then publish the exact validated artifact hashes to
+  production PyPI. Never overwrite or append artifacts to published `0.1.5`.

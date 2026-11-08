@@ -681,6 +681,31 @@ metadata mistake is found after publication, increment the package version,
 rebuild both artifacts, rerun the gates and publish a new release instead of
 reusing an already-published version.
 
+## Coordinated Python 0.1.6 release
+
+This is the active release checklist. The source revision must be committed and
+immutable before producing distributable artifacts. Build the sdist and
+Windows wheel from that revision with `scripts/build_publication.ps1`, then run
+`scripts/test_installed_wheel.ps1` for each supported Windows CPython version.
+Run the full source Python suite, including slow solver stories, before the
+wheel build; the installed-wheel script runs the contract suite outside the
+checkout.
+
+The 0.1.6 release contains the new StiffAPI/BVP_api and initial/boundary-value
+binding surfaces. Therefore its clean-wheel contract checks must explicitly
+cover StiffAPI dispatch, BVP_api boundary-value rebinding and CorrectionNewton
+parameter loops. Run `benchmarks/python_boundary_stiff_api.py` from the clean
+installed wheel and archive its Tabled report with the release evidence.
+
+Build the Linux manylinux wheel from the exact same committed source, verify
+its tag and SHA-256, and run the clean Linux installed-wheel contract suite.
+Do not stage a partial cross-platform release. Upload the complete matching
+sdist and wheel set to TestPyPI first; inspect pip's verbose output to confirm
+the platform wheel was selected and run the clean-wheel contract gates there.
+Production upload is a separate step after reviewing the TestPyPI results.
+Reuse the exact staged artifact files and hashes; never rebuild between the
+TestPyPI and production uploads. Never overwrite or append files to 0.1.5.
+
 ## Recovery from a defective release
 
 1. Stop further uploads for the affected version and preserve its wheel, sdist,

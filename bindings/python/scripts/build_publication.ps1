@@ -94,6 +94,53 @@ if ($archiveRoots.Count -ne 1) {
 }
 $archiveRoot = $archiveRoots[0]
 
+# Maturin's path-dependent sdist can include ignored repository artifacts from
+# the workspace. Prune them only from this disposable extracted staging tree.
+$forbiddenDirectoryNames = @(
+    "target",
+    "test_reports",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    ".venv-gavin-win",
+    "venv",
+    "env",
+    "htmlcov",
+    ".coverage"
+)
+$archiveRootPath = [System.IO.Path]::GetFullPath($archiveRoot.FullName).TrimEnd('\') + '\'
+$forbiddenDirectories = @(Get-ChildItem -LiteralPath $archiveRootPath -Directory -Recurse -Force |
+    Where-Object {
+        $path = [System.IO.Path]::GetFullPath($_.FullName)
+        $path.StartsWith($archiveRootPath, [System.StringComparison]::OrdinalIgnoreCase) -and
+            ($forbiddenDirectoryNames -contains $_.Name -or $_.Name -like ".venv*")
+    } | Sort-Object { $_.FullName.Length } -Descending)
+foreach ($directory in $forbiddenDirectories) {
+    if (Test-Path -LiteralPath $directory.FullName) {
+        Remove-Item -LiteralPath $directory.FullName -Recurse -Force
+    }
+}
+
+$forbiddenFiles = @(Get-ChildItem -LiteralPath $archiveRootPath -File -Recurse -Force |
+    Where-Object {
+        $_.Extension -in @(".pdb", ".dll", ".so", ".dylib", ".log", ".pyc", ".pyo") -or
+            $_.Name -eq ".coverage"
+    })
+foreach ($file in $forbiddenFiles) {
+    Remove-Item -LiteralPath $file.FullName -Force
+}
+
+$remainingForbidden = @(Get-ChildItem -LiteralPath $archiveRootPath -Recurse -Force |
+    Where-Object {
+        $_.PSIsContainer -and
+            ($forbiddenDirectoryNames -contains $_.Name -or $_.Name -like ".venv*")
+    })
+if ($remainingForbidden.Count -gt 0) {
+    throw "Forbidden local artifact directories remain in staged sdist: $($remainingForbidden.FullName -join ', ')"
+}
+
 $pythonReadme = Join-Path $archiveRoot.FullName "bindings\python\README.md"
 $archiveReadme = Join-Path $archiveRoot.FullName "README.md"
 if (-not (Test-Path -LiteralPath $pythonReadme)) {

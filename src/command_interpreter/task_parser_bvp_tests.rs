@@ -2095,6 +2095,12 @@ z_left: 1.0
 
 y_right: 1.0
 
+bounds
+
+z: -50.0, 50.0
+
+y: -35.0, 35.0
+
 
 
 mesh
@@ -2135,6 +2141,147 @@ loglevel: off
 }
 
 #[test]
+fn bvp_task_bounds_are_typed_and_override_damped_wide_defaults() {
+    let bounded = r#"
+task
+solver: BVP
+strategy: Damped
+scheme: forward
+method: Sparse
+
+equations
+arg: x
+unknowns: z, y
+rhs: y-z, -z^3
+
+boundary_conditions
+z_left: 1.0
+y_right: 1.0
+
+bounds
+z: -50.0, 50.0
+y: -35.0, 35.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 20
+
+initial_guess
+guess: 0.0, 0.0
+
+solver_options
+tolerance: 1e-5
+max_iterations: 20
+loglevel: off
+"#;
+    let spec = parse_bvp_task_from_str(bounded).expect("bounds should parse into task settings");
+    assert_eq!(
+        spec.solver_options.bounds.as_ref().unwrap(),
+        &HashMap::from([
+            ("z".to_string(), (-50.0, 50.0)),
+            ("y".to_string(), (-35.0, 35.0)),
+        ])
+    );
+    let native = build_bvp_solver_from_spec(&spec).expect("bounded Damped solver should build");
+    let BvpDampTaskSolver::Damped(native) = native else {
+        panic!("expected Damped native solver");
+    };
+    assert_eq!(
+        native.Bounds.as_ref().unwrap(),
+        &HashMap::from([
+            ("z".to_string(), (-50.0, 50.0)),
+            ("y".to_string(), (-35.0, 35.0)),
+        ])
+    );
+    let result = run_bvp_task_from_str(bounded).expect("bounded reference task should converge");
+    assert!(result.result.is_some());
+
+    for invalid_bounds in ["z: 50.0, -50.0", "z: 1.0", "z: NaN, 10.0"] {
+        let invalid = bounded.replace("z: -50.0, 50.0", invalid_bounds);
+        assert!(
+            parse_bvp_task_from_str(&invalid).is_err(),
+            "invalid bounds `{invalid_bounds}` must be rejected"
+        );
+    }
+    let unknown = bounded.replace("z: -50.0, 50.0", "unknown: -1.0, 1.0");
+    assert!(
+        parse_bvp_task_from_str(&unknown).is_err(),
+        "bounds for undeclared states must be rejected"
+    );
+
+    let without_bounds = bounded.replace("bounds\nz: -50.0, 50.0\ny: -35.0, 35.0\n", "");
+    let default_spec = parse_bvp_task_from_str(&without_bounds).unwrap();
+    assert!(default_spec.solver_options.bounds.is_none());
+    let default_solver = build_bvp_solver_from_spec(&default_spec).unwrap();
+    let BvpDampTaskSolver::Damped(default_solver) = default_solver else {
+        panic!("expected default Damped solver");
+    };
+    assert_eq!(
+        default_solver.Bounds.as_ref().unwrap(),
+        &HashMap::from([
+            ("z".to_string(), (-1.0e6, 1.0e6)),
+            ("y".to_string(), (-1.0e6, 1.0e6)),
+        ])
+    );
+
+    let frozen_partial_bounds = bounded
+        .replace("strategy: Damped", "strategy: Frozen")
+        .replace(
+            "bounds\nz: -50.0, 50.0\ny: -35.0, 35.0",
+            "bounds\nz: -50.0, 50.0",
+        );
+    let frozen_spec = parse_bvp_task_from_str(&frozen_partial_bounds)
+        .expect("Frozen task should accept per-state bound overrides");
+    let frozen_solver = build_bvp_solver_from_spec(&frozen_spec).unwrap();
+    let BvpDampTaskSolver::Frozen(frozen_solver) = frozen_solver else {
+        panic!("expected Frozen native solver");
+    };
+    assert_eq!(
+        frozen_solver.Bounds.as_ref().unwrap(),
+        &HashMap::from([
+            ("z".to_string(), (-50.0, 50.0)),
+            ("y".to_string(), (-1.0e6, 1.0e6)),
+        ])
+    );
+}
+
+#[test]
+fn bvp_sci_task_rejects_unsupported_state_bounds() {
+    let input = r#"
+task
+solver: BVP_sci
+execution: Lambdify
+method: Dense
+
+equations
+arg: x
+unknowns: y
+rhs: -y
+
+boundary_conditions
+y_left: 1.0
+
+bounds
+y: 0.0, 2.0
+
+mesh
+t0: 0.0
+t_end: 1.0
+n_steps: 12
+
+initial_guess
+y: 0.5
+"#;
+    let error = parse_bvp_task_from_str(input)
+        .expect_err("BVP_sci bounds must fail explicitly rather than be ignored");
+    assert!(matches!(
+        error,
+        BvpTaskError::UnsupportedOption { option, .. } if option == "bounds"
+    ));
+}
+
+#[test]
 
 fn bvp_task_runner_can_save_csv() {
     let dir = tempdir().expect("tempdir should be created");
@@ -2171,6 +2318,12 @@ boundary_conditions
 z_left: 1.0
 
 y_right: 1.0
+
+bounds
+
+z: -50.0, 50.0
+
+y: -35.0, 35.0
 
 
 
@@ -2260,6 +2413,12 @@ boundary_conditions
 z_left: 1.0
 
 y_right: 1.0
+
+bounds
+
+z: -50.0, 50.0
+
+y: -35.0, 35.0
 
 
 

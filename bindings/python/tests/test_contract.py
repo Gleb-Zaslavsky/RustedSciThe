@@ -6074,7 +6074,9 @@ def test_all_exported_native_public_members_have_docstrings():
 
 def test_python_example_inventory_and_explanatory_headers_stay_complete():
     examples_dir = Path(__file__).parents[1] / "examples"
-    scripts = {path.name for path in examples_dir.glob("*.py")}
+    scripts = {
+        path.name for path in examples_dir.glob("*.py") if not path.name.startswith("_")
+    }
     readme = (examples_dir / "README.md").read_text(encoding="utf-8")
     indexed = set(re.findall(r"\]\(([^)]+\.py)\)", readme))
     indexed = {Path(item).name for item in indexed}
@@ -6919,17 +6921,17 @@ def test_stiff_api_lsode2_python_callbacks_reject_aot_and_inferred_bands():
 def test_stiff_api_prepare_preserves_typed_unsupported_capability_context():
     from rustedscithe import StiffPreset, StiffSolverRequest
 
-    request = StiffSolverRequest.radau(
+    request = StiffSolverRequest.bdf(
         [Expr.parse("-y")], ["y"], "t", [1.0], 0.0, 0.1, 0.05,
     )
-    preset = StiffPreset.expr_dense().with_logging("info")
-    with pytest.raises(UnsupportedOptionError, match="logging") as captured:
+    preset = StiffPreset.expr_dense().with_matrix_layout("sparse")
+    with pytest.raises(UnsupportedOptionError, match="dense") as captured:
         request.prepare(preset)
 
     error = captured.value
     assert error.category == "unsupported_option"
     assert error.stage == "configuration"
-    assert error.solver == "radau"
+    assert error.solver == "bdf"
     assert error.route == "stiff_api:preset"
     assert error.native_kind == "UnsupportedCapability"
 

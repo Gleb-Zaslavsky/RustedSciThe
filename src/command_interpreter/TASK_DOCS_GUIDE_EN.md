@@ -76,6 +76,18 @@ Optional for both:
 - `postprocessing`
 - `where` (or `substitute`) for symbolic substitutions
 
+For BVP solvers that support component bounds, use a root-level `bounds`
+section. Each entry is an inclusive `lower, upper` pair. Damped and Frozen
+retain their wide `[-1e6, 1e6]` limits for states omitted from this section;
+explicit entries override those defaults. BVP_sci currently rejects bounds
+with a typed unsupported-option error rather than ignoring them.
+
+```text
+bounds
+temperature: 250.0, 5000.0
+fuel: 0.0, 1.0
+```
+
 ### 2.2 Equation section forms
 
 Both IVP and BVP parsers support two equation styles.
@@ -366,6 +378,10 @@ rhs: y-z, -z^3
 boundary_conditions
 z_left: 1.0
 y_right: 1.0
+
+bounds
+z: -50.0, 50.0
+y: -35.0, 35.0
 
 mesh
 t0: 0.0

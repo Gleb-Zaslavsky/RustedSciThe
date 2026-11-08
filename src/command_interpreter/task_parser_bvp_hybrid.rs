@@ -236,6 +236,9 @@ pub fn parse_hybrid_bvp_solver_settings_from_document(
                 optional_string(settings, "scheme")?.unwrap_or_else(|| "forward".into()),
             )
             .with_generated_backend_config(generated);
+            if let Some(bounds) = parse_hybrid_bounds(document)? {
+                options = options.with_bounds(bounds);
+            }
             if let Some(level) = optional_string(settings, "loglevel")? {
                 options = options.with_logging_level(parse_log_level(&level)?);
             }
@@ -698,12 +701,7 @@ fn validate_scalar_cardinality(section: &Section) -> Result<(), HybridBvpSetting
 }
 
 fn reject_sections_for_frozen(document: &DocumentMap) -> Result<(), HybridBvpSettingsError> {
-    for section in [
-        "bounds",
-        "rel_tolerance",
-        "adaptive_strategy",
-        "grid_refinement",
-    ] {
+    for section in ["rel_tolerance", "adaptive_strategy", "grid_refinement"] {
         if document.contains_key(section) {
             return Err(HybridBvpSettingsError::UnsupportedField {
                 path: section.into(),
@@ -712,6 +710,48 @@ fn reject_sections_for_frozen(document: &DocumentMap) -> Result<(), HybridBvpSet
         }
     }
     Ok(())
+}
+
+fn parse_hybrid_bounds(
+    document: &DocumentMap,
+) -> Result<Option<HashMap<String, (f64, f64)>>, HybridBvpSettingsError> {
+    let Some(section) = document.get("bounds") else {
+        return Ok(None);
+    };
+    if section.is_empty() {
+        return Err(invalid("bounds", "must contain at least one state bound"));
+    }
+    let mut bounds = HashMap::with_capacity(section.len());
+    for (name, values) in section {
+        let path = format!("bounds.{name}");
+        let values = values
+            .as_ref()
+            .ok_or_else(|| invalid(&path, "expected two finite bounds"))?;
+        let pair = match values.as_slice() {
+            [Value::Vector(values)] => values.clone(),
+            values => values
+                .iter()
+                .map(|value| hybrid_bound_value(value, &path))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        if pair.len() != 2 || pair.iter().any(|value| !value.is_finite()) || pair[0] > pair[1] {
+            return Err(invalid(&path, "expected finite lower <= upper bounds"));
+        }
+        bounds.insert(name.clone(), (pair[0], pair[1]));
+    }
+    Ok(Some(bounds))
+}
+
+fn hybrid_bound_value(value: &Value, path: &str) -> Result<f64, HybridBvpSettingsError> {
+    let numeric = match value {
+        Value::Float(value) => Some(*value),
+        Value::Integer(value) => Some(*value as f64),
+        Value::Usize(value) => Some(*value as f64),
+        _ => None,
+    };
+    numeric
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| invalid(path, "expected finite numeric bound"))
 }
 
 fn reject_non_sci_sections(document: &DocumentMap) -> Result<(), HybridBvpSettingsError> {
@@ -2147,6 +2187,86 @@ mod tests {
             adaptive.grid_method,
             crate::numerical::BVP_Damp::grid_api::GridRefinementMethod::Easy(0.2)
         );
+    }
+
+    #[test]
+    fn frozen_hybrid_settings_forward_and_validate_bounds() {
+        let settings = values(&[
+            ("solver_family", Value::String("frozen".into())),
+            ("strategy", Value::String("frozen".into())),
+        ]);
+        let mut document = document(settings);
+        document.insert(
+            "bounds".into(),
+            HashMap::from([
+                (
+                    "z".into(),
+                    Some(vec![Value::Float(-50.0), Value::Float(50.0)]),
+                ),
+                (
+                    "y".into(),
+                    Some(vec![Value::Float(-35.0), Value::Float(35.0)]),
+                ),
+            ]),
+        );
+        let BvpSolverSettings::Frozen(options) =
+            parse_hybrid_bvp_solver_settings_from_document(&document).unwrap()
+        else {
+            panic!("expected Frozen settings");
+        };
+        assert_eq!(
+            options.bounds.as_ref().unwrap(),
+            &HashMap::from([
+                ("z".to_string(), (-50.0, 50.0)),
+                ("y".to_string(), (-35.0, 35.0)),
+            ])
+        );
+
+        document.insert(
+            "bounds".into(),
+            HashMap::from([("z".into(), Some(vec![Value::Float(2.0), Value::Float(1.0)]))]),
+        );
+        assert!(matches!(
+            parse_hybrid_bvp_solver_settings_from_document(&document),
+            Err(HybridBvpSettingsError::InvalidField { path, .. }) if path == "bounds.z"
+        ));
+    }
+
+    #[test]
+    fn hybrid_damped_rejects_non_finite_or_reversed_bounds() {
+        let settings = values(&[
+            ("solver_family", Value::String("damped".into())),
+            ("strategy", Value::String("damped".into())),
+            ("scheme", Value::String("forward".into())),
+            ("method", Value::String("Sparse".into())),
+            ("abs_tolerance", Value::Float(1e-8)),
+            ("max_iterations", Value::Integer(10)),
+        ]);
+        for pair in [
+            vec![Value::Float(2.0), Value::Float(1.0)],
+            vec![Value::Float(f64::NAN), Value::Float(1.0)],
+            vec![Value::Float(0.0)],
+        ] {
+            let mut document = document(settings.clone());
+            document.insert("bounds".into(), HashMap::from([("z".into(), Some(pair))]));
+            assert!(
+                parse_hybrid_bvp_solver_settings_from_document(&document).is_err(),
+                "malformed bounds must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn hybrid_sci_rejects_unsupported_bounds() {
+        let mut document = document(sci_settings(&[]));
+        document.insert(
+            "bounds".into(),
+            HashMap::from([("y".into(), Some(vec![Value::Float(0.0), Value::Float(2.0)]))]),
+        );
+        assert!(matches!(
+            parse_hybrid_bvp_solver_settings_from_document(&document),
+            Err(HybridBvpSettingsError::UnsupportedField { path, .. }) if path == "bounds"
+        ));
     }
 
     #[test]

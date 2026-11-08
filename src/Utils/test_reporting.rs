@@ -340,8 +340,8 @@ fn report_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        TestReportCapture, capture_test_line, capture_test_table, sanitize_component,
-        write_test_report_in, write_test_report_in_profile,
+        TestReportCapture, capture_test_line, capture_test_table, report_profile,
+        sanitize_component, write_test_report_in, write_test_report_in_profile,
     };
     use std::fs;
 
@@ -447,7 +447,7 @@ mod tests {
         }
         let report = root
             .join("Radau_Large")
-            .join("debug")
+            .join(report_profile())
             .join("table_story.md");
         let contents = fs::read_to_string(report).expect("table report should exist");
         assert!(contents.contains("summary"));

@@ -1348,6 +1348,215 @@ mod tests {
     use crate::symbolic::symbolic_engine::Expr;
 
     #[test]
+    fn classic_z_y_good_seed_converges_with_sparse_adaptive_mesh() {
+        let telemetry = BvpSciTelemetry::detailed();
+        let plan = super::super::BvpSciLambdifyPlan::prepare(
+            BvpSciAssembly::ExprLegacy,
+            &[
+                Expr::parse_expression("y-z"),
+                Expr::parse_expression("-z^3"),
+            ],
+            &["z".into(), "y".into()],
+            &[],
+            "x",
+            telemetry,
+        )
+        .expect("classic z/y symbolic plan");
+        let boundary = BvpSciBoundaryCallbacks::new(
+            2,
+            |ya, yb, _, output| {
+                output[0] = ya[0] - 1.0;
+                output[1] = yb[1] - 1.0;
+                Ok(())
+            },
+            BvpSciTelemetry::disabled(),
+        );
+        let mesh: Vec<f64> = (0..=10).map(|index| index as f64 / 10.0).collect();
+        let mut options = BvpSciOptions::default();
+        options.tolerance = 1e-5;
+        options.matrix_layout = BvpSciMatrixLayout::Sparse;
+        options.max_nodes = 5_000;
+        options.output_policy = BvpSciOutputPolicy::DenseOutput;
+        let mut solver = BvpSciSolver::new(
+            plan,
+            boundary,
+            mesh.clone(),
+            vec![1.0; 2 * mesh.len()],
+            vec![],
+            options,
+        )
+        .expect("classic z/y solver");
+
+        let result = solver.solve();
+        let snapshot = solver.plan().telemetry_snapshot();
+        let solution = result.as_ref().expect("good-seed classic z/y solve");
+        let dense = solution.dense_output().expect("dense output requested");
+        // Pinned SciPy 1.18.1 reference with analytic RHS/BC Jacobians,
+        // tol=1e-5, 11-node all-ones guess, max_nodes=5000.
+        let scipy_samples = [
+            [1.0, -6.91491913988577],
+            [0.06693620509665849, -6.947269348058225],
+            [-0.7569544937381028, -6.934309516476678],
+            [-1.4744403316742434, -6.738186616680437],
+            [-2.0563824500158328, -6.01557858582429],
+            [-2.440751320674219, -4.546913085257167],
+            [-2.57004340971545, -2.526251138110811],
+            [-2.4410478563679603, -0.5119042980422194],
+            [-2.1174386856568237, 1.0],
+        ];
+        for (index, expected) in scipy_samples.iter().enumerate() {
+            let x = index as f64 / 8.0;
+            let values = dense.evaluate(x).expect("sample in solution domain");
+            assert!(
+                (values[0] - expected[0]).abs() < 1e-7
+                    && (values[1] - expected[1]).abs() < 1e-7,
+                "Rust/SciPy profile mismatch at x={x}: Rust={values:?}, SciPy={expected:?}"
+            );
+        }
+        assert_eq!(solution.status, BvpSciStatus::Success);
+        assert_eq!(solution.x.first(), Some(&0.0));
+        assert_eq!(solution.x.last(), Some(&1.0));
+        assert!(solution.residual_norm.is_finite());
+        assert!(solution
+            .interval_residuals
+            .iter()
+            .all(|defect| *defect <= 1e-5));
+        assert!(snapshot.rhs_calls > 0);
+        assert!(snapshot.jacobian_calls > 0);
+        assert!(snapshot.newton_iterations > 0);
+        assert_eq!(snapshot.mesh_passes.len(), 4);
+        assert_eq!(snapshot.mesh_refinements, 3);
+        assert!(snapshot.factorizations > 0);
+        assert!(snapshot.linear_solves > 0);
+    }
+
+    #[test]
+    fn classic_z_y_zero_seed_matches_scipy_node_budget_failure() {
+        let telemetry = BvpSciTelemetry::detailed();
+        let plan = super::super::BvpSciLambdifyPlan::prepare(
+            BvpSciAssembly::ExprLegacy,
+            &[
+                Expr::parse_expression("y-z"),
+                Expr::parse_expression("-z^3"),
+            ],
+            &["z".into(), "y".into()],
+            &[],
+            "x",
+            telemetry,
+        )
+        .expect("classic z/y symbolic plan");
+        let boundary = BvpSciBoundaryCallbacks::new(
+            2,
+            |ya, yb, _, output| {
+                output[0] = ya[0] - 1.0;
+                output[1] = yb[1] - 1.0;
+                Ok(())
+            },
+            BvpSciTelemetry::disabled(),
+        );
+        let mesh: Vec<f64> = (0..=20).map(|index| index as f64 / 20.0).collect();
+        let mut options = BvpSciOptions::default();
+        options.tolerance = 1e-5;
+        options.matrix_layout = BvpSciMatrixLayout::Sparse;
+        options.max_nodes = 1_000;
+        let mut solver = BvpSciSolver::new(
+            plan,
+            boundary,
+            mesh.clone(),
+            vec![0.0; 2 * mesh.len()],
+            vec![],
+            options,
+        )
+        .expect("classic zero-seed z/y solver");
+
+        assert!(matches!(
+            solver.solve(),
+            Err(BvpSciNewError::MaxNodesExceeded { max_nodes: 1_000 })
+        ));
+        let snapshot = solver.plan().telemetry_snapshot();
+        // With analytic RHS/BC Jacobians, vendored SciPy 1.18.1 has the same
+        // mesh trajectory, refreshes, factorizations and solves for this seed.
+        assert_eq!(
+            snapshot.mesh_passes.iter().map(|pass| pass.mesh_nodes).collect::<Vec<_>>(),
+            vec![21, 61, 181, 541]
+        );
+        assert_eq!(snapshot.newton_jacobian_refreshes, 16);
+        assert_eq!(snapshot.factorizations, 16);
+        assert_eq!(
+            snapshot
+                .mesh_passes
+                .iter()
+                .map(|pass| pass.linear_solves)
+                .collect::<Vec<_>>(),
+            vec![23, 22, 20, 17]
+        );
+    }
+
+    #[test]
+    fn classic_z_y_zero_seed_failure_is_not_sparse_layout_specific() {
+        for layout in [
+            BvpSciMatrixLayout::Dense,
+            BvpSciMatrixLayout::Sparse,
+            BvpSciMatrixLayout::BandedAuto,
+        ] {
+            let plan = super::super::BvpSciLambdifyPlan::prepare(
+                BvpSciAssembly::ExprLegacy,
+                &[
+                    Expr::parse_expression("y-z"),
+                    Expr::parse_expression("-z^3"),
+                ],
+                &["z".into(), "y".into()],
+                &[],
+                "x",
+                BvpSciTelemetry::detailed(),
+            )
+            .expect("classic z/y symbolic plan");
+            let boundary = BvpSciBoundaryCallbacks::new(
+                2,
+                |ya, yb, _, output| {
+                    output[0] = ya[0] - 1.0;
+                    output[1] = yb[1] - 1.0;
+                    Ok(())
+                },
+                BvpSciTelemetry::disabled(),
+            );
+            let mesh: Vec<f64> = (0..=20).map(|index| index as f64 / 20.0).collect();
+            let mut options = BvpSciOptions::default();
+            options.tolerance = 1e-5;
+            options.matrix_layout = layout;
+            options.max_nodes = 1_000;
+            let mut solver = BvpSciSolver::new(
+                plan,
+                boundary,
+                mesh.clone(),
+                vec![0.0; 2 * mesh.len()],
+                vec![],
+                options,
+            )
+            .expect("classic zero-seed z/y solver");
+
+            let result = solver.solve();
+            let snapshot = solver.plan().telemetry_snapshot();
+            println!(
+                "zero-seed {layout:?}: failed_on_node_budget={}, mesh_nodes={:?}, jacobian_refreshes={}, factors={}, solves={}",
+                matches!(&result, Err(BvpSciNewError::MaxNodesExceeded { .. })),
+                snapshot.mesh_passes.iter().map(|pass| pass.mesh_nodes).collect::<Vec<_>>(),
+                snapshot.newton_jacobian_refreshes,
+                snapshot.factorizations,
+                snapshot.linear_solves,
+            );
+            assert!(matches!(
+                &result,
+                Err(BvpSciNewError::MaxNodesExceeded { max_nodes: 1_000 })
+            ));
+            assert_eq!(
+                snapshot.mesh_passes.iter().map(|pass| pass.mesh_nodes).collect::<Vec<_>>(),
+                vec![21, 61, 181, 541]
+            );
+        }
+    }
+
+    #[test]
     fn external_parameter_loop_keeps_inputs_out_of_newton_unknowns_and_continues_after_failure() {
         for assembly in [BvpSciAssembly::ExprLegacy, BvpSciAssembly::AtomViewNative] {
             let mut solver =

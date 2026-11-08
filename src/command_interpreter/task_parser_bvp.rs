@@ -19,6 +19,8 @@
 //! - numeric parameters are substituted before solver construction
 //! - boundary conditions are expressed as `<unknown>_left` / `<unknown>_right`
 //! - initial guess is described as constant profiles, not arbitrary matrices
+//! - optional document-level `bounds` override the Damped/Frozen per-state
+//!   limits; omitted Damped states retain the existing wide default
 //! - `solver_options` can select Lambdify/AOT, Sparse/Banded matrix assembly,
 //!   AOT compiler/build policy, symbolic assembly backend, and native banded
 //!   linear solver policy
@@ -322,6 +324,9 @@ pub struct BvpSolverOptionsSpec {
     pub singular_term_matrix: Option<Vec<f64>>,
     pub linear_sys_method: Option<String>,
     pub loglevel: Option<String>,
+    /// Optional per-state bounds from the document-level `bounds` section.
+    /// Damped/Frozen fill unspecified states with the task parser's wide default.
+    pub bounds: Option<HashMap<String, (f64, f64)>>,
     pub generated_backend: BvpGeneratedBackendSpec,
 }
 
@@ -1368,14 +1373,16 @@ fn build_bvp_solver_core(
                     .map(|name| (name, 1e-4_f64))
                     .collect(),
             );
-            options.bounds = Some(
-                equations
-                    .unknowns
-                    .iter()
-                    .cloned()
-                    .map(|name| (name, (-1.0e6_f64, 1.0e6_f64)))
-                    .collect(),
-            );
+            let mut bounds = equations
+                .unknowns
+                .iter()
+                .cloned()
+                .map(|name| (name, (-1.0e6_f64, 1.0e6_f64)))
+                .collect::<HashMap<_, _>>();
+            if let Some(overrides) = &solver_options.bounds {
+                bounds.extend(overrides.iter().map(|(name, pair)| (name.clone(), *pair)));
+            }
+            options.bounds = Some(bounds);
             options.loglevel = solver_options.loglevel.clone();
             options.generated_backend_config = generated_config;
             BvpDampTaskSolver::Damped(DampedBvpSolver::new_with_options(
@@ -1401,6 +1408,16 @@ fn build_bvp_solver_core(
             )
             .with_scheme_name(solver_selection.scheme.clone())
             .with_generated_backend_config(generated_config);
+            if let Some(bounds) = &solver_options.bounds {
+                let mut complete_bounds = equations
+                    .unknowns
+                    .iter()
+                    .cloned()
+                    .map(|name| (name, (-1.0e6_f64, 1.0e6_f64)))
+                    .collect::<HashMap<_, _>>();
+                complete_bounds.extend(bounds.iter().map(|(name, pair)| (name.clone(), *pair)));
+                options = options.with_bounds(complete_bounds);
+            }
             options.strategy = solver_selection.strategy.as_solver_string();
             BvpDampTaskSolver::Frozen(FrozenBvpSolver::new_with_options(
                 equations.rhs.clone(),
@@ -1473,6 +1490,9 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
         let segment_spec = bind_continuation_segment(&spec, values)?;
         let mut solver = build_bvp_solver_from_spec(&segment_spec)?;
         solver.try_solve().map_err(BvpTaskError::BvpDamp)?;
+        let result = solver.get_result().ok_or(BvpTaskError::SolverResult(
+            BvpSolverResultFailure::NoResult { solver: "BVP_Damp" },
+        ))?;
         let plan = segment_spec.postprocessing.to_plan("bvp_result.csv");
         if !plan.actions.is_empty() {
             solver
@@ -1482,9 +1502,6 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
         if segment_spec.postprocessing.plot {
             solver.plot_result();
         }
-        let result = solver.get_result().ok_or(BvpTaskError::SolverResult(
-            BvpSolverResultFailure::NoResult { solver: "BVP_Damp" },
-        ))?;
         let mesh = uniform_bvp_mesh(
             segment_spec.mesh.t0,
             segment_spec.mesh.t_end,
@@ -1686,6 +1703,21 @@ fn validate_bvp_task_spec(spec: &BvpTaskSpec) -> Result<(), BvpTaskError> {
     validate_bvp_problem_spec(&spec.problem_spec())?;
     validate_bvp_solver_options(&spec.solver_options)?;
     validate_bvp_option_compatibility(&spec.solver, &spec.solver_options)?;
+    if let Some(bounds) = &spec.solver_options.bounds {
+        for name in bounds.keys() {
+            if !spec
+                .equations
+                .unknowns
+                .iter()
+                .any(|unknown| unknown == name)
+            {
+                return Err(BvpTaskError::InvalidConfiguration {
+                    field: format!("bounds.{name}"),
+                    message: "state is not declared in equations.unknowns".to_string(),
+                });
+            }
+        }
+    }
     if spec.solver.family == BvpSolverFamilySpec::CorrectionNewton {
         correction_newton::validate_task(spec)?;
     }
@@ -1925,6 +1957,22 @@ fn validate_bvp_solver_options(options: &BvpSolverOptionsSpec) -> Result<(), Bvp
             });
         }
     }
+    if let Some(bounds) = &options.bounds {
+        if bounds.is_empty() {
+            return Err(BvpTaskError::InvalidConfiguration {
+                field: "bounds".to_string(),
+                message: "must contain at least one state bound".to_string(),
+            });
+        }
+        for (name, &(lower, upper)) in bounds {
+            if !lower.is_finite() || !upper.is_finite() || lower > upper {
+                return Err(BvpTaskError::InvalidConfiguration {
+                    field: format!("bounds.{name}"),
+                    message: "expected finite lower <= upper bounds".to_string(),
+                });
+            }
+        }
+    }
     for (field, value) in [
         ("max_nodes", options.max_nodes),
         ("max_newton_iterations", options.max_newton_iterations),
@@ -2030,6 +2078,7 @@ fn validate_bvp_option_compatibility(
             ),
         ],
         BvpSolverFamilySpec::Sci => vec![
+            ("bounds", options.bounds.is_some()),
             ("linear_sys_method", options.linear_sys_method.is_some()),
             ("loglevel", options.loglevel.is_some()),
             (
@@ -2068,7 +2117,11 @@ fn validate_bvp_option_compatibility(
     };
     if let Some((option, _)) = unsupported.into_iter().find(|(_, present)| *present) {
         return Err(BvpTaskError::UnsupportedOption {
-            option: format!("solver_options.{option}"),
+            option: if option == "bounds" {
+                "bounds".to_string()
+            } else {
+                format!("solver_options.{option}")
+            },
             solver: match solver.family {
                 BvpSolverFamilySpec::Damp => "BVP_Damp".to_string(),
                 BvpSolverFamilySpec::Sci => "BVP_sci".to_string(),
@@ -2688,6 +2741,10 @@ boundary_conditions
 z_left: 1.0
 y_right: 1.0
 
+bounds
+z: -50.0, 50.0
+y: -35.0, 35.0
+
 mesh
 t0: 0.0
 t_end: 1.0
@@ -2940,9 +2997,12 @@ fn parse_bvp_initial_guess(
 }
 
 fn parse_bvp_solver_options(document: &DocumentMap) -> Result<BvpSolverOptionsSpec, BvpTaskError> {
-    let section = match document.get("solver_options") {
-        Some(section) => section,
-        None => return Ok(BvpSolverOptionsSpec::default()),
+    let bounds = parse_bvp_bounds(document)?;
+    let Some(section) = document.get("solver_options") else {
+        return Ok(BvpSolverOptionsSpec {
+            bounds,
+            ..BvpSolverOptionsSpec::default()
+        });
     };
 
     const ALLOWED_OPTIONS: &[&str] = &[
@@ -3043,8 +3103,64 @@ fn parse_bvp_solver_options(document: &DocumentMap) -> Result<BvpSolverOptionsSp
         )?,
         linear_sys_method: get_optional_string(section, "linear_sys_method", "solver_options")?,
         loglevel: get_optional_string(section, "loglevel", "solver_options")?,
+        bounds,
         generated_backend: parse_generated_backend_options(section)?,
     })
+}
+
+fn parse_bvp_bounds(
+    document: &DocumentMap,
+) -> Result<Option<HashMap<String, (f64, f64)>>, BvpTaskError> {
+    let Some(section) = document.get("bounds") else {
+        return Ok(None);
+    };
+    if section.is_empty() {
+        return Err(BvpTaskError::InvalidConfiguration {
+            field: "bounds".to_string(),
+            message: "must contain at least one state bound".to_string(),
+        });
+    }
+
+    let mut bounds = HashMap::with_capacity(section.len());
+    for (name, values) in section {
+        let values = values.as_ref().ok_or_else(|| BvpTaskError::InvalidField {
+            section: "bounds".to_string(),
+            field: name.clone(),
+            message: "expected two finite numeric values".to_string(),
+        })?;
+        let pair = match values.as_slice() {
+            [Value::Vector(values)] => values.clone(),
+            values => values
+                .iter()
+                .map(|value| {
+                    bvp_bound_value(value).ok_or_else(|| BvpTaskError::InvalidField {
+                        section: "bounds".to_string(),
+                        field: name.clone(),
+                        message: "expected finite numeric bound".to_string(),
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        if pair.len() != 2 || pair.iter().any(|value| !value.is_finite()) || pair[0] > pair[1] {
+            return Err(BvpTaskError::InvalidField {
+                section: "bounds".to_string(),
+                field: name.clone(),
+                message: "expected finite lower <= upper bounds".to_string(),
+            });
+        }
+        bounds.insert(name.clone(), (pair[0], pair[1]));
+    }
+    Ok(Some(bounds))
+}
+
+fn bvp_bound_value(value: &Value) -> Option<f64> {
+    let value = match value {
+        Value::Float(value) => *value,
+        Value::Integer(value) => *value as f64,
+        Value::Usize(value) => *value as f64,
+        _ => return None,
+    };
+    value.is_finite().then_some(value)
 }
 
 fn parse_sparse_factorization(raw: &str) -> Result<BvpSciSparseFactorization, BvpTaskError> {

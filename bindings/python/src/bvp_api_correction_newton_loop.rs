@@ -10,23 +10,31 @@ use rustedscithe_core::numerical::BVP_CorrectionNewton::{
 use rustedscithe_core::numerical::BVP_api::BvpApiError;
 use std::collections::HashMap;
 
+/// One detached attempt from a CorrectionNewton parameter sweep.
 #[pyclass(name = "BvpCorrectionNewtonParameterLoopPoint", module = "rustedscithe", unsendable)]
 pub struct BvpCorrectionNewtonParameterLoopPoint {
+    /// Zero-based position in the requested parameter sequence.
     #[pyo3(get)]
     index: usize,
+    /// Numeric parameter values used for this attempt.
     #[pyo3(get)]
     parameters: Vec<f64>,
     /// None means the configured initial guess, not a failed point.
     #[pyo3(get)]
     guess_source_index: Option<usize>,
+    /// Native attempt status, including typed non-convergence status.
     #[pyo3(get)]
     status: String,
+    /// Telemetry mode used for this attempt.
     #[pyo3(get)]
     telemetry_mode: String,
+    /// Newton iteration count, when an attempt report is available.
     #[pyo3(get)]
     iterations: Option<usize>,
+    /// Final correction norm, when an attempt report is available.
     #[pyo3(get)]
     correction_norm: Option<f64>,
+    /// Final residual norm, when an attempt report is available.
     #[pyo3(get)]
     residual_norm: Option<f64>,
     solution: Option<PyBvpApiSolution>,
@@ -43,6 +51,7 @@ impl BvpCorrectionNewtonParameterLoopPoint {
         self.solution.clone()
     }
 
+    /// Return the typed error for this point, if the solve failed.
     #[getter]
     fn error<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
         self.error.as_ref().map(|error| error.bind(py).clone())
@@ -59,6 +68,7 @@ impl BvpCorrectionNewtonParameterLoopPoint {
     }
 }
 
+/// Ordered CorrectionNewton parameter-loop results and optional stop failure.
 #[pyclass(name = "BvpCorrectionNewtonParameterLoopReport", module = "rustedscithe", unsendable)]
 pub struct BvpCorrectionNewtonParameterLoopReport {
     points: Vec<Py<BvpCorrectionNewtonParameterLoopPoint>>,
@@ -67,16 +77,19 @@ pub struct BvpCorrectionNewtonParameterLoopReport {
 
 #[pymethods]
 impl BvpCorrectionNewtonParameterLoopReport {
+    /// Return detached point records in input order.
     #[getter]
     fn points(&self, py: Python<'_>) -> Vec<Py<BvpCorrectionNewtonParameterLoopPoint>> {
         self.points.iter().map(|point| point.clone_ref(py)).collect()
     }
 
+    /// Return an error that stopped the loop before all points were attempted.
     #[getter]
     fn stop_error<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
         self.stop_error.as_ref().map(|error| error.bind(py).clone())
     }
 
+    /// Return the number of attempted points.
     fn completed_count(&self) -> usize {
         self.points.len()
     }

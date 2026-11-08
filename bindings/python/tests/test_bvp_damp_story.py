@@ -28,21 +28,12 @@ def _combustion_fixture():
     q_heat = 3000.0 * 1.0e3 * 0.034
     delta_t = 600.0
     t_scale = 600.0
-    length = 0.3e-4
+    length = 3.0e-4
     molecular_mass = 34.2 / 1000.0
-    conductivity = 0.07
-    heat_capacity = 0.35 * 4.184 * 1000.0
-    pressure = 2.0e6
-    t0 = 800.0
-    t_m = 1500.0
-    gas_constant = 8.314
-    mass_flux = 0.077 * (pressure / 1.0e5) ** 0.748 / 100.0
-    density_0 = molecular_mass * pressure / (gas_constant * t0)
-    diffusivity = conductivity / (heat_capacity * density_0)
-    peclet_q = length * heat_capacity * mass_flux / conductivity
-    density_diffusion = diffusivity * density_0 * (t_m / t0) ** 0.5
-    peclet_d = mass_flux * length / density_diffusion
-    density_m = molecular_mass * pressure / (gas_constant * t_m)
+    peclet_q = 0.0090168
+    density_diffusion = 2.88e-4
+    peclet_d = 1.50e-3
+    density_m = molecular_mass * 2.0e6 / (8.314 * 1500.0)
     q_m = length**2 / t_scale
     q_s = length**2
 
@@ -54,19 +45,18 @@ def _combustion_fixture():
     j1 = "J1"
     rate = (
         f"{_number(1.3e5)} * exp(-({_number(5000.0 * 4.184)}) / "
-        f"({_number(gas_constant)} * ({teta} * {_number(t_scale)} + "
-        f"{_number(delta_t)}))) * {c0} * ({_number(density_m)} / "
-        f"{_number(molecular_mass)})"
+        f"({_number(8.314)} * ({teta} * {_number(t_scale)} + "
+        f"{_number(delta_t)}))) * {c0} * ({_number(density_m)} / 0.342)"
     )
     expressions = [
-        Expr.parse(f"{q} / {_number(conductivity)}"),
+        Expr.parse(f"{q} / 0.07"),
         Expr.parse(
             f"{q} * {_number(peclet_q)} - {_number(q_heat)} * ({rate}) * "
             f"{_number(q_m)}"
         ),
         Expr.parse(f"{j0} / {_number(density_diffusion)}"),
         Expr.parse(
-            f"{j0} * {_number(peclet_d)} - ({rate}) * {_number(density_m)} * "
+            f"{j0} * {_number(peclet_d)} + ({rate}) * {_number(density_m)} * "
             f"{_number(q_s)}"
         ),
         Expr.parse(f"{j1} / {_number(density_diffusion)}"),
@@ -76,7 +66,8 @@ def _combustion_fixture():
         ),
     ]
     states = [teta, q, c0, j0, c1, j1]
-    mesh = [index / 19.0 for index in range(20)]
+    nodes = 1000
+    mesh = [index / (nodes - 1) for index in range(nodes)]
     initial_state = [0.99] * (len(mesh) * len(states))
     boundary_conditions = {
         teta: [(0, (1000.0 - delta_t) / t_scale)],
@@ -87,12 +78,12 @@ def _combustion_fixture():
         j1: [(1, 1.0e-7)],
     }
     bounds = {
-        teta: (-100.0, 100.0),
+        teta: (0.0, 10.0),
         q: (-1.0e20, 1.0e20),
-        c0: (-1.0, 1.5),
-        j0: (-1.0e20, 1.0e20),
-        c1: (-1.0, 1.5),
-        j1: (-1.0e20, 1.0e20),
+        c0: (0.0, 1.5),
+        j0: (-1.0e2, 1.0e2),
+        c1: (0.0, 1.5),
+        j1: (-1.0e2, 1.0e2),
     }
     return expressions, states, boundary_conditions, mesh, initial_state, bounds
 
@@ -130,13 +121,16 @@ def test_bvp_damp_combustion_story_writes_compact_matrix(capsys):
             initial_state,
             options=SolverOptions(
                 frontend=frontend,
-                matrix_layout="dense",
+                matrix_layout="sparse",
                 execution="lambdify",
                 telemetry="detailed",
             ),
             scheme="forward",
             tolerance=1.0e-5,
             max_iterations=100,
+            max_jacobian_refreshes=6,
+            max_damping_iterations=6,
+            damping_factor=0.5,
             bounds=bounds,
         )
         solution = solver.solve()
@@ -174,7 +168,7 @@ def test_bvp_damp_combustion_story_writes_compact_matrix(capsys):
     lines = [
         "# BVP_Damp Python combustion story",
         "",
-        "Native verified combustion fixture; initial 20-node mesh; Lambdify only.",
+        "Native verified combustion fixture; initial 1000-node Sparse mesh; Lambdify only.",
         "This is an explicit slow story, separate from the fast Python contract suite.",
         "",
         "| frontend | layout | nodes | iterations | residual_calls | jacobian_requests | factorizations | total_ms | symbolic_ms | residual_ms | jacobian_ms | factorization_ms | max_abs |",

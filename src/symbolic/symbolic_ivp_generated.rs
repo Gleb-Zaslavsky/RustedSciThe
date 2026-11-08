@@ -32,18 +32,18 @@ use crate::symbolic::codegen::c_backend::codegen_c_aot_runtime_link::{
     register_generated_c_residual_backend, register_generated_c_sparse_backend,
 };
 use crate::symbolic::codegen::codegen_aot_driver::{
-    generated_aot_artifact_from_prepared_problem, generated_aot_build_request_from_artifact,
     AotBuildPreset, AotCodegenBackend, ExecutedGeneratedAotBuild, GeneratedAotBuildRequest,
-    GeneratedAotBuildResult,
+    GeneratedAotBuildResult, generated_aot_artifact_from_prepared_problem,
+    generated_aot_build_request_from_artifact,
 };
 use crate::symbolic::codegen::codegen_aot_lifecycle::AotArtifactState;
 use crate::symbolic::codegen::codegen_aot_resolution::{AotResolutionStatus, AotResolver};
 use crate::symbolic::codegen::codegen_aot_runtime_link::{
+    LinkedDenseAotBackend, LinkedJacobianLayout, LinkedResidualAotBackend, LinkedSparseAotBackend,
     register_generated_banded_cdylib_backend, register_generated_dense_cdylib_backend,
     register_generated_residual_cdylib_backend, register_generated_sparse_cdylib_backend,
     resolve_linked_dense_backend, resolve_linked_residual_backend, resolve_linked_sparse_backend,
-    try_register_linked_residual_backend, LinkedDenseAotBackend, LinkedJacobianLayout,
-    LinkedResidualAotBackend, LinkedSparseAotBackend,
+    try_register_linked_residual_backend,
 };
 use crate::symbolic::codegen::codegen_provider_api::{
     BackendKind, MatrixBackend, PreparedBandedProblem, PreparedProblem, PreparedSparseProblem,
@@ -63,16 +63,15 @@ use crate::symbolic::codegen::zig_backend::codegen_zig_aot_runtime_link::{
 };
 use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetry};
 use crate::symbolic::symbolic_ivp::{
-    prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem, IvpBackendError,
-    PreparedSymbolicIvpAotProblem, PreparedSymbolicIvpProblem, PreparedSymbolicIvpResidualProblem,
-    SymbolicIvpAotOptions, SymbolicIvpProblemOptions,
+    IvpBackendError, PreparedSymbolicIvpAotProblem, PreparedSymbolicIvpProblem,
+    PreparedSymbolicIvpResidualProblem, SymbolicIvpAotOptions, SymbolicIvpProblemOptions,
+    prepare_symbolic_ivp_problem, prepare_symbolic_ivp_residual_problem,
 };
 use crate::symbolic::symbolic_ivp_aot::{
-    generated_aot_artifact_from_symbolic_ivp_atom_problem,
+    PreparedSymbolicIvpAtomAotProblem, generated_aot_artifact_from_symbolic_ivp_atom_problem,
     generated_aot_artifact_from_symbolic_ivp_residual_problem,
     prepared_atom_aot_problem_from_residual_problem,
     prepared_atom_aot_problem_from_symbolic_ivp_problem_with_layout,
-    PreparedSymbolicIvpAtomAotProblem,
 };
 use log::{debug, info, warn};
 use std::fmt;
@@ -568,7 +567,10 @@ fn load_handoff_resolver(
             crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleStage::Planned,
             crate::symbolic::codegen::codegen_aot_lifecycle::AotFailureKind::Manifest,
             path.display().to_string(),
-            format!("failed to read AOT registry handoff '{}': {error}", path.display()),
+            format!(
+                "failed to read AOT registry handoff '{}': {error}",
+                path.display()
+            ),
         )),
     }
 }
@@ -589,7 +591,10 @@ fn write_handoff_if_requested(
             crate::symbolic::codegen::codegen_aot_lifecycle::AotLifecycleStage::Published,
             crate::symbolic::codegen::codegen_aot_lifecycle::AotFailureKind::Io,
             artifact_key,
-            format!("failed to publish AOT registry handoff '{}': {error}", path.display()),
+            format!(
+                "failed to publish AOT registry handoff '{}': {error}",
+                path.display()
+            ),
         )
     })
 }
@@ -4178,10 +4183,10 @@ mod tests {
     use super::*;
     use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
     use crate::symbolic::codegen::codegen_aot_runtime_link::{
-        register_linked_dense_backend, resolve_linked_residual_backend,
-        resolve_linked_sparse_backend, unregister_linked_dense_backend,
-        unregister_linked_residual_backend, unregister_linked_sparse_backend,
-        LinkedDenseAotBackend, LinkedDenseJacobianChunk,
+        LinkedDenseAotBackend, LinkedDenseJacobianChunk, register_linked_dense_backend,
+        resolve_linked_residual_backend, resolve_linked_sparse_backend,
+        unregister_linked_dense_backend, unregister_linked_residual_backend,
+        unregister_linked_sparse_backend,
     };
     use crate::symbolic::ivp_telemetry::{IvpColdStage, IvpTelemetry, IvpTelemetryRoute};
     use crate::symbolic::symbolic_engine::Expr;
@@ -4251,13 +4256,15 @@ mod tests {
 
     #[test]
     fn generated_ivp_defaults_fall_back_to_lambdify_when_aot_is_missing() {
-        let (equations, variables, time_arg, options) = sample_problem();
+        let (equations, variables, time_arg, options) =
+            sample_problem_with_offset(0.2718281828459045);
         let prepared = prepare_generated_symbolic_ivp_problem(
             equations,
             variables,
             time_arg,
             options,
-            SymbolicIvpGeneratedBackendConfig::defaults(),
+            SymbolicIvpGeneratedBackendConfig::defaults()
+                .with_resolver(Some(AotResolver::new(AotRegistry::new()))),
         )
         .expect("defaults should fall back to lambdify");
 
@@ -4266,15 +4273,18 @@ mod tests {
             SelectedSymbolicIvpBackendKind::Lambdify
         );
         assert_eq!(prepared.problem.backend_kind, IvpBackendKind::Lambdify);
-        assert!(prepared
-            .try_aot_runtime()
-            .expect("Lambdify fallback has no stale AOT owner")
-            .is_none());
+        assert!(
+            prepared
+                .try_aot_runtime()
+                .expect("Lambdify fallback has no stale AOT owner")
+                .is_none()
+        );
     }
 
     #[test]
     fn generated_atomview_use_if_available_stays_native_when_aot_is_not_requested() {
-        let (equations, variables, time_arg, options) = sample_problem();
+        let (equations, variables, time_arg, options) =
+            sample_problem_with_offset(-0.3141592653589793);
         let telemetry = IvpTelemetry::counters();
         let options = options
             .with_symbolic_assembly_backend(IvpSymbolicAssemblyBackend::AtomView)
@@ -4285,7 +4295,8 @@ mod tests {
             variables,
             time_arg,
             options,
-            SymbolicIvpGeneratedBackendConfig::defaults(),
+            SymbolicIvpGeneratedBackendConfig::defaults()
+                .with_resolver(Some(AotResolver::new(AotRegistry::new()))),
         )
         .expect("native AtomView should prepare without an AOT compatibility pass");
 

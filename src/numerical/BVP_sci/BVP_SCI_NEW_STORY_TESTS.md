@@ -4,6 +4,85 @@ This document is the planned evidence index for `BVP_sci::new`. It is not a
 release result yet. The old `BVP_SCI_STORY_TESTS.md` remains the historical
 reference for the legacy implementation.
 
+## 2026-11-08 Classic `-z^3` SciPy/Rust Diagnostic
+
+The matched fixture is `z' = y - z`, `y' = -z^3`, with `z(0)=1`,
+`y(1)=1`, tolerance `1e-5`, and Sparse BVP_sci. The Rust tests separately
+check the assembled global Jacobian against finite differences and exercise
+both the historically failing zero seed and a useful all-ones seed. The vendored
+SciPy runner now supplies the same analytic RHS and boundary Jacobians; this is
+essential because SciPy's default finite-difference Jacobian takes a different
+Newton path on this sensitive problem.
+
+| seed / initial nodes | route | outcome / final nodes | mesh-pass nodes | Jacobian builds / factors / linear solves per pass |
+|---|---|---|---|---|
+| zero / 21 | Rust ExprLegacy | typed max-node exhaustion at 1000 | 21, 61, 181, 541 | 4/4/23, 4/4/22, 4/4/20, 4/4/17 |
+| zero / 21 | vendored SciPy, analytic Jacobian | status 1, max-node exhaustion at 1000 | 21, 61, 181, 541 | 4/4/23, 4/4/22, 4/4/20, 4/4/17 |
+| ones / 11 | Rust ExprLegacy | success, 259 nodes, max RMS defect `8.004817e-6` | 11, 30, 88, 259 | 4/4/18, 4/4/18, 4/4/16, 1/1/9 |
+| ones / 11 | vendored SciPy, analytic Jacobian | success, 259 nodes, max RMS defect `8.004817e-6` | 11, 30, 88, 259 | 4/4/18, 4/4/18, 4/4/16, 1/1/9 |
+
+The seeded Rust profile agrees with the pinned SciPy trajectory at nine points
+to `1e-7`; Rust also independently re-evaluates the final interval defects using
+the vendored SciPy estimator, obtaining `8.0048174744e-6`. The zero-seed result
+is therefore not evidence of an Expr parse/Jacobian defect: SciPy has the same
+failure status, mesh sequence and detailed work counts when derivatives are
+matched. Default SciPy finite differences instead take a much longer route
+(1183 nodes for the seeded case), so that run is not an apples-to-apples Newton
+comparison. No production solver formula was changed for this investigation.
+
+### Same-State FD/Exact Jacobian Probe
+
+To test the suspected derivative defect directly, the FD and exact SciPy runs
+were instrumented at each Jacobian refresh on the first problematic zero-seed
+mesh (`181` nodes). At each refresh, the FD global matrix was compared against
+an exact global matrix assembled at the *same* state, with the same residual
+and boundary Jacobian. At the first sensitive refresh, the state had
+`z in [1, 1.106288]`, `max(abs(y)) = 1.457893`, and the FD matrix condition
+number was about `4.415e5`. The global matrix relative Frobenius difference was
+`1.989e-10` (maximum entry difference `3.029e-10`); the resulting Newton
+correction differed by `2.633e-5` relative, while the affine costs were
+`5.567746e7` (FD) and `5.568039e7` (exact).
+
+At the Jacobian evaluation with the largest pointwise error at that refresh,
+the sample was `x=0.0722222`, `z=1.03001653`, `y=1.40291200`. For the
+nonlinear derivative `d(-z^3)/dz`, FD returned `-3.1828022724` versus exact
+`-3.1828021730`, a normalized difference of `2.376e-8`.
+
+The following backtracking trial costs diverge dramatically even though the
+Jacobian at the base state is close: at the next iteration, trial `alpha=1`
+gave costs `1.535e22` (FD) and `4.508e23` (exact), and the final `alpha=1/16`
+trial gave `5.943e14` and `2.050e16`. Neither passed Armijo; both routes
+committed the final fallback trial and then continued on different states.
+Across the remaining refreshes, the largest observed relative global-matrix
+difference was `1.190e-8` (max entry `4.246e-8`). This does **not** support a
+grossly incorrect FD derivative. It points instead to an ill-conditioned
+Newton system and a highly sensitive cubic line-search trajectory: a small
+correction perturbation can select very different trial states/costs. Both
+routes still reach the same node-budget failure for the zero seed, and the
+matched exact-Jacobian route agrees with Rust telemetry.
+
+The state histories from separate FD and exact runs show where that sensitivity
+takes over. Maximum absolute state difference by Jacobian refresh was:
+
+| mesh nodes | max state difference at successive refreshes |
+|---:|---|
+| 21 | `0`, `0`, `6.573e-8`, `6.451e-7` |
+| 61 | `1.397e-6`, `3.512e-6`, `2.719e-5`, `4.529e-5` |
+| 181 | `3.661e-4`, `6.009e-4`, `24.53`, `28.21` |
+
+Thus the runs are already slightly separated before the mesh-181 refresh, but
+the catastrophic state split occurs at the next refresh after a line search
+whose trials all failed Armijo and whose last fallback trial was committed.
+Large trial-cost ratios from separately evolving runs must not be interpreted
+as a large Jacobian-matrix error; the direct same-state matrix/step comparison
+above is the relevant measurement.
+
+Debug checks passed: the three targeted Rust `classic_z_y_*` tests, the full
+`numerical::BVP_sci::new` module (`87 passed, 27 ignored`), and the targeted
+Python reference telemetry test. This only resolves the matched BVP_sci
+diagnostic; the initial guess and settings of other failed solver/task-parser
+fixtures must be compared separately.
+
 ## 2026-10-22 Componentwise Symbolic Frontend Parity
 
 Debug test `numerical::BVP_sci::new::story_tests::combustion_bvp_componentwise_frontend_parity_pins_compiler_input`

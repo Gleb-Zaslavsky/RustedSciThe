@@ -314,15 +314,42 @@ fn run_atom_evaluator_compile_case(
     } else {
         IvpTelemetry::disabled()
     };
-    let total_started = Instant::now();
-    let mut solver = Lsode2Solver::new(chain_solver_config(
+    let generated_backend =
+        crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig::new()
+            .with_resolver(Some(
+                crate::symbolic::codegen::codegen_aot_resolution::AotResolver::new(
+                    crate::symbolic::codegen::codegen_aot_registry::AotRegistry::new(),
+                ),
+            ));
+    let backend = match matrix {
+        ChainMatrixRoute::Sparse => {
+            super::Lsode2BackendConfig::native_sparse_faer_with_generated_backend(generated_backend)
+        }
+        ChainMatrixRoute::Banded => {
+            super::Lsode2BackendConfig::native_banded_faithful_with_generated_backend(
+                generated_backend,
+            )
+        }
+    };
+    // Keep this evaluator-compilation A/B independent of artifacts registered by
+    // earlier story tests in the same test process.
+    let mut config = chain_solver_config(
         dimension,
         IvpSymbolicAssemblyBackend::AtomView,
         matrix,
         IvpLambdifyExecutionPolicy::Sequential,
         telemetry.clone(),
-    ))
-    .expect("AtomView evaluator-compilation A/B solver should construct");
+    )
+    .with_backend(backend);
+    // Keep the conversion-count comparison cold even when earlier stories in
+    // this process prepared the shared diffusion-chain expression fixture.
+    config.eq_system[0] = crate::symbolic::symbolic_engine::Expr::Add(
+        Box::new(config.eq_system[0].clone()),
+        Box::new(Expr::Const(1.0e-13)),
+    );
+    let total_started = Instant::now();
+    let mut solver = Lsode2Solver::new(config)
+        .expect("AtomView evaluator-compilation A/B solver should construct");
     let prepare_started = Instant::now();
     with_separate_atom_graph_for_test(!reuse_shared_atom_graph, || {
         with_parallel_atom_evaluator_compilation_for_test(parallel_compile, || solver.prepare())

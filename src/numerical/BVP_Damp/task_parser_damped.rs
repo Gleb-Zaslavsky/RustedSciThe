@@ -966,6 +966,13 @@ pub fn parse_bvp_damped_solver_settings_from_document(
     let generated_backend = parse_generated_backend_options(solver_settings)?;
 
     let bounds = if let Some(bounds_section) = document.get("bounds") {
+        if bounds_section.is_empty() {
+            return Err(BvpDampedTaskError::InvalidField {
+                section: "bounds",
+                field: "*".to_string(),
+                message: "must contain at least one state bound".to_string(),
+            });
+        }
         let bounds = bounds_section
             .iter()
             .map(|(key, value)| {
@@ -974,24 +981,36 @@ pub fn parse_bvp_damped_solver_settings_from_document(
                     .ok_or_else(|| BvpDampedTaskError::InvalidField {
                         section: "bounds",
                         field: key.clone(),
-                        message: "expected pair of floats".to_string(),
+                        message: "expected exactly two finite numeric bounds".to_string(),
                     })?;
-                let lower = values
-                    .first()
-                    .and_then(|value| value.as_float())
-                    .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                let pair = match values.as_slice() {
+                    [Value::Vector(values)] => values.clone(),
+                    values => values
+                        .iter()
+                        .map(|value| damped_bound_value(value))
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                            section: "bounds",
+                            field: key.clone(),
+                            message: "expected exactly two finite numeric bounds".to_string(),
+                        })?,
+                };
+                if pair.len() != 2 {
+                    return Err(BvpDampedTaskError::InvalidField {
                         section: "bounds",
                         field: key.clone(),
-                        message: "expected lower bound float".to_string(),
-                    })?;
-                let upper = values
-                    .get(1)
-                    .and_then(|value| value.as_float())
-                    .ok_or_else(|| BvpDampedTaskError::InvalidField {
+                        message: "expected exactly two finite numeric bounds".to_string(),
+                    });
+                }
+                let lower = pair[0];
+                let upper = pair[1];
+                if !lower.is_finite() || !upper.is_finite() || lower > upper {
+                    return Err(BvpDampedTaskError::InvalidField {
                         section: "bounds",
                         field: key.clone(),
-                        message: "expected upper bound float".to_string(),
-                    })?;
+                        message: "expected finite lower <= upper bounds".to_string(),
+                    });
+                }
                 Ok((key.clone(), (lower, upper)))
             })
             .collect::<Result<HashMap<_, _>, _>>()?;
@@ -1102,6 +1121,16 @@ pub fn parse_bvp_damped_solver_settings_from_document(
         rel_tolerance,
         strategy_params,
     })
+}
+
+fn damped_bound_value(value: &Value) -> Option<f64> {
+    let value = match value {
+        Value::Float(value) => *value,
+        Value::Integer(value) => *value as f64,
+        Value::Usize(value) => *value as f64,
+        _ => return None,
+    };
+    value.is_finite().then_some(value)
 }
 
 /// Parse the postprocessing block into a typed spec without mutating the solver.

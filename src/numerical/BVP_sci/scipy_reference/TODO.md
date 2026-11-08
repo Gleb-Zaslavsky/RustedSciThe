@@ -74,6 +74,19 @@ Debug verification on 2026-10-12:
   `construct_global_jac`, including parameter and boundary blocks. The
   `global-jacobian` fixture compares the complete 7x7 matrix and collocation
   residual at a fixed state, independently of Newton and LU behavior.
+- [x] Add a matched classic `z'=y-z`, `y'=-z^3` diagnostic for zero and useful
+  initial guesses using exact analytic Jacobians in both SciPy and Rust. The
+  zero-seed node-budget failure and its per-mesh work counters match exactly;
+  the seeded solve matches status, mesh, solve counts, profile and SciPy RMS
+  defect. SciPy's default finite-difference Jacobian follows a different,
+  much more expensive trajectory on this sensitive case and is not the matched
+  comparison. See `../BVP_SCI_NEW_STORY_TESTS.md` for measurements and scope.
+- [x] Probe the FD and exact global Jacobians at identical states on the first
+  divergent zero-seed mesh. Relative matrix differences stayed between
+  `2e-10` and `1.2e-8`; the most sensitive solve had condition number
+  `4.4e5`, amplifying this to a `2.6e-5` relative correction difference. The
+  large divergence appears later in rejected cubic line-search trials, not as a
+  gross derivative/Jacobian error. Detailed figures are in the BVP_sci story.
 - [x] Compare dense-output first derivatives and per-interval RMS residuals
   on the matched exponential case for both SciPy FD and exact-Jacobian routes;
   maximum observed differences were `1.776e-15` and `1.356e-16` respectively.

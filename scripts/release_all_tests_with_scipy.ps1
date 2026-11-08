@@ -1,5 +1,7 @@
 param(
-    [string]$PythonPath
+    [string]$PythonPath,
+    [ValidateRange(1, 256)]
+    [int]$TestThreads = 1
 )
 
 # Run only the crate library tests in release mode, including ignored tests.
@@ -23,14 +25,15 @@ if (-not (Test-Path -LiteralPath $PythonPath -PathType Leaf)) {
 }
 
 $env:IVP_SCIPY_PYTHON = (Resolve-Path -LiteralPath $PythonPath).Path
+$env:SOMELINALG_PYTHON = $env:IVP_SCIPY_PYTHON
 Write-Host "Validating SciPy parity Python: $env:IVP_SCIPY_PYTHON"
 & $env:IVP_SCIPY_PYTHON -c "import sys, numpy, scipy; print(sys.executable); print('NumPy', numpy.__version__); print('SciPy', scipy.__version__)"
 if ($LASTEXITCODE -ne 0) {
     throw "The configured Python could not import NumPy and SciPy; Rust tests were not started."
 }
 
-Write-Host "Running release library tests, including ignored tests; Cargo build jobs: $cargoBuildJobs."
-cargo test --release --lib --jobs $cargoBuildJobs -- --include-ignored
+Write-Host "Running release library tests, including ignored tests; Cargo build jobs: $cargoBuildJobs; test threads: $TestThreads."
+cargo test --release --lib --jobs $cargoBuildJobs -- --include-ignored --test-threads $TestThreads
 $testExitCode = $LASTEXITCODE
 if ($testExitCode -ne 0) {
     Write-Error "Release test suite failed with exit code $testExitCode."

@@ -87,11 +87,23 @@ mod test {
     #[test]
     fn printer_preserves_precedence_for_add_mul_pow() {
         let expr = parse!("(x+y)*(z+1)^2").unwrap();
-        let expected1 = "(x+y)*(z+1)^2";
-        let expected2 = "(z+1)^2*(x+y)";
-        let eq1 = print(&expr) == expected1;
-        let eq2 = print(&expr) == expected2;
-        assert!(eq1 || eq2);
+        let printed = print(&expr);
+        assert!(
+            printed.contains('('),
+            "additive operands need grouping: {printed}"
+        );
+        let reparsed = parse!(&printed).unwrap();
+        let (x, y, z) = symbol!("x", "y", "z");
+        let mut values = FloatSymbolMap::default();
+        values.insert(x, 0.3);
+        values.insert(y, -0.2);
+        values.insert(z, 0.7);
+        let original = evaluate_with_symbols(&expr, &values, &FunctionMap::new()).unwrap();
+        let round_trip = evaluate_with_symbols(&reparsed, &values, &FunctionMap::new()).unwrap();
+        assert!(
+            (original - round_trip).abs() < 1.0e-12,
+            "printed form changed precedence: {printed}"
+        );
     }
 
     #[test]

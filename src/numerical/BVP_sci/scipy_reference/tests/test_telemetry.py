@@ -115,6 +115,40 @@ class BvpReferenceTelemetryTests(unittest.TestCase):
         self.assertEqual(row["newton_passes"], counters["solve_newton_calls"])
         self.assertEqual(row["jacobian_builds"], counters["construct_global_jac_calls"])
 
+    def test_classic_z_y_matched_analytic_jacobian_reference(self):
+        rows = {}
+        for case in ("classic-z-y-zero-analytic", "classic-z-y-analytic"):
+            completed = subprocess.run(
+                [sys.executable, str(REFERENCE_DIR / "bvp_parity.py"), case],
+                check=True, capture_output=True, text=True,
+            )
+            rows[case] = json.loads(completed.stdout)
+
+        zero = rows["classic-z-y-zero-analytic"]
+        self.assertFalse(zero["success"])
+        self.assertEqual(zero["status"], 1)
+        self.assertEqual(zero["nodes"], 541)
+        zero_passes = zero["telemetry"]["mesh_passes"]
+        self.assertEqual([entry["mesh_nodes"] for entry in zero_passes],
+                         [21, 61, 181, 541])
+        self.assertEqual(
+            [entry["counters"]["linear_solve_calls"] for entry in zero_passes],
+            [23, 22, 20, 17],
+        )
+
+        seeded = rows["classic-z-y-analytic"]
+        self.assertTrue(seeded["success"])
+        self.assertEqual(seeded["status"], 0)
+        self.assertEqual(seeded["nodes"], 259)
+        seeded_passes = seeded["telemetry"]["mesh_passes"]
+        self.assertEqual([entry["mesh_nodes"] for entry in seeded_passes],
+                         [11, 30, 88, 259])
+        self.assertEqual(
+            [entry["counters"]["linear_solve_calls"] for entry in seeded_passes],
+            [18, 18, 16, 9],
+        )
+        self.assertLess(seeded["rms_residual_max"], 1e-5)
+
     def test_diagnostic_tsv_separates_analytic_callback_cost_and_vectorized_work(self):
         completed = subprocess.run(
             [sys.executable, str(REFERENCE_DIR / "bvp_parity.py"),

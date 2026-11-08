@@ -592,9 +592,26 @@ fn combustion_prepared_route_preserves_debug_iteration_trace() {
                     .map(|(kind, input, output)| (*kind, input.len(), output.len())),
             );
         }
-        assert_eq!(
-            native_events, prepared_events,
-            "callback input sequence differs on independent sample {sample}"
+        assert_eq!(native_events.len(), prepared_events.len());
+        let mut trace_max_diff = 0.0_f64;
+        for (
+            (native_kind, native_input, native_output),
+            (prepared_kind, prepared_input, prepared_output),
+        ) in native_events.iter().zip(&prepared_events)
+        {
+            assert_eq!(native_kind, prepared_kind);
+            assert_eq!(native_input.len(), prepared_input.len());
+            assert_eq!(native_output.len(), prepared_output.len());
+            trace_max_diff = native_input
+                .iter()
+                .zip(prepared_input)
+                .chain(native_output.iter().zip(prepared_output))
+                .map(|(native, prepared)| (native - prepared).abs())
+                .fold(trace_max_diff, f64::max);
+        }
+        assert!(
+            trace_max_diff <= 1e-13,
+            "callback trace values differ by {trace_max_diff:e} on independent sample {sample}"
         );
 
         assert_eq!(

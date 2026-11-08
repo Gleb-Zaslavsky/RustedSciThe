@@ -41,6 +41,10 @@ boundary_conditions
 z_left: 1.0
 y_right: 1.0
 
+bounds
+z: -50.0, 50.0
+y: -35.0, 35.0
+
 mesh
 t0: 0.0
 t_end: 1.0

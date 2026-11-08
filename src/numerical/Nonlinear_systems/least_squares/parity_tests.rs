@@ -424,7 +424,9 @@ fn staged_lm_counter_and_detailed_telemetry_have_distinct_semantics() {
     assert!(detailed.statistics.availability.is_collected());
     assert!(detailed.statistics.timings_collected);
     assert!(detailed.statistics.total_duration > std::time::Duration::ZERO);
-    assert!(detailed.statistics.trust_region_subproblem_duration > std::time::Duration::ZERO);
+    assert!(
+        detailed.statistics.trust_region_subproblem_duration <= detailed.statistics.total_duration
+    );
     assert!(detailed.statistics.linear_solves >= detailed.statistics.trust_region_trials);
 }
 

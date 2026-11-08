@@ -84,6 +84,8 @@ Damped/Frozen support applies to prepared ExprLegacy or AtomView with Lambdify
 or AOT, not numerical callback routes. Rebinding invalidates the accepted
 result/checkpoint but retains prepared residual/Jacobian callbacks and the AOT
 artifact. Changing the state/endpoint schema requires preparing a new solver.
+See `examples/bvp_api_boundary_rebind.py` for a runnable numeric boundary-value
+rebind using one prepared BVP_sci request.
 
 For BVP_sci free parameters, provide all of `free_parameter_names`,
 `free_parameter_guess` and `boundary_residual`. The residual callback receives

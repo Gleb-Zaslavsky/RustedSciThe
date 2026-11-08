@@ -1478,6 +1478,7 @@ mod tests {
         let started = timings.start_iteration_scope();
         assert!(started.is_some());
         timings.record_iteration();
+        std::thread::sleep(Duration::from_millis(1));
         timings.finish_iteration_scope(started);
         let snapshot = timings.snapshot();
         let scopes = timings.scopes_snapshot(&BvpTimingSnapshot::default(), &snapshot);

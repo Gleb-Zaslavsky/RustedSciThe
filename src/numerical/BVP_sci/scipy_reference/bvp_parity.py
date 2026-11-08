@@ -34,7 +34,46 @@ def solve_reference(case: str, *, capture_newton_trace: bool = False) -> dict[st
     mesh = np.linspace(0.0, 1.0, 6)
     sample = np.linspace(0.0, 1.0, 9)
 
-    if case == "validation":
+    if case in {"classic-z-y-analytic", "classic-z-y-zero-analytic"}:
+        def fun(x, y):
+            return np.vstack((y[1] - y[0], -(y[0] ** 3)))
+
+        def bc(ya, yb):
+            return np.array([ya[0] - 1.0, yb[1] - 1.0])
+
+        def fun_jac(x, y):
+            jacobian = np.zeros((2, 2, x.size))
+            jacobian[0, 0, :] = -1.0
+            jacobian[0, 1, :] = 1.0
+            jacobian[1, 0, :] = -3.0 * y[0] ** 2
+            return jacobian
+
+        def bc_jac(ya, yb):
+            return (
+                np.array([[1.0, 0.0], [0.0, 0.0]]),
+                np.array([[0.0, 0.0], [0.0, 1.0]]),
+            )
+
+        if case == "classic-z-y-zero-analytic":
+            solve_mesh = np.linspace(0.0, 1.0, 21)
+            initial = np.zeros((2, solve_mesh.size))
+            max_nodes = 1_000
+        else:
+            solve_mesh = np.linspace(0.0, 1.0, 11)
+            initial = np.ones((2, solve_mesh.size))
+            max_nodes = 5_000
+        result = solve_bvp(
+            fun,
+            bc,
+            solve_mesh,
+            initial,
+            fun_jac=fun_jac,
+            bc_jac=bc_jac,
+            tol=1e-5,
+            max_nodes=max_nodes,
+            telemetry=telemetry,
+        )
+    elif case == "validation":
         def fun(x, y):
             return np.ones_like(y)
 
@@ -58,7 +97,7 @@ def solve_reference(case: str, *, capture_newton_trace: bool = False) -> dict[st
                 raise AssertionError(f"SciPy accepted invalid input {name}")
         return {"case": case, "validation_failures": failures}
 
-    if case == "global-jacobian":
+    elif case == "global-jacobian":
         # Exercise SciPy's matrix assembly directly, independently of Newton
         # convergence and sparse factorization behavior.
         n, k = 2, 1
@@ -434,7 +473,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "case",
-        choices=("global-jacobian", "linear", "unknown-parameter", "unknown-parameter-analytic",
+        choices=("global-jacobian", "linear", "classic-z-y-analytic",
+                 "classic-z-y-zero-analytic", "unknown-parameter", "unknown-parameter-analytic",
                  "exponential", "exponential-analytic", "exponential-tight",
                  "sturm-liouville",
                  "sturm-liouville-analytic", "bratu", "bratu-refine",

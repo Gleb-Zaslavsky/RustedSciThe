@@ -16,16 +16,19 @@ pub struct PyIvpParameterLoopPoint {
 #[pymethods]
 impl PyIvpParameterLoopPoint {
     #[getter]
+    /// Zero-based position in the requested parameter sequence.
     fn index(&self) -> usize {
         self.index
     }
 
     #[getter]
+    /// Numeric parameter values for this attempt.
     fn parameter_values(&self) -> Vec<f64> {
         self.parameter_values.clone()
     }
 
     #[getter]
+    /// Whether this point contains a successful detached solution.
     fn succeeded(&self) -> bool {
         self.solution.is_some()
     }

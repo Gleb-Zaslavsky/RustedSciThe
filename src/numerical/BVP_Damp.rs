@@ -72,6 +72,10 @@ mod test_lambdify_lifecycle;
 #[cfg(any(test, feature = "perf-gates"))]
 #[path = "BVP_Damp/tests/large_native_regressions.rs"]
 pub(crate) mod test_large_native_regressions;
+/// Programmatic cross-solver diagnostic for the task-parser BVP fixture.
+#[cfg(test)]
+#[path = "BVP_Damp/tests/programmatic_solver_ab.rs"]
+mod test_programmatic_solver_ab;
 
 /// Reuses the maintained KiThe large-combustion fixture from perf-gates.
 /// This is feature-gated so the test fixture does not enter ordinary builds.

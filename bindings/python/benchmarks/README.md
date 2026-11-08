@@ -225,3 +225,18 @@ release claims, verify both paths point into the clean wheel environment's
 `site-packages`; a checkout/editable path is diagnostic-only. Results and their
 interpretation are recorded in
 [`PYTHON_BOUNDARY_STORY_TESTS.md`](../PYTHON_BOUNDARY_STORY_TESTS.md).
+# StiffAPI boundary benchmark
+
+`python_boundary_stiff_api.py` measures request construction and validation,
+facade prepare/dispatch, full BDF solve, NumPy trajectory conversion, and
+result/telemetry extraction on a stiff dense diffusion-chain fixture. Native
+telemetry is reported as nested attribution and is not added to Python wall
+times.
+
+Run from an installed-wheel environment outside the source checkout:
+
+```powershell
+python .\bindings\python\benchmarks\python_boundary_stiff_api.py `
+  --repeats 11 --dimension 32 --end-time 0.1 `
+  --output .\test_reports\Python_StiffAPI\stiff_api_boundary.md
+```

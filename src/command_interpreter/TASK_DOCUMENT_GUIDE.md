@@ -22,6 +22,23 @@ The parser retains the symbolic RHS and returns a typed `ContinuationSpec`.
 and `prepared` means reuse the prepared symbolic/backend model. The actual
 solver adapter must still decide which state can safely be reused.
 
+## Bounds для BVP
+
+Для поддерживающих bounds BVP-солверов ограничения задаются отдельной
+корневой секцией документа, а не внутри `solver_options`. Каждая строка
+содержит включительные нижнюю и верхнюю границы:
+
+```text
+bounds
+temperature: 250.0, 5000.0
+fuel: 0.0, 1.0
+```
+
+Damped и Frozen сохраняют широкие границы `[-1e6, 1e6]` для состояний,
+которые не перечислены в секции, и заменяют их явно заданными значениями.
+BVP_sci пока не поддерживает bounds и возвращает типизированную ошибку,
+вместо того чтобы молча игнорировать настройку.
+
 ## Routing policy
 
 `UniversalODESolver` is useful for simple nonstiff prototyping. For stiff

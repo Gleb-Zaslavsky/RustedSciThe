@@ -15,6 +15,8 @@ mod tests {
         SymbolicNonlinearProblem, SymbolicProblemOptions,
     };
     use crate::numerical::Nonlinear_systems::symbolic_generated::SymbolicAotBuildPolicy;
+    use crate::symbolic::codegen::codegen_aot_registry::AotRegistry;
+    use crate::symbolic::codegen::codegen_aot_resolution::AotResolver;
     use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
     use nalgebra::{DMatrix, DVector};
     use std::time::{Duration, Instant};
@@ -171,17 +173,22 @@ mod tests {
 
     #[test]
     fn atom_native_generated_aot_has_typed_missing_artifact_path() {
+        // A unique manifest prevents linked AOT runtimes from unrelated tests
+        // from changing this missing-artifact contract.
+        let isolated_equations = vec!["a*x^2+y-5+0.123456789".to_string(), "x-y".to_string()];
+        let resolver = AotResolver::new(AotRegistry::new());
         let direct = SymbolicNonlinearProblem::from_strings_with_backend_selection(
-            equations(),
+            isolated_equations.clone(),
             options(SymbolicLambdifyFrontend::AtomViewNative),
             SymbolicBackendSelectionPolicy::AotOnly,
-            None,
+            Some(&resolver),
             SymbolicDenseAotOptions::default(),
         );
         let generated = SymbolicNonlinearProblem::from_strings_with_generated_backend(
-            equations(),
+            isolated_equations,
             options(SymbolicLambdifyFrontend::AtomViewNative),
-            SymbolicGeneratedBackendConfig::defaults(),
+            SymbolicGeneratedBackendConfig::defaults()
+                .with_resolver(Some(AotResolver::new(AotRegistry::new()))),
         );
 
         match direct {

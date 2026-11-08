@@ -85,6 +85,8 @@ ExprLegacy или AtomView с Lambdify либо AOT, но не численны�
 Перепривязка сбрасывает принятый результат/сохранённое приближение, сохраняя
 подготовленные residual/Jacobian callbacks и AOT artifact. Изменение схемы
 состояний или endpoint-ов требует подготовки нового solver.
+Исполняемый пример повторного решения с новым числовым значением границы:
+`examples/bvp_api_boundary_rebind.py`.
 
 Для свободных параметров BVP_sci передаются вместе
 `free_parameter_names`, `free_parameter_guess` и `boundary_residual`. Callback
