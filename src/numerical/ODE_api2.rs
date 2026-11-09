@@ -14,7 +14,7 @@ use crate::numerical::BDF::BDF_api::{
 };
 use crate::numerical::BE::{BE, BeError, BeSolverOptions};
 use crate::numerical::LSODE2::{Lsode2Error, Lsode2ProblemConfig, Lsode2Solver};
-use crate::numerical::NonStiff_api::nonstiffODE;
+use crate::numerical::NonStiff_api::{Dop853Error, Dop853Options, nonstiffODE};
 #[cfg(test)]
 use crate::numerical::Radau::Radau_main::{Radau, RadauSolverOptions, RadauStatistics};
 use crate::numerical::Radau::{
@@ -48,6 +48,7 @@ pub enum NonStiffMethod {
     Rk45,
     Dopri,
     Ab4,
+    Dop853,
     Other(String),
 }
 
@@ -57,6 +58,7 @@ impl NonStiffMethod {
             Self::Rk45 => "RK45",
             Self::Dopri => "DOPRI",
             Self::Ab4 => "AB4",
+            Self::Dop853 => "DOP853",
             Self::Other(name) => name.as_str(),
         }
     }
@@ -67,6 +69,7 @@ impl NonStiffMethod {
             "RK45" => Self::Rk45,
             "DOPRI" => Self::Dopri,
             "AB4" => Self::Ab4,
+            "DOP853" => Self::Dop853,
             _ => Self::Other(name),
         }
     }
@@ -294,6 +297,7 @@ impl UniversalIvpStatistics {
 #[derive(Debug)]
 pub enum UniversalOdeError {
     Backend(IvpBackendError),
+    NonStiff(crate::numerical::NonStiff_api::NonStiffError),
     Bdf(BdfSolveError),
     BdfStopCondition(BdfStopConditionError),
     BackwardEuler(BeError),
@@ -307,6 +311,7 @@ impl std::fmt::Display for UniversalOdeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Backend(err) => write!(f, "{err}"),
+            Self::NonStiff(err) => write!(f, "{err}"),
             Self::Bdf(err) => write!(f, "{err}"),
             Self::BdfStopCondition(err) => write!(f, "{err}"),
             Self::BackwardEuler(err) => write!(f, "{err}"),
@@ -330,6 +335,7 @@ impl std::error::Error for UniversalOdeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Backend(err) => Some(err),
+            Self::NonStiff(err) => Some(err),
             Self::Bdf(err) => Some(err),
             Self::BdfStopCondition(err) => Some(err),
             Self::BackwardEuler(err) => Some(err),
@@ -344,6 +350,18 @@ impl std::error::Error for UniversalOdeError {
 impl From<IvpBackendError> for UniversalOdeError {
     fn from(value: IvpBackendError) -> Self {
         Self::Backend(value)
+    }
+}
+
+impl From<crate::numerical::NonStiff_api::NonStiffError> for UniversalOdeError {
+    fn from(value: crate::numerical::NonStiff_api::NonStiffError) -> Self {
+        Self::NonStiff(value)
+    }
+}
+
+impl From<Dop853Error> for UniversalOdeError {
+    fn from(value: Dop853Error) -> Self {
+        Self::NonStiff(crate::numerical::NonStiff_api::NonStiffError::Dop853(value))
     }
 }
 
@@ -705,8 +723,8 @@ impl UniversalODESolver {
         self
     }
 
-    /// Supplies opt-in symbolic telemetry for RK45, DOPRI and AB4. The
-    /// underlying legacy integrators do not expose step-level counters.
+    /// Supplies opt-in symbolic callback telemetry for nonstiff routes.
+    /// DOP853 additionally exposes native accepted/rejected step counters.
     pub fn with_nonstiff_symbolic_telemetry(mut self, telemetry: IvpTelemetry) -> Self {
         self.nonstiff_symbolic_telemetry = telemetry;
         self
@@ -803,6 +821,11 @@ impl UniversalODESolver {
                         method: method.as_str().to_string(),
                     });
                 }
+                let legacy_step = if *method == NonStiffMethod::Dop853 {
+                    self.max_step.or(self.step_size).unwrap_or(f64::INFINITY)
+                } else {
+                    self.step_size.unwrap_or(1e-3)
+                };
                 let mut solver = nonstiffODE::try_new(
                     self.eq_system.clone(),
                     self.values.clone(),
@@ -811,10 +834,17 @@ impl UniversalODESolver {
                     self.t0,
                     self.y0.clone(),
                     self.t_bound,
-                    self.step_size.unwrap_or(1e-3),
+                    legacy_step,
                     self.stop_condition.clone(),
                 )?;
                 solver.set_symbolic_telemetry(self.nonstiff_symbolic_telemetry.clone());
+                solver.set_dop853_options(Dop853Options {
+                    rtol: self.rtol.unwrap_or(1e-8),
+                    atol: self.atol.unwrap_or(1e-10),
+                    max_step: self.max_step.or(self.step_size).unwrap_or(f64::INFINITY),
+                    first_step: self.first_step,
+                    ..Dop853Options::default()
+                });
                 if let Some(tol) = self.neighborhood_check {
                     solver.set_neighborhood_check(tol);
                 }
@@ -1085,7 +1115,22 @@ impl UniversalODESolver {
         let method = self.method_label();
         let backend = self.backend_label();
         match self.solver_instance.as_ref()? {
-            SolverInstance::NonStiff(_) => None,
+            SolverInstance::NonStiff(solver) => {
+                solver
+                    .dop853_statistics()
+                    .map(|stats| UniversalIvpStatistics {
+                        method_label: method,
+                        backend_label: backend,
+                        solve_ms_total: stats.solve_ms,
+                        integration_loop_ms_total: stats.solve_ms,
+                        residual_calls: stats.function_evaluations,
+                        step_calls: stats.attempted_steps,
+                        accepted_steps_total: stats.accepted_steps,
+                        candidate_step_attempts_total: stats.attempted_steps,
+                        rejected_step_attempts_total: stats.rejected_steps,
+                        ..UniversalIvpStatistics::default()
+                    })
+            }
             #[cfg(test)]
             SolverInstance::Radau(solver) => Some(UniversalIvpStatistics::from_radau_stats(
                 method,
@@ -1217,6 +1262,33 @@ impl UniversalODESolver {
         solver
     }
 
+    /// Construct the adaptive explicit DOP853 method.
+    pub fn dop853(
+        eq_system: Vec<Expr>,
+        values: Vec<String>,
+        arg: String,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        max_step: f64,
+        rtol: f64,
+        atol: f64,
+    ) -> Self {
+        let mut solver = Self::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::NonStiff(NonStiffMethod::Dop853),
+            t0,
+            y0,
+            t_bound,
+        );
+        solver.set_max_step(max_step);
+        solver.set_rtol(rtol);
+        solver.set_atol(atol);
+        solver
+    }
+
     /// Construct the universal fixed-order Radau route.
     ///
     /// The historical `RadauOrder` argument was intentionally removed from
@@ -1341,9 +1413,11 @@ mod tests {
         assert_eq!(NonStiffMethod::from_name("rk45"), NonStiffMethod::Rk45);
         assert_eq!(NonStiffMethod::from_name("DOPRI"), NonStiffMethod::Dopri);
         assert_eq!(NonStiffMethod::from_name("ab4"), NonStiffMethod::Ab4);
+        assert_eq!(NonStiffMethod::from_name("dop853"), NonStiffMethod::Dop853);
         assert_eq!(NonStiffMethod::Rk45.as_str(), "RK45");
         assert_eq!(NonStiffMethod::Dopri.as_str(), "DOPRI");
         assert_eq!(NonStiffMethod::Ab4.as_str(), "AB4");
+        assert_eq!(NonStiffMethod::Dop853.as_str(), "DOP853");
 
         let extension = NonStiffMethod::from_name("custom-explicit");
         assert_eq!(extension.as_str(), "custom-explicit");
@@ -1414,6 +1488,73 @@ mod tests {
         assert_eq!(
             snapshot.residual_evaluations,
             telemetry.snapshot().residual_evaluations
+        );
+    }
+
+    #[test]
+    fn universal_dop853_matches_bdf_and_exponential_reference() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut adaptive = UniversalODESolver::new(
+            eq_system.clone(),
+            values.clone(),
+            arg.clone(),
+            SolverType::NonStiff(NonStiffMethod::Dop853),
+            0.0,
+            y0.clone(),
+            1.0,
+        )
+        .with_nonstiff_symbolic_telemetry(IvpTelemetry::detailed());
+        adaptive.set_rtol(1e-11);
+        adaptive.set_atol(1e-13);
+        adaptive.set_max_step(0.25);
+        adaptive.set_first_step(Some(0.1));
+        adaptive
+            .try_solve()
+            .expect("DOP853 should solve smooth decay");
+
+        let (adaptive_t, adaptive_y) = adaptive.get_result();
+        let adaptive_t = adaptive_t.unwrap();
+        let adaptive_y = adaptive_y.unwrap();
+        let adaptive_final = adaptive_y[(adaptive_y.nrows() - 1, 0)];
+        assert_eq!(*adaptive_t.as_slice().last().unwrap(), 1.0);
+        assert!((adaptive_final - (-1.0_f64).exp()).abs() < 2e-11);
+
+        let mut reference_bdf =
+            UniversalODESolver::bdf(eq_system, values, arg, 0.0, y0, 1.0, 0.05, 1e-10, 1e-12);
+        reference_bdf
+            .try_solve()
+            .expect("BDF reference should solve smooth decay");
+        let (_, fixed_y) = reference_bdf.get_result();
+        let fixed_y = fixed_y.expect("BDF result");
+        let fixed_final = fixed_y[(fixed_y.nrows() - 1, 0)];
+        assert!(
+            (adaptive_final - fixed_final).abs() < 2e-8,
+            "DOP853={adaptive_final:.16e}, BDF={fixed_final:.16e}"
+        );
+
+        let stats = adaptive.get_statistics().expect("DOP853 native statistics");
+        assert!(stats.accepted_steps_total > 0);
+        assert!(stats.residual_calls > 0);
+        let callback_telemetry = adaptive
+            .nonstiff_symbolic_telemetry()
+            .expect("callback telemetry is forwarded");
+        assert_eq!(
+            callback_telemetry.residual_evaluations,
+            stats.residual_calls as u64
+        );
+        assert_eq!(
+            callback_telemetry.accepted_steps,
+            stats.accepted_steps_total as u64
+        );
+        assert_eq!(
+            callback_telemetry.rejected_steps,
+            stats.rejected_step_attempts_total as u64
+        );
+        assert!(
+            adaptive
+                .statistics_report()
+                .unwrap()
+                .contains("accepted_steps=")
         );
     }
 

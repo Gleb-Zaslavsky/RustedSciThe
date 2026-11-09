@@ -432,7 +432,10 @@ mod bound_step_tests {
         let bounds = [(-0.1, 2.0)];
         let raw_factor = bound_step_Cantera2_with_update_sign(&state, &step, &bounds, -1.0);
         let raw_candidate = 1.1 - step.get_val(0) * raw_factor;
-        assert!(raw_candidate < bounds[0].0, "fixture must reproduce rounding overshoot");
+        assert!(
+            raw_candidate < bounds[0].0,
+            "fixture must reproduce rounding overshoot"
+        );
 
         let safe_factor = feasible_update_factor(&state, &step, &bounds, -1.0, raw_factor);
         let safe_candidate = 1.1 - step.get_val(0) * safe_factor;

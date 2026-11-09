@@ -664,8 +664,7 @@ mod tests {
         let telemetry = BvpSciTelemetry::disabled();
         let mut workspace = BvpSciCollocationWorkspace::new(2, x.len(), 0, &telemetry).unwrap();
         evaluate_collocation(&plan, &x, &y, &[], &[], None, &mut workspace).unwrap();
-        assemble_global_jacobian(&plan, &boundary, &x, &y, &[], &[], None, &mut workspace)
-            .unwrap();
+        assemble_global_jacobian(&plan, &boundary, &x, &y, &[], &[], None, &mut workspace).unwrap();
 
         let residual_at = |state: &[f64]| {
             let mut probe = BvpSciCollocationWorkspace::new(2, x.len(), 0, &telemetry).unwrap();

@@ -488,11 +488,8 @@ mod tets {
             guess.push(1.0);
             guess.push(1.0);
         }
-        let initial_guess: DMatrix<f64> = DMatrix::from_column_slice(
-            values.len(),
-            n_steps,
-            DVector::from_vec(guess).as_slice(),
-        );
+        let initial_guess: DMatrix<f64> =
+            DMatrix::from_column_slice(values.len(), n_steps, DVector::from_vec(guess).as_slice());
         let mut BorderConditions = HashMap::new();
         BorderConditions.insert("z".to_string(), vec![(0usize, 1.0f64)]);
         BorderConditions.insert("y".to_string(), vec![(1usize, 1.0f64)]);

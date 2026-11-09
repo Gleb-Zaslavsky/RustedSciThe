@@ -24,7 +24,8 @@ k = G * M * T^2 / L^3 = 6.6743e-11 * 1.989e30 * (3.15576e7)^2 / (1.495978707e11)
 */
 use RustedSciThe::Utils::animation_2d::create_2d_animation;
 
-use RustedSciThe::numerical::ODE_api2::UniversalODESolver;
+use RustedSciThe::numerical::ODE_api2::{NonStiffMethod, SolverType, UniversalODESolver};
+use RustedSciThe::symbolic::ivp_telemetry::IvpTelemetry;
 use RustedSciThe::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
@@ -181,21 +182,29 @@ fn main() {
     let y0 = DVector::from_vec(vect.clone());
 
     let t_bound = 500.0;
-    // The universal facade is intentionally nonstiff-only.  A stiff run of
-    // this problem must use `BdfSolverOptions` and `BDF_api::ODEsolver`
-    // directly; this example demonstrates the portable RK45 route.
-    let solver_name = "RK45".to_string();
+    // DOP853 adapts its step to the trajectory instead of taking the legacy
+    // fixed 1e-6 RK45 step across this long integration interval.
     let now = Instant::now();
-    let mut solver = match solver_name.as_str() {
-        "RK45" => UniversalODESolver::rk45(eq_sys, unknowns, arg, t0, y0, t_bound, 1e-6),
-        "AB4" => UniversalODESolver::ab4(eq_sys, unknowns, arg, t0, y0, t_bound, 1e-6),
-        _ => panic!("Unsupported solver: {}", solver_name),
-    };
-
-    solver.solve();
+    let mut solver = UniversalODESolver::new(
+        eq_sys,
+        unknowns,
+        arg,
+        SolverType::NonStiff(NonStiffMethod::Dop853),
+        t0,
+        y0,
+        t_bound,
+    )
+    .with_nonstiff_symbolic_telemetry(IvpTelemetry::counters());
+    solver.set_rtol(1e-9);
+    solver.set_atol(1e-11);
+    solver.set_max_step(0.2);
+    solver
+        .try_solve()
+        .expect("DOP853 should solve the three-body IVP");
 
     assert_eq!(solver.get_status().unwrap(), "finished");
     println!("Solver time: {:.2?}", now.elapsed().as_millis() as f64);
+    println!("{}", solver.statistics_report().unwrap_or_default());
     let (t, y_result) = solver.get_result();
     let y_result = y_result.unwrap();
     let t = t.unwrap();
@@ -308,12 +317,29 @@ fn main() {
         }
     }
 
-    println!("Creating animation for body 0...");
-    let times = t;
-    create_2d_animation(
-        _positions_of_2,
-        times,
-        Some(("X".to_string(), "Y".to_string())),
-        Some(100.0),
-    );
+    if std::env::var_os("RST_SHOW_ANIMATION").is_some() {
+        println!("Creating animation for body 0...");
+        let times = t;
+        let animation_stride = times.len().div_ceil(2_000).max(1);
+        let mut animation_indices: Vec<usize> =
+            (0..times.len()).step_by(animation_stride).collect();
+        if animation_indices.last().copied() != Some(times.len() - 1) {
+            animation_indices.push(times.len() - 1);
+        }
+        let animation_positions = DMatrix::from_fn(2, animation_indices.len(), |row, column| {
+            _positions_of_2[(row, animation_indices[column])]
+        });
+        let animation_times = DVector::from_iterator(
+            animation_indices.len(),
+            animation_indices.iter().map(|&index| times[index]),
+        );
+        create_2d_animation(
+            animation_positions,
+            animation_times,
+            Some(("X".to_string(), "Y".to_string())),
+            Some(100.0),
+        );
+    } else {
+        println!("Skipping interactive animation; set RST_SHOW_ANIMATION=1 to display it.");
+    }
 }

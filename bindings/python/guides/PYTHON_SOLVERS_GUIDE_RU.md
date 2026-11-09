@@ -83,15 +83,21 @@ result = solver.solve()
 контроллера Adams/BDF. Аргумент `controller=` допустим только для LSODE2.
 
 Nonstiff-часть `ODE_api2` доступна отдельно через `UniversalNonStiffSolver`;
-`create_ivp` и `solve_ivp` также принимают методы `"rk45"`, `"dopri"` и
-`"ab4"`. Этот маршрут намеренно уже stiff-адаптеров: ExprLegacy/Lambdify,
-Dense, последовательное выполнение, положительный шаг, optional stop
-conditions по именам состояний и neighborhood tolerance. Native telemetry,
-AOT, AtomNative, parameter continuation и restart здесь отсутствуют;
-неподдерживаемая конфигурация отклоняется явно. Fixed-step цикл заканчивает
-после достижения или пересечения `t_end`, поэтому последняя точка может выйти
-за границу менее чем на один шаг. Для stiff-методов используются их отдельные
-нативные API.
+`create_ivp` и `solve_ivp` также принимают методы `"rk45"`, `"dopri"`,
+`"ab4"` и адаптивный `"dop853"`. Старые методы сохраняют fixed-step
+поведение; для DOP853 общий аргумент `max_step` задаёт максимальный шаг, а
+`rtol`, `atol` и `first_step` настраивают адаптивный контроллер. DOP853
+возвращает принятые точки сетки, точно обрезает последний шаг по `t_end` и
+публикует счётчики принятых/отклонённых шагов и RHS-вызовов в
+`solution.diagnostics()`. Callback telemetry включается через
+`SolverOptions(telemetry="counters" | "timings" | "detailed")`.
+
+Маршрут остаётся уже stiff-адаптеров: ExprLegacy/Lambdify, Dense и
+последовательное выполнение; AOT, AtomNative, parameter rebinding и restart
+не поддерживаются. Fixed-step цикл может выйти за `t_end` менее чем на один
+шаг, DOP853 этого не делает. DOP853 возвращает только принятые точки сетки и
+пока не предоставляет dense-output interpolation. Для stiff-методов
+используются их отдельные нативные API.
 
 ### Типизация convenience facade
 

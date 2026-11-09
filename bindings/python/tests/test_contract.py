@@ -1666,7 +1666,27 @@ def test_ode_api2_nonstiff_methods_return_detached_trajectory(method):
     assert 0.1 <= result.times()[-1] < 0.11 + 1e-12
     assert result.states()[-1][0] == pytest.approx(result.times()[-1], abs=1e-10)
     assert result.states_array().shape == (result.sample_count, 1)
-    assert result.diagnostics()["telemetry"] == "not_provided_by_native_route"
+    assert result.diagnostics()["telemetry"] == "off"
+
+
+def test_ode_api2_dop853_adaptive_solution_and_telemetry():
+    result = python_facade.solve_ivp(
+        "dop853", [Expr.parse("y")], ["y"], "t", [1.0], 0.0, 1.0, 0.5,
+        rtol=1e-11, atol=1e-13,
+        options=SolverOptions(
+            frontend="expr_legacy", execution="lambdify", matrix_layout="dense",
+            execution_policy="sequential", telemetry="detailed",
+        ),
+    )
+    assert result.method == "dop853"
+    assert result.status == "finished"
+    assert result.times()[-1] == 1.0
+    assert result.states()[-1][0] == pytest.approx(np.e, rel=2e-10)
+    diagnostics = result.diagnostics()
+    assert diagnostics["telemetry"] == "detailed"
+    assert int(diagnostics["accepted_steps"]) > 0
+    assert int(diagnostics["rhs_evaluations"]) > 0
+    assert int(diagnostics["callback_evaluations"]) == int(diagnostics["rhs_evaluations"])
 
 
 def test_ode_api2_nonstiff_facade_and_stop_condition():
@@ -1676,11 +1696,9 @@ def test_ode_api2_nonstiff_facade_and_stop_condition():
     )
     assert result.status == "stopped_by_condition"
     assert result.states()[-1][0] == pytest.approx(0.05, abs=1e-12)
-    assert capabilities("nonstiff").methods == ["rk45", "dopri", "ab4"]
+    assert capabilities("nonstiff").methods == ["rk45", "dopri", "ab4", "dop853"]
     assert capabilities("nonstiff").supports_continuation is False
-    assert capabilities("nonstiff").telemetry_modes == ["off"]
-    with pytest.raises(UnsupportedOptionError, match="telemetry mode 'timings'"):
-        SolverOptions(telemetry="timings").validate_for("nonstiff")
+    assert capabilities("nonstiff").telemetry_modes == ["off", "counters", "timings", "detailed"]
     with pytest.raises(UnsupportedOptionError, match="does not expose symbolic parameter"):
         python_facade.create_ivp(
             "rk45", [Expr.parse("rate")], ["y"], "t", [0.0], 0.0, 0.1, 0.01,
@@ -1690,7 +1708,7 @@ def test_ode_api2_nonstiff_facade_and_stop_condition():
 
 def test_ode_api2_nonstiff_rejects_unsupported_options_and_invalid_inputs():
     base = ([Expr.parse("1")], ["y"], "t", [0.0], 0.0, 0.1, 0.01)
-    with pytest.raises(UnsupportedOptionError, match="expected rk45, dopri or ab4"):
+    with pytest.raises(UnsupportedOptionError, match="expected rk45, dopri, ab4 or dop853"):
         UniversalNonStiffSolver("rk4", *base)
     with pytest.raises(UnsupportedOptionError, match="ExprLegacy, Lambdify, Dense and Sequential"):
         UniversalNonStiffSolver(

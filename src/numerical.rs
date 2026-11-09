@@ -249,7 +249,7 @@ pub mod BVP_sci;
 pub mod Examples_and_utils;
 
 pub mod LSODE2;
-/// RK45 and Dormand-Prince methods
+/// Explicit nonstiff IVP methods, including adaptive DOP853
 pub mod NonStiff_api;
 /// solvers of nonlinear algebraic equations
 pub mod Nonlinear_systems;

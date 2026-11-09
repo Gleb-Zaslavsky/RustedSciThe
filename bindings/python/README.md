@@ -93,7 +93,7 @@ public API from `rustedscithe`; `_native` is an implementation module.
 
 | Problem | Python entry points | Useful distinction |
 | --- | --- | --- |
-| Initial-value problems | `UniversalNonStiffSolver`, `RadauSolver`, `BdfSolver`, `BackwardEulerSolver`, `Lsode2Solver` | ODE_api2 exposes RK45/DOPRI/AB4 through its narrow native nonstiff route; stiff solvers retain their dedicated APIs. LSODE2 separates family from its Adams/BDF/Auto controller. |
+| Initial-value problems | `UniversalNonStiffSolver`, `RadauSolver`, `BdfSolver`, `BackwardEulerSolver`, `Lsode2Solver` | ODE_api2 exposes fixed-step RK45/DOPRI/AB4 and adaptive DOP853 through its narrow nonstiff route; stiff solvers retain their dedicated APIs. LSODE2 separates family from its Adams/BDF/Auto controller. |
 | Boundary-value problems | `BvpSciSolver`, `BvpDampSolver`, `BvpDampNaiveSolver`, `BvpDampFrozenSolver` | BVP_sci uses symbolic boundary residuals and collocation; BVP_Damp exposes distinct damped, fixed-mesh Naive and Frozen-Jacobian routes. Damped, Naive and Frozen accept reduced Newton guesses and publish endpoint-complete profiles; mesh adaptation and iteration policies differ. |
 | Nonlinear systems | `NonlinearSolver` | Prepared square systems with Newton, LM and trust-region method families. |
 | Least squares and fitting | `FittingSolver`, `GavinFittingSolver`, `VarProSolver` | Rectangular symbolic least squares, observation-based fitting and separable-model fitting have distinct contracts. |

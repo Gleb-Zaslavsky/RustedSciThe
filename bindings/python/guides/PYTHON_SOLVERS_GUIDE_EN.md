@@ -101,13 +101,18 @@ Adams/BDF controller. `controller=` is only valid for the LSODE2 route.
 
 The nonstiff part of `ODE_api2` is exposed separately as
 `UniversalNonStiffSolver`; `create_ivp` and `solve_ivp` also accept `"rk45"`,
-`"dopri"` and `"ab4"`. This route is intentionally narrower than the stiff
-adapters: it supports ExprLegacy/Lambdify, Dense, sequential execution, a
-positive step size, optional named-state stop conditions and a neighborhood
-tolerance. It has no native telemetry, AOT, AtomNative, parameter continuation
-or restart contract; non-default telemetry and unsupported backend selections
-are rejected. Its fixed-step loop stops after reaching or crossing `t_end`,
-so the final time can overshoot by less than one step. Stiff methods continue
+`"dopri"`, `"ab4"` and adaptive `"dop853"`. The legacy methods retain their
+fixed-step behavior. DOP853 accepts `rtol`, `atol`, `first_step`, and `max_step`
+(the common `max_step` positional argument); it returns accepted mesh points,
+clips the last step to `t_end`, and exposes accepted/rejected-step and RHS
+counts through `solution.diagnostics()`. Its callback telemetry can be enabled
+with `SolverOptions(telemetry="counters" | "timings" | "detailed")`.
+
+The family remains intentionally narrower than the stiff adapters: it supports
+ExprLegacy/Lambdify, Dense, and sequential execution, but not AOT, AtomNative,
+parameter rebinding or restart. Fixed-step methods may overshoot `t_end` by
+less than one step; DOP853 does not. DOP853 currently returns accepted mesh
+samples and does not provide dense-output interpolation. Stiff methods continue
 to use their dedicated solver APIs.
 
 ### Convenience facade typing

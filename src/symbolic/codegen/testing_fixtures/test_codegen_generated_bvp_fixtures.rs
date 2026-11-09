@@ -327,5 +327,4 @@ pub mod generated_bvp_fixture {
         out[0] = t6;
         out[1] = t1;
     }
-
 }

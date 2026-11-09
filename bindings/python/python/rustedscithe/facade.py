@@ -229,10 +229,11 @@ def _method_name(method: str) -> str:
         "rk45": "rk45",
         "dopri": "dopri",
         "ab4": "ab4",
+        "dop853": "dop853",
     }
     if normalized not in aliases:
         raise ValueError(
-            "unsupported IVP method; expected rk45, dopri, ab4, bdf, radau5, "
+            "unsupported IVP method; expected rk45, dopri, ab4, dop853, bdf, radau5, "
             "backward_euler, lsode2 or lsoda"
         )
     return aliases[normalized]
@@ -264,7 +265,7 @@ def create_ivp(
     Parameters
     ----------
     method:
-        Solver family: ``"rk45"``, ``"dopri"``, ``"ab4"``, ``"bdf"``,
+        Solver family: ``"rk45"``, ``"dopri"``, ``"ab4"``, ``"dop853"``, ``"bdf"``,
         ``"radau5"``, ``"backward_euler"`` or ``"lsode2"``. ``"radau"``,
         ``"be"``, ``"lsode"`` and ``"lsoda"`` are accepted aliases. The
         ``"lsoda"`` alias selects the automatic Adams/BDF controller unless
@@ -276,8 +277,9 @@ def create_ivp(
         Radau accepts the value here for API symmetry but binds it at ``solve``.
     t0, t_end, max_step:
         Integration interval and step control, in the model's time units. For
-        ODE_api2 nonstiff methods this is the native fixed starting step size;
-        other solver families interpret it according to their own contracts.
+        For legacy ODE_api2 nonstiff methods this is the fixed step size; for
+        DOP853 it is the maximum adaptive step. Other solver families interpret
+        it according to their own contracts.
     parameters, parameter_values:
         Optional ordered parameter schema and current numeric values. Radau
         retains these values as the default for later ``solver.solve(y0)``;
@@ -305,7 +307,7 @@ def create_ivp(
     """
 
     family = _method_name(method)
-    if family in {"rk45", "dopri", "ab4"}:
+    if family in {"rk45", "dopri", "ab4", "dop853"}:
         if controller is not None:
             raise ValueError("controller is only supported by the LSODE2 route")
         if parameters is not None or parameter_values is not None:

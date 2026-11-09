@@ -1408,8 +1408,7 @@ mod tests {
             let x = index as f64 / 8.0;
             let values = dense.evaluate(x).expect("sample in solution domain");
             assert!(
-                (values[0] - expected[0]).abs() < 1e-7
-                    && (values[1] - expected[1]).abs() < 1e-7,
+                (values[0] - expected[0]).abs() < 1e-7 && (values[1] - expected[1]).abs() < 1e-7,
                 "Rust/SciPy profile mismatch at x={x}: Rust={values:?}, SciPy={expected:?}"
             );
         }
@@ -1417,10 +1416,12 @@ mod tests {
         assert_eq!(solution.x.first(), Some(&0.0));
         assert_eq!(solution.x.last(), Some(&1.0));
         assert!(solution.residual_norm.is_finite());
-        assert!(solution
-            .interval_residuals
-            .iter()
-            .all(|defect| *defect <= 1e-5));
+        assert!(
+            solution
+                .interval_residuals
+                .iter()
+                .all(|defect| *defect <= 1e-5)
+        );
         assert!(snapshot.rhs_calls > 0);
         assert!(snapshot.jacobian_calls > 0);
         assert!(snapshot.newton_iterations > 0);
@@ -1477,7 +1478,11 @@ mod tests {
         // With analytic RHS/BC Jacobians, vendored SciPy 1.18.1 has the same
         // mesh trajectory, refreshes, factorizations and solves for this seed.
         assert_eq!(
-            snapshot.mesh_passes.iter().map(|pass| pass.mesh_nodes).collect::<Vec<_>>(),
+            snapshot
+                .mesh_passes
+                .iter()
+                .map(|pass| pass.mesh_nodes)
+                .collect::<Vec<_>>(),
             vec![21, 61, 181, 541]
         );
         assert_eq!(snapshot.newton_jacobian_refreshes, 16);
@@ -1540,7 +1545,11 @@ mod tests {
             println!(
                 "zero-seed {layout:?}: failed_on_node_budget={}, mesh_nodes={:?}, jacobian_refreshes={}, factors={}, solves={}",
                 matches!(&result, Err(BvpSciNewError::MaxNodesExceeded { .. })),
-                snapshot.mesh_passes.iter().map(|pass| pass.mesh_nodes).collect::<Vec<_>>(),
+                snapshot
+                    .mesh_passes
+                    .iter()
+                    .map(|pass| pass.mesh_nodes)
+                    .collect::<Vec<_>>(),
                 snapshot.newton_jacobian_refreshes,
                 snapshot.factorizations,
                 snapshot.linear_solves,
@@ -1550,7 +1559,11 @@ mod tests {
                 Err(BvpSciNewError::MaxNodesExceeded { max_nodes: 1_000 })
             ));
             assert_eq!(
-                snapshot.mesh_passes.iter().map(|pass| pass.mesh_nodes).collect::<Vec<_>>(),
+                snapshot
+                    .mesh_passes
+                    .iter()
+                    .map(|pass| pass.mesh_nodes)
+                    .collect::<Vec<_>>(),
                 vec![21, 61, 181, 541]
             );
         }

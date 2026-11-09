@@ -337,15 +337,15 @@ concrete adapter.
   the machine-readable source for the same contract.
 - [x] Expose the `ODE_api2` nonstiff solver family through a dedicated
   `UniversalNonStiffSolver` and the common `create_ivp`/`solve_ivp` facade.
-  RK45/DOPRI/AB4 retain their method identity; the wrapper validates their
-  ExprLegacy/Lambdify, Dense, Sequential contract and forwards step size,
-  stop conditions and neighborhood tolerance. It rejects unsupported AOT,
-  AtomNative, parallelism, telemetry, parameter rebinding and stiff methods.
-  The result is detached and NumPy-capable. Native ODE_api2 has no telemetry or
-  restart/continuation API; the fixed-step loop may overshoot `t_end` by less
-  than one step, which is documented and tested. The contract test exposed an
-  incorrect Dormand-Prince tableau in the native DOPRI implementation; its
-  seven-stage fifth-order weights are corrected and covered by a core test.
+  RK45/DOPRI/AB4 retain their fixed-step identity; adaptive DOP853 is a
+  separate method with tolerances, first/max-step controls, typed failures,
+  native step statistics and opt-in callback telemetry. The wrapper validates
+  ExprLegacy/Lambdify, Dense, Sequential and forwards stop conditions. It
+  rejects unsupported AOT, AtomNative, parameter rebinding and stiff methods.
+  Results are detached and NumPy-capable. Fixed-step methods may overshoot
+  `t_end`; DOP853 clips its final step and currently returns accepted mesh
+  points without dense output. An analytic exponential plus BDF A/B regression
+  covers the Rust route and Python contract tests cover tolerances and stats.
   Stiff methods remain on their native direct APIs.
 
 ## 5. BVP solver family
@@ -474,7 +474,7 @@ concrete adapter.
 | `ShootingBvpSolver` | ExprLegacy/AtomNative, Lambdify, Dense, Sequential/Parallel, native telemetry and logging | No AOT, continuation, or Python numerical callback route; intended for scalar/very small systems | no missing setting found in the current native ShootingBVP API |
 | `BvpDampSolver` / `BvpDampNaiveSolver` / `BvpDampFrozenSolver` | Damped route: ExprLegacy/AtomNative, Lambdify/AOT, Dense/Sparse/Banded, execution policies, damping/Jacobian budgets, six grid methods, bounds and adaptive refinement. Naive and Frozen routes: symbolic frontend/execution/layout axes, fixed uniform mesh, native prepare, fixed-input rebind and prepared iterate replacement; all three expose `solve_with_parameter_values` for rebind plus last-successful-profile warm start and telemetry; Frozen also exposes all five native reuse policies | Non-standard sparse factorization belongs to BVP_sci and is typed-rejected here; Naive/Frozen do not claim adaptive mesh or interval restart | Native `GeneratedBackendConfig` lacks direct AOT output-directory support; fixed-mesh routes cannot replace their interval in place |
 | `BvpSolverRequest` / `PreparedBvpSolver` | Typed native `BVP_api` request for Damped, Frozen, symbolic BVP_sci and BVP_CorrectionNewton; node-major guesses/results, fixed parameter binding/rebinding and ordered per-route loops, BVP_sci free-parameter callbacks, native telemetry maps/scopes, typed errors and native postprocessing plan; EN/RU guide and route-selection examples | Python numerical callbacks, experimental sparse factorizations and arbitrary nonuniform Damped/Frozen meshes remain explicitly unsupported by this facade; direct solver APIs retain their own routes | Python contracts cover CorrectionNewton continuation failures/checkpoints and Off/Counters/Detailed telemetry on both symbolic frontends; general route telemetry, Damped/Frozen schemas, BVP_sci consistency and AOT policy forwarding remain covered; boundary-overhead measurement remains open |
-| `UniversalNonStiffSolver` | ODE_api2 RK45/DOPRI/AB4; ExprLegacy/Lambdify, Dense, Sequential; step size and named stop conditions | No AOT, AtomNative, parallel mode, telemetry, parameters, restart or continuation; fixed-step end may overshoot by less than one step | Stiff methods use their direct solver wrappers; do not route stiff workloads through ODE_api2 |
+| `UniversalNonStiffSolver` | ODE_api2 RK45/DOPRI/AB4 fixed-step and DOP853 adaptive; ExprLegacy/Lambdify, Dense, Sequential; named stop conditions; DOP853 tolerances, step bounds, native stats, opt-in callback telemetry | No AOT, AtomNative, parallel mode, parameter rebinding, restart or continuation; fixed-step methods may overshoot, DOP853 returns accepted mesh points without dense output | Stiff methods use their direct solver wrappers; do not route stiff workloads through ODE_api2 |
 
 The policy is now explicit: a convenience constructor may choose native
 defaults, but every accepted option is applied, and every route that the

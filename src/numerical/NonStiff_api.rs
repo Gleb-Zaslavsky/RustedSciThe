@@ -9,6 +9,46 @@ use nalgebra::{DMatrix, DVector};
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
+
+mod dop853;
+pub use dop853::{Dop853Error, Dop853Options, Dop853Solution, Dop853Statistics, Dop853Status};
+
+#[derive(Debug)]
+pub enum NonStiffError {
+    Backend(IvpBackendError),
+    Dop853(Dop853Error),
+}
+
+impl std::fmt::Display for NonStiffError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Backend(error) => write!(f, "{error}"),
+            Self::Dop853(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for NonStiffError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Backend(error) => Some(error),
+            Self::Dop853(error) => Some(error),
+        }
+    }
+}
+
+impl From<IvpBackendError> for NonStiffError {
+    fn from(value: IvpBackendError) -> Self {
+        Self::Backend(value)
+    }
+}
+
+impl From<Dop853Error> for NonStiffError {
+    fn from(value: Dop853Error) -> Self {
+        Self::Dop853(value)
+    }
+}
+
 pub struct nonstiffODE {
     eq_system: Vec<Expr>,
     values: Vec<String>,
@@ -26,11 +66,15 @@ pub struct nonstiffODE {
     stop_condition: Option<HashMap<String, f64>>,
     neighborhood_check: f64,
     symbolic_telemetry: IvpTelemetry,
+    dop853_options: Dop853Options,
+    dop853_solver: Option<dop853::Dop853>,
+    dop853_rhs: Option<Box<dyn Fn(f64, &DVector<f64>) -> DVector<f64>>>,
 }
 pub enum Solvers {
     RK45(RK45),
     DOPRI(DormandPrince),
     AB4(AdamsBashforth4),
+    DOP853,
 }
 impl Solvers {
     pub fn new(name: &str) -> Solvers {
@@ -42,6 +86,7 @@ impl Solvers {
             "RK45" => Ok(Solvers::RK45(RK45::new())),
             "DOPRI" => Ok(Solvers::DOPRI(DormandPrince::new())),
             "AB4" => Ok(Solvers::AB4(AdamsBashforth4::new())),
+            "DOP853" => Ok(Solvers::DOP853),
             _ => Err(IvpBackendError::InvalidArgumentSchema {
                 message: format!("unsupported non-stiff solver method `{name}`"),
             }),
@@ -173,6 +218,12 @@ impl nonstiffODE {
             stop_condition: stop_condition,
             neighborhood_check: 1e-3,
             symbolic_telemetry: IvpTelemetry::disabled(),
+            dop853_options: Dop853Options {
+                max_step: h_step,
+                ..Dop853Options::default()
+            },
+            dop853_solver: None,
+            dop853_rhs: None,
         })
     }
 
@@ -198,9 +249,19 @@ impl nonstiffODE {
     }
 
     /// Enables shared IVP telemetry for symbolic preparation and RHS callback
-    /// work. This legacy integrator does not expose step-level counters.
+    /// work; adaptive DOP853 also records accepted/rejected steps.
     pub fn set_symbolic_telemetry(&mut self, telemetry: IvpTelemetry) {
         self.symbolic_telemetry = telemetry;
+    }
+
+    /// Sets adaptive DOP853 controls. These settings are ignored by the
+    /// historical fixed-step RK45/DOPRI/AB4 routes.
+    pub fn set_dop853_options(&mut self, options: Dop853Options) {
+        self.dop853_options = options;
+    }
+
+    pub fn dop853_statistics(&self) -> Option<&Dop853Statistics> {
+        self.dop853_solver.as_ref().map(dop853::Dop853::statistics)
     }
 
     /// Returns a snapshot of symbolic preparation and RHS callback telemetry.
@@ -233,6 +294,9 @@ impl nonstiffODE {
             let mut solver_instance = AdamsBashforth4::new();
             solver_instance.set_initial(fun, self.y0.clone(), self.t0, self.h_step);
             self.solver_instance = Solvers::AB4(solver_instance);
+        } else if self.method.eq_ignore_ascii_case("DOP853") {
+            self.solver_instance = Solvers::DOP853;
+            self.dop853_rhs = Some(fun);
         }
         Ok(())
     }
@@ -260,6 +324,9 @@ impl nonstiffODE {
                 Solvers::AB4(ab4) => {
                     ab4.step(self.t_bound, &mut self.status, &mut self.message);
                 }
+                Solvers::DOP853 => {
+                    unreachable!("adaptive DOP853 is driven by its fallible solve path")
+                }
             };
 
             let current_y = match &self.solver_instance {
@@ -284,6 +351,7 @@ impl nonstiffODE {
                     y.push(y_i.clone());
                     y_i
                 }
+                Solvers::DOP853 => unreachable!("adaptive DOP853 bypasses the legacy loop"),
             };
 
             // Check stop condition first, before checking solver status
@@ -313,8 +381,56 @@ impl nonstiffODE {
         self.y_result = y_res;
     }
 
-    pub fn try_solve(&mut self) -> Result<(), IvpBackendError> {
+    pub fn try_solve(&mut self) -> Result<(), NonStiffError> {
         self.try_generate()?;
+        if self.method.eq_ignore_ascii_case("DOP853") {
+            let stop_condition = self.stop_condition.as_ref().map(|conditions| {
+                let indexes: Vec<(usize, f64)> = conditions
+                    .iter()
+                    .filter_map(|(name, target)| {
+                        self.values
+                            .iter()
+                            .position(|value| value == name)
+                            .map(|index| (index, *target))
+                    })
+                    .collect();
+                let tolerance = self.neighborhood_check;
+                move |y: &DVector<f64>| {
+                    indexes
+                        .iter()
+                        .any(|(index, target)| (y[*index] - target).abs() <= tolerance)
+                }
+            });
+            self.dop853_solver = Some(dop853::Dop853::new(
+                self.dop853_rhs
+                    .take()
+                    .expect("DOP853 RHS is prepared before solve"),
+                self.y0.clone(),
+                self.t0,
+                self.t_bound,
+                self.dop853_options,
+                self.symbolic_telemetry.clone(),
+            )?);
+            let solution = self
+                .dop853_solver
+                .as_mut()
+                .expect("DOP853 solver is initialized during symbolic preparation")
+                .solve(
+                    stop_condition
+                        .as_ref()
+                        .map(|predicate| predicate as &dyn Fn(&DVector<f64>) -> bool),
+                )?;
+            self.status = match solution.status {
+                Dop853Status::Finished => "finished".to_owned(),
+                Dop853Status::StoppedByCondition => "stopped_by_condition".to_owned(),
+            };
+            self.t_result = DVector::from_vec(solution.times);
+            let rows = solution.states.len();
+            let cols = self.y0.len();
+            let flat: Vec<f64> = solution.states.into_iter().flatten().collect();
+            self.y_result = DMatrix::from_row_slice(rows, cols, &flat);
+            return Ok(());
+        }
         self.main_loop();
         Ok(())
     }
