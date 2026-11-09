@@ -565,6 +565,10 @@ they do not silently flatten the two BVP APIs.
 - [x] Extend failure matrices and long-series statistics coverage to every
   solver-specific fitting branch, including reusable Fitting rebinds and
   repeated one-shot Gavin/VarPro constructions.
+- [x] Preserve the native post-fit evaluator on `UniversalFittingSolution` and
+  expose evaluate, uniform-range, explicit extrapolation and gap-fill methods
+  as owned NumPy `(x, values)` arrays; verify sample-major shape and typed
+  rejection in the cross-method Python contract.
 
 - [x] Audit `NonlinearSolver` against the complete `Nonlinear_systems` Rust
   surface: all solver methods, ExprLegacy/AtomNative frontends, preparation

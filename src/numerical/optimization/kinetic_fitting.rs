@@ -362,7 +362,8 @@ impl Fit {
             UniversalFittingResult::GAVIN(fit) => {
                 self.map_of_solutions = Some(
                     fit.parameter_names
-                        .into_iter()
+                        .iter()
+                        .cloned()
                         .zip(fit.fit.parameters.iter().copied())
                         .collect(),
                 );

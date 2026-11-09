@@ -123,6 +123,25 @@ solution = fit.build()
 print(solution.method, solution.solution_map())
 ```
 
+The detached `UniversalFittingSolution` also retains the fitted model for
+post-fit evaluation. The methods return owned NumPy arrays `(x, values)`, where
+`values` has shape `(samples, equations)`:
+
+```python
+x_eval, values = solution.evaluate_at([0.25, 0.75])
+x_grid, grid_values = solution.evaluate_uniform_range(0.0, 2.0, 9)
+x_extra, extra_values = solution.extrapolate_uniform_range(2.5, 4.5, 5)
+gap_results = solution.fill_missing_intervals([(0.5, 1.0, 4), (1.5, 2.0, 3)])
+```
+
+The uniform-range count includes both endpoints. Gap tuples are
+`(start, end, missing_points)` and count only interior samples; ranges must be
+inside the observed domain and cannot contain fitted observations or overlap.
+Extrapolation requires every requested point to lie strictly outside the
+training domain, exposed as `solution.training_domain`. These operations reuse
+the fitted coefficients and compiled model; they do not fit again. Extrapolated
+values are not physical-validity or confidence-bound guarantees.
+
 ## Frontends, logging and results
 
 Where supported, select ExprLegacy or AtomNative and sequential/parallel
@@ -154,7 +173,9 @@ invalid configuration or symbolic preparation errors.
 Run `examples/nonlinear_parameter_sweep.py` for prepared nonlinear continuation,
 `examples/lm_observation_fit.py` for reusable symbolic least squares,
 `examples/gavin_exponential_fit.py` for sampled-data fitting with a positive
-parameter, `examples/varpro_exponential_fit.py` for separable fitting, and
-`examples/universal_fitting_routes.py` for method selection. The shorter
+parameter, `examples/varpro_exponential_fit.py` for separable fitting,
+`examples/universal_fitting_routes.py` for method selection, and
+`examples/universal_fitting_post_fit.py` for post-fit evaluation and gap fill.
+The shorter
 `examples/nonlinear_and_fitting.py` remains a minimal starting point. See the
 native nonlinear and optimization guides for algorithm details.

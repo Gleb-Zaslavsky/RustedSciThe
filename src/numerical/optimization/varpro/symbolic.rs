@@ -11,6 +11,7 @@ use thiserror::Error as ThisError;
 use crate::numerical::Nonlinear_systems::least_squares::{
     LeastSquaresError, LeastSquaresTerminationReason, LevenbergMarquardt,
 };
+use crate::numerical::optimization::fitted_model::{FittedModel, FittedModelError};
 use crate::numerical::optimization::varpro::fit::FitResult;
 use crate::numerical::optimization::varpro::model::SeparableModel;
 use crate::numerical::optimization::varpro::model::builder::SeparableModelBuilder;
@@ -74,6 +75,15 @@ pub enum SymbolicVarProError {
         #[source]
         source: Option<LeastSquaresError>,
     },
+
+    /// A successful VarPro solve did not expose the model coefficients needed
+    /// to retain its post-fit evaluation function.
+    #[error("successful symbolic VarPro fit did not expose coefficients for post-fit evaluation")]
+    FitOutputUnavailable,
+
+    /// The fitted model could not be wrapped for reusable post-fit evaluation.
+    #[error(transparent)]
+    FittedModel(#[from] FittedModelError),
 }
 
 #[derive(Clone, Debug)]
@@ -306,6 +316,57 @@ impl SymbolicVarProBuilder {
                     source: fit.minimization_report.error,
                 }
             })
+    }
+
+    /// Build a reusable scalar fitted evaluator without changing the fit result.
+    pub(crate) fn fitted_model(
+        &self,
+        fit: &SymbolicVarProFit,
+    ) -> Result<FittedModel, SymbolicVarProError> {
+        let coefficients = fit
+            .linear_coefficients()
+            .ok_or(SymbolicVarProError::FitOutputUnavailable)?;
+        let parameters = fit.nonlinear_parameters();
+        let expected_coefficients = self.basis_functions.len() + self.invariant_functions.len();
+        if coefficients.len() != expected_coefficients {
+            return Err(SymbolicVarProError::FitOutputUnavailable);
+        }
+
+        let mut equation: Option<Expr> = None;
+        for (index, basis) in self.basis_functions.iter().enumerate() {
+            let parameter_index = self
+                .parameter_names
+                .iter()
+                .position(|name| name == &basis.parameter_name)
+                .ok_or(SymbolicVarProError::FitOutputUnavailable)?;
+            let term = Expr::Const(coefficients[index])
+                * basis.expression.clone().substitute_variable(
+                    &basis.parameter_name,
+                    &Expr::Const(parameters[parameter_index]),
+                );
+            equation = Some(match equation {
+                Some(current) => current + term,
+                None => term,
+            });
+        }
+        for (offset, invariant) in self.invariant_functions.iter().enumerate() {
+            let term =
+                Expr::Const(coefficients[self.basis_functions.len() + offset]) * invariant.clone();
+            equation = Some(match equation {
+                Some(current) => current + term,
+                None => term,
+            });
+        }
+
+        let x_data = self
+            .x_data
+            .as_ref()
+            .ok_or(SymbolicVarProError::XDataMissing)?;
+        Ok(FittedModel::from_bound_expressions(
+            vec![equation.ok_or(SymbolicVarProError::FitOutputUnavailable)?],
+            self.x_name.clone(),
+            x_data.iter().copied().collect(),
+        )?)
     }
 
     /// Alias for [`solve`](Self::solve) for users coming from fitting-style APIs.

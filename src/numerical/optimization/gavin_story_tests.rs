@@ -520,7 +520,10 @@ fn execute(
         max_parameter_error < 2e-2,
         "parameter error={max_parameter_error}"
     );
-    let telemetry = fit.telemetry.expect("story enables solve telemetry");
+    let telemetry = fit
+        .telemetry
+        .as_ref()
+        .expect("story enables solve telemetry");
     GavinStoryRow {
         frontend: match frontend {
             SymbolicLambdifyFrontend::ExprLegacy => "ExprLegacy",

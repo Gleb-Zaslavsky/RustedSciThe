@@ -15,6 +15,9 @@ use crate::numerical::Nonlinear_systems::symbolic::{
 };
 use crate::numerical::SolverTelemetryMode;
 use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
+use crate::numerical::optimization::fitted_model::{
+    FittedBackend, FittedModel, FittedModelError, FittedValues, MissingInterval,
+};
 use crate::numerical::optimization::gavin_fitting::{GavinSymbolicFitResult, GavinSymbolicFitting};
 use crate::numerical::optimization::lm_gavin::GavinLmUpdatePolicy;
 use crate::numerical::optimization::sym_fitting::{
@@ -43,14 +46,63 @@ pub enum Method {
 /// Result returned by [`UniversalFitting::build`].
 pub enum UniversalFittingResult {
     /// The classic symbolic Levenberg-Marquardt pipeline.
-    LM(Fitting),
+    LM(FittedBackend<Fitting>),
     /// The symbolic VarPro pipeline.
-    VARPRO(SymbolicVarProFit),
+    VARPRO(FittedBackend<SymbolicVarProFit>),
     /// Gavin's independently controlled symbolic LM fit.
-    GAVIN(GavinSymbolicFitResult),
+    GAVIN(FittedBackend<GavinSymbolicFitResult>),
 }
 
 impl UniversalFittingResult {
+    /// Borrow the reusable fitted-model evaluator shared across backends.
+    pub fn fitted_model(&self) -> &FittedModel {
+        match self {
+            Self::LM(result) => result.fitted_model(),
+            Self::VARPRO(result) => result.fitted_model(),
+            Self::GAVIN(result) => result.fitted_model(),
+        }
+    }
+
+    /// Evaluate fitted equations at arbitrary coordinates in request order.
+    pub fn evaluate_at(&self, x: &[f64]) -> Result<FittedValues, FittedModelError> {
+        self.fitted_model().evaluate_at(x)
+    }
+
+    /// Evaluate a uniform range including both endpoints.
+    pub fn evaluate_uniform_range(
+        &self,
+        start: f64,
+        end: f64,
+        total_points: usize,
+    ) -> Result<FittedValues, FittedModelError> {
+        self.fitted_model()
+            .evaluate_uniform_range(start, end, total_points)
+    }
+
+    /// Evaluate points strictly outside the training-data domain.
+    pub fn extrapolate_at(&self, x: &[f64]) -> Result<FittedValues, FittedModelError> {
+        self.fitted_model().extrapolate_at(x)
+    }
+
+    /// Evaluate a uniform range entirely outside the training-data domain.
+    pub fn extrapolate_uniform_range(
+        &self,
+        start: f64,
+        end: f64,
+        total_points: usize,
+    ) -> Result<FittedValues, FittedModelError> {
+        self.fitted_model()
+            .extrapolate_uniform_range(start, end, total_points)
+    }
+
+    /// Reconstruct interior values for caller-specified missing intervals.
+    pub fn fill_missing_intervals(
+        &self,
+        intervals: &[MissingInterval],
+    ) -> Result<Vec<FittedValues>, FittedModelError> {
+        self.fitted_model().fill_missing_intervals(intervals)
+    }
+
     /// Return the fitted parameter map regardless of backend.
     ///
     /// LM returns its symbolic parameter map directly. VarPro returns the
@@ -101,6 +153,9 @@ pub enum UniversalFittingError {
     /// A Gavin-specific symbolic preparation or solve failed.
     #[error(transparent)]
     Gavin(#[from] crate::numerical::optimization::lm_gavin::GavinLmError),
+    /// A successful backend fit could not produce its reusable evaluator.
+    #[error(transparent)]
+    FittedModel(#[from] FittedModelError),
     /// A requested shared option has no equivalent in the selected controller.
     #[error("option '{option}' is not supported by fitting method {method:?}")]
     UnsupportedOption {
@@ -475,7 +530,20 @@ impl UniversalFitting {
                 if let Some(policy) = self.observation_policy {
                     lm = lm.with_observation_policy(policy);
                 }
-                Ok(UniversalFittingResult::LM(lm.try_build()?))
+                let fit = lm.try_build()?;
+                let parameters = fit
+                    .solution_map_ref()
+                    .ok_or(FittedModelError::MissingFittedParameters)?;
+                let fitted_model = FittedModel::from_parameterized_expressions(
+                    &fit.equations,
+                    fit.arg.clone(),
+                    parameters,
+                    fit.x_data.clone(),
+                )?;
+                Ok(UniversalFittingResult::LM(FittedBackend::new(
+                    fit,
+                    fitted_model,
+                )))
             }
             Method::VARPRO => {
                 if self.frontend != SymbolicLambdifyFrontend::ExprLegacy {
@@ -509,7 +577,8 @@ impl UniversalFitting {
                 if let Some(scale_diag) = self.scale_diag {
                     solver = solver.with_scale_diag(scale_diag);
                 }
-                let fit = varpro.solve_with_solver(solver)?;
+                let fit = varpro.clone().solve_with_solver(solver)?;
+                let fitted_model = varpro.fitted_model(&fit)?;
                 if self.logging_enabled {
                     log::info!(
                         "UniversalFitting VarPro finished: termination={:?}, objective={:.6e}, evaluations={}",
@@ -518,7 +587,10 @@ impl UniversalFitting {
                         fit.minimization_report.number_of_evaluations
                     );
                 }
-                Ok(UniversalFittingResult::VARPRO(fit))
+                Ok(UniversalFittingResult::VARPRO(FittedBackend::new(
+                    fit,
+                    fitted_model,
+                )))
             }
             Method::GAVIN => {
                 if self.telemetry_mode != LeastSquaresTelemetryMode::Off {
@@ -545,16 +617,32 @@ impl UniversalFitting {
                     self.tolerance.unwrap_or(1e-3),
                     1e-1,
                 ));
-                Ok(UniversalFittingResult::GAVIN(
-                    self.gavin
-                        .with_equations(self.equations)
-                        .with_frontend(self.frontend)
-                        .with_lambdify_execution_policy(self.execution_policy)
-                        .with_telemetry(self.gavin_telemetry_mode)
-                        .with_logging(self.logging_enabled)
-                        .with_solver_controls(controls.0, controls.1, controls.2, controls.3)
-                        .try_solve()?,
-                ))
+                let equations = self.equations;
+                let fit = self
+                    .gavin
+                    .with_equations(equations.clone())
+                    .with_frontend(self.frontend)
+                    .with_lambdify_execution_policy(self.execution_policy)
+                    .with_telemetry(self.gavin_telemetry_mode)
+                    .with_logging(self.logging_enabled)
+                    .with_solver_controls(controls.0, controls.1, controls.2, controls.3)
+                    .try_solve()?;
+                let parameters = fit
+                    .parameter_names
+                    .iter()
+                    .cloned()
+                    .zip(fit.fit.parameters.iter().copied())
+                    .collect::<HashMap<_, _>>();
+                let fitted_model = FittedModel::from_parameterized_expressions(
+                    &equations,
+                    self.lm.arg,
+                    &parameters,
+                    self.lm.x_data,
+                )?;
+                Ok(UniversalFittingResult::GAVIN(FittedBackend::new(
+                    fit,
+                    fitted_model,
+                )))
             }
         }
     }
@@ -570,6 +658,149 @@ impl Default for UniversalFitting {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    #[test]
+    fn post_fit_evaluation_is_shared_by_lm_gavin_and_varpro() {
+        let x = vec![0.0, 0.5, 1.0, 2.0, 3.0, 4.0];
+        let linear_y = x.iter().map(|x| 2.0 * x + 1.0).collect::<Vec<_>>();
+        let exponential_y = x
+            .iter()
+            .map(|x: &f64| 2.5 * (-x / 1.7_f64).exp() + 0.8)
+            .collect::<Vec<_>>();
+
+        let lm = UniversalFitting::new()
+            .with_data(x.clone(), linear_y.clone())
+            .with_equation_str("a*x+b")
+            .with_arg("x")
+            .with_unknowns(["a", "b"])
+            .with_initial_guess(vec![1.0, 0.0])
+            .build()
+            .unwrap();
+        let gavin = UniversalFitting::new()
+            .with_gavin()
+            .with_data(x.clone(), linear_y)
+            .with_equation_str("a*x+b")
+            .with_arg("x")
+            .with_unknowns(["a", "b"])
+            .with_initial_guess(vec![1.0, 0.0])
+            .build()
+            .unwrap();
+        let varpro = UniversalFitting::new()
+            .with_varpro()
+            .with_data(x.clone(), exponential_y)
+            .with_arg("x")
+            .with_parameters(["tau"])
+            .with_initial_guess(vec![1.4])
+            .with_basis_str("tau", "exp(-x/tau)")
+            .with_equation_str("1")
+            .build()
+            .unwrap();
+
+        for result in [&lm, &gavin] {
+            let parameters_before = result.solution_map().unwrap();
+            let training_value = result.evaluate_at(&[1.0]).unwrap();
+            assert_relative_eq!(
+                training_value.values[(0, 0)],
+                parameters_before["a"] + parameters_before["b"],
+                epsilon = 1e-10
+            );
+            let values = result.evaluate_at(&[5.0, -1.0]).unwrap();
+            assert_eq!(values.values.shape(), (2, 1));
+            assert_relative_eq!(
+                values.values[(0, 0)],
+                parameters_before["a"] * 5.0 + parameters_before["b"],
+                epsilon = 1e-10
+            );
+            assert_relative_eq!(
+                values.values[(1, 0)],
+                -parameters_before["a"] + parameters_before["b"],
+                epsilon = 1e-10
+            );
+            let repeated = result.evaluate_at(&[5.0, -1.0]).unwrap();
+            assert_eq!(values.values, repeated.values);
+            assert_eq!(parameters_before, result.solution_map().unwrap());
+            let extrapolated = result.extrapolate_at(&[-1.0, 5.0]).unwrap();
+            assert_relative_eq!(
+                extrapolated.values[(0, 0)],
+                -parameters_before["a"] + parameters_before["b"],
+                epsilon = 1e-10
+            );
+            assert!(result.extrapolate_uniform_range(5.0, 6.0, 3).is_ok());
+            let filled = result
+                .fill_missing_intervals(&[
+                    MissingInterval {
+                        start: 1.0,
+                        end: 2.0,
+                        missing_points: 2,
+                    },
+                    MissingInterval {
+                        start: 3.0,
+                        end: 4.0,
+                        missing_points: 1,
+                    },
+                ])
+                .unwrap();
+            assert_eq!(filled.len(), 2);
+            assert_eq!(filled[0].x.len(), 2);
+            assert_eq!(filled[1].x.len(), 1);
+        }
+
+        let values = varpro.evaluate_at(&[5.0, -1.0]).unwrap();
+        assert_eq!(values.values.shape(), (2, 1));
+        let training_value = varpro.evaluate_at(&[1.0]).unwrap();
+        assert_relative_eq!(
+            training_value.values[(0, 0)],
+            2.5 * (-1.0_f64 / 1.7).exp() + 0.8,
+            epsilon = 1e-5
+        );
+        assert_eq!(
+            varpro.extrapolate_at(&[-1.0, 5.0]).unwrap().x,
+            vec![-1.0, 5.0]
+        );
+        assert_relative_eq!(
+            values.values[(0, 0)],
+            2.5 * (-5.0_f64 / 1.7).exp() + 0.8,
+            epsilon = 1e-5
+        );
+        let filled = varpro
+            .fill_missing_intervals(&[
+                MissingInterval {
+                    start: 1.0,
+                    end: 2.0,
+                    missing_points: 2,
+                },
+                MissingInterval {
+                    start: 3.0,
+                    end: 4.0,
+                    missing_points: 1,
+                },
+            ])
+            .unwrap();
+        assert_eq!(filled.len(), 2);
+        assert_relative_eq!(varpro.solution_map().unwrap()["tau"], 1.7, epsilon = 1e-2);
+    }
+
+    #[test]
+    fn post_fit_evaluation_uses_sample_major_layout_for_multiple_equations() {
+        let x = vec![0.0, 1.0, 2.0, 3.0];
+        // Fitting input is equation-major: y0 samples followed by y1 samples.
+        let y = vec![0.0, 2.0, 4.0, 6.0, 1.0, 2.0, 3.0, 4.0];
+        let result = UniversalFitting::new()
+            .with_data(x, y)
+            .with_equations_str(["a*x", "b+x"])
+            .with_arg("x")
+            .with_unknowns(["a", "b"])
+            .with_initial_guess(vec![1.0, 1.0])
+            .build()
+            .unwrap();
+
+        let evaluated = result.evaluate_at(&[4.0, 0.5]).unwrap();
+        assert_eq!(evaluated.values.shape(), (2, 2));
+        assert_relative_eq!(evaluated.values[(0, 0)], 8.0, epsilon = 1e-7);
+        assert_relative_eq!(evaluated.values[(0, 1)], 5.0, epsilon = 1e-7);
+        assert_relative_eq!(evaluated.values[(1, 0)], 1.0, epsilon = 1e-7);
+        assert_relative_eq!(evaluated.values[(1, 1)], 1.5, epsilon = 1e-7);
+    }
 
     #[test]
     fn universal_observation_policy_is_lm_only_and_preserves_typed_failure() {
@@ -637,7 +868,7 @@ mod tests {
             UniversalFittingResult::GAVIN(_) => panic!("expected LM result"),
         };
 
-        let map = fitting.map_of_solutions.unwrap();
+        let map = fitting.map_of_solutions.as_ref().unwrap();
         assert_relative_eq!(map["a"], 3.0, epsilon = 1e-6);
         assert_relative_eq!(map["b"], 2.0, epsilon = 1e-6);
     }

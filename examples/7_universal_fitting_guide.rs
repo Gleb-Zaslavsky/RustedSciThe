@@ -46,6 +46,7 @@ fn universal_lm() {
 
     let map = lm
         .map_of_solutions
+        .as_ref()
         .expect("LM path should produce a solution map");
     println!("Recovered parameters:");
     println!("  a = {:.6}", map["a"]);

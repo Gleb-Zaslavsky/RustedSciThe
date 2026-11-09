@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use numpy::{PyArray1, PyArray2};
 use pyo3::prelude::*;
 
 use rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresTelemetryMode;
@@ -18,6 +19,9 @@ use rustedscithe_core::numerical::optimization::universal_fitting::{
     Method, UniversalFitting, UniversalFittingError, UniversalFittingResult,
 };
 use rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError;
+use rustedscithe_core::numerical::optimization::{
+    FittedModel, FittedModelError, FittedValues, MissingInterval,
+};
 
 use crate::errors::{
     ExhaustionError, InvalidConfigurationError, InvalidExpressionError, SolverError,
@@ -148,6 +152,9 @@ fn map_error(error: UniversalFittingError) -> PyErr {
         UniversalFittingError::SolverConfiguration(_) => {
             InvalidConfigurationError::new_err(error.to_string())
         }
+        UniversalFittingError::FittedModel(_) => {
+            InvalidConfigurationError::new_err(error.to_string())
+        }
         UniversalFittingError::VarPro(_) | UniversalFittingError::Gavin(_) => {
             SolverError::new_err(error.to_string())
         }
@@ -164,6 +171,7 @@ fn map_error(error: UniversalFittingError) -> PyErr {
 #[pyclass(name = "UniversalFittingSolution", module = "rustedscithe")]
 pub struct PyUniversalFittingSolution {
     method: String,
+    fitted_model: FittedModel,
     solution: Option<HashMap<String, f64>>,
     r_squared: Option<f64>,
     telemetry_mode: SolverTelemetryMode,
@@ -179,6 +187,7 @@ impl PyUniversalFittingSolution {
         telemetry_mode: SolverTelemetryMode,
         result: UniversalFittingResult,
     ) -> Self {
+        let fitted_model = result.fitted_model().clone();
         let (counters, timings_ms, attempt_counters, attempt_timings_ms) = match &result {
             UniversalFittingResult::LM(fitting) => fitting.last_statistics().map_or_else(
                 || (HashMap::new(), HashMap::new(), Vec::new(), Vec::new()),
@@ -227,6 +236,7 @@ impl PyUniversalFittingSolution {
         .to_owned();
         Self {
             method,
+            fitted_model,
             solution: result.solution_map(),
             r_squared: result.r_squared(),
             telemetry_mode,
@@ -235,6 +245,16 @@ impl PyUniversalFittingSolution {
             attempt_counters,
             attempt_timings_ms,
         }
+    }
+
+    fn evaluate_model<T>(
+        &self,
+        stage: &'static str,
+        evaluate: impl FnOnce(&FittedModel) -> Result<T, FittedModelError>,
+    ) -> PyResult<T> {
+        crate::errors::catch_panic(stage, "universal_fitting", "post_fit", || {
+            evaluate(&self.fitted_model).map_err(map_fitted_model_error)
+        })
     }
 }
 
@@ -250,6 +270,88 @@ impl PyUniversalFittingSolution {
     /// cannot provide a named solution map.
     pub fn solution_map(&self) -> Option<HashMap<String, f64>> {
         self.solution.clone()
+    }
+
+    #[getter]
+    /// Minimum and maximum observed x coordinates used by this fitted model.
+    pub fn training_domain(&self) -> (f64, f64) {
+        self.fitted_model.training_domain()
+    }
+
+    /// Evaluate model equations at requested x coordinates.
+    ///
+    /// Returns `(x, values)` as owned NumPy arrays. `values` has shape
+    /// `(number_of_coordinates, number_of_equations)`.
+    pub fn evaluate_at<'py>(
+        &self,
+        py: Python<'py>,
+        x: Vec<f64>,
+    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
+        let values = self.evaluate_model("evaluate", |model| model.evaluate_at(&x))?;
+        fitted_values_to_numpy(py, values)
+    }
+
+    /// Evaluate an evenly spaced range; `total_points` includes both endpoints.
+    pub fn evaluate_uniform_range<'py>(
+        &self,
+        py: Python<'py>,
+        start: f64,
+        end: f64,
+        total_points: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
+        let values = self.evaluate_model("evaluate", |model| {
+            model.evaluate_uniform_range(start, end, total_points)
+        })?;
+        fitted_values_to_numpy(py, values)
+    }
+
+    /// Evaluate coordinates strictly outside the observed training domain.
+    pub fn extrapolate_at<'py>(
+        &self,
+        py: Python<'py>,
+        x: Vec<f64>,
+    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
+        let values = self.evaluate_model("extrapolate", |model| model.extrapolate_at(&x))?;
+        fitted_values_to_numpy(py, values)
+    }
+
+    /// Evaluate an evenly spaced range strictly outside the training domain.
+    pub fn extrapolate_uniform_range<'py>(
+        &self,
+        py: Python<'py>,
+        start: f64,
+        end: f64,
+        total_points: usize,
+    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
+        let values = self.evaluate_model("extrapolate", |model| {
+            model.extrapolate_uniform_range(start, end, total_points)
+        })?;
+        fitted_values_to_numpy(py, values)
+    }
+
+    /// Fill explicit internal gaps given as `(start, end, missing_points)` tuples.
+    ///
+    /// Each item in the returned list is an `(x, values)` pair of owned NumPy
+    /// arrays. `missing_points` counts only points strictly inside the gap.
+    pub fn fill_missing_intervals<'py>(
+        &self,
+        py: Python<'py>,
+        intervals: Vec<(f64, f64, usize)>,
+    ) -> PyResult<Vec<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)>> {
+        let intervals = intervals
+            .into_iter()
+            .map(|(start, end, missing_points)| MissingInterval {
+                start,
+                end,
+                missing_points,
+            })
+            .collect::<Vec<_>>();
+        self.evaluate_model("fill_missing_intervals", |model| {
+            model.fill_missing_intervals(&intervals)
+        })?
+        .into_iter()
+        .map(|values| fitted_values_to_numpy(py, values))
+        .collect()
     }
 
     #[getter]
@@ -304,6 +406,41 @@ impl PyUniversalFittingSolution {
             ),
         ])
     }
+}
+
+fn fitted_values_to_numpy<'py>(
+    py: Python<'py>,
+    values: FittedValues,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
+    let rows = (0..values.values.nrows())
+        .map(|row| {
+            (0..values.values.ncols())
+                .map(|column| values.values[(row, column)])
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    Ok((
+        crate::numpy_support::vector(py, &values.x),
+        crate::numpy_support::matrix(py, &rows)?,
+    ))
+}
+
+fn map_fitted_model_error(error: FittedModelError) -> PyErr {
+    let native_kind = native_variant(&error);
+    let message = error.to_string();
+    let mapped = match &error {
+        FittedModelError::NonFinitePrediction { .. }
+        | FittedModelError::AllocationFailed { .. }
+        | FittedModelError::OutputSizeOverflow => SolverError::new_err(message.clone()),
+        _ => InvalidConfigurationError::new_err(message),
+    };
+    annotate_native(
+        mapped,
+        "evaluate",
+        "universal_fitting",
+        "native",
+        &native_kind,
+    )
 }
 
 /// Fluent Python adapter over the native Rust `UniversalFitting` builder.

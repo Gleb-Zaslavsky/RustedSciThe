@@ -1043,6 +1043,25 @@ def test_universal_fitting_facade_dispatches_native_routes(method, frontend):
     assert result.telemetry_mode == "detailed"
     assert result.telemetry_counters()
     assert result.telemetry_timings_ms()
+    assert result.training_domain == pytest.approx((0.0, 2.2))
+    eval_x, eval_y = result.evaluate_at([0.1, 0.3])
+    assert eval_x.shape == (2,)
+    assert eval_y.shape == (2, 1)
+    assert np.all(np.isfinite(eval_y))
+    grid_x, grid_y = result.evaluate_uniform_range(0.0, 1.0, 5)
+    assert grid_x.tolist() == pytest.approx([0.0, 0.25, 0.5, 0.75, 1.0])
+    assert grid_y.shape == (5, 1)
+    extrap_x, extrap_y = result.extrapolate_at([2.4, 2.6])
+    assert extrap_x.tolist() == pytest.approx([2.4, 2.6])
+    assert extrap_y.shape == (2, 1)
+    restored = result.fill_missing_intervals([(0.05, 0.15, 3), (0.65, 0.75, 2)])
+    assert len(restored) == 2
+    assert restored[0][0].shape == (3,)
+    assert restored[0][1].shape == (3, 1)
+    assert restored[1][0].shape == (2,)
+    assert restored[1][1].shape == (2, 1)
+    with pytest.raises(InvalidConfigurationError, match="inside the training domain"):
+        result.extrapolate_at([1.0])
     assert solver.is_built()
     with pytest.raises(SolverError, match="one-shot"):
         solver.build()
@@ -5995,7 +6014,19 @@ def test_fitting_and_varpro_pyo3_docs_cover_lifecycle_results_and_telemetry():
             ),
         ),
         (UniversalFitting, ("with_data", "with_unknowns", "with_equation_str", "with_equations_str", "with_polynomial", "with_basis_str", "with_invariant_str", "with_frontend", "with_gavin_solver_controls", "build")),
-        (UniversalFittingSolution, ("solution_map", "diagnostics")),
+        (
+            UniversalFittingSolution,
+            (
+                "solution_map",
+                "diagnostics",
+                "training_domain",
+                "evaluate_at",
+                "evaluate_uniform_range",
+                "extrapolate_at",
+                "extrapolate_uniform_range",
+                "fill_missing_intervals",
+            ),
+        ),
     )
     for exposed_type, method_names in documented:
         assert exposed_type.__doc__ and len(exposed_type.__doc__.strip()) > 40

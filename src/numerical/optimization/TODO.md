@@ -1,5 +1,51 @@
 # Optimization TODO
 
+## 2026-11-09 Post-fit Evaluation, Extrapolation, and Gap Restoration
+
+### Contract and module boundary
+
+- [x] Add a focused `fitted_model.rs` module for post-fit evaluation rather
+  than expanding `universal_fitting.rs`. Keep `UniversalFitting` as the
+  fitting/configuration facade and have its result delegate to a reusable
+  fitted-model evaluator.
+- [x] Preserve enough fitted model state after a successful fit to evaluate
+  with LM, Gavin, and VarPro. Reuse prepared/compiled callbacks or basis
+  functions; do not repeat symbolic preparation or lambdification on each
+  evaluation call.
+- [x] Provide one common arbitrary-coordinate evaluation operation (proposed
+  name: `evaluate_at`) as the foundation for extrapolation and filling gaps.
+  Preserve caller coordinate order and return the coordinates together with
+  clearly shaped multi-equation values.
+- [x] Add a uniform-range convenience operation over the common evaluator.
+  Its sample count means total returned points, including both endpoints.
+- [x] Add explicit missing-interval filling over one or more caller-supplied
+  ranges. Do not infer gaps from sparse/nonuniform x data. For this operation,
+  the requested count means strictly interior missing points; observed range
+  endpoints are not duplicated. Return each reconstructed range with its x
+  coordinates and fitted values.
+- [x] Document that extrapolation evaluates the fitted model outside the data
+  domain but does not imply physical validity or provide confidence bounds.
+
+### Backend readiness and correctness gates
+
+- [x] Audit how LM, Gavin, and VarPro retain their fitted symbolic model and
+  parameters. In particular, make arbitrary-x evaluation possible for VarPro's
+  invariant/basis functions and fitted linear coefficients, and retain the
+  expression/model information currently absent from the Gavin result.
+- [x] Add typed failures for evaluation before a successful fit, invalid or
+  non-finite coordinates, invalid uniform ranges/counts, and model evaluation
+  failures. Do not panic or encode failures as fabricated numeric values.
+- [x] Add analytic correctness tests for LM, Gavin, and VarPro covering
+  evaluation at training points, interpolation, left/right extrapolation, a
+  generated uniform range, and multiple explicitly specified internal gaps.
+- [x] Verify the new evaluation calls do not rerun fitting, mutate fitted
+  coefficients, or alter predictions at original data points. Check the
+  returned multi-equation layout explicitly.
+- [x] Record the API and its limitations in the Rust and Python optimization
+  guides, expose it through Python bindings, and add runnable examples showing
+  fit once, then evaluate/extrapolate and restore missing ranges without fitting
+  again.
+
 ## 2026-10-16 Shared Telemetry Mode Contract
 
 - [x] Replace Gavin's binary telemetry switch with the shared

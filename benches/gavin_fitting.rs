@@ -90,7 +90,10 @@ fn measure(
         for (actual, expected) in fit.fit.parameters.iter().zip([2.0, 0.5, 1.0, 2.0]) {
             max_error = max_error.max((actual - expected).abs());
         }
-        let stats = fit.telemetry.expect("benchmark enables solver telemetry");
+        let stats = fit
+            .telemetry
+            .as_ref()
+            .expect("benchmark enables solver telemetry");
         prepare.push(fit.preparation.preparation_duration.as_secs_f64() * 1e3);
         solve.push(stats.total_time.as_secs_f64() * 1e3);
         objective.push(stats.objective_time.as_secs_f64() * 1e3);

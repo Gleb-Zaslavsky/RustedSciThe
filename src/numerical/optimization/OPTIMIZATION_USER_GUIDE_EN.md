@@ -209,6 +209,42 @@ let linear_coefficients = fit
 Use the dedicated `SymbolicVarProBuilder` API when you need its lower-level
 model construction or solver configuration.
 
+## Evaluate a fitted model after fitting
+
+Every `UniversalFittingResult` retains a reusable fitted-model evaluator for
+LM, Gavin, and VarPro. Evaluation does not rerun fitting; the symbolic
+expressions are compiled lazily on the first request and then reused. Values
+are returned sample-major: `values[(sample, equation)]`.
+
+```rust,ignore
+use RustedSciThe::numerical::optimization::{MissingInterval, UniversalFitting};
+
+let fit = UniversalFitting::new()
+    .with_data(vec![0.0, 1.0, 2.0, 4.0], vec![1.0, 3.5, 6.0, 11.0])
+    .with_equation_str("a*x+b")
+    .with_arg("x")
+    .with_unknowns(["a", "b"])
+    .with_initial_guess(vec![1.0, 1.0])
+    .build()?;
+
+let values = fit.evaluate_at(&[0.5, 1.5])?;
+let grid = fit.evaluate_uniform_range(0.0, 2.0, 9)?; // 9 total points, endpoints included
+let right = fit.extrapolate_uniform_range(4.0, 6.0, 5)?;
+let gaps = fit.fill_missing_intervals(&[MissingInterval {
+    start: 2.0,
+    end: 4.0,
+    missing_points: 4, // interior points only; endpoints are not duplicated
+}])?;
+```
+
+`evaluate_at` supports interpolation and extrapolation while preserving request
+order. The explicit `extrapolate_*` methods additionally require every point to
+be strictly outside the observed x-domain. Gap filling requires ranges inside
+that domain and rejects ranges containing observed samples or overlapping one
+another. Extrapolated values are model predictions, not a guarantee of physical
+validity or confidence bounds. See `cargo run --example
+universal_fitting_post_fit` for a complete runnable example.
+
 ## Telemetry, logging, and errors
 
 Telemetry and logging are disabled by default. Enable telemetry explicitly:

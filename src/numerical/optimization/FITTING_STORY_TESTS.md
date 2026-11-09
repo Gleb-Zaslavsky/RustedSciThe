@@ -4,6 +4,32 @@ This document records correctness and performance evidence for the canonical
 `optimization::sym_fitting::Fitting` adapter. Gavin has a separate controller
 and its evidence remains in `GAVIN_STORY_TESTS.md`.
 
+## Post-fit Evaluation and Gap Reconstruction (2026-11-09)
+
+`UniversalFittingResult` now retains a reusable fitted symbolic model for LM,
+Gavin, and VarPro. The first post-fit evaluation lazily lambdifies the already
+parameter-bound expressions; subsequent calls and cloned model handles reuse
+the compiled scalar callbacks. This feature does not rerun fitting and does not
+change fitted coefficients. Results use sample-major layout
+`values[(sample, equation)]`.
+
+The shared API supports arbitrary coordinates, uniform ranges with the total
+point count including both endpoints, explicit left/right extrapolation, and
+one or more caller-specified internal gaps. Gap counts refer only to interior
+points; gaps cannot include observed samples or overlap. Extrapolation is model
+evaluation only and carries no physical-validity or uncertainty guarantee.
+
+Debug correctness coverage is in `fitted_model.rs` and
+`universal_fitting.rs`: coordinate ordering and layout, uniform endpoint
+semantics, analytic LM/Gavin/VarPro predictions, repeated evaluation and
+parameter stability, multiple missing ranges, invalid domains, non-finite
+predictions, unrepresentable floating-point grids, and checked output sizing.
+The user-facing runnable example is
+`cargo run --example universal_fitting_post_fit`; the Python facade exposes the
+same operations as owned NumPy `(x, values)` arrays and has contract coverage
+for all three methods. No performance claim is made; callback compilation is
+lazy and shared specifically to avoid repeated setup.
+
 ## Observation-Batch Pilot (2026-10-24)
 
 ### Hypothesis and Scope

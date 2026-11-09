@@ -8,6 +8,11 @@
 //!
 /// Compatibility re-export; interpolation now lives in `numerical::interpolation`.
 pub use crate::numerical::interpolation::ppoly as PPoly;
+/// Reusable post-fit evaluation, extrapolation, and explicit gap reconstruction.
+pub mod fitted_model;
+pub use fitted_model::{
+    FittedBackend, FittedModel, FittedModelError, FittedValues, MissingInterval,
+};
 /// some special cases of fitting
 pub mod fitting_features;
 /// Compatibility re-export; interpolation now lives in `numerical::interpolation`.

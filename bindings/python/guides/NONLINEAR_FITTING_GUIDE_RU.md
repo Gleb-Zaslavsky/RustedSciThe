@@ -121,6 +121,26 @@ solution = fit.build()
 print(solution.method, solution.solution_map())
 ```
 
+`UniversalFittingSolution` хранит fitted-модель и после завершения подгонки.
+Методы вычислений возвращают собственные NumPy-массивы `(x, values)`, где
+`values` имеет форму `(число_точек, число_уравнений)`:
+
+```python
+x_eval, values = solution.evaluate_at([0.25, 0.75])
+x_grid, grid_values = solution.evaluate_uniform_range(0.0, 2.0, 9)
+x_extra, extra_values = solution.extrapolate_uniform_range(2.5, 4.5, 5)
+gap_results = solution.fill_missing_intervals([(0.5, 1.0, 4), (1.5, 2.0, 3)])
+```
+
+Количество точек равномерного диапазона включает оба конца. Элементы gap-списка
+имеют вид `(start, end, missing_points)`; число задаёт только внутренние точки.
+Диапазоны должны находиться внутри области наблюдений, не включать уже
+использованные точки и не пересекаться. Экстраполяция требует, чтобы все точки
+лежали строго вне области; её границы доступны через `solution.training_domain`.
+Подгонка не запускается повторно: используются те же коэффициенты и скомпилированная
+модель. Экстраполированные значения не гарантируют физическую корректность и не
+являются доверительными границами.
+
 ## Frontend-ы, логирование и результаты
 
 В поддержанных маршрутах можно выбрать ExprLegacy/AtomNative и sequential/
@@ -136,5 +156,6 @@ parallel вычисление символьных выражений. Точк�
 символьной подготовки.
 
 `examples/nonlinear_and_fitting.py` даёт короткий обзор,
-`examples/gavin_observation_fit.py` показывает fitting наблюдений с bounds.
+`examples/gavin_observation_fit.py` показывает fitting наблюдений с bounds,
+`examples/universal_fitting_post_fit.py` — пост-фит вычисления и заполнение gaps.
 Алгоритмические детали см. в native guides нелинейных систем и optimization.

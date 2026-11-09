@@ -278,6 +278,8 @@ native_error_kinds!(rustedscithe_core::numerical::optimization::varpro::symbolic
     rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::ModelBuild(_) => "ModelBuild",
     rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::ProblemBuild(_) => "ProblemBuild",
     rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::SolverFailed { .. } => "SolverFailed",
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::FitOutputUnavailable => "FitOutputUnavailable",
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::FittedModel(_) => "FittedModel",
 });
 
 native_error_kinds!(rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError {
@@ -286,6 +288,30 @@ native_error_kinds!(rustedscithe_core::numerical::optimization::universal_fittin
     rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::SolverConfiguration(_) => "SolverConfiguration",
     rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::Gavin(_) => "Gavin",
     rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::UnsupportedOption { .. } => "UnsupportedOption",
+    rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::FittedModel(_) => "FittedModel",
+});
+
+native_error_kinds!(rustedscithe_core::numerical::optimization::FittedModelError {
+    rustedscithe_core::numerical::optimization::FittedModelError::EmptyModel => "EmptyModel",
+    rustedscithe_core::numerical::optimization::FittedModelError::MissingFittedParameters => "MissingFittedParameters",
+    rustedscithe_core::numerical::optimization::FittedModelError::MissingIndependentVariable => "MissingIndependentVariable",
+    rustedscithe_core::numerical::optimization::FittedModelError::NonFiniteTrainingCoordinate { .. } => "NonFiniteTrainingCoordinate",
+    rustedscithe_core::numerical::optimization::FittedModelError::EmptyCoordinates => "EmptyCoordinates",
+    rustedscithe_core::numerical::optimization::FittedModelError::NonFiniteCoordinate { .. } => "NonFiniteCoordinate",
+    rustedscithe_core::numerical::optimization::FittedModelError::NonFinitePrediction { .. } => "NonFinitePrediction",
+    rustedscithe_core::numerical::optimization::FittedModelError::InvalidUniformRange => "InvalidUniformRange",
+    rustedscithe_core::numerical::optimization::FittedModelError::TooFewUniformPoints { .. } => "TooFewUniformPoints",
+    rustedscithe_core::numerical::optimization::FittedModelError::OutputSizeOverflow => "OutputSizeOverflow",
+    rustedscithe_core::numerical::optimization::FittedModelError::AllocationFailed { .. } => "AllocationFailed",
+    rustedscithe_core::numerical::optimization::FittedModelError::UnrepresentableUniformGrid => "UnrepresentableUniformGrid",
+    rustedscithe_core::numerical::optimization::FittedModelError::UnrepresentableMissingInterval { .. } => "UnrepresentableMissingInterval",
+    rustedscithe_core::numerical::optimization::FittedModelError::MissingPointCountOverflow { .. } => "MissingPointCountOverflow",
+    rustedscithe_core::numerical::optimization::FittedModelError::EmptyMissingIntervals => "EmptyMissingIntervals",
+    rustedscithe_core::numerical::optimization::FittedModelError::InvalidMissingInterval { .. } => "InvalidMissingInterval",
+    rustedscithe_core::numerical::optimization::FittedModelError::MissingIntervalOutsideDomain { .. } => "MissingIntervalOutsideDomain",
+    rustedscithe_core::numerical::optimization::FittedModelError::MissingIntervalContainsObserved { .. } => "MissingIntervalContainsObserved",
+    rustedscithe_core::numerical::optimization::FittedModelError::OverlappingMissingIntervals { .. } => "OverlappingMissingIntervals",
+    rustedscithe_core::numerical::optimization::FittedModelError::CoordinateInsideTrainingDomain { .. } => "CoordinateInsideTrainingDomain",
 });
 
 native_error_kinds!(rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError {

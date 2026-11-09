@@ -7,6 +7,16 @@ Rust solver timings and counters are included only as attribution and
 correctness context. The normative scope is defined in
 [`PYTHON_ARCHITECTURAL_GUIDELINE.md`](PYTHON_ARCHITECTURAL_GUIDELINE.md#5-measure-python-boundary-cost).
 
+## 2026-11-09: Universal Fitting Post-fit Model API
+
+`UniversalFittingSolution` retains the fitted native model and exposes
+`evaluate_at`, uniform-range evaluation, strict extrapolation, and explicit
+internal gap reconstruction. Each returns detached NumPy arrays with
+sample-major shape `(samples, equations)`; gap filling returns one `(x, values)`
+pair per requested range. The contract test exercises LM, Gavin, and VarPro,
+including domain rejection. This is API/correctness coverage, not a Python
+performance claim; no boundary timings were collected for these methods.
+
 ## Reporting Contract
 
 - Run each workload against a clean environment containing the exact installed
