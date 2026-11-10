@@ -1,5 +1,14 @@
 # BVP_api: Hybrid Client Settings And Full-Fidelity Route Contract
 
+## Initial-guess packing regression (2026-11-10)
+
+- [x] Convert the documented Damped state-major free profiles into the native
+  compact node-major Newton ordering in the facade. Mixed left/right boundary
+  conditions are mapped by each state's constrained endpoint; ambiguous
+  boundary topologies that give states unequal free-node counts are rejected
+  with `BvpApiError::InvalidProblem`. Regression coverage asserts the exact
+  native ordering before solve.
+
 ## CorrectionNewton route onboarding (2026-11-05)
 
 ### Parameter continuation and document clients

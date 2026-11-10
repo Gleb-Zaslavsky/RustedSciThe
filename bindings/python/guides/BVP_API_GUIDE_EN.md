@@ -44,10 +44,13 @@ Factories are tagged by native solver family: `damped`, `frozen`, `sci`, or
 ordered `state_variables` list. Equations and state variables must have equal
 length, with one scalar endpoint condition per state.
 
-Guesses are Python/NumPy-friendly node-major rows. Damped and Frozen Newton
-routes expect one row per mesh interval because their native iterates contain
-the reduced unknowns. Both publish a full endpoint-inclusive profile with
-boundary values restored. BVP_sci expects one row per mesh node. Damped and Frozen require
+Guesses are Python/NumPy-friendly row-major lists. For Damped, each state omits
+its own constrained endpoint and its remaining values are ordered by increasing
+mesh coordinate; the list's row index is a free-coordinate ordinal, not a
+shared physical node when boundary sides are mixed. The Rust facade packs this
+state-major profile into the native compact node-major iterate. Frozen uses one
+row per reduced unknown index. Both publish a full endpoint-inclusive profile
+with boundary values restored. BVP_sci expects one row per mesh node. Damped and Frozen require
 a uniform mesh; the native constructors accept endpoints and a count rather
 than arbitrary coordinates. BVP_sci accepts a nonuniform mesh.
 

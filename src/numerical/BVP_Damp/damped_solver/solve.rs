@@ -1115,10 +1115,10 @@ impl NRBVP {
         let use_prepared_iterate = self.prepared_iterate;
         self.prepared_iterate = false;
         if self.grid_refinemens == 0 && !use_prepared_iterate {
-            let y: DMatrix<f64> = self.initial_guess.clone();
-            //  println!("new y = {} \n \n", &y);
-            let y: Vec<f64> = y.iter().cloned().collect();
-            let y: DVector<f64> = DVector::from_vec(y);
+            let y = self.initial_compact_node_major_iterate.clone().map_or_else(
+                || DVector::from_vec(self.initial_guess.iter().copied().collect()),
+                DVector::from_vec,
+            );
             self.result = Some(y.clone()); // save into result in case the very first iteration
             // with the current n_steps will go wrong and we shall need grid refinement
             self.y = Vectors_type_casting(&y.clone(), self.effective_runtime_method());

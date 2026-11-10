@@ -88,7 +88,12 @@ problem; the native solver remains responsible for solvability.
 
 Initial-guess layout is solver-specific by design. Damped and CorrectionNewton expect
 `state_count x interval_count`; Frozen/Naive and BVP_sci expect
-`state_count x mesh_point_count`. Damped and Frozen accept only uniform meshes
+`state_count x mesh_point_count`. For Damped, each row is one state's free
+profile in increasing mesh order, omitting that state's constrained endpoint.
+The facade packs these rows into the native compact node-major Newton vector;
+callers must not pre-pack the native vector into the public matrix. This
+state-major contract requires exactly one endpoint condition per state on the
+Damped route. Damped and Frozen accept only uniform meshes
 because their native constructors take interval endpoints and a point/step
 count. BVP_sci receives the explicit mesh directly. CorrectionNewton also requires a
 uniform mesh and performs a fixed-mesh solve without refinement.

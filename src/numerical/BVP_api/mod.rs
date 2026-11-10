@@ -575,8 +575,11 @@ impl BvpSolverSettings {
     /// Attach a state-major initial guess and construct the matching route.
     ///
     /// The guess shape is route-specific and is validated by
-    /// [`BvpSolver::new`]: Damped expects one column per interval, while Frozen
-    /// and Sci expect one column per mesh node.
+    /// [`BvpSolver::new`]: Damped and CorrectionNewton expect one value per
+    /// free state/interval coordinate, while Frozen and Sci expect one column
+    /// per mesh node. For Damped, each state row follows increasing mesh order
+    /// with its constrained endpoint omitted; the facade converts it to the
+    /// native compact node-major Newton ordering.
     pub fn with_initial_guess(self, initial_guess: DMatrix<f64>) -> BvpSolverConfig {
         match self {
             Self::CorrectionNewton(options) => BvpSolverConfig::CorrectionNewton {
@@ -852,7 +855,8 @@ impl BvpSolver {
                 }
                 require_uniform_interval_mesh(&problem.mesh, "BVP_Damp Damped")?;
                 validate_initial_guess(&problem, &initial_guess, problem.mesh.len() - 1)?;
-                let solver = DampedSolver::new_with_options(
+                let compact_initial_iterate = pack_damped_initial_guess(&problem, &initial_guess)?;
+                let mut solver = DampedSolver::new_with_options(
                     problem.equations.clone(),
                     initial_guess,
                     problem.state_names.clone(),
@@ -863,6 +867,9 @@ impl BvpSolver {
                     problem.mesh.len() - 1,
                     options,
                 );
+                solver
+                    .try_set_initial_compact_node_major_iterate(compact_initial_iterate)
+                    .map_err(BvpApiError::Damped)?;
                 BvpNativeSolver::Damped(solver)
             }
             BvpSolverConfig::Frozen {
@@ -1688,4 +1695,49 @@ fn validate_initial_guess(
         )));
     }
     Ok(())
+}
+
+/// Convert the public state-major Damped profile to its native compact
+/// node-major iterate, omitting each state's fixed endpoint coordinate.
+fn pack_damped_initial_guess(
+    problem: &BvpProblem,
+    state_major: &DMatrix<f64>,
+) -> Result<Vec<f64>, BvpApiError> {
+    let state_count = problem.state_names.len();
+    let interval_count = problem.mesh.len() - 1;
+    let mut constrained_side = vec![None; state_count];
+    for condition in &problem.boundary_conditions {
+        if constrained_side[condition.state]
+            .replace(condition.side)
+            .is_some()
+        {
+            return Err(BvpApiError::InvalidProblem(
+                "BVP_Damp state-major initial guesses require exactly one endpoint condition per state".into(),
+            ));
+        }
+    }
+    if constrained_side.iter().any(Option::is_none) {
+        return Err(BvpApiError::InvalidProblem(
+            "BVP_Damp state-major initial guesses require exactly one endpoint condition per state"
+                .into(),
+        ));
+    }
+
+    let mut compact_node_major = Vec::with_capacity(state_count * interval_count);
+    for node in 0..=interval_count {
+        for (state, side) in constrained_side.iter().enumerate() {
+            let column = match side.expect("validated endpoint condition") {
+                BvpBoundarySide::Left if node == 0 => None,
+                BvpBoundarySide::Left => Some(node - 1),
+                BvpBoundarySide::Right if node == interval_count => None,
+                BvpBoundarySide::Right => Some(node),
+            };
+            if let Some(column) = column {
+                compact_node_major.push(state_major[(state, column)]);
+            }
+        }
+    }
+
+    debug_assert_eq!(compact_node_major.len(), state_count * interval_count);
+    Ok(compact_node_major)
 }

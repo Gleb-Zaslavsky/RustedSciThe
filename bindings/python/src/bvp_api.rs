@@ -35,12 +35,13 @@ use crate::expr::PyExpr;
 mod correction_newton_loop;
 pub use correction_newton_loop::{BvpCorrectionNewtonParameterLoopPoint, BvpCorrectionNewtonParameterLoopReport};
 
-/// Turn a row-major `[node][state]` Python guess into the native state-major
-/// matrix. Route factories validate the route-specific number of nodes first.
+/// Turn route-specific row-major Python guess data into the shared state-major
+/// matrix. Reduced Newton routes use a free-coordinate ordinal for the row
+/// axis; full-profile routes use mesh-node indices.
 fn guess_matrix(rows: Vec<Vec<f64>>, states: usize, nodes: usize) -> PyResult<DMatrix<f64>> {
     if rows.len() != nodes || rows.iter().any(|row| row.len() != states) {
         return Err(InvalidConfigurationError::new_err(format!(
-            "initial_guess must have shape ({nodes}, {states}) in [node][state] order"
+            "initial_guess must have shape ({nodes}, {states}) in [row][state] order"
         )));
     }
     if rows.iter().flatten().any(|value| !value.is_finite()) {
@@ -282,7 +283,9 @@ impl PyBvpPostprocessPlan {
 #[pymethods]
 impl PyBvpSolverRequest {
     /// Configure the adaptive Damped Newton route. Its guess has one row per
-    /// interval; the solver manages any later mesh refinement itself.
+    /// free-coordinate ordinal; each state omits its constrained endpoint and
+    /// is sampled in increasing mesh order. The facade packs it for the native
+    /// node-major iterate. Later mesh refinement remains solver-managed.
     #[staticmethod]
     #[pyo3(signature=(expressions, state_variables, independent_variable, mesh, boundary_conditions, initial_guess, options=None, parameters=None, parameter_values=None, scheme="forward", strategy="Damped", tolerance=1e-6, max_iterations=25, bounds=None, loglevel=None, linear_sys_method=None, max_jacobian_refreshes=None, max_damping_iterations=None, damping_factor=None, max_refinements=None, grid_method=None, grid_parameters=None, logging_mode="off"))]
     #[allow(clippy::too_many_arguments)]

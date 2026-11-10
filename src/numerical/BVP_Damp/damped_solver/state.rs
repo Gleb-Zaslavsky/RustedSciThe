@@ -70,6 +70,9 @@ pub struct NRBVP {
     /// When set, a prepared continuation solve starts from `y` instead of
     /// reloading the structural initial-guess matrix.
     prepared_iterate: bool,
+    /// Optional compact node-major start vector supplied by a typed facade.
+    /// The public initial-guess matrix remains state-major for bounds checks.
+    initial_compact_node_major_iterate: Option<Vec<f64>>,
     number_of_refined_intervals: usize, //number of refined intervals
     bandwidth: (usize, usize),          //bandwidth
     generated_backend_config: GeneratedBackendConfig, // generated backend selection config

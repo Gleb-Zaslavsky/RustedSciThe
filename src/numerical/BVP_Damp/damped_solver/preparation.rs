@@ -193,6 +193,7 @@ impl NRBVP {
             new_grid_enabled: new_grid_enabled_,
             grid_refinemens: 0,
             prepared_iterate: false,
+            initial_compact_node_major_iterate: None,
             number_of_refined_intervals: 0,
             bandwidth: (0, 0),
             generated_backend_config: GeneratedBackendConfig::default(),
@@ -1497,6 +1498,7 @@ impl NRBVP {
         self.p = p;
         self.y = y;
         self.initial_guess = initial_guess;
+        self.initial_compact_node_major_iterate = None;
     }
 
     /// Replace the Newton initial guess without rebuilding symbolic callbacks.
@@ -1529,12 +1531,44 @@ impl NRBVP {
         }
         let flattened = DVector::from_vec(initial_guess.iter().copied().collect());
         self.initial_guess = initial_guess;
+        self.initial_compact_node_major_iterate = None;
         self.result = None;
         self.full_result = None;
         self.grid_refinemens = 0;
         self.prepared_iterate = false;
         self.y = Vectors_type_casting(&flattened, self.effective_runtime_method());
         self.invalidate_linear_runtime();
+        Ok(())
+    }
+
+    /// Set the initial compact node-major iterate while retaining the
+    /// state-major profile used for per-state bounds validation.
+    pub fn try_set_initial_compact_node_major_iterate(
+        &mut self,
+        iterate: Vec<f64>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        let expected = self.values.len().checked_mul(self.n_steps).ok_or_else(|| {
+            BvpBackendIntegrationError::InvalidProblem {
+                field: "initial_guess".to_string(),
+                message: "compact initial iterate length overflowed".to_string(),
+            }
+        })?;
+        if iterate.len() != expected {
+            return Err(BvpBackendIntegrationError::InvalidProblem {
+                field: "initial_guess".to_string(),
+                message: format!(
+                    "expected {expected} compact node-major values, got {}",
+                    iterate.len()
+                ),
+            });
+        }
+        if let Some(index) = iterate.iter().position(|value| !value.is_finite()) {
+            return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                stage: "initial_guess".to_string(),
+                index,
+            });
+        }
+        self.initial_compact_node_major_iterate = Some(iterate);
         Ok(())
     }
 
@@ -1569,6 +1603,7 @@ impl NRBVP {
         }
         let flattened = DVector::from_vec(iterate.iter().copied().collect());
         self.y = Vectors_type_casting(&flattened, self.effective_runtime_method());
+        self.initial_compact_node_major_iterate = None;
         self.prepared_iterate = true;
         self.invalidate_linear_runtime();
         Ok(())

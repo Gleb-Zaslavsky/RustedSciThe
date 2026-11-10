@@ -709,6 +709,7 @@ pub mod generated_bvp_large_superblock_variants {
         out[77] = t67;
         out[78] = t0;
     }
+
 }
 
 pub mod generated_bvp_large_superblock_variant_bindings {
@@ -723,4 +724,5 @@ pub mod generated_bvp_large_superblock_variant_bindings {
         generated_bvp_large_superblock_variants::fixture_bvp32_sparse_t2_chunk_0,
         generated_bvp_large_superblock_variants::fixture_bvp32_sparse_t2_chunk_1,
     ];
+
 }

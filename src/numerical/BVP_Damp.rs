@@ -76,6 +76,10 @@ pub(crate) mod test_large_native_regressions;
 #[cfg(test)]
 #[path = "BVP_Damp/tests/programmatic_solver_ab.rs"]
 mod test_programmatic_solver_ab;
+/// Regression for the public state-major initial-guess contract on mixed BCs.
+#[cfg(test)]
+#[path = "BVP_Damp/tests/initial_guess_packing.rs"]
+mod test_initial_guess_packing;
 
 /// Reuses the maintained KiThe large-combustion fixture from perf-gates.
 /// This is feature-gated so the test fixture does not enter ordinary builds.

@@ -1097,6 +1097,110 @@ fn route_specific_initial_guess_shapes_are_validated_before_native_construction(
 }
 
 #[test]
+fn damped_facade_packs_state_major_guess_into_mixed_boundary_node_order() {
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("1"), Expr::parse_expression("2")],
+        vec!["u".into(), "v".into()],
+        "x",
+        vec![0.0, 0.25, 0.5, 0.75, 1.0],
+        vec![
+            BvpBoundaryCondition {
+                state: 0,
+                side: BvpBoundarySide::Left,
+                value: 0.0,
+            },
+            BvpBoundaryCondition {
+                state: 1,
+                side: BvpBoundarySide::Right,
+                value: 5.0,
+            },
+        ],
+    )
+    .expect("mixed endpoint problem should validate");
+    let state_major = DMatrix::from_row_slice(2, 4, &[0.25, 0.5, 0.75, 1.0, 3.0, 3.5, 4.0, 4.5]);
+
+    let mut solver = BvpSolver::new(
+        problem,
+        BvpSolverConfig::Damped {
+            options: DampedSolverOptions::default()
+                .trapezoid_derivative()
+                .with_bounds(HashMap::from([
+                    ("u".to_string(), (-1.0, 2.0)),
+                    ("v".to_string(), (2.0, 6.0)),
+                ]))
+                .with_rel_tolerance(HashMap::from([
+                    ("u".to_string(), 1.0e-8),
+                    ("v".to_string(), 1.0e-8),
+                ]))
+                .with_bvp_logging_config(BvpLoggingConfig::new(BvpLoggingMode::Detailed)),
+            initial_guess: state_major.clone(),
+        },
+    )
+    .expect("Damped facade should pack the public state-major profile");
+    let BvpNativeSolver::Damped(native) = solver.native() else {
+        panic!("expected Damped native route");
+    };
+
+    assert_eq!(
+        native.initial_guess, state_major,
+        "native bounds-validation profile remains state-major"
+    );
+
+    solver
+        .solve()
+        .expect("the supplied linear profile is an exact trapezoid solution");
+    let trace = solver
+        .damped_decision_trace_snapshot()
+        .expect("detailed decision trace should be available through the facade");
+    let initial_residual = trace.events.iter().find_map(|event| match event {
+        crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionEvent::IterationDecision {
+            base_residual_norm,
+            ..
+        } => *base_residual_norm,
+        _ => None,
+    });
+    assert!(
+        initial_residual.expect("trace should include the initial residual") < 1e-12,
+        "state-major exact profile should enter Newton with near-zero residual"
+    );
+}
+
+#[test]
+fn damped_facade_rejects_ambiguous_state_major_boundary_topology() {
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("0"), Expr::parse_expression("0")],
+        vec!["u".into(), "v".into()],
+        "x",
+        vec![0.0, 0.5, 1.0],
+        vec![
+            BvpBoundaryCondition {
+                state: 0,
+                side: BvpBoundarySide::Left,
+                value: 0.0,
+            },
+            BvpBoundaryCondition {
+                state: 0,
+                side: BvpBoundarySide::Right,
+                value: 1.0,
+            },
+        ],
+    )
+    .expect("problem-level boundary count is valid");
+
+    let error = match BvpSolver::new(
+        problem,
+        BvpSolverConfig::Damped {
+            options: DampedSolverOptions::default(),
+            initial_guess: DMatrix::zeros(2, 2),
+        },
+    ) {
+        Ok(_) => panic!("state-major rows cannot represent unequal free-node counts"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, BvpApiError::InvalidProblem(_)));
+}
+
+#[test]
 fn sci_facade_explicitly_rejects_numerical_callback_configuration() {
     let error = BvpSolver::new(
         valid_problem(),

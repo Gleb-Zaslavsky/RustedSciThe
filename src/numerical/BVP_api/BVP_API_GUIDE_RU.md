@@ -81,7 +81,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Конфигурация solver-specific намеренно. Damped и CorrectionNewton initial guess имеют
 форму `state_count x interval_count`; Frozen/Naive и BVP_sci используют
-`state_count x mesh_point_count`. Damped и Frozen принимают только равномерную
+`state_count x mesh_point_count`. Для Damped каждая строка задаёт свободный
+профиль одного состояния в порядке возрастания координаты сетки, без узла,
+закреплённого граничным условием. Фасад преобразует такую state-major матрицу
+во внутренний compact node-major вектор; предварительно упаковывать его в
+публичную матрицу не нужно. Для Damped требуется ровно одно endpoint-условие
+на состояние; неоднозначная топология отклоняется типизированной ошибкой.
+Damped и Frozen принимают только равномерную
 сетку, поскольку их native constructors задаются концами интервала и числом
 шагов. CorrectionNewton также требует равномерную сетку и выполняет solve без её
 уточнения. Неравномерную сетку можно передать BVP_sci напрямую.
