@@ -1,4 +1,106 @@
+#[derive(Clone, Copy)]
+struct DampedIterationTraceContext {
+    iteration: u64,
+    jacobian_age: usize,
+    jacobian_refreshed: bool,
+    base_residual_norm: Option<f64>,
+    previous_comparison_metric: Option<f64>,
+}
+
 impl NRBVP {
+    fn damped_trace_reason_for_error(
+        error: &BvpBackendIntegrationError,
+    ) -> crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionReason {
+        use crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionReason as Reason;
+        match error {
+            BvpBackendIntegrationError::LinearSolveFailed { .. } => Reason::LinearSolveFailure,
+            BvpBackendIntegrationError::NonFiniteCallbackValue { .. } => {
+                Reason::NonFiniteEvaluation
+            }
+            BvpBackendIntegrationError::CallbackExecutionFailed { .. }
+            | BvpBackendIntegrationError::CallbackShapeMismatch { .. }
+            | BvpBackendIntegrationError::CallbackInputLengthMismatch { .. } => {
+                Reason::CallbackFailure
+            }
+            BvpBackendIntegrationError::BoundStepBlocked { .. }
+            | BvpBackendIntegrationError::BoundStateOutsideBounds { .. } => {
+                Reason::BoundsPreventedStep
+            }
+            _ => Reason::OtherFailure,
+        }
+    }
+
+    fn record_damped_solve_termination(
+        &self,
+        result: &Result<Option<DVector<f64>>, BvpBackendIntegrationError>,
+    ) {
+        use crate::numerical::BVP_Damp::telemetry::{
+            BvpDampedDecisionEvent as Event, BvpDampedSolveTerminationReason as Reason,
+            BvpSolveStatus,
+        };
+
+        if !self.telemetry_counters.detailed_decision_trace_enabled() {
+            return;
+        }
+        let trace = self.telemetry_counters.damped_decision_trace_snapshot();
+        let last_iteration = trace.events.iter().rev().find_map(|event| match event {
+            Event::IterationDecision {
+                iteration,
+                correction_metric,
+                accepted_correction_norm,
+                residual_norm,
+                stopping_threshold,
+                ..
+            } => Some((
+                *iteration,
+                *correction_metric,
+                *accepted_correction_norm,
+                *residual_norm,
+                *stopping_threshold,
+            )),
+            _ => None,
+        });
+        let (
+            iteration_index,
+            correction_metric,
+            stopping_metric,
+            residual_norm,
+            stopping_threshold,
+        ) = last_iteration.map_or(
+            (None, None, None, None, None),
+            |(iteration, metric, correction, residual, threshold)| {
+                (Some(iteration), metric, correction, residual, threshold)
+            },
+        );
+        let last_iteration_status = trace.events.iter().rev().find_map(|event| match event {
+            Event::IterationDecision { status, .. } => Some(*status),
+            _ => None,
+        });
+        let (reason, status) = match result {
+            Ok(Some(_)) => (Reason::Converged, BvpSolveStatus::Converged),
+            Ok(None) => (
+                match last_iteration_status {
+                    Some(crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::AcceptedContinue) => Reason::IterationLimit,
+                    Some(crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::TrialsExhausted) => Reason::DampingTrialsExhausted,
+                    Some(crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::BoundsRejected) => Reason::BoundsBlocked,
+                    _ => Reason::NoResult,
+                },
+                BvpSolveStatus::NoResult,
+            ),
+            Err(_) => (Reason::Failed, BvpSolveStatus::Failed),
+        };
+        self.telemetry_counters
+            .record_damped_decision(Event::SolveTermination {
+                reason,
+                status,
+                iteration_index,
+                correction_metric,
+                stopping_metric,
+                stopping_threshold,
+                residual_norm,
+            });
+    }
+
     fn validate_active_bounds(&self) -> Result<(), BvpBackendIntegrationError> {
         if let Some((index, value, _lower, _upper)) =
             first_bound_violation(&*self.y, &self.bounds_vec)
@@ -386,17 +488,78 @@ impl NRBVP {
     pub fn try_damped_step(
         &mut self,
     ) -> Result<(i32, Option<Box<dyn VectorType>>), BvpBackendIntegrationError> {
-        let (status, state, _) = self.try_damped_step_with_residual(None)?;
+        let context = DampedIterationTraceContext {
+            iteration: self.telemetry_counters.iterations().saturating_add(1),
+            jacobian_age: self.m,
+            jacobian_refreshed: false,
+            base_residual_norm: None,
+            previous_comparison_metric: None,
+        };
+        let (status, state, _) = self.try_damped_step_with_residual(None, context)?;
         Ok((status, state))
     }
 
     fn try_damped_step_with_residual(
         &mut self,
         initial_residual: Option<Box<dyn VectorType>>,
+        trace_context: DampedIterationTraceContext,
     ) -> Result<(i32, Option<Box<dyn VectorType>>, Option<f64>), BvpBackendIntegrationError> {
-        self.validate_active_bounds()?;
+        let detailed_trace_enabled = self.telemetry_counters.detailed_decision_trace_enabled();
+        macro_rules! record_damped_decision {
+            ($event:expr) => {
+                if detailed_trace_enabled {
+                    self.telemetry_counters.record_damped_decision($event);
+                }
+            };
+        }
+        let mut trace_correction_metric = None;
+        let mut trace_base_correction_norm = None;
+        let mut trace_bound_limited_alpha = None;
+        macro_rules! record_iteration_decision {
+            ($status:expr, $reason:expr, $accepted_alpha:expr, $accepted_correction_norm:expr, $residual_norm:expr, $stopping_threshold:expr) => {
+                record_damped_decision!(
+                    crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionEvent::IterationDecision {
+                        iteration: trace_context.iteration,
+                        correction_metric: trace_correction_metric,
+                        base_correction_norm: trace_base_correction_norm,
+                        previous_comparison_metric: trace_context.previous_comparison_metric,
+                        base_residual_norm: trace_context.base_residual_norm,
+                        bound_limited_alpha: trace_bound_limited_alpha,
+                        jacobian_age: trace_context.jacobian_age,
+                        jacobian_refreshed: trace_context.jacobian_refreshed,
+                        accepted_alpha: $accepted_alpha,
+                        accepted_correction_norm: $accepted_correction_norm,
+                        residual_norm: $residual_norm,
+                        stopping_threshold: $stopping_threshold,
+                        status: $status,
+                        reason: $reason,
+                    }
+                );
+            };
+        }
+        if let Err(error) = self.validate_active_bounds() {
+            record_iteration_decision!(
+                crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::Failed,
+                Some(Self::damped_trace_reason_for_error(&error)),
+                None,
+                None,
+                None,
+                None
+            );
+            return Err(error);
+        }
         if self.newton_criteria == DampedNewtonCriteria::CorrectionNewton {
-            self.ensure_newton_norm_layout()?;
+            if let Err(error) = self.ensure_newton_norm_layout() {
+                record_iteration_decision!(
+                    crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::Failed,
+                    Some(Self::damped_trace_reason_for_error(&error)),
+                    None,
+                    None,
+                    trace_context.base_residual_norm,
+                    None
+                );
+                return Err(error);
+            }
         }
         // macro for saving times
         macro_rules! save_operation_times {
@@ -463,10 +626,24 @@ impl NRBVP {
                 .as_ref()
                 .map(|jacobian| jacobian.factorization_ready())
                 .unwrap_or(false);
-        let base_step = if let Some(residual) = initial_residual {
-            self.try_step_with_residual(p, y_k_minus_1, residual)?
+        let base_step_result = if let Some(residual) = initial_residual {
+            self.try_step_with_residual(p, y_k_minus_1, residual)
         } else {
-            self.try_step_with_linear_telemetry(p, y_k_minus_1)?
+            self.try_step_with_linear_telemetry(p, y_k_minus_1)
+        };
+        let base_step = match base_step_result {
+            Ok(step) => step,
+            Err(error) => {
+                record_iteration_decision!(
+                    crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::Failed,
+                    Some(Self::damped_trace_reason_for_error(&error)),
+                    None,
+                    None,
+                    trace_context.base_residual_norm,
+                    None
+                );
+                return Err(error);
+            }
         };
         let (undamped_step_k_minus_1, pair_of_times, factorization_time, rhs_solve_time, _) =
             base_step;
@@ -499,11 +676,27 @@ impl NRBVP {
         );
         if fbound.is_nan() {
             self.telemetry_counters.record_non_finite_value(0);
+            record_iteration_decision!(
+                crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::Failed,
+                Some(crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionReason::NonFiniteEvaluation),
+                None,
+                None,
+                None,
+                None
+            );
             error!("\n \n fbound is NaN \n \n");
             panic!("Damped BVP damping failed: boundary step factor is NaN")
         }
         if fbound.is_infinite() {
             self.telemetry_counters.record_non_finite_value(0);
+            record_iteration_decision!(
+                crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::Failed,
+                Some(crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionReason::NonFiniteEvaluation),
+                None,
+                None,
+                None,
+                None
+            );
             error!("\n \n fbound is infinite \n \n");
             panic!("Damped BVP damping failed: boundary step factor is infinite")
         }
@@ -541,12 +734,22 @@ impl NRBVP {
         }
         // let fbound =1.0;
         info!("\n \n fboundary  = {}", fbound);
+        // This is the first alpha after applying the bound-feasibility limit;
+        // later rejected trials update it using the existing damping schedule.
         let mut lambda = 1.0 * fbound;
         // if fbound is very small, then x0 is already close to the boundary and
         // step0 points out of the allowed domain. In this case, the Newton
         // algorithm fails, so return an error condition.
         if fbound < 1e-10 {
             warn!("\n  No damped step can be taken without violating solution component bounds.");
+            record_iteration_decision!(
+                crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::BoundsRejected,
+                Some(crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionReason::BoundsPreventedStep),
+                None,
+                None,
+                None,
+                None
+            );
             return Ok((-3, None, None));
         }
 
@@ -556,6 +759,7 @@ impl NRBVP {
         let mut conv: f64 = 0.0;
         // Legacy acceptance used a raw Euclidean correction; the candidate
         // policy uses CorrectionNewton's dimensionless component-scaled RMS.
+        // s0 is the undamped correction norm at the current iterate, not a residual.
         let s0 = match self.newton_criteria {
             DampedNewtonCriteria::Legacy => undamped_step_k_minus_1.norm(),
             DampedNewtonCriteria::CorrectionNewton => Self::correction_newton_weighted_rms(
@@ -569,9 +773,19 @@ impl NRBVP {
                 &*undamped_step_k_minus_1,
             )?,
         };
+        let correction_metric = match self.newton_criteria {
+            DampedNewtonCriteria::Legacy => {
+                crate::numerical::BVP_Damp::telemetry::BvpDampedCorrectionMetric::LegacyEuclidean
+            }
+            DampedNewtonCriteria::CorrectionNewton => crate::numerical::BVP_Damp::telemetry::BvpDampedCorrectionMetric::CorrectionNewtonWeightedRms,
+        };
+        trace_correction_metric = Some(correction_metric);
+        trace_base_correction_norm = Some(s0);
+        trace_bound_limited_alpha = Some(fbound);
 
         let mut k = 0;
         while k < max_damp_iter {
+            let attempted_alpha = lambda;
             self.telemetry_counters.record_damping_trial_at(
                 self.telemetry_counters.iterations(),
                 lambda,
@@ -613,7 +827,38 @@ impl NRBVP {
                 factorization_time,
                 rhs_solve_time,
                 trial_residual_norm,
-            ) = step_result?;
+            ) = match step_result {
+                Ok(step) => step,
+                Err(error) => {
+                    let reason = Self::damped_trace_reason_for_error(&error);
+                    record_damped_decision!(
+                        crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionEvent::DampingTrialDecision {
+                            iteration: trace_context.iteration,
+                            trial: k + 1,
+                            attempted_alpha,
+                            next_alpha: None,
+                            correction_metric,
+                            current_norm: None,
+                            comparison_norm: s0,
+                            convergence_threshold: 1.0,
+                            accepted_by_threshold: None,
+                            accepted_by_decrease: None,
+                            accepted: false,
+                            trial_residual_norm: None,
+                            reason: Some(reason),
+                        }
+                    );
+                    record_iteration_decision!(
+                        crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::Failed,
+                        Some(reason),
+                        None,
+                        None,
+                        trace_context.base_residual_norm,
+                        None
+                    );
+                    return Err(error);
+                }
+            };
             // saving times of corresponding operations
             save_operation_times!(
                 self,
@@ -632,6 +877,8 @@ impl NRBVP {
                 self.telemetry_counters.record_factorization();
             }
 
+            // s1 is the next undamped correction norm at the trial iterate;
+            // the acceptance test compares this correction with s0 and 1.0.
             let s1 = match self.newton_criteria {
                 DampedNewtonCriteria::Legacy => undamped_step_k.norm(),
                 DampedNewtonCriteria::CorrectionNewton => Self::correction_newton_weighted_rms(
@@ -663,10 +910,29 @@ impl NRBVP {
 
             // Both policies retain the same acceptance shape. Legacy used raw
             // L2 here; CorrectionNewton applies it to normalized weighted RMS.
-            let accepted = (s1 < 1.0) || (s1 < s0);
+            let accepted_by_threshold = s1 < 1.0;
+            let accepted_by_decrease = s1 < s0;
+            let accepted = accepted_by_threshold || accepted_by_decrease;
             self.telemetry_counters
                 .finish_damping_trial_scope(damping_trial_started);
             if accepted {
+                record_damped_decision!(
+                    crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionEvent::DampingTrialDecision {
+                        iteration: trace_context.iteration,
+                        trial: k + 1,
+                        attempted_alpha,
+                        next_alpha: None,
+                        correction_metric,
+                        current_norm: Some(s1),
+                        comparison_norm: s0,
+                        convergence_threshold: 1.0,
+                        accepted_by_threshold: Some(accepted_by_threshold),
+                        accepted_by_decrease: Some(accepted_by_decrease),
+                        accepted: true,
+                        trial_residual_norm: Some(trial_residual_norm),
+                        reason: None,
+                    }
+                );
                 // The criterion for accepting is that the undamped steps decrease in
                 // magnitude, This prevents the iteration from stepping away from the region where there is good reason to believe a solution lies
                 S_k = Some(s1);
@@ -686,6 +952,25 @@ impl NRBVP {
                     lambda /= 2.0_f64.sqrt();
                 }
             }
+            record_damped_decision!(
+                crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionEvent::DampingTrialDecision {
+                    iteration: trace_context.iteration,
+                    trial: k + 1,
+                    attempted_alpha,
+                    next_alpha: Some(lambda),
+                    correction_metric,
+                    current_norm: Some(s1),
+                    comparison_norm: s0,
+                    convergence_threshold: 1.0,
+                    accepted_by_threshold: Some(accepted_by_threshold),
+                    accepted_by_decrease: Some(accepted_by_decrease),
+                    accepted: false,
+                    trial_residual_norm: Some(trial_residual_norm),
+                    reason: Some(
+                        crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionReason::AcceptanceCriterionNotMet,
+                    ),
+                }
+            );
             self.telemetry_counters.record_damping_rejection_at(
                 self.telemetry_counters.iterations(),
                 lambda,
@@ -709,6 +994,14 @@ impl NRBVP {
                     "\n \n  step norm =  {}, weight norm = {}, convergence condition = {}",
                     self.error_old, step_norm, conv
                 );
+                record_iteration_decision!(
+                    crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::AcceptedContinue,
+                    None,
+                    Some(lambda),
+                    Some(step_norm),
+                    accepted_residual_norm,
+                    Some(conv)
+                );
                 Ok((0, damped_step_result, accepted_residual_norm))
             } else {
                 info!("\n \n  Damping coefficient found (solution has converged)");
@@ -716,11 +1009,27 @@ impl NRBVP {
                     "\n \n step norm =  {}, weight norm = {}, convergence condition = {}",
                     self.error_old, step_norm, conv
                 );
+                record_iteration_decision!(
+                    crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::Converged,
+                    None,
+                    Some(lambda),
+                    Some(step_norm),
+                    accepted_residual_norm,
+                    Some(conv)
+                );
                 Ok((1, damped_step_result, accepted_residual_norm))
             }
         } else {
             //  if we have reached max damping iterations without finding a damping coefficient we must reject the step
             warn!("\n \n  No damping coefficient found (max damping trials reached)");
+            record_iteration_decision!(
+                crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::TrialsExhausted,
+                Some(crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionReason::MaximumTrialsReached),
+                None,
+                S_k,
+                None,
+                None
+            );
             Ok((-2, None, None))
         }
     } // end of damped step
@@ -824,6 +1133,7 @@ impl NRBVP {
             .as_ref()
             .expect("initial residual was just evaluated")
             .norm();
+        let mut trace_base_residual_norm = Some(initial_residual_norm);
         self.custom_timer
             .append_to_fun_time(initial_residual_started.elapsed());
         info!("norm of the initial residual = {}", initial_residual_norm);
@@ -838,16 +1148,45 @@ impl NRBVP {
                 self.factor_owner.jacobian_slot(),
                 &mut self.jac_recalc,
             );
+            let jacobian_refreshed = self.jac_recalc;
             let jacobian_result = self.try_recalc_jacobian();
-            if jacobian_result.is_err() {
+            if let Err(error) = jacobian_result {
                 self.telemetry_counters
                     .finish_iteration_scope(iteration_started);
+                if self.telemetry_counters.detailed_decision_trace_enabled() {
+                    self.telemetry_counters.record_damped_decision(
+                        crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionEvent::IterationDecision {
+                            iteration: i.saturating_add(1) as u64,
+                            correction_metric: None,
+                            base_correction_norm: None,
+                            previous_comparison_metric: None,
+                            base_residual_norm: trace_base_residual_norm,
+                            bound_limited_alpha: None,
+                            jacobian_age: self.m,
+                            jacobian_refreshed,
+                            accepted_alpha: None,
+                            accepted_correction_norm: None,
+                            residual_norm: trace_base_residual_norm,
+                            stopping_threshold: None,
+                            status: crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::Failed,
+                            reason: Some(Self::damped_trace_reason_for_error(&error)),
+                        },
+                    );
+                }
+                return Err(error);
             }
-            jacobian_result?;
             self.m += 1;
             i += 1; // increment the number of iterations
             self.telemetry_counters.record_iteration();
-            let step_result = self.try_damped_step_with_residual(initial_residual.take());
+            let trace_context = DampedIterationTraceContext {
+                iteration: i as u64,
+                jacobian_age: self.m,
+                jacobian_refreshed,
+                base_residual_norm: trace_base_residual_norm,
+                previous_comparison_metric: (i > 1).then_some(self.error_old),
+            };
+            let step_result =
+                self.try_damped_step_with_residual(initial_residual.take(), trace_context);
             if step_result.is_err() {
                 self.telemetry_counters
                     .finish_iteration_scope(iteration_started);
@@ -866,6 +1205,7 @@ impl NRBVP {
                     }
                 };
                 self.y = y_k_plus_1;
+                trace_base_residual_norm = accepted_residual_norm;
                 self.jac_recalc = false;
             }
             // status == 0
@@ -1241,6 +1581,7 @@ impl NRBVP {
                 0.0
             },
         );
+        self.record_damped_solve_termination(&res);
         let res = res?;
         let end = begin.elapsed();
         elapsed_time(end);
@@ -1295,6 +1636,7 @@ impl NRBVP {
                 0.0
             },
         );
+        self.record_damped_solve_termination(&res);
         let res = res?;
         let end = begin.elapsed();
         elapsed_time(end);

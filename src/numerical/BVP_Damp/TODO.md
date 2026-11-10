@@ -1593,12 +1593,23 @@ nonlinear algorithm.
   format strings, allocate event maps or acquire a lock in the numerical hot
   path. `BvpTelemetryMode::Off` skips counters, stage timers and callback
   timing; `BvpLoggingMode::Off` skips event retention independently.
-- [ ] Keep detailed logging non-invasive for enabled modes: the default/off path must not format strings,
-  allocate event maps or acquire a lock in the numerical hot path. Detailed
-  events should carry `solve_id`, `mesh_revision`, `iteration`,
-  `damping_trial` and stage identifiers; the enclosing snapshot carries the
-  resolved plan. Formatting belongs to
-  the selected sink (console, structured test file or tracing adapter).
+- [ ] Keep detailed logging non-invasive for enabled modes: the default/off
+  path must not format strings, allocate event maps or acquire a lock in the
+  numerical hot path. General logging events/sinks and their concurrency
+  contract remain open. The dedicated bounded Damped Newton decision trace is
+  implemented and tested below; formatting remains outside the solver.
+- [x] Add opt-in typed Damped Newton decision trace (2026-11-10).
+  `BvpLoggingMode::Detailed` retains bounded `IterationDecision`,
+  `DampingTrialDecision` and `SolveTermination` events with solve/iteration
+  identity, s0/s1 metric and operands, previous comparison metric, residuals,
+  Jacobian age/refresh, bound-limited/attempted/next alpha, both acceptance
+  predicates, accepted step, typed status, stopping metric and threshold. `Off`
+  creates no event payloads or retained history; the trace is independent of
+  counters/timings and adds no residual/Jacobian evaluations. Debug gates
+  verify unchanged results/counters, bounded retention, legacy value_a/value_b
+  semantics, counters-gated legacy damping events, small analytic BVP behavior,
+  four-route parity and BVP_api access. See the 2026-11-10 story entry; release
+  timing remains noisy and is not an overhead claim.
 - [x] Define severity and repetition policy: `debug` for normal adaptive
   decisions, `info` for major lifecycle transitions, `warn` for recoverable
   fallbacks/rejections and `error` for failed termination. Aggregate or rate

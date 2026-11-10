@@ -784,7 +784,10 @@ mod tests {
     fn solve_rejected_damping_fixture(
         backend: BvpSymbolicAssemblyBackend,
         matrix: MatrixRoute,
-    ) -> BvpTelemetrySnapshot {
+    ) -> (
+        BvpTelemetrySnapshot,
+        crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionTrace,
+    ) {
         // The symbolic route is still exercised before installing the common
         // numeric callbacks. The callback fixture is deliberately elementwise:
         // at y=0, F=-2 and J=-2, so the full Newton proposal reaches y=-1;
@@ -831,7 +834,10 @@ mod tests {
         solver
             .try_solver_prepared()
             .expect("rejected damping fixture should solve through the prepared path");
-        solver.get_statistics().telemetry
+        (
+            solver.get_statistics().telemetry,
+            solver.damped_decision_trace_snapshot(),
+        )
     }
 
     #[test]
@@ -849,7 +855,38 @@ mod tests {
                 solve_rejected_damping_fixture(frontend, matrix),
             )
         });
-        let legacy_trace = &cases[0].2;
+        let legacy_trace = &cases[0].2.0;
+        let legacy_damped_trace = &cases[0].2.1;
+        let decision_shape =
+            |trace: &crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionTrace| {
+                trace
+                .events
+                .iter()
+                .map(|event| match event {
+                    crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionEvent::IterationDecision {
+                        iteration,
+                        correction_metric,
+                        jacobian_age,
+                        jacobian_refreshed,
+                        status,
+                        ..
+                    } => format!("iteration:{iteration}:{correction_metric:?}:{jacobian_age}:{jacobian_refreshed}:{status:?}"),
+                    crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionEvent::DampingTrialDecision {
+                        iteration,
+                        trial,
+                        accepted,
+                        reason,
+                        ..
+                    } => format!("trial:{iteration}:{trial}:{accepted}:{reason:?}"),
+                    crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionEvent::SolveTermination {
+                        reason,
+                        status,
+                        iteration_index,
+                        ..
+                    } => format!("solve:{reason:?}:{status:?}:{iteration_index:?}"),
+                })
+                .collect::<Vec<_>>()
+            };
 
         assert!(
             legacy_trace.counters.damping_rejections > 0,
@@ -858,7 +895,7 @@ mod tests {
             legacy_trace.counters.damping_trials,
             legacy_trace.counters.damping_rejections
         );
-        for (matrix, frontend, trace) in cases.iter().skip(1) {
+        for (matrix, frontend, (trace, damped_trace)) in cases.iter().skip(1) {
             assert_eq!(
                 legacy_trace.counters.iterations, trace.counters.iterations,
                 "iteration mismatch for {matrix:?}/{frontend:?}"
@@ -876,12 +913,36 @@ mod tests {
                 event_trace(trace),
                 "event trace mismatch for {matrix:?}/{frontend:?}"
             );
+            assert_eq!(
+                decision_shape(legacy_damped_trace),
+                decision_shape(damped_trace),
+                "typed Damped decision trace mismatch for {matrix:?}/{frontend:?}"
+            );
         }
         assert!(
             legacy_trace
                 .log_events
                 .iter()
                 .any(|event| { event.kind == BvpLogEventKind::DampingRejected })
+        );
+        let rejected_trials = legacy_damped_trace
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionEvent::DampingTrialDecision {
+                    accepted: false,
+                    reason: Some(crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionReason::AcceptanceCriterionNotMet),
+                    current_norm: Some(_),
+                    trial_residual_norm: Some(_),
+                    attempted_alpha,
+                    ..
+                } if attempted_alpha.is_finite()
+            ))
+            .count();
+        assert_eq!(
+            rejected_trials as u64,
+            legacy_trace.counters.damping_rejections
         );
         println!(
             "[BVP rejected damping parity] trials={} rejections={} iterations={}",
@@ -895,15 +956,15 @@ mod tests {
             legacy_trace.counters.damping_trials,
             legacy_trace.counters.damping_rejections,
             legacy_trace.counters.iterations,
-            cases[1].2.counters.damping_trials,
-            cases[1].2.counters.damping_rejections,
-            cases[1].2.counters.iterations,
-            cases[2].2.counters.damping_trials,
-            cases[2].2.counters.damping_rejections,
-            cases[2].2.counters.iterations,
-            cases[3].2.counters.damping_trials,
-            cases[3].2.counters.damping_rejections,
-            cases[3].2.counters.iterations,
+            cases[1].2.0.counters.damping_trials,
+            cases[1].2.0.counters.damping_rejections,
+            cases[1].2.0.counters.iterations,
+            cases[2].2.0.counters.damping_trials,
+            cases[2].2.0.counters.damping_rejections,
+            cases[2].2.0.counters.iterations,
+            cases[3].2.0.counters.damping_trials,
+            cases[3].2.0.counters.damping_rejections,
+            cases[3].2.0.counters.iterations,
         );
         if let Err(error) = write_test_report(
             "BVP_Damp",

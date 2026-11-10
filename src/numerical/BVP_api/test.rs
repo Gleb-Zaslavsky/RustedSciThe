@@ -8,7 +8,7 @@ use crate::numerical::BVP_CorrectionNewton::CorrectionNewtonOptions;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedSolverOptions;
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
 use crate::numerical::BVP_Damp::telemetry::BvpSolveStatus;
-use crate::numerical::BVP_Damp::telemetry::{BvpLoggingMode, BvpTelemetryMode};
+use crate::numerical::BVP_Damp::telemetry::{BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode};
 use crate::numerical::BVP_sci::new::BvpSciSparseFactorization as NativeBvpSciSparseFactorization;
 use crate::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciMatrixLayout, BvpSciOptions, BvpSciOutputPolicy,
@@ -41,6 +41,28 @@ fn valid_problem() -> BvpProblem {
         }],
     )
     .expect("valid BVP should construct")
+}
+
+#[test]
+fn damped_facade_exposes_opt_in_decision_trace() {
+    let mut solver = BvpSolver::new(
+        valid_problem(),
+        BvpSolverConfig::Damped {
+            options: DampedSolverOptions::default()
+                .with_bounds(HashMap::from([("y".to_string(), (-10.0, 10.0))]))
+                .with_rel_tolerance(HashMap::from([("y".to_string(), 1e-6)]))
+                .with_bvp_logging_config(BvpLoggingConfig::new(BvpLoggingMode::Detailed)),
+            initial_guess: DMatrix::from_element(1, 2, 1.0),
+        },
+    )
+    .expect("Damped facade should construct");
+    solver.solve().expect("simple Damped problem should solve");
+
+    let trace = solver
+        .damped_decision_trace_snapshot()
+        .expect("Damped facade exposes the native decision trace");
+    assert!(!trace.events.is_empty());
+    assert_eq!(trace.dropped_events, 0);
 }
 
 #[test]

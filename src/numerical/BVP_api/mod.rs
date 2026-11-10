@@ -1504,6 +1504,17 @@ impl BvpSolver {
         }
     }
 
+    /// Return the opt-in Damped Newton decision trace, if this facade owns a
+    /// Damped solver. The trace is empty when detailed BVP logging was off.
+    pub fn damped_decision_trace_snapshot(
+        &self,
+    ) -> Option<crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionTrace> {
+        match &self.native {
+            BvpNativeSolver::Damped(solver) => Some(solver.damped_decision_trace_snapshot()),
+            _ => None,
+        }
+    }
+
     /// Build a common dataset view for plotting/export while retaining the
     /// route-native solution separately.
     pub fn postprocess_dataset(&self) -> Result<PostprocessDataset, PostprocessError> {

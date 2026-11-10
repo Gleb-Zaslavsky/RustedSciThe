@@ -160,11 +160,15 @@ pub enum BvpLogEventKind {
     Termination,
 }
 
-/// Allocation-free payload for one decision event.
+/// Allocation-free payload for one legacy decision event.
 ///
 /// Numeric payload slots intentionally avoid a string map in the hot path.
 /// Their interpretation is defined by `kind`; presentation layers can turn
-/// them into structured JSON, tables, or human-readable log lines.
+/// them into structured JSON, tables, or human-readable log lines. Existing
+/// Damped meanings are retained: `DampingTrial` stores attempted alpha in
+/// `value_a` and NaN in `value_b`; `DampingRejected` stores the next alpha
+/// after backtracking in `value_a` and the rejected correction metric in
+/// `value_b`. Use [`BvpDampedDecisionEvent`] for an unambiguous trial record.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BvpLogEvent {
     pub solve_id: u64,
@@ -178,6 +182,106 @@ pub struct BvpLogEvent {
     pub mesh_revision: u64,
     pub value_a: f64,
     pub value_b: f64,
+}
+
+/// Why a Damped Newton iteration or trial ended, without changing solver policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BvpDampedDecisionReason {
+    AcceptedStep,
+    Converged,
+    AcceptanceCriterionNotMet,
+    BoundsPreventedStep,
+    NonFiniteEvaluation,
+    LinearSolveFailure,
+    CallbackFailure,
+    MaximumTrialsReached,
+    OtherFailure,
+}
+
+/// Outcome code for one completed Damped Newton step attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BvpDampedIterationStatus {
+    AcceptedContinue,
+    Converged,
+    BoundsRejected,
+    TrialsExhausted,
+    Failed,
+}
+
+/// Classification of the enclosing native solve result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BvpDampedSolveTerminationReason {
+    Converged,
+    NoResult,
+    IterationLimit,
+    DampingTrialsExhausted,
+    BoundsBlocked,
+    Failed,
+}
+
+/// Correction metric used by the active Damped Newton acceptance rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BvpDampedCorrectionMetric {
+    LegacyEuclidean,
+    CorrectionNewtonWeightedRms,
+}
+
+/// One already-computed Newton iteration, damping-trial, or solve outcome.
+/// Iteration and trial indices are one-based. For trials, `comparison_norm`
+/// is s0, `current_norm` is s1, and the existing acceptance rule remains
+/// `s1 < convergence_threshold || s1 < s0`; these correction norms are not
+/// residual norms. Trial alpha fields record the attempted value and, on
+/// rejection, the already-computed next value after the unchanged backtrack.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BvpDampedDecisionEvent {
+    IterationDecision {
+        iteration: u64,
+        correction_metric: Option<BvpDampedCorrectionMetric>,
+        base_correction_norm: Option<f64>,
+        previous_comparison_metric: Option<f64>,
+        base_residual_norm: Option<f64>,
+        bound_limited_alpha: Option<f64>,
+        jacobian_age: usize,
+        jacobian_refreshed: bool,
+        accepted_alpha: Option<f64>,
+        accepted_correction_norm: Option<f64>,
+        residual_norm: Option<f64>,
+        stopping_threshold: Option<f64>,
+        status: BvpDampedIterationStatus,
+        reason: Option<BvpDampedDecisionReason>,
+    },
+    DampingTrialDecision {
+        iteration: u64,
+        trial: usize,
+        attempted_alpha: f64,
+        next_alpha: Option<f64>,
+        correction_metric: BvpDampedCorrectionMetric,
+        current_norm: Option<f64>,
+        comparison_norm: f64,
+        convergence_threshold: f64,
+        accepted_by_threshold: Option<bool>,
+        accepted_by_decrease: Option<bool>,
+        accepted: bool,
+        trial_residual_norm: Option<f64>,
+        reason: Option<BvpDampedDecisionReason>,
+    },
+    SolveTermination {
+        reason: BvpDampedSolveTerminationReason,
+        status: BvpSolveStatus,
+        iteration_index: Option<u64>,
+        correction_metric: Option<BvpDampedCorrectionMetric>,
+        stopping_metric: Option<f64>,
+        stopping_threshold: Option<f64>,
+        residual_norm: Option<f64>,
+    },
+}
+
+/// Bounded, opt-in trace for Damped Newton acceptance decisions.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BvpDampedDecisionTrace {
+    pub solve_id: u64,
+    pub events: Vec<BvpDampedDecisionEvent>,
+    pub dropped_events: u64,
 }
 
 /// Fixed vocabulary for callback sub-stages.
@@ -483,6 +587,8 @@ pub(crate) struct BvpTelemetryRecorder {
     next_log_sequence: Cell<u64>,
     dropped_log_events: Cell<u64>,
     log_events: RefCell<Vec<BvpLogEvent>>,
+    dropped_damped_events: Cell<u64>,
+    damped_events: RefCell<Vec<BvpDampedDecisionEvent>>,
     iterations: Cell<u64>,
     scalar_evaluations: Cell<u64>,
     residual_calls: Cell<u64>,
@@ -542,6 +648,9 @@ impl BvpTelemetryRecorder {
         if config.mode == BvpLoggingMode::Off {
             self.log_events.borrow_mut().clear();
         }
+        if config.mode != BvpLoggingMode::Detailed {
+            self.damped_events.borrow_mut().clear();
+        }
     }
 
     pub(crate) fn logging_mode(&self) -> BvpLoggingMode {
@@ -550,6 +659,11 @@ impl BvpTelemetryRecorder {
 
     pub(crate) fn logging_config(&self) -> BvpLoggingConfig {
         self.logging_config.get()
+    }
+
+    #[inline]
+    pub(crate) fn detailed_decision_trace_enabled(&self) -> bool {
+        self.logging_config.get().mode == BvpLoggingMode::Detailed
     }
 
     /// Starts a new trace without resetting numerical counters.
@@ -562,6 +676,8 @@ impl BvpTelemetryRecorder {
         self.next_log_sequence.set(0);
         self.dropped_log_events.set(0);
         self.log_events.borrow_mut().clear();
+        self.dropped_damped_events.set(0);
+        self.damped_events.borrow_mut().clear();
         self.iteration_elapsed.set(Duration::ZERO);
         self.damping_trial_elapsed.set(Duration::ZERO);
     }
@@ -709,6 +825,30 @@ impl BvpTelemetryRecorder {
 
     pub(crate) fn dropped_log_events(&self) -> u64 {
         self.dropped_log_events.get()
+    }
+
+    /// Retains a Damped decision only when detailed logging is explicitly enabled.
+    #[inline]
+    pub(crate) fn record_damped_decision(&self, event: BvpDampedDecisionEvent) {
+        let config = self.logging_config.get();
+        if config.mode != BvpLoggingMode::Detailed {
+            return;
+        }
+        let mut events = self.damped_events.borrow_mut();
+        if events.len() >= config.max_events {
+            self.dropped_damped_events
+                .set(self.dropped_damped_events.get().saturating_add(1));
+            return;
+        }
+        events.push(event);
+    }
+
+    pub(crate) fn damped_decision_trace_snapshot(&self) -> BvpDampedDecisionTrace {
+        BvpDampedDecisionTrace {
+            solve_id: self.solve_id.get(),
+            events: self.damped_events.borrow().clone(),
+            dropped_events: self.dropped_damped_events.get(),
+        }
     }
 
     pub(crate) fn solve_id(&self) -> u64 {
@@ -1346,6 +1486,53 @@ mod tests {
         assert_eq!(event.scope, BvpTelemetryScope::DampingTrial);
         assert_eq!(event.value_a, 0.25);
         assert_eq!(event.value_b, 1.5);
+    }
+
+    #[test]
+    fn damped_decision_trace_is_independent_of_counters_and_bounded() {
+        let recorder = BvpTelemetryRecorder::default();
+        recorder.set_telemetry_mode(BvpTelemetryMode::Off);
+        recorder
+            .set_logging_config(BvpLoggingConfig::new(BvpLoggingMode::Detailed).with_max_events(1));
+        recorder.begin_solve();
+        recorder.record_damped_decision(BvpDampedDecisionEvent::IterationDecision {
+            iteration: 1,
+            correction_metric: Some(BvpDampedCorrectionMetric::LegacyEuclidean),
+            base_correction_norm: Some(2.0),
+            previous_comparison_metric: None,
+            base_residual_norm: Some(4.0),
+            bound_limited_alpha: Some(1.0),
+            jacobian_age: 1,
+            jacobian_refreshed: true,
+            accepted_alpha: Some(1.0),
+            accepted_correction_norm: Some(1.0),
+            residual_norm: Some(0.1),
+            stopping_threshold: Some(1.0),
+            status: BvpDampedIterationStatus::Converged,
+            reason: None,
+        });
+        recorder.record_damped_decision(BvpDampedDecisionEvent::DampingTrialDecision {
+            iteration: 1,
+            trial: 1,
+            attempted_alpha: 0.5,
+            next_alpha: Some(0.25),
+            correction_metric: BvpDampedCorrectionMetric::LegacyEuclidean,
+            current_norm: Some(1.0),
+            comparison_norm: 2.0,
+            convergence_threshold: 1.0,
+            accepted_by_threshold: Some(false),
+            accepted_by_decrease: Some(true),
+            accepted: true,
+            trial_residual_norm: Some(0.25),
+            reason: None,
+        });
+
+        let trace = recorder.damped_decision_trace_snapshot();
+        assert_eq!(trace.solve_id, 1);
+        assert_eq!(trace.events.len(), 1);
+        assert_eq!(trace.dropped_events, 1);
+        assert!(recorder.log_events_snapshot().is_empty());
+        assert_eq!(recorder.snapshot().residual_calls, 0);
     }
 
     #[test]

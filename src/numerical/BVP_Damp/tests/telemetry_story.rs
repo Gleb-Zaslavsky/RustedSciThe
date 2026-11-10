@@ -19,7 +19,7 @@ mod tests {
     };
     use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
     use crate::numerical::BVP_Damp::telemetry::{
-        BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode,
+        BvpDampedDecisionEvent, BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode,
     };
     use nalgebra::{DMatrix, DVector};
     use std::collections::HashMap;
@@ -30,6 +30,8 @@ mod tests {
     struct TimedRun {
         wall_ms: f64,
         stats: DampedStats,
+        result: DMatrix<f64>,
+        decision_trace: crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionTrace,
     }
 
     fn bratu_solver(telemetry_mode: BvpTelemetryMode, logging_mode: BvpLoggingMode) -> NRBVP {
@@ -82,6 +84,45 @@ mod tests {
         )
     }
 
+    fn small_linear_bvp_solver() -> NRBVP {
+        let n_steps = 8;
+        let values = vec!["y".to_string(), "z".to_string()];
+        let initial_guess = DMatrix::zeros(values.len(), n_steps);
+        let boundary_conditions =
+            HashMap::from([("y".to_string(), vec![(0usize, 0.0), (1usize, 1.0)])]);
+        let bounds = HashMap::from([
+            ("y".to_string(), (-2.0, 2.0)),
+            ("z".to_string(), (-2.0, 2.0)),
+        ]);
+        let rel_tolerance = HashMap::from([("y".to_string(), 1e-8), ("z".to_string(), 1e-8)]);
+        let options = DampedSolverOptions::sparse_damped()
+            .with_strategy_params(Some(SolverParams::default()))
+            .with_abs_tolerance(1e-9)
+            .with_max_iterations(20)
+            .with_bounds(bounds)
+            .with_rel_tolerance(rel_tolerance)
+            .with_bvp_telemetry_mode(BvpTelemetryMode::Off)
+            .with_bvp_logging_config(
+                BvpLoggingConfig::new(BvpLoggingMode::Detailed).with_max_events(64),
+            );
+
+        // y' = z, z' = 0 with y(0)=0 and y(1)=1 has the exact solution y=x, z=1.
+        NRBVP::new_numeric_with_jacobian_options(
+            initial_guess,
+            values,
+            "x".to_string(),
+            boundary_conditions,
+            0.0,
+            1.0,
+            n_steps,
+            options,
+            |_x, state: &DVector<f64>, _params| DVector::from_vec(vec![state[1], 0.0]),
+            |_x, _state: &DVector<f64>, _params| {
+                DMatrix::from_row_slice(2, 2, &[0.0, 1.0, 0.0, 0.0])
+            },
+        )
+    }
+
     fn run_story_case(telemetry_mode: BvpTelemetryMode, logging_mode: BvpLoggingMode) -> TimedRun {
         let mut solver = bratu_solver(telemetry_mode, logging_mode);
         let started = Instant::now();
@@ -96,7 +137,326 @@ mod tests {
         TimedRun {
             wall_ms: elapsed_ms,
             stats: solver.get_statistics(),
+            result,
+            decision_trace: solver.damped_decision_trace_snapshot(),
         }
+    }
+
+    #[test]
+    fn damped_decision_trace_is_opt_in_and_does_not_change_solver_work() {
+        let off = run_story_case(BvpTelemetryMode::Off, BvpLoggingMode::Off);
+        let logging_only = run_story_case(BvpTelemetryMode::Off, BvpLoggingMode::Detailed);
+        let counters_only = run_story_case(BvpTelemetryMode::Counters, BvpLoggingMode::Off);
+        let detailed_trace = run_story_case(BvpTelemetryMode::Counters, BvpLoggingMode::Detailed);
+
+        assert_eq!(off.result, detailed_trace.result);
+        assert_eq!(off.result, logging_only.result);
+        assert!(off.decision_trace.events.is_empty());
+        assert!(counters_only.decision_trace.events.is_empty());
+        assert!(!logging_only.decision_trace.events.is_empty());
+        assert_eq!(logging_only.stats.telemetry.counters, Default::default());
+        assert!(
+            !logging_only
+                .stats
+                .telemetry
+                .log_events
+                .iter()
+                .any(|event| event.kind
+                    == crate::numerical::BVP_Damp::telemetry::BvpLogEventKind::DampingTrial)
+        );
+        assert!(!detailed_trace.decision_trace.events.is_empty());
+        assert_eq!(detailed_trace.decision_trace.dropped_events, 0);
+
+        let off_counters = &counters_only.stats.telemetry.counters;
+        let detailed_counters = &detailed_trace.stats.telemetry.counters;
+        assert_eq!(off_counters, detailed_counters);
+        assert_eq!(
+            off_counters.residual_calls,
+            detailed_counters.residual_calls
+        );
+        assert_eq!(
+            off_counters.jacobian_recalculations,
+            detailed_counters.jacobian_recalculations
+        );
+        assert_eq!(
+            off_counters.damping_trials,
+            detailed_counters.damping_trials
+        );
+        assert_eq!(
+            off_counters.damping_rejections,
+            detailed_counters.damping_rejections
+        );
+        assert_eq!(off_counters.linear_solves, detailed_counters.linear_solves);
+        assert_eq!(
+            off_counters.factorizations,
+            detailed_counters.factorizations
+        );
+
+        let trials = detailed_trace
+            .decision_trace
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                BvpDampedDecisionEvent::DampingTrialDecision { .. } => Some(event),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(trials.len() as u64, detailed_counters.damping_trials);
+        assert!(trials.iter().any(|event| matches!(
+            event,
+            BvpDampedDecisionEvent::DampingTrialDecision {
+                accepted: true,
+                accepted_by_threshold: Some(_),
+                accepted_by_decrease: Some(_),
+                comparison_norm,
+                convergence_threshold,
+                ..
+            } if comparison_norm.is_finite() && *convergence_threshold == 1.0
+        )));
+        for event in &trials {
+            if let BvpDampedDecisionEvent::DampingTrialDecision {
+                attempted_alpha,
+                next_alpha,
+                current_norm: Some(s1),
+                comparison_norm: s0,
+                convergence_threshold,
+                accepted_by_threshold: Some(by_threshold),
+                accepted_by_decrease: Some(by_decrease),
+                accepted,
+                ..
+            } = event
+            {
+                assert_eq!(*by_threshold, *s1 < *convergence_threshold);
+                assert_eq!(*by_decrease, *s1 < *s0);
+                assert_eq!(*accepted, *by_threshold || *by_decrease);
+                if *accepted {
+                    assert!(next_alpha.is_none());
+                } else {
+                    let next_alpha = next_alpha.expect("rejected trial records next alpha");
+                    assert!(next_alpha < *attempted_alpha);
+                }
+            }
+        }
+
+        let legacy_trial_alphas = detailed_trace
+            .stats
+            .telemetry
+            .log_events
+            .iter()
+            .filter(|event| {
+                event.kind == crate::numerical::BVP_Damp::telemetry::BvpLogEventKind::DampingTrial
+            })
+            .map(|event| (event.value_a, event.value_b))
+            .collect::<Vec<_>>();
+        assert_eq!(legacy_trial_alphas.len(), trials.len());
+        for (typed, (legacy_alpha, legacy_value_b)) in trials.iter().zip(legacy_trial_alphas) {
+            let BvpDampedDecisionEvent::DampingTrialDecision {
+                attempted_alpha, ..
+            } = typed
+            else {
+                unreachable!()
+            };
+            assert_eq!(*attempted_alpha, legacy_alpha);
+            assert!(legacy_value_b.is_nan());
+        }
+        let legacy_rejected = detailed_trace
+            .stats
+            .telemetry
+            .log_events
+            .iter()
+            .filter(|event| {
+                event.kind
+                    == crate::numerical::BVP_Damp::telemetry::BvpLogEventKind::DampingRejected
+            })
+            .collect::<Vec<_>>();
+        let typed_rejected = trials
+            .iter()
+            .filter_map(|event| match event {
+                BvpDampedDecisionEvent::DampingTrialDecision {
+                    accepted: false,
+                    next_alpha: Some(next_alpha),
+                    current_norm: Some(current_norm),
+                    ..
+                } => Some((*next_alpha, *current_norm)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(legacy_rejected.len(), typed_rejected.len());
+        for (legacy, (next_alpha, rejected_norm)) in legacy_rejected.iter().zip(typed_rejected) {
+            assert_eq!(legacy.value_a, next_alpha);
+            assert_eq!(legacy.value_b, rejected_norm);
+        }
+
+        let legacy_trial = detailed_trace
+            .stats
+            .telemetry
+            .log_events
+            .iter()
+            .find(|event| {
+                event.kind == crate::numerical::BVP_Damp::telemetry::BvpLogEventKind::DampingTrial
+            })
+            .expect("legacy decision event remains available");
+        assert!(legacy_trial.value_a.is_finite());
+        assert!(legacy_trial.value_b.is_nan());
+        assert!(
+            detailed_trace
+                .decision_trace
+                .events
+                .iter()
+                .any(|event| matches!(
+                    event,
+                    BvpDampedDecisionEvent::IterationDecision {
+                        status: crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::Converged,
+                        accepted_alpha: Some(_),
+                        accepted_correction_norm: Some(_),
+                        stopping_threshold: Some(_),
+                        ..
+                    }
+                ))
+        );
+        assert!(detailed_trace.decision_trace.events.iter().any(|event| matches!(
+            event,
+            BvpDampedDecisionEvent::SolveTermination {
+                reason: crate::numerical::BVP_Damp::telemetry::BvpDampedSolveTerminationReason::Converged,
+                status: crate::numerical::BVP_Damp::telemetry::BvpSolveStatus::Converged,
+                iteration_index: Some(_),
+                stopping_metric: Some(_),
+                stopping_threshold: Some(_),
+                residual_norm: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn small_linear_reference_bvp_emits_complete_decision_and_termination() {
+        let mut solver = small_linear_bvp_solver();
+        let result = solver
+            .try_solve()
+            .expect("small linear reference BVP should solve")
+            .expect("small linear reference BVP should converge");
+        assert!(result.iter().all(|value| value.is_finite()));
+
+        let profile = solver
+            .get_result()
+            .expect("converged linear reference profile should be published");
+        assert_eq!(profile.ncols(), 2);
+        assert!((profile[(0, 0)] - 0.0).abs() <= 1e-8);
+        assert!((profile[(profile.nrows() - 1, 0)] - 1.0).abs() <= 1e-8);
+        assert!((profile[(0, 1)] - 1.0).abs() <= 1e-8);
+
+        let trace = solver.damped_decision_trace_snapshot();
+        println!("[BVP Damp typed trace example] {:#?}", trace.events);
+        let iteration = trace.events.iter().find_map(|event| match event {
+            BvpDampedDecisionEvent::IterationDecision {
+                correction_metric: Some(metric),
+                base_correction_norm: Some(base_norm),
+                base_residual_norm: Some(base_residual),
+                bound_limited_alpha: Some(alpha),
+                jacobian_age,
+                jacobian_refreshed,
+                accepted_alpha: Some(accepted_alpha),
+                accepted_correction_norm: Some(accepted_norm),
+                residual_norm: Some(residual_norm),
+                stopping_threshold: Some(threshold),
+                status: crate::numerical::BVP_Damp::telemetry::BvpDampedIterationStatus::Converged,
+                ..
+            } => Some((
+                *metric,
+                *base_norm,
+                *base_residual,
+                *alpha,
+                *jacobian_age,
+                *jacobian_refreshed,
+                *accepted_alpha,
+                *accepted_norm,
+                *residual_norm,
+                *threshold,
+            )),
+            _ => None,
+        });
+        let (
+            metric,
+            base_norm,
+            base_residual,
+            alpha,
+            jacobian_age,
+            jacobian_refreshed,
+            accepted_alpha,
+            accepted_norm,
+            residual_norm,
+            threshold,
+        ) = iteration.expect("trace records completed Newton iteration");
+        assert_eq!(
+            metric,
+            crate::numerical::BVP_Damp::telemetry::BvpDampedCorrectionMetric::LegacyEuclidean
+        );
+        assert!(base_norm.is_finite() && base_residual.is_finite());
+        assert!(alpha.is_finite() && accepted_alpha.is_finite());
+        assert!(jacobian_age > 0);
+        assert!(jacobian_refreshed);
+        assert!(accepted_norm <= threshold);
+        assert!(residual_norm.is_finite());
+
+        assert!(trace.events.iter().any(|event| matches!(
+            event,
+            BvpDampedDecisionEvent::SolveTermination {
+                reason: crate::numerical::BVP_Damp::telemetry::BvpDampedSolveTerminationReason::Converged,
+                status: crate::numerical::BVP_Damp::telemetry::BvpSolveStatus::Converged,
+                iteration_index: Some(_),
+                stopping_metric: Some(_),
+                stopping_threshold: Some(_),
+                residual_norm: Some(_),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn bounded_newton_budget_reports_no_result_termination() {
+        let mut solver = bratu_solver(BvpTelemetryMode::Off, BvpLoggingMode::Detailed);
+        solver.max_iterations = 2;
+        if let Some(strategy) = solver.strategy_params.as_mut() {
+            strategy.max_damp_iter = Some(1);
+            strategy.adaptive = None;
+        }
+        let result = solver
+            .try_solve()
+            .expect("bounded Newton budget should return a classified solve outcome");
+        assert!(result.is_none(), "tiny Newton budget should not converge");
+
+        let trace = solver.damped_decision_trace_snapshot();
+        let termination = trace.events.iter().find_map(|event| match event {
+            BvpDampedDecisionEvent::SolveTermination {
+                reason,
+                status,
+                iteration_index,
+                stopping_metric,
+                stopping_threshold,
+                ..
+            } => Some((
+                *reason,
+                *status,
+                *iteration_index,
+                *stopping_metric,
+                *stopping_threshold,
+            )),
+            _ => None,
+        });
+        let (reason, status, iteration, metric, threshold) =
+            termination.expect("no-result solve should retain its typed termination");
+        assert_eq!(
+            status,
+            crate::numerical::BVP_Damp::telemetry::BvpSolveStatus::NoResult
+        );
+        assert!(matches!(
+            reason,
+            crate::numerical::BVP_Damp::telemetry::BvpDampedSolveTerminationReason::IterationLimit
+                | crate::numerical::BVP_Damp::telemetry::BvpDampedSolveTerminationReason::DampingTrialsExhausted
+        ));
+        assert!(iteration.is_some());
+        assert!(metric.is_some());
+        assert!(threshold.is_some());
     }
 
     fn median(values: &[f64]) -> f64 {

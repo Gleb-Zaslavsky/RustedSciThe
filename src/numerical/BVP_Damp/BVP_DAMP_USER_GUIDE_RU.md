@@ -755,6 +755,23 @@ println!("solve_id={} dropped={}", trace.solve_id, trace.log_events_dropped);
 может бесконечно наращивать память диагностики. При достижении лимита проверяйте
 `log_events_dropped`.
 
+Для Damped `BvpLoggingMode::Detailed` дополнительно сохраняет отдельный
+ограниченный `BvpDampedDecisionTrace`. Его можно получить через
+`NRBVP::damped_decision_trace_snapshot()` или через фасад
+`BvpSolver::damped_decision_trace_snapshot()`. Типизированные события итераций
+представлены тремя видами: `IterationDecision`, `DampingTrialDecision` и
+`SolveTermination`. Они содержат базовую/пробную метрики коррекции (s0/s1),
+предыдущее значение для сравнения, возраст/обновление Jacobian, alpha с учетом
+bounds, attempted alpha и следующую alpha после отказа, оба предиката принятия,
+принятый шаг, доступные нормы residual, типизированный статус, stopping metric
+и примененный порог. Trace использует уже вычисленные значения и не вызывает
+callbacks повторно. Он независим от counters; для старых событий нужны и
+counters, и сохраняющий их уровень логирования: `DampingTrial` имеет уровень
+Debug (только Detailed), а `DampingRejected` — Warn (Warnings или Detailed).
+При выключенном логировании новая трасса не хранит события. Смысл
+`BvpLogEvent::value_a/value_b` не меняется; однозначную диагностику alpha дает
+новый типизированный trace.
+
 ## Запуск BVP-задач из текстовых документов
 
 Текстовый task-document — это удобный слой над нативным API BVP_Damp для

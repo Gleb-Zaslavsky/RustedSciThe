@@ -760,6 +760,23 @@ trace is bounded per solve, so large adaptive problems cannot grow diagnostic
 memory without limit. Check `log_events_dropped` when the configured cap is
 reached.
 
+For the Damped solver, `BvpLoggingMode::Detailed` also retains a separate
+bounded `BvpDampedDecisionTrace`. Read it with
+`NRBVP::damped_decision_trace_snapshot()` or, through the facade,
+`BvpSolver::damped_decision_trace_snapshot()`. Its typed iteration/trial
+events are `IterationDecision`, `DampingTrialDecision` and
+`SolveTermination`. They report base/trial correction metrics (s0/s1), prior
+comparison metric, Jacobian age/refresh, bound-limited and attempted alpha,
+next alpha after rejection, both acceptance predicates, the accepted step,
+available residual norms, typed status, stopping metric and applied threshold.
+The trace reuses values already computed by the solver and never invokes
+callbacks again. It is independent of counters; older generic damping log
+projections require counters and a retaining logging level: `DampingTrial` is
+Debug (Detailed only), while `DampingRejected` is Warn (Warnings or Detailed).
+With logging Off the new trace stores no decision events. Existing
+`BvpLogEvent::value_a/value_b` meanings remain unchanged; use the typed trace
+for unambiguous attempted-alpha diagnostics.
+
 ## Running BVP tasks from text documents
 
 The task-document route is a convenience layer over the native BVP_Damp API.

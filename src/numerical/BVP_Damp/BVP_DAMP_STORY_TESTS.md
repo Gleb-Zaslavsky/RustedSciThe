@@ -13,7 +13,7 @@ This file is the short index for the BVP_Damp story ledger. The detailed entries
 
 Every new or rerun story entry must contain Recorded: YYYY-MM-DD, machine/core-count context, command, result, interpretation, and conclusion. An entry marked Recorded: undated is historical evidence only and is RERUN REQUIRED after the current architecture pass. A rerun supersedes the old block; the old block remains for auditability.
 
-Current date for this ledger pass: 2026-09-22.
+Current date for this ledger pass: 2026-11-10.
 
 ## Source-Of-Truth Rules
 
@@ -1505,3 +1505,71 @@ story-test selection:
 AOT is opt-in because compiler lifecycle time should not silently turn a
 bounded callback matrix into an overnight run. Use `-IncludeCriterion` only
 when the detailed existing Criterion instruments are wanted as well.
+
+## Opt-in Damped Newton decision trace (2026-11-10, debug + release)
+
+Recorded: 2026-11-10 | Windows, 24 logical processors | rustc 1.98.1
+
+The Damped solver exposes a bounded typed trace only when
+`BvpLoggingMode::Detailed` is selected. The three event kinds are
+`IterationDecision`, `DampingTrialDecision`, and `SolveTermination`.
+`s0` is the base undamped correction norm; `s1` is the trial state's undamped
+correction norm, not a residual. The unchanged acceptance rule is
+`s1 < 1.0 || s1 < s0`. The trace reports the metric policy, prior comparison
+metric, residual norms already available, Jacobian age/refresh, bound-limited
+alpha, attempted alpha, next alpha after rejection, both predicate results,
+accepted step, typed status, stopping metric, and applied convergence
+threshold. It is available from `NRBVP::damped_decision_trace_snapshot()` and
+the `Bvp_api` facade.
+
+The old generic event payload remains unchanged: `DampingTrial` stores the
+attempted alpha in `value_a` and NaN in `value_b`; `DampingRejected` stores the
+already-reduced next alpha in `value_a` and rejected `s1` in `value_b`. Those
+two legacy projections require counters and a retaining logging level: the
+Debug-level trial is kept only by Detailed logging, while Warn-level rejection
+is kept by Warnings or Detailed. The counter methods return early otherwise.
+The new detailed trace is independent of counters. `Off` stores no new events;
+it performs no extra callback evaluation or event allocation.
+
+The alpha schedule is unchanged: the first attempted alpha is the bounds-
+feasibility factor `fbound`; after each rejection, Legacy divides the current
+alpha by `2^(k + damp_factor)` using the existing zero-based trial index `k`,
+while CorrectionNewton divides by `sqrt(2)`. The new trace stores the attempted
+and already-computed next alpha without recomputing either.
+
+Debug gates:
+
+```powershell
+cargo test --lib damped_decision_trace -- --nocapture --test-threads=1
+cargo test --lib small_linear_reference_bvp_emits_complete_decision_and_termination -- --nocapture --test-threads=1
+cargo test --lib bounded_newton_budget_reports_no_result_termination -- --nocapture --test-threads=1
+cargo test --lib numerical::BVP_Damp::telemetry::tests -- --nocapture --test-threads=1
+cargo test --lib rejected_damping_decisions_match_across_frontends_and_layout_configs -- --nocapture --test-threads=1
+cargo test --lib damped_facade_exposes_opt_in_decision_trace -- --nocapture --test-threads=1
+cargo test --lib facade_builds_native_solver_variants_and_preserves_route_guess_layouts -- --nocapture --test-threads=1
+```
+
+All passed: 14 telemetry unit tests, Bratu off/counters/detailed parity,
+the analytic small linear BVP `y'=z, z'=0` (`y=x, z=1`), no-result termination,
+the facade accessor, and route parity. The Bratu test confirms identical full
+counter snapshots and result with tracing on/off. ExprLegacy/AtomView x
+Sparse/Banded rejection parity recorded 72 trials, 64 rejections and 13
+iterations with matching typed decisions across all four routes. For the
+linear fixture, the real trace included `attempted_alpha=1`, `s0=3.344772...`,
+`s1=0`, `accepted=true`, stopping threshold `1.25e-7`, and a typed
+`SolveTermination::Converged` at iteration 1. No new residual/Jacobian callback
+was issued to construct these events.
+
+The release telemetry story also passed:
+
+```powershell
+cargo test --release --lib telemetry_off_vs_detailed_adaptive_story -- --include-ignored --nocapture --test-threads=1
+```
+
+The latest release telemetry price comparison (5 samples, report timestamp
+2026-11-10T17:35:13.873Z) measured Off median 87.384 ms and Detailed telemetry
+median 88.127 ms (+2.63% by medians); paired deltas ranged from -151.835 ms to
++41.294 ms. The run is too noisy to infer a small overhead and does not isolate
+the new decision trace. A low-noise release comparison of
+`BvpLoggingMode::Off` and `Detailed` remains open. The disabled trace path
+constructs/retains no event payloads and performs no additional callback work.

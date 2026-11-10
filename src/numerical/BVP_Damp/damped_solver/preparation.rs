@@ -1880,6 +1880,14 @@ impl NRBVP {
         }
     }
 
+    /// Returns the bounded Damped Newton iteration/trial trace when detailed
+    /// BVP logging was enabled. This accessor does not trigger solver work.
+    pub fn damped_decision_trace_snapshot(
+        &self,
+    ) -> crate::numerical::BVP_Damp::telemetry::BvpDampedDecisionTrace {
+        self.telemetry_counters.damped_decision_trace_snapshot()
+    }
+
     fn append_generated_backend_diagnostics(&self, diagnostics: &mut HashMap<String, String>) {
         let config = &self.generated_backend_config;
         let effective_method = self.effective_runtime_method();
