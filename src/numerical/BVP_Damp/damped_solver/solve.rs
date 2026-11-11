@@ -1560,6 +1560,23 @@ impl NRBVP {
     /// errors. Enabled logging must initialize its persistent file sink before
     /// numerical work begins.
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_solver_with_mesh(None)
+    }
+
+    /// Cold solve starting from an explicit mesh. Unlike a prior manual
+    /// `try_eq_generate` followed by `try_solver_prepared`, this keeps symbolic
+    /// preparation inside the ordinary solve telemetry/timing lifecycle.
+    pub fn try_solver_on_mesh(
+        &mut self,
+        mesh: Vec<f64>,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_solver_with_mesh(Some(mesh))
+    }
+
+    fn try_solver_with_mesh(
+        &mut self,
+        mesh: Option<Vec<f64>>,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         let _logging_scope = SolverLogGuard::try_enter(self.effective_logging_level()?)
             .map_err(|source| BvpBackendIntegrationError::LogSetupFailed { source })?;
         self.telemetry_counters.begin_solve();
@@ -1567,7 +1584,7 @@ impl NRBVP {
         let begin = Instant::now();
         let res = (|| {
             self.custom_timer.symbolic_operations_tic();
-            self.try_eq_generate(None, None)?;
+            self.try_eq_generate(mesh, None)?;
             self.custom_timer.symbolic_operations_tac();
             self.try_main_loop_damped()
         })();

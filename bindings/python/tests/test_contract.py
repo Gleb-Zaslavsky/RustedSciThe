@@ -4072,6 +4072,47 @@ def test_bvp_api_correction_newton_route_exposes_frontend_backend_and_native_tel
     assert "factorization" in telemetry["timings_ms"]
 
 
+@pytest.mark.parametrize("route", ["correction_newton", "damped"])
+def test_bvp_api_newton_routes_accept_node_aligned_seed_on_nonuniform_mesh(route):
+    x = Expr.variable("x")
+    mesh = [0.0, 0.07, 0.31, 0.66, 1.0]
+    seed = [[0.5 * coordinate * coordinate] for coordinate in mesh]
+    seed[2][0] += 0.05
+    kwargs = {"initial_guess_layout": "node_aligned"}
+    if route == "correction_newton":
+        request = BvpSolverRequest.correction_newton(
+            [x], ["y"], "x", mesh, [(0, "left", 0.0)], seed,
+            options=SolverOptions(frontend="atom_native", matrix_layout="banded"),
+            tolerance=1e-9,
+            **kwargs,
+        )
+    else:
+        request = BvpSolverRequest.damped(
+            [x], ["y"], "x", mesh, [(0, "left", 0.0)], seed,
+            options=SolverOptions(frontend="atom_native", matrix_layout="banded"),
+            scheme="trapezoid",
+            bounds={"y": (-1.0, 1.0)},
+            tolerance=1e-9,
+            **kwargs,
+        )
+    solution = request.prepare().solve()
+    assert solution.mesh() == pytest.approx(mesh, abs=0.0)
+    assert [row[0] for row in solution.values()] == pytest.approx(
+        [0.5 * coordinate * coordinate for coordinate in mesh], abs=1e-10
+    )
+
+
+def test_bvp_api_node_aligned_newton_seed_requires_boundary_compatibility():
+    y = Expr.variable("y")
+    mesh = [0.0, 0.2, 1.0]
+    with pytest.raises(InvalidConfigurationError, match="violates the Left boundary"):
+        BvpSolverRequest.correction_newton(
+            [y], ["y"], "x", mesh, [(0, "left", 0.0)],
+            [[1e-4], [0.5], [1.0]],
+            initial_guess_layout="node_aligned",
+        ).prepare()
+
+
 def test_bvp_api_correction_newton_rejects_unsupported_parallel_policy():
     y = Expr.variable("y")
     with pytest.raises(UnsupportedOptionError, match="execution_policy='sequential'"):
@@ -4175,6 +4216,30 @@ def test_bvp_api_damped_and_frozen_requests_keep_route_specific_guess_shapes(rou
     telemetry = solver.telemetry_snapshot()
     assert telemetry["route"] == route
     assert telemetry["counters"]
+
+
+def test_bvp_api_frozen_accepts_nonuniform_mesh_and_node_aligned_guess():
+    x = Expr.variable("x")
+    mesh = [0.0, 0.07, 0.31, 0.66, 1.0]
+    guess = [[0.5 * coordinate * coordinate] for coordinate in mesh]
+    guess[2][0] += 0.05
+    request = BvpSolverRequest.frozen(
+        [x],
+        ["y"],
+        "x",
+        mesh,
+        [(0, "left", 0.0)],
+        guess,
+        options=SolverOptions(frontend="atom_native", matrix_layout="banded"),
+        scheme="trapezoid",
+        tolerance=1e-10,
+        initial_guess_layout="node_aligned",
+    )
+
+    solution = request.prepare().solve()
+    assert solution.mesh() == pytest.approx(mesh)
+    for coordinate, profile_row in zip(mesh, solution.values()):
+        assert profile_row[0] == pytest.approx(0.5 * coordinate * coordinate, abs=1e-9)
 
 
 @pytest.mark.parametrize(

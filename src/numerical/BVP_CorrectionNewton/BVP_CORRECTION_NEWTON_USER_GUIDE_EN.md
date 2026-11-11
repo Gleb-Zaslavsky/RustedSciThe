@@ -1,6 +1,6 @@
 # BVP_CorrectionNewton User Guide
 
-`BVP_CorrectionNewton` is a fixed-uniform-mesh boundary-value route implementing a
+`BVP_CorrectionNewton` is a fixed-mesh boundary-value route implementing a
 damped correction-Newton numerical core. Its nonlinear iteration is
 independent of BVP_Damp and BVP_sci. The public client facade is the shared
 [`BVP_api`](../BVP_api/BVP_API_GUIDE_EN.md); this page documents the route's
@@ -12,7 +12,8 @@ telemetry, and validation contract.
 
 ## Numerical Scope
 
-The discretization is a fixed-grid trapezoid system. Boundary-constrained
+The discretization is a fixed-grid trapezoid system on either uniform or
+explicit nonuniform coordinates; each interval uses its own `h_i`. Boundary-constrained
 unknowns are eliminated from the packed Newton state and restored when the
 profile is returned. There is no mesh refinement, pseudo-transient recovery,
 or mesh restart in this solver route. Fixed external inputs are inferred from

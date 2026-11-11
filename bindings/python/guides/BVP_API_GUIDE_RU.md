@@ -36,11 +36,14 @@ print(solver.telemetry_snapshot())
 ```
 
 Фабрики фасада выбирают семейство native-солвера: `damped`, `frozen`, `sci`
-или `correction_newton`. Маршрут `correction_newton` реализует fixed-grid trapezoid/Newton для
-равномерной сетки и поддерживает ExprLegacy или нативный AtomView, Lambdify
+или `correction_newton`. Маршрут `correction_newton` реализует fixed-grid trapezoid/Newton и поддерживает
+равномерную или произвольную строго возрастающую сетку, ExprLegacy или нативный AtomView, Lambdify
 или AOT, а также Dense, Sparse и автоматически определяемый Banded backend.
-Начальное приближение содержит одну строку на интервал; граничные значения
-задаются отдельно. Grid refinement этим fixed-mesh маршрутом не поддерживается.
+По умолчанию начальное приближение содержит одну строку на свободную координату;
+граничные значения задаются отдельно. `initial_guess_layout="node_aligned"`
+вместо этого принимает полный профиль с одной строкой на узел mesh и проверяет
+значения закреплённых endpoint-ов на совместимость с граничными условиями.
+Grid refinement этим fixed-mesh маршрутом не поддерживается.
 Фиксированные символьные входы можно передать через
 `external_parameters` и `external_parameter_values`; вызов
 `solve_with_parameter_values(values)` повторно использует подготовленные
@@ -69,9 +72,18 @@ error с доступной telemetry, но не прерывает послед
 во внутренний compact node-major iterate. Frozen использует строку на каждый
 индекс сокращённого unknown-вектора. Оба маршрута возвращают полный профиль с
 граничными значениями на endpoint-ах. BVP_sci ожидает строку на каждый узел.
-Damped и Frozen требуют равномерную сетку, поскольку их конструкторы принимают
-границы и число интервалов, а не произвольные координаты. BVP_sci допускает неравномерную
-сетку.
+Damped принимает явную
+неравномерную сетку и начинает adaptive refinement с переданных координат.
+Frozen также принимает неравномерную сетку и полный node-aligned профиль;
+во время фиксированного solve эта сетка не изменяется.
+CorrectionNewton принимает неравномерную сетку и использует локальные ширины
+интервалов в residual и Jacobian. Для Damped, Frozen и CorrectionNewton задайте
+`initial_guess_layout="node_aligned"`, чтобы передать полный профиль
+`[node][state]`; endpoint-значения должны совпадать с условиями с точностью до
+машинного округления. Значение по умолчанию `"free"` сохраняет прежний reduced
+формат. BVP_sci также допускает неравномерную сетку. Исполняемый пример с
+полным node-aligned профилем на неравномерной сетке находится в
+[`examples/bvp_api_nonuniform_mesh.py`](../examples/bvp_api_nonuniform_mesh.py).
 
 Общие frontend, execution, layout, callback policy, telemetry, logging и AOT
 настройки задаются через `SolverOptions`; алгоритмические параметры доступны

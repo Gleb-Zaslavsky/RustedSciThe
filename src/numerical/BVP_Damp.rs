@@ -152,5 +152,7 @@ pub use resolved_plan::{
     BvpEvaluatorKind, BvpLinearAlgorithmKind, BvpParameterBinding, BvpResolvedPlan, BvpStrategyKind,
 };
 pub use telemetry::{
-    BvpLogEvent, BvpLogEventKind, BvpLogLevel, BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode,
+    BvpFrozenFailureEvent, BvpFrozenFailureStage, BvpFrozenIterationEvent,
+    BvpFrozenIterationTrace, BvpLogEvent, BvpLogEventKind, BvpLogLevel, BvpLoggingConfig,
+    BvpLoggingMode, BvpTelemetryMode,
 };

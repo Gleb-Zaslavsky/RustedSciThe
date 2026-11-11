@@ -26,6 +26,12 @@ impl NRBVP {
         let fun_begin = Instant::now();
         self.telemetry_counters.record_residual_call();
         let new_fun = fun.try_call(p, y).map_err(|error| {
+            self.telemetry_counters.record_frozen_failure(
+                crate::numerical::BVP_Damp::telemetry::BvpFrozenFailureEvent {
+                    iteration: self.iteration_index as u64,
+                    stage: crate::numerical::BVP_Damp::telemetry::BvpFrozenFailureStage::ResidualCallback,
+                },
+            );
             BvpBackendIntegrationError::CallbackExecutionFailed {
                 stage: "residual".to_string(),
                 message: error.to_string(),
@@ -34,6 +40,7 @@ impl NRBVP {
         self.custom_timer.append_to_fun_time(fun_begin.elapsed());
         let now = Instant::now();
 
+        let jacobian_refreshed = self.jac_recalc;
         let reused_factorization;
         if self.jac_recalc {
             info!("\n \n JACOBIAN (RE)CALCULATED! \n \n");
@@ -52,6 +59,12 @@ impl NRBVP {
                 Ok(jacobian) => jacobian,
                 Err(error) => {
                     self.custom_timer.jac_tac();
+                    self.telemetry_counters.record_frozen_failure(
+                        crate::numerical::BVP_Damp::telemetry::BvpFrozenFailureEvent {
+                            iteration: self.iteration_index as u64,
+                            stage: crate::numerical::BVP_Damp::telemetry::BvpFrozenFailureStage::JacobianCallback,
+                        },
+                    );
                     return Err(BvpBackendIntegrationError::CallbackExecutionFailed {
                         stage: "Jacobian".to_string(),
                         message: error.to_string(),
@@ -186,6 +199,35 @@ impl NRBVP {
         // silently convert a full step into a fraction-to-boundary step.
         let new_y = y - &*applied_step;
 
+        if self.telemetry_counters.detailed_decision_trace_enabled() {
+            let mut correction_inf = 0.0_f64;
+            let mut correction_inf_index = 0;
+            let mut current_iterate_inf = 0.0_f64;
+            let mut next_iterate_inf = 0.0_f64;
+            for index in 0..applied_step.len() {
+                let correction = applied_step.get_val(index).abs();
+                if correction > correction_inf {
+                    correction_inf = correction;
+                    correction_inf_index = index;
+                }
+                current_iterate_inf = current_iterate_inf.max(y.get_val(index).abs());
+                next_iterate_inf = next_iterate_inf.max(new_y.get_val(index).abs());
+            }
+            self.telemetry_counters.record_frozen_iteration(
+                crate::numerical::BVP_Damp::telemetry::BvpFrozenIterationEvent {
+                    iteration: self.iteration_index as u64,
+                    residual_l2: new_fun.norm(),
+                    correction_l2: applied_step.norm(),
+                    correction_inf,
+                    correction_inf_index,
+                    current_iterate_inf,
+                    next_iterate_inf,
+                    jacobian_age: self.m,
+                    jacobian_refreshed,
+                },
+            );
+        }
+
         Ok(new_y)
     }
 
@@ -204,13 +246,13 @@ impl NRBVP {
     /// Fallible internal Newton loop used by [`NRBVP::try_solver`].
     pub fn try_main_loop(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         info!("solving system of equations with Newton-Raphson method! \n \n");
-        let y: DMatrix<f64> = self.initial_guess.clone();
-        let y: Vec<f64> = y.iter().cloned().collect();
-        let y: DVector<f64> = DVector::from_vec(y);
-        self.y = Vectors_type_casting(&y.clone(), self.method.clone());
+        let y = self.packed_initial_guess_node_major()?;
+        self.y = Vectors_type_casting(&y, self.method.clone());
+        self.iteration_index = 0;
         let mut i = 0;
 
         while i < self.max_iterations {
+            self.iteration_index = i + 1;
             self.telemetry_counters.record_iteration();
             let iteration_started = self.telemetry_counters.start_iteration_scope();
             let iteration_result = self.try_iteration();

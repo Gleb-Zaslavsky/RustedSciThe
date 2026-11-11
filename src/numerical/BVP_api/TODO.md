@@ -1,5 +1,21 @@
 # BVP_api: Hybrid Client Settings And Full-Fidelity Route Contract
 
+## Explicit Nonuniform Mesh BVP Routes (2026-11-11)
+
+- [x] Add distinct `CorrectionNewtonNodeAligned` and `DampedNodeAligned`
+  configurations accepting a full state-major profile aligned one-to-one with
+  `BvpProblem::mesh`; do not reinterpret existing reduced-guess variants.
+- [x] Extend the same contract to Frozen: add `FrozenNodeAligned`, validate and
+  remove each state's constrained endpoint, pass explicit nonuniform nodes to
+  symbolic callback generation, and preserve the existing uniform/reduced path.
+- [x] Permit arbitrary strictly increasing meshes on CorrectionNewton and
+  Damped and Frozen routes. Preserve native uniform-grid fast/legacy paths and
+  Damped's solver-managed refinement lifecycle. Require full-profile BC values
+  to agree within scale-aware floating-point tolerance before packing.
+- [x] Add parity and validation tests, including mixed left/right BCs and
+  explicit nonuniform solves. Propagate the new config surface to Python
+  bindings, tests, and RU/EN guides without changing BVP_sci behavior.
+
 ## Initial-guess packing regression (2026-11-10)
 
 - [x] Convert the documented Damped state-major free profiles into the native
@@ -184,8 +200,9 @@ This facade must not duplicate Newton logic or compensate for native defects.
 - [x] Validate strictly increasing finite mesh and route-specific guess shapes
   before native construction: Damped uses interval columns; Frozen and Sci use
   node columns.
-- [x] Require uniform mesh for Damped/Frozen native constructors; preserve
-  BVP_sci's adaptive mesh contract without hidden resampling.
+- [x] Preserve BVP_sci's adaptive mesh contract without hidden resampling;
+  Damped and Frozen now receive explicit meshes through the native symbolic
+  builder when the supplied nodes are nonuniform.
 - [x] Ensure hybrid conversion delegates through the same validation and does
   not change mesh, guess, parameter or postprocessing semantics.
 
@@ -223,3 +240,102 @@ This facade must not duplicate Newton logic or compensate for native defects.
   and Rust/Python guide coverage. Damped/Frozen support generated symbolic
   ExprLegacy/AtomView with Lambdify/AOT; numeric callback routes remain
   unsupported. Changing boundary topology requires new preparation.
+
+## MF-LOW Nonuniform Six-State Regression (2026-11-11)
+
+- [x] Add the KiThe MF-LOW six-state clustered and uniform seed fixtures plus
+  the SciPy clustered reference under `fixtures/`, preserving source bytes.
+- [x] Reproduce the symbolic equations, mixed endpoint boundary conditions,
+  and full node-aligned initial profile through the public `BVP_api`.
+- [x] Keep BVP_sci Sparse as the reference route; investigate CorrectionNewton,
+  Frozen/Naive, and Damped on the same clustered seed without Dense storage.
+- [x] For Damped, exercise the principal refinement strategies with explicit
+  non-default controls and record mesh growth, status, timings, and native
+  telemetry. Uniform-grid sensitivity is not part of this clustered-seed run.
+- [x] Record actual outcomes, solver settings, and limitations in
+  `STORY_TESTS.md`; do not infer physical validity from convergence alone.
+- [x] Run the focused Debug tests and verify existing BVP_api tests remain green.
+- [x] Diagnose the apparent fixed-mesh CorrectionNewton/Frozen profile split.
+  Frozen flattened the state-major reduced guess column-major, but its generated
+  callbacks use node-major free-unknown order. With mixed left/right endpoint
+  constraints this permuted the guess. At a tight CorrectionNewton root the
+  Frozen callback residual was `1.525e3` under the old flattening and `3.55e-8`
+  after canonical packing. Frozen now retains that root within `3.4e-6` max
+  profile distance; the former Frozen profiles are withdrawn as invalid.
+- [x] Match stopping scales diagnostically: Frozen uses an unscaled L2 step
+  norm, while CorrectionNewton uses component-scaled weighted RMS <= 1. Mapping
+  CorrectionNewton's scales to approximately Frozen's raw L2 threshold keeps
+  the same profile and lowers its trapezoid defect from `2.50e-5` to `7.90e-12`.
+- [x] Investigate Frozen's remaining inability to converge from the original
+  MF-LOW clustered or SciPy seed after correct packing. Opt-in per-iteration
+  trace shows runaway corrections while one Jacobian is reused; the default
+  route fails safely on a non-finite residual. Refreshing the Jacobian after
+  every large correction converges in 8 iterations and matches the tight
+  CorrectionNewton profile within `3.323e-6`; `every_m=1` (refresh every third
+  iteration) does not converge
+  within 100 iterations. Results and Debug gates are recorded in
+  `STORY_TESTS.md`. This is distinct from the fixed mixed-endpoint packing bug.
+- [x] Decision after MF-LOW/HIGH comparison: retain large-correction refresh
+  as an opt-in native strategy setting and keep the existing Frozen default.
+  It is decisive for the tested MF-LOW trajectory but adds Jacobian work
+  without a material solution change on MF-HIGH. The opposite regime outcomes
+  do not justify a universal default change; revisit only with further
+  workload-specific evidence.
+
+## MF-1963 Solver Suitability Matrix: LOW and HIGH (2026-11-11)
+
+Keep every Rust-side MF-1963 numerical experiment in the single module
+`mf1963_nonuniform_story_tests.rs`. This is an inspectable example for KiThe
+clients to select a solver/strategy from evidence. Tests may be split into
+helpers within that module, but do not scatter this case across solver test
+modules. Solver failure is an acceptable outcome when the solver is unsuitable
+for a seed/regime, provided it returns a typed failure, publishes no invalid
+profile, and the limitation is clearly recorded.
+
+- [x] Add the KiThe MF-HIGH six-state seed and independent SciPy reference
+  fixtures to `BVP_api/fixtures/`; record provenance and preserve source bytes.
+- [x] Generalize the existing MF-LOW fixture/problem/report helpers to carry
+  case parameters (`delta`, `Pe`/domain) and compute that case's own RHS,
+  discrete trapezoid defect, endpoint errors, and telemetry.
+- [x] Run BVP_sci on MF-HIGH from the KiThe seed and independently reconstructed
+  smooth seed; run CorrectionNewton, all four Damped refinement strategies,
+  and three Frozen refresh policies from the KiThe seed. The two BVP_sci seeds
+  differ by max profile distance `7.681e1`. Solver-produced cross-seeds remain
+  covered by the MF-LOW tests; do not expand this matrix into a Cartesian
+  seed-by-solver sweep unless later evidence makes seed sensitivity decision-
+  critical. Keep BVP_sci as the independent positive control.
+- [x] For both regimes, record physical-state ranges and invariants (finite
+  temperature transform, nonnegative concentrations within numerical noise,
+  concentration closure / first integral, boundary defects), separately from
+  algebraic solver status and reference-profile error. Existing permissive
+  Damped bounds `[-1e6, 1e6]` do not establish physical admissibility.
+- [x] Investigate the MF-LOW DoublePoints discrepancy: it has better sampled
+  SciPy profile agreement but a larger reported absolute trapezoid defect
+  (`7.67e-4`) than Pearson/Grcar (`3.01e-5`). It belongs to `q` at interval
+  31472 with width `3.134e-7`; the scaled defect is `1.552e-8`. This is not
+  evidence of a bad refined solution by itself.
+- [x] Classify CorrectionNewton/Damped profile differences against the
+  collocation reference: check grid convergence, discrete residual, branch
+  indicators and physical invariants before calling them defects. Distinct
+  discretizations/branches need not produce identical profiles. On MF-HIGH,
+  fixed-mesh CorrectionNewton and Frozen agree within `9.1e-6`; Damped's
+  refinement progressively approaches the BVP_sci collocation profile.
+- [x] Keep Frozen refresh-policy results as solver-suitability evidence, not a
+  universal correctness obligation. Compare adaptive large-correction refresh
+  with the default and periodic cadence on MF-HIGH before proposing any default
+  change; do not weaken tolerances or force a successful solve. On MF-HIGH,
+  all three converge in 3 iterations; adaptive refresh performs 3 Jacobian
+  refreshes versus 1 for default/`every_m=1`, with no material profile change.
+  MF-LOW remains the counterexample where refresh after large corrections
+  changes failure into convergence. No default change is justified yet.
+- [x] Run the complete MF-1963 Debug matrix, including ignored large cases,
+  retain Tabled results in `STORY_TESTS.md`, and state which route/strategy is
+  recommended for each regime and seed class. Keep backend/frontend axes
+  explicitly scoped; no AtomView/AOT parity claim follows from Lambdify-only
+  runs. MF-LOW/HIGH together completed with 17 passed and 0 failed in 102.74 s;
+  the ordinary BVP_api Debug suite passed 47 tests (17 ignored). No production
+  defaults were changed.
+- [x] Add a consolidated LOW/HIGH solver-and-seed selection table to the story
+  tests and prepare a standalone KiThe handoff covering the observed routes,
+  nonuniform mesh/full-profile syntax, Frozen packing fix, refresh tuning,
+  physical checks, and scope limitations.

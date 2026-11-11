@@ -284,6 +284,49 @@ pub struct BvpDampedDecisionTrace {
     pub dropped_events: u64,
 }
 
+/// One successful full Newton update performed by the Frozen solver.
+///
+/// Norms are measured from values already computed by the iteration. The
+/// packed index follows the callback's node-major unknown ordering.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BvpFrozenIterationEvent {
+    pub iteration: u64,
+    pub residual_l2: f64,
+    pub correction_l2: f64,
+    pub correction_inf: f64,
+    pub correction_inf_index: usize,
+    pub current_iterate_inf: f64,
+    pub next_iterate_inf: f64,
+    /// Number of completed iterations since the Jacobian was refreshed.
+    /// Zero means this step used a freshly evaluated Jacobian.
+    pub jacobian_age: usize,
+    pub jacobian_refreshed: bool,
+}
+
+/// Stage where a Frozen Newton iteration failed before producing an update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BvpFrozenFailureStage {
+    ResidualCallback,
+    JacobianCallback,
+}
+
+/// Terminal callback failure associated with the next attempted iteration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BvpFrozenFailureEvent {
+    pub iteration: u64,
+    pub stage: BvpFrozenFailureStage,
+}
+
+/// Bounded, opt-in record of successful Frozen Newton updates.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BvpFrozenIterationTrace {
+    pub solve_id: u64,
+    pub events: Vec<BvpFrozenIterationEvent>,
+    pub dropped_events: u64,
+    /// At most one terminal callback failure is retained for the solve.
+    pub failure: Option<BvpFrozenFailureEvent>,
+}
+
 /// Fixed vocabulary for callback sub-stages.
 ///
 /// Callback instrumentation uses this enum internally so a callback does not
@@ -589,6 +632,9 @@ pub(crate) struct BvpTelemetryRecorder {
     log_events: RefCell<Vec<BvpLogEvent>>,
     dropped_damped_events: Cell<u64>,
     damped_events: RefCell<Vec<BvpDampedDecisionEvent>>,
+    dropped_frozen_events: Cell<u64>,
+    frozen_events: RefCell<Vec<BvpFrozenIterationEvent>>,
+    frozen_failure: Cell<Option<BvpFrozenFailureEvent>>,
     iterations: Cell<u64>,
     scalar_evaluations: Cell<u64>,
     residual_calls: Cell<u64>,
@@ -650,6 +696,8 @@ impl BvpTelemetryRecorder {
         }
         if config.mode != BvpLoggingMode::Detailed {
             self.damped_events.borrow_mut().clear();
+            self.frozen_events.borrow_mut().clear();
+            self.frozen_failure.set(None);
         }
     }
 
@@ -678,6 +726,9 @@ impl BvpTelemetryRecorder {
         self.log_events.borrow_mut().clear();
         self.dropped_damped_events.set(0);
         self.damped_events.borrow_mut().clear();
+        self.dropped_frozen_events.set(0);
+        self.frozen_events.borrow_mut().clear();
+        self.frozen_failure.set(None);
         self.iteration_elapsed.set(Duration::ZERO);
         self.damping_trial_elapsed.set(Duration::ZERO);
     }
@@ -848,6 +899,38 @@ impl BvpTelemetryRecorder {
             solve_id: self.solve_id.get(),
             events: self.damped_events.borrow().clone(),
             dropped_events: self.dropped_damped_events.get(),
+        }
+    }
+
+    /// Retains Frozen iteration diagnostics only when detailed logging is on.
+    #[inline]
+    pub(crate) fn record_frozen_iteration(&self, event: BvpFrozenIterationEvent) {
+        let config = self.logging_config.get();
+        if config.mode != BvpLoggingMode::Detailed {
+            return;
+        }
+        let mut events = self.frozen_events.borrow_mut();
+        if events.len() >= config.max_events {
+            self.dropped_frozen_events
+                .set(self.dropped_frozen_events.get().saturating_add(1));
+            return;
+        }
+        events.push(event);
+    }
+
+    pub(crate) fn frozen_iteration_trace_snapshot(&self) -> BvpFrozenIterationTrace {
+        BvpFrozenIterationTrace {
+            solve_id: self.solve_id.get(),
+            events: self.frozen_events.borrow().clone(),
+            dropped_events: self.dropped_frozen_events.get(),
+            failure: self.frozen_failure.get(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn record_frozen_failure(&self, failure: BvpFrozenFailureEvent) {
+        if self.detailed_decision_trace_enabled() {
+            self.frozen_failure.set(Some(failure));
         }
     }
 

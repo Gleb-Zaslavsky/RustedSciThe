@@ -22,6 +22,17 @@ not expose this operation. The shared `BVP_api` facade and Python binding
 provide `set_boundary_values` and `solve_with_boundary_values` for the same
 prepared symbolic routes.
 
+For symbolic Damped solves, the low-level preparation API also accepts explicit
+coordinates through `try_eq_generate(Some(mesh), bandwidth)`. The typed
+`BVP_api` route preserves that mesh through its cold solve and may refine it
+later. Frozen/Naive also accepts an explicit nonuniform fixed mesh through
+`BVP_api`; its symbolic callbacks are prepared on those exact coordinates and
+the solver does not refine them. Use
+`BvpSolverSettings::with_node_aligned_initial_guess` when the seed is known at
+every mesh node; the facade validates endpoint values and packs the full
+state-major profile into each route's native free-unknown order. The established
+reduced-guess configurations remain available and unchanged.
+
 ## 2. What the BVP solver receives
 
 The preferred constructor for new Damped code is `NRBVP::new_with_options(...)`:
@@ -776,6 +787,27 @@ Debug (Detailed only), while `DampingRejected` is Warn (Warnings or Detailed).
 With logging Off the new trace stores no decision events. Existing
 `BvpLogEvent::value_a/value_b` meanings remain unchanged; use the typed trace
 for unambiguous attempted-alpha diagnostics.
+
+Frozen has its own opt-in `BvpFrozenIterationTrace`, available from
+`NRBVP::frozen_iteration_trace_snapshot()` and
+`BvpSolver::frozen_iteration_trace_snapshot()`. Each completed full Newton
+update records residual/correction L2 norms, maximum correction and its
+node-major packed index, current/next iterate infinity norms, and whether the
+Jacobian was refreshed plus its age. A terminal residual/Jacobian callback
+failure records its iteration and stage; the original typed solve error still
+contains the detailed cause. The trace uses the residual and correction
+already computed by the iteration and never re-evaluates callbacks. It is
+retained only with `BvpLoggingMode::Detailed` and shares the configured bounded
+event capacity; `Off` adds no trace payloads.
+
+```rust
+let options = FrozenSolverOptions::banded_frozen()
+    .with_bvp_logging_config(
+        BvpLoggingConfig::new(BvpLoggingMode::Detailed).with_max_events(128),
+    );
+// After solving:
+let trace = solver.frozen_iteration_trace_snapshot();
+```
 
 ## Running BVP tasks from text documents
 

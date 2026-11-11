@@ -120,6 +120,7 @@ impl NRBVP {
             jac: None,
             p: 0.0,
             y: y0,
+            iteration_index: 0,
             m: 0,
             factor_owner: BvpPreparedRuntime::new(),
             prepared_runtime_revision: BvpRuntimeRevision::default(),
@@ -461,6 +462,197 @@ impl NRBVP {
             self.generated_backend_config.effective_method(&self.method),
         );
         Ok(())
+    }
+
+    /// Replaces the Frozen grid with explicit finite, strictly increasing
+    /// coordinates. The generated callbacks and numeric linear runtime are
+    /// invalidated; install a matching seed before preparing/solving.
+    pub fn try_set_explicit_mesh(
+        &mut self,
+        mesh: Vec<f64>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        let invalid = |message: String| BvpBackendIntegrationError::InvalidProblem {
+            field: "mesh".into(),
+            message,
+        };
+        if mesh.len() < 3 {
+            return Err(invalid(format!(
+                "Frozen explicit mesh requires at least 3 nodes, got {}",
+                mesh.len()
+            )));
+        }
+        if mesh.iter().any(|coordinate| !coordinate.is_finite())
+            || !mesh.windows(2).all(|pair| pair[1] > pair[0])
+        {
+            return Err(invalid(
+                "coordinates must be finite and strictly increasing".into(),
+            ));
+        }
+        if self.x_mesh.as_slice() == mesh.as_slice() {
+            return Ok(());
+        }
+
+        let n_steps = mesh.len() - 1;
+        self.invalidate_linear_runtime();
+        self.prepared_runtime_revision.mesh_changed();
+        self.jac = None;
+        self.factor_owner.clear_layout();
+        self.variable_string.clear();
+        self.result = None;
+        self.t0 = mesh[0];
+        self.t_end = *mesh.last().expect("mesh has at least three nodes");
+        self.n_steps = n_steps;
+        self.x_mesh = DVector::from_vec(mesh);
+        self.initial_guess = DMatrix::zeros(self.values.len(), n_steps);
+        self.y = Vectors_type_casting(
+            &DVector::zeros(self.values.len() * n_steps),
+            self.generated_backend_config.effective_method(&self.method),
+        );
+        Ok(())
+    }
+
+    /// Installs a full state-major profile aligned with every current mesh
+    /// node. Each state's one fixed endpoint is checked against its boundary
+    /// value and removed before storing the native reduced Newton guess.
+    pub fn try_set_node_aligned_initial_guess(
+        &mut self,
+        full_guess: DMatrix<f64>,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        let invalid = |message: String| BvpBackendIntegrationError::InvalidProblem {
+            field: "initial_guess".into(),
+            message,
+        };
+        if full_guess.shape() != (self.values.len(), self.n_steps + 1) {
+            return Err(invalid(format!(
+                "expected state-major shape {}x{}, got {}x{}",
+                self.values.len(),
+                self.n_steps + 1,
+                full_guess.nrows(),
+                full_guess.ncols()
+            )));
+        }
+        if let Some(index) = full_guess.iter().position(|value| !value.is_finite()) {
+            return Err(BvpBackendIntegrationError::NonFiniteCallbackValue {
+                stage: "node_aligned_initial_guess".into(),
+                index,
+            });
+        }
+
+        let mut constrained_nodes = vec![None; self.values.len()];
+        for (state_index, state) in self.values.iter().enumerate() {
+            let conditions = self.BorderConditions.get(state).ok_or_else(|| {
+                invalid(format!("missing endpoint condition for state `{state}`"))
+            })?;
+            if conditions.len() != 1 {
+                return Err(invalid(format!(
+                    "node-aligned Frozen guesses require exactly one endpoint condition for `{state}`"
+                )));
+            }
+            let (side, boundary_value) = conditions[0];
+            let node = match side {
+                0 => 0,
+                1 => self.n_steps,
+                other => {
+                    return Err(invalid(format!(
+                        "invalid endpoint side {other} for state `{state}`"
+                    )));
+                }
+            };
+            let seed_value = full_guess[(state_index, node)];
+            let scale = seed_value.abs().max(boundary_value.abs()).max(1.0);
+            if (seed_value - boundary_value).abs() > 64.0 * f64::EPSILON * scale {
+                return Err(invalid(format!(
+                    "node-aligned seed for `{state}` at endpoint {side} is {seed_value}, expected {boundary_value}"
+                )));
+            }
+            constrained_nodes[state_index] = Some(node);
+        }
+
+        let mut reduced = DMatrix::zeros(self.values.len(), self.n_steps);
+        for state in 0..self.values.len() {
+            let fixed_node = constrained_nodes[state].expect("all state endpoints validated");
+            let mut column = 0;
+            for node in 0..=self.n_steps {
+                if node == fixed_node {
+                    continue;
+                }
+                reduced[(state, column)] = full_guess[(state, node)];
+                column += 1;
+            }
+        }
+
+        self.initial_guess = reduced;
+        self.result = None;
+        self.invalidate_linear_runtime();
+        if self.prepared_runtime_revision.prepared_plan().is_some() {
+            let fingerprint = self.prepared_plan_fingerprint();
+            self.prepared_runtime_revision
+                .refresh_prepared_fingerprint(fingerprint);
+            self.factor_owner.refresh_prepared_binding(fingerprint);
+        }
+        Ok(())
+    }
+
+    /// Packs the per-state reduced guess into the node-major order expected by
+    /// the generated residual and Jacobian callbacks. Mixed endpoint sides
+    /// mean a reduced column index is not a shared physical node across states.
+    pub(crate) fn packed_initial_guess_node_major(
+        &self,
+    ) -> Result<DVector<f64>, BvpBackendIntegrationError> {
+        let invalid = |message: String| BvpBackendIntegrationError::InvalidProblem {
+            field: "initial_guess".into(),
+            message,
+        };
+        if self.initial_guess.shape() != (self.values.len(), self.n_steps) {
+            return Err(invalid(format!(
+                "expected reduced shape {}x{}, got {}x{}",
+                self.values.len(),
+                self.n_steps,
+                self.initial_guess.nrows(),
+                self.initial_guess.ncols()
+            )));
+        }
+
+        let fixed_nodes =
+            self.values
+                .iter()
+                .map(|state| {
+                    let conditions = self.BorderConditions.get(state).ok_or_else(|| {
+                        invalid(format!("missing endpoint condition for `{state}`"))
+                    })?;
+                    if conditions.len() != 1 {
+                        return Err(invalid(format!(
+                            "expected exactly one endpoint condition for `{state}`"
+                        )));
+                    }
+                    match conditions[0].0 {
+                        0 => Ok(0),
+                        1 => Ok(self.n_steps),
+                        side => Err(invalid(format!(
+                            "invalid endpoint side {side} for `{state}`"
+                        ))),
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+        let mut packed = Vec::with_capacity(self.initial_guess.len());
+        for node in 0..=self.n_steps {
+            for (state, &fixed_node) in fixed_nodes.iter().enumerate() {
+                if node == fixed_node {
+                    continue;
+                }
+                let reduced_column = if fixed_node == 0 { node - 1 } else { node };
+                packed.push(self.initial_guess[(state, reduced_column)]);
+            }
+        }
+        if packed.len() != self.initial_guess.len() {
+            return Err(invalid(format!(
+                "packed {} unknowns, expected {}",
+                packed.len(),
+                self.initial_guess.len()
+            )));
+        }
+        Ok(DVector::from_vec(packed))
     }
 
     /// Basic methods to set the equation system
@@ -1345,6 +1537,14 @@ impl NRBVP {
                     .map(crate::symbolic::bvp::telemetry::BvpDirectJacobianTelemetry::snapshot),
             },
         }
+    }
+
+    /// Returns the bounded opt-in trace of successful Frozen Newton updates.
+    /// The trace is empty unless `BvpLoggingMode::Detailed` was selected.
+    pub fn frozen_iteration_trace_snapshot(
+        &self,
+    ) -> crate::numerical::BVP_Damp::telemetry::BvpFrozenIterationTrace {
+        self.telemetry_counters.frozen_iteration_trace_snapshot()
     }
 
     fn append_generated_backend_diagnostics(&self, diagnostics: &mut HashMap<String, String>) {

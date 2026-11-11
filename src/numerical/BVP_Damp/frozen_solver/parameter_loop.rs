@@ -127,17 +127,52 @@ impl NRBVP {
                         });
                         break;
                     }
-                    let iterate = DMatrix::from_column_slice(
-                        self.values.len(),
-                        self.n_steps,
-                        solution.as_slice(),
-                    );
                     let values = self.get_result().ok_or_else(|| {
                         BvpBackendIntegrationError::InvalidProblem {
                             field: "parameter_loop_solution".into(),
                             message: "Frozen converged iterate could not be expanded to the full endpoint profile".into(),
                         }
                     })?;
+                    let mut iterate = DMatrix::zeros(self.values.len(), self.n_steps);
+                    for (state, state_name) in self.values.iter().enumerate() {
+                        let conditions =
+                            self.BorderConditions.get(state_name).ok_or_else(|| {
+                                BvpBackendIntegrationError::InvalidProblem {
+                                    field: "parameter_loop_solution".into(),
+                                    message: format!(
+                                        "missing endpoint condition for `{state_name}`"
+                                    ),
+                                }
+                            })?;
+                        if conditions.len() != 1 {
+                            return Err(BvpBackendIntegrationError::InvalidProblem {
+                                field: "parameter_loop_solution".into(),
+                                message: format!(
+                                    "expected one endpoint condition for `{state_name}`"
+                                ),
+                            });
+                        }
+                        let fixed_node = match conditions[0].0 {
+                            0 => 0,
+                            1 => self.n_steps,
+                            side => {
+                                return Err(BvpBackendIntegrationError::InvalidProblem {
+                                    field: "parameter_loop_solution".into(),
+                                    message: format!(
+                                        "invalid endpoint side {side} for `{state_name}`"
+                                    ),
+                                });
+                            }
+                        };
+                        for reduced_column in 0..self.n_steps {
+                            let node = if fixed_node == 0 {
+                                reduced_column + 1
+                            } else {
+                                reduced_column
+                            };
+                            iterate[(state, reduced_column)] = values[(node, state)];
+                        }
+                    }
                     successful_checkpoint = Some(SuccessfulCheckpoint {
                         parameters: parameters.clone(),
                         iterate,
@@ -189,8 +224,8 @@ impl NRBVP {
         self.try_set_parameter_values(parameters)?;
         self.try_set_prepared_iterate(iterate.clone())?;
         self.result = result;
-        let flat = DVector::from_column_slice(iterate.as_slice());
-        self.y = Vectors_type_casting(&flat, self.method.clone());
+        let packed = self.packed_initial_guess_node_major()?;
+        self.y = Vectors_type_casting(&packed, self.method.clone());
         Ok(())
     }
 }

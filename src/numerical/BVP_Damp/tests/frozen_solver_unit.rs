@@ -13,8 +13,142 @@
 //!
 //! Each verbose story is mirrored to `test_reports/BVP_Damp_AOT_Frozen/`.
 use super::*;
+use crate::numerical::BVP_Damp::{BvpFrozenFailureEvent, BvpFrozenFailureStage};
 use crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot;
 use std::time::Duration;
+
+#[test]
+fn frozen_explicit_mesh_and_node_aligned_seed_use_typed_native_contracts() {
+    let mut solver = NRBVP::new_with_options(
+        vec![Expr::parse_expression("x")],
+        DMatrix::zeros(1, 4),
+        vec!["y".into()],
+        "x".into(),
+        HashMap::from([("y".into(), vec![(0, 0.0)])]),
+        0.0,
+        1.0,
+        4,
+        FrozenSolverOptions::dense_frozen().trapezoid_derivative(),
+    );
+    let original_mesh = solver.x_mesh.clone();
+    assert!(matches!(
+        solver.try_set_explicit_mesh(vec![0.0, 0.4, 0.3, 1.0]),
+        Err(BvpBackendIntegrationError::InvalidProblem { field, .. }) if field == "mesh"
+    ));
+    assert_eq!(solver.x_mesh, original_mesh);
+
+    let mesh = vec![0.0, 0.07, 0.31, 0.66, 1.0];
+    solver
+        .try_set_explicit_mesh(mesh.clone())
+        .expect("valid explicit mesh should be accepted");
+    let mut full_guess = DMatrix::from_row_slice(1, mesh.len(), &[0.0, 0.01, 0.05, 0.2, 0.5]);
+    full_guess[(0, 0)] = 1e-3;
+    assert!(matches!(
+        solver.try_set_node_aligned_initial_guess(full_guess),
+        Err(BvpBackendIntegrationError::InvalidProblem { field, .. }) if field == "initial_guess"
+    ));
+
+    solver
+        .try_set_node_aligned_initial_guess(DMatrix::from_row_slice(
+            1,
+            mesh.len(),
+            &[0.0, 0.01, 0.05, 0.2, 0.5],
+        ))
+        .expect("full node-aligned guess should validate and pack");
+    assert_eq!(solver.x_mesh.as_slice(), mesh.as_slice());
+    assert_eq!(solver.n_steps, mesh.len() - 1);
+    assert_eq!(
+        solver.initial_guess,
+        DMatrix::from_row_slice(1, 4, &[0.01, 0.05, 0.2, 0.5])
+    );
+}
+
+#[test]
+fn frozen_reduced_guess_packs_mixed_endpoints_in_node_major_callback_order() {
+    let mut solver = NRBVP::new_with_options(
+        vec![Expr::parse_expression("y"), Expr::parse_expression("z")],
+        DMatrix::from_row_slice(2, 3, &[10.0, 11.0, 12.0, 20.0, 21.0, 22.0]),
+        vec!["y".into(), "z".into()],
+        "x".into(),
+        HashMap::from([("y".into(), vec![(0, 0.0)]), ("z".into(), vec![(1, 0.0)])]),
+        0.0,
+        1.0,
+        3,
+        FrozenSolverOptions::dense_frozen().trapezoid_derivative(),
+    );
+    let packed = solver
+        .packed_initial_guess_node_major()
+        .expect("mixed endpoint seed should pack into callback ordering");
+    assert_eq!(packed.as_slice(), &[20.0, 10.0, 21.0, 11.0, 22.0, 12.0]);
+}
+
+#[test]
+fn frozen_iteration_trace_is_opt_in_and_bounded() {
+    let build = |logging_config| {
+        let mut options = FrozenSolverOptions::dense_frozen()
+            .trapezoid_derivative()
+            .with_tolerance(1e-10)
+            .with_max_iterations(8)
+            .with_bvp_telemetry_mode(BvpTelemetryMode::Counters);
+        if let Some(config) = logging_config {
+            options = options.with_bvp_logging_config(config);
+        }
+        NRBVP::new_with_options(
+            vec![Expr::parse_expression("0")],
+            DMatrix::zeros(1, 4),
+            vec!["y".into()],
+            "x".into(),
+            HashMap::from([("y".into(), vec![(0, 1.0)])]),
+            0.0,
+            1.0,
+            4,
+            options,
+        )
+    };
+
+    let mut off = build(None);
+    let off_result = off
+        .try_solve()
+        .expect("logging-off solve should succeed")
+        .expect("linear BVP should converge");
+    assert!(off.frozen_iteration_trace_snapshot().events.is_empty());
+
+    let config = crate::numerical::BVP_Damp::BvpLoggingConfig::new(
+        crate::numerical::BVP_Damp::BvpLoggingMode::Detailed,
+    )
+    .with_max_events(1);
+    let mut detailed = build(Some(config));
+    let detailed_result = detailed
+        .try_solve()
+        .expect("detailed solve should succeed")
+        .expect("linear BVP should converge");
+    assert!((&off_result - &detailed_result).amax() < 1e-12);
+    let off_counters = off.get_statistics().telemetry.counters;
+    let detailed_counters = detailed.get_statistics().telemetry.counters;
+    assert_eq!(off_counters.iterations, detailed_counters.iterations);
+    assert_eq!(
+        off_counters.residual_calls,
+        detailed_counters.residual_calls
+    );
+    assert_eq!(
+        off_counters.jacobian_recalculations,
+        detailed_counters.jacobian_recalculations
+    );
+    assert_eq!(off_counters.linear_solves, detailed_counters.linear_solves);
+    let trace = detailed.frozen_iteration_trace_snapshot();
+    assert_eq!(trace.events.len(), 1, "trace retention must be bounded");
+    assert!(trace.dropped_events > 0, "overflow should be reported");
+    let event = trace.events[0];
+    assert_eq!(event.iteration, 1);
+    assert!(event.residual_l2.is_finite() && event.residual_l2 > 0.0);
+    assert!(event.correction_l2.is_finite() && event.correction_l2 > 0.0);
+    assert!(event.correction_inf.is_finite() && event.correction_inf > 0.0);
+    assert!(event.correction_inf_index < 4);
+    assert!(event.current_iterate_inf.is_finite());
+    assert!(event.next_iterate_inf.is_finite());
+    assert!(event.jacobian_refreshed);
+    assert_eq!(event.jacobian_age, 0);
+}
 
 // Keep the verbose Frozen story tables in the same report system as the
 // other AOT stories without putting filesystem work in solver timings.
@@ -62,6 +196,7 @@ fn frozen_native_failure_exposes_partial_telemetry_for_each_mode() {
     ] {
         let mut solver = sparse_surface_test_solver();
         solver.set_bvp_telemetry_mode(mode);
+        solver.set_bvp_logging_config(BvpLoggingConfig::new(BvpLoggingMode::Detailed));
         solver
             .try_eq_generate()
             .expect("callbacks must prepare before injecting a runtime failure");
@@ -90,6 +225,15 @@ fn frozen_native_failure_exposes_partial_telemetry_for_each_mode() {
         assert_eq!(snapshot.telemetry_mode, mode);
         assert_eq!(snapshot.last_solve_status, BvpSolveStatus::Failed);
         assert_eq!(snapshot.solve_id, 1);
+        let trace = solver.frozen_iteration_trace_snapshot();
+        assert!(trace.events.is_empty());
+        assert_eq!(
+            trace.failure,
+            Some(BvpFrozenFailureEvent {
+                iteration: 1,
+                stage: BvpFrozenFailureStage::ResidualCallback,
+            })
+        );
         match mode {
             BvpTelemetryMode::Off => {
                 assert_eq!(snapshot.counters, Default::default());

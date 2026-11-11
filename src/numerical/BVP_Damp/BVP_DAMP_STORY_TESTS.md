@@ -1573,3 +1573,20 @@ median 88.127 ms (+2.63% by medians); paired deltas ranged from -151.835 ms to
 the new decision trace. A low-noise release comparison of
 `BvpLoggingMode::Off` and `Detailed` remains open. The disabled trace path
 constructs/retains no event payloads and performs no additional callback work.
+
+## Frozen Mixed-Endpoint Initial-Guess Packing (2026-11-11)
+
+Frozen stores the public reduced guess as a state-by-free-node matrix, while
+generated callbacks consume node-major free unknowns. The solve loop previously
+flattened that matrix in column-major order, which permuted values when some
+states were fixed on the left and others on the right. A direct MF-LOW probe
+measured Frozen residual infinity norm `1.525e3` under that flattening versus
+`3.55e-8` after canonical node-major packing at a tight CorrectionNewton root.
+
+The runtime now packs by physical mesh node and state. Its parameter-loop
+checkpoint conversion uses the inverse mapping. A unit test locks the mixed
+endpoint coordinate order; the MF-LOW BVP_api story confirms Frozen retains a
+high-accuracy CorrectionNewton root within `3.4e-6` max profile distance. The
+original MF-LOW seed still does not converge under Frozen, but is no longer
+misreported as a successful alternate profile; that solver-robustness question
+remains separate.

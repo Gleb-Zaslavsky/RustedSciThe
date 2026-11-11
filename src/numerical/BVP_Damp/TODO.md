@@ -1,5 +1,28 @@
 # BVP_Damp Architecture Review And Migration TODO
 
+## Explicit Nonuniform Mesh And Node-Aligned Seed (2026-11-11)
+
+- [x] Preserve the existing uniform-grid constructor/configuration and reduced
+  initial-guess shapes exactly. Add BVP_api node-aligned routes for Damped and
+  Frozen accepting a finite, strictly increasing mesh plus a full state-major
+  `state_count x node_count` seed. Validate fixed endpoint seed values against
+  BCs with a small scale-aware floating-point tolerance, then pack only free
+  unknowns into each solver's native node-major order. Frozen also exposes
+  typed `try_set_explicit_mesh` and `try_set_node_aligned_initial_guess` native
+  lifecycle operations; its legacy uniform setter remains unchanged.
+- [x] Ensure Damped and Frozen cold solve lifecycles prepare callbacks on the
+  supplied mesh rather than silently replacing it with a uniform grid. Damped
+  refinement starts from that mesh, interpolates from its coordinates, and
+  invalidates mesh-dependent resources as it already does on refinement;
+  Frozen retains the explicit mesh as its fixed grid.
+- [x] Add Debug regression coverage for nonuniform residual/Jacobian assembly,
+  mixed left/right BC seed packing, malformed mesh/profile/BC mismatch, and a
+  refinement pass starting from an explicit mesh. Keep the existing
+  uniform-grid and reduced-guess tests unchanged as compatibility gates.
+- [x] Expose the explicit-mesh/full-seed contract through Python BVP_api;
+  update Rust and Python RU/EN guides and add a nonuniform-mesh usage example.
+  Run the focused Debug tests and the existing BVP_Damp correctness tests.
+
 ## Numeric Boundary-Value Rebinding (2026-11-07)
 
 - [x] Add `set_boundary_values`/`solve_with_boundary_values` for unchanged
@@ -4095,3 +4118,35 @@ recovery contracts.
 - [ ] Decide whether the 26-state Pearson/Grcar diagnostic that reaches 3939
   nodes in two refinements belongs in routine ignored Debug suites; it is
   computationally expensive but captures a meaningful large workload.
+
+## Frozen Mixed-Endpoint Reduced-Guess Packing (2026-11-11)
+
+- [x] Pack Frozen's per-state reduced initial-guess matrix into the node-major
+  order used by generated residual/Jacobian callbacks. The old column-major
+  flattening permuted unknowns whenever endpoint constraints mixed left and
+  right sides.
+- [x] Update Frozen parameter-loop checkpoint conversion to map between the
+  public state-by-free-node matrix and internal node-major vector explicitly.
+- [x] Add a mixed-endpoint unit test for the exact packed coordinate order and
+  an MF-LOW cross-route regression proving Frozen preserves an accurate
+  CorrectionNewton root.
+- [x] Investigate Frozen's non-convergence from the original MF-LOW clustered
+  and SciPy seeds after correct packing. Detailed trace attributes the failure
+  to runaway full Newton updates with a stale Jacobian; refresh-on-large-
+  correction converges. See the measured follow-up below and BVP_api story.
+
+## Frozen MF-LOW Newton-Trajectory Telemetry (2026-11-11)
+
+- [x] Add bounded, opt-in Frozen Newton iteration records with residual and
+  correction norms, worst packed coordinate, iterate magnitudes, and Jacobian
+  age/refresh status; capture the terminal callback-failure stage without
+  repeating residual/Jacobian work.
+- [x] Verify the trace does not change the solution or actual Counters-mode
+  work counts; verify callback failure capture and bounded event retention.
+- [x] Diagnose MF-LOW stale-Jacobian behavior: the default one-Jacobian route
+  diverges and safely fails; refresh-on-large-correction converges in 8 steps
+  and matches the tight CorrectionNewton root within `3.323e-6`. `every_m=1`
+  does not converge within 100 steps.
+- [ ] Evaluate refresh-policy candidates on additional large combustion
+  workloads before changing Frozen production defaults. See the measured
+  trajectory and Debug gates in `BVP_api/STORY_TESTS.md`.

@@ -331,16 +331,36 @@ pub enum BvpSolverConfig {
         /// State-major initial guess with one value per non-fixed node.
         initial_guess: DMatrix<f64>,
     },
+    /// CorrectionNewton route with a full state-major profile aligned to every
+    /// node of [`BvpProblem::mesh`]. Fixed endpoint entries must match the BCs.
+    CorrectionNewtonNodeAligned {
+        options: CorrectionNewtonOptions,
+        initial_guess: DMatrix<f64>,
+    },
     /// Damped Newton route. Its guess has one column per mesh interval.
     Damped {
         options: DampedSolverOptions,
         /// State-major initial guess with shape `state_count x (mesh.len() - 1)`.
         initial_guess: DMatrix<f64>,
     },
-    /// Frozen/Naive route. Its guess has one column per mesh point.
+    /// Damped route with a full state-major profile aligned to every node.
+    /// Fixed endpoint entries must match the BCs; enabled refinement remains
+    /// owned by the native Damped solve lifecycle.
+    DampedNodeAligned {
+        options: DampedSolverOptions,
+        initial_guess: DMatrix<f64>,
+    },
+    /// Frozen/Naive route. Its reduced guess has one column per free interval
+    /// coordinate; use `FrozenNodeAligned` to supply all mesh nodes.
     Frozen {
         options: FrozenSolverOptions,
-        /// State-major initial guess with shape `state_count x mesh.len()`.
+        /// State-major reduced guess with shape `state_count x interval_count`.
+        initial_guess: DMatrix<f64>,
+    },
+    /// Frozen/Naive route with a complete state-major profile aligned to every
+    /// mesh node. Fixed endpoint entries must match the boundary conditions.
+    FrozenNodeAligned {
+        options: FrozenSolverOptions,
         initial_guess: DMatrix<f64>,
     },
     /// Collocation route, retaining its full native option and AOT policies.
@@ -575,11 +595,11 @@ impl BvpSolverSettings {
     /// Attach a state-major initial guess and construct the matching route.
     ///
     /// The guess shape is route-specific and is validated by
-    /// [`BvpSolver::new`]: Damped and CorrectionNewton expect one value per
-    /// free state/interval coordinate, while Frozen and Sci expect one column
-    /// per mesh node. For Damped, each state row follows increasing mesh order
-    /// with its constrained endpoint omitted; the facade converts it to the
-    /// native compact node-major Newton ordering.
+    /// [`BvpSolver::new`]: Damped, Frozen and CorrectionNewton expect one value
+    /// per free state/interval coordinate, while Sci expects one column per
+    /// mesh node. For Damped, each state row follows increasing mesh order with
+    /// its constrained endpoint omitted; the facade converts it to the native
+    /// compact node-major Newton ordering.
     pub fn with_initial_guess(self, initial_guess: DMatrix<f64>) -> BvpSolverConfig {
         match self {
             Self::CorrectionNewton(options) => BvpSolverConfig::CorrectionNewton {
@@ -606,6 +626,29 @@ impl BvpSolverSettings {
             },
         }
     }
+
+    /// Attach a full state-major profile with one column per node in the
+    /// caller-supplied mesh. CorrectionNewton and Damped validate the
+    /// constrained endpoint entries and pack only free values internally;
+    /// Frozen validates the constrained endpoint entries and packs only free
+    /// coordinates; Sci already consumes the full profile directly.
+    pub fn with_node_aligned_initial_guess(self, initial_guess: DMatrix<f64>) -> BvpSolverConfig {
+        match self {
+            Self::CorrectionNewton(options) => BvpSolverConfig::CorrectionNewtonNodeAligned {
+                options,
+                initial_guess,
+            },
+            Self::Damped(options) => BvpSolverConfig::DampedNodeAligned {
+                options,
+                initial_guess,
+            },
+            Self::Frozen(options) => BvpSolverConfig::FrozenNodeAligned {
+                options,
+                initial_guess,
+            },
+            settings @ Self::Sci { .. } => settings.with_initial_guess(initial_guess),
+        }
+    }
 }
 
 impl BvpSolverConfig {
@@ -613,11 +656,12 @@ impl BvpSolverConfig {
     /// Native telemetry and bounded typed decision traces remain independent.
     pub fn with_logging_level(mut self, level: SolverLogLevel) -> Self {
         match &mut self {
-            Self::CorrectionNewton { options, .. } => options.logging_level = level,
-            Self::Damped { options, .. } => {
+            Self::CorrectionNewton { options, .. }
+            | Self::CorrectionNewtonNodeAligned { options, .. } => options.logging_level = level,
+            Self::Damped { options, .. } | Self::DampedNodeAligned { options, .. } => {
                 *options = options.clone().with_logging_level(level);
             }
-            Self::Frozen { options, .. } => {
+            Self::Frozen { options, .. } | Self::FrozenNodeAligned { options, .. } => {
                 *options = options.clone().with_logging_level(level);
             }
             Self::Sci { options, .. } | Self::SciWithFreeParameters { options, .. } => {
@@ -769,21 +813,14 @@ pub enum BvpApiError {
     MissingResult,
 }
 
-fn require_uniform_interval_mesh(mesh: &[f64], solver: &'static str) -> Result<(), BvpApiError> {
+fn is_uniform_mesh(mesh: &[f64]) -> bool {
     let first_step = mesh[1] - mesh[0];
     let domain_width = mesh[mesh.len() - 1] - mesh[0];
     let scale = domain_width.abs().max(first_step.abs()).max(1.0);
     let tolerance = 32.0 * f64::EPSILON * scale;
-    if mesh
+    !mesh
         .windows(2)
         .any(|pair| ((pair[1] - pair[0]) - first_step).abs() > tolerance)
-    {
-        return Err(BvpApiError::UnsupportedRoute {
-            solver,
-            reason: "this route accepts uniform interval endpoints/count, not an arbitrary mesh",
-        });
-    }
-    Ok(())
 }
 
 fn validate_mesh(mesh: &[f64]) -> Result<(), BvpApiError> {
@@ -808,6 +845,7 @@ pub struct BvpSolver {
     last_solution: Option<BvpSolution>,
     last_correction_newton_telemetry: Option<CorrectionNewtonTelemetrySnapshot>,
     boundary_values_binding: Option<Arc<Vec<AtomicU64>>>,
+    damped_explicit_mesh: bool,
 }
 
 impl BvpSolver {
@@ -815,12 +853,12 @@ impl BvpSolver {
     pub fn new(problem: BvpProblem, config: BvpSolverConfig) -> Result<Self, BvpApiError> {
         problem.validate()?;
         let mut boundary_values_binding = None;
+        let mut damped_explicit_mesh = false;
         let native = match config {
             BvpSolverConfig::CorrectionNewton {
                 options,
                 initial_guess,
             } => {
-                require_uniform_interval_mesh(&problem.mesh, "BVP_CorrectionNewton")?;
                 validate_initial_guess(&problem, &initial_guess, problem.mesh.len() - 1)?;
                 let correction_newton_problem = CorrectionNewtonProblem {
                     equations: problem.equations.clone(),
@@ -834,8 +872,48 @@ impl BvpSolver {
                     ),
                     steps: problem.mesh.len() - 1,
                 };
-                let mut solver =
-                    CorrectionNewtonSolver::from_symbolic(correction_newton_problem, options)?;
+                let mut solver = if is_uniform_mesh(&problem.mesh) {
+                    CorrectionNewtonSolver::from_symbolic(correction_newton_problem, options)?
+                } else {
+                    CorrectionNewtonSolver::from_symbolic_on_mesh(
+                        correction_newton_problem,
+                        problem.mesh.clone(),
+                        options,
+                    )?
+                };
+                if let Some(parameters) = problem.external_parameters.as_ref() {
+                    solver
+                        .bind_parameters(parameters.names.clone(), parameters.values.clone())
+                        .map_err(BvpApiError::CorrectionNewton)?;
+                }
+                BvpNativeSolver::CorrectionNewton(solver)
+            }
+            BvpSolverConfig::CorrectionNewtonNodeAligned {
+                options,
+                initial_guess,
+            } => {
+                let reduced_guess = reduce_node_aligned_guess(&problem, &initial_guess)?;
+                let correction_newton_problem = CorrectionNewtonProblem {
+                    equations: problem.equations.clone(),
+                    initial_guess: reduced_guess,
+                    state_names: problem.state_names.clone(),
+                    independent_variable: problem.independent_variable.clone(),
+                    boundary_conditions: problem.legacy_boundary_conditions(),
+                    interval: (
+                        problem.mesh[0],
+                        *problem.mesh.last().expect("validated mesh"),
+                    ),
+                    steps: problem.mesh.len() - 1,
+                };
+                let mut solver = if is_uniform_mesh(&problem.mesh) {
+                    CorrectionNewtonSolver::from_symbolic(correction_newton_problem, options)?
+                } else {
+                    CorrectionNewtonSolver::from_symbolic_on_mesh(
+                        correction_newton_problem,
+                        problem.mesh.clone(),
+                        options,
+                    )?
+                };
                 if let Some(parameters) = problem.external_parameters.as_ref() {
                     solver
                         .bind_parameters(parameters.names.clone(), parameters.values.clone())
@@ -853,7 +931,6 @@ impl BvpSolver {
                         reason: "external_parameters are supported by the symbolic BVP_sci route, not BVP_Damp",
                     });
                 }
-                require_uniform_interval_mesh(&problem.mesh, "BVP_Damp Damped")?;
                 validate_initial_guess(&problem, &initial_guess, problem.mesh.len() - 1)?;
                 let compact_initial_iterate = pack_damped_initial_guess(&problem, &initial_guess)?;
                 let mut solver = DampedSolver::new_with_options(
@@ -867,6 +944,40 @@ impl BvpSolver {
                     problem.mesh.len() - 1,
                     options,
                 );
+                damped_explicit_mesh = !is_uniform_mesh(&problem.mesh);
+                if damped_explicit_mesh {
+                    solver.x_mesh = DVector::from_vec(problem.mesh.clone());
+                }
+                solver
+                    .try_set_initial_compact_node_major_iterate(compact_initial_iterate)
+                    .map_err(BvpApiError::Damped)?;
+                BvpNativeSolver::Damped(solver)
+            }
+            BvpSolverConfig::DampedNodeAligned {
+                options,
+                initial_guess,
+            } => {
+                if problem.external_parameters.is_some() {
+                    return Err(BvpApiError::UnsupportedRoute {
+                        solver: "BVP_Damp Damped",
+                        reason: "external_parameters are supported by the symbolic BVP_sci route, not BVP_Damp",
+                    });
+                }
+                let reduced_guess = reduce_node_aligned_guess(&problem, &initial_guess)?;
+                let compact_initial_iterate = pack_damped_initial_guess(&problem, &reduced_guess)?;
+                let mut solver = DampedSolver::new_with_options(
+                    problem.equations.clone(),
+                    reduced_guess,
+                    problem.state_names.clone(),
+                    problem.independent_variable.clone(),
+                    problem.legacy_boundary_conditions(),
+                    problem.mesh[0],
+                    *problem.mesh.last().expect("validated mesh"),
+                    problem.mesh.len() - 1,
+                    options,
+                );
+                solver.x_mesh = DVector::from_vec(problem.mesh.clone());
+                damped_explicit_mesh = true;
                 solver
                     .try_set_initial_compact_node_major_iterate(compact_initial_iterate)
                     .map_err(BvpApiError::Damped)?;
@@ -882,20 +993,29 @@ impl BvpSolver {
                         reason: "external_parameters are supported by the symbolic BVP_sci route, not BVP_Damp",
                     });
                 }
-                require_uniform_interval_mesh(&problem.mesh, "BVP_Damp Frozen/Naive")?;
-                validate_initial_guess(&problem, &initial_guess, problem.mesh.len() - 1)?;
-                let solver = FrozenSolver::new_with_options(
-                    problem.equations.clone(),
-                    initial_guess,
-                    problem.state_names.clone(),
-                    problem.independent_variable.clone(),
-                    problem.legacy_boundary_conditions(),
-                    problem.mesh[0],
-                    *problem.mesh.last().expect("validated mesh is non-empty"),
-                    problem.mesh.len() - 1,
+                BvpNativeSolver::Frozen(build_frozen_solver(
+                    &problem,
                     options,
-                );
-                BvpNativeSolver::Frozen(solver)
+                    initial_guess,
+                    false,
+                )?)
+            }
+            BvpSolverConfig::FrozenNodeAligned {
+                options,
+                initial_guess,
+            } => {
+                if problem.external_parameters.is_some() {
+                    return Err(BvpApiError::UnsupportedRoute {
+                        solver: "BVP_Damp Frozen/Naive",
+                        reason: "external_parameters are supported by the symbolic BVP_sci route, not BVP_Damp",
+                    });
+                }
+                BvpNativeSolver::Frozen(build_frozen_solver(
+                    &problem,
+                    options,
+                    initial_guess,
+                    true,
+                )?)
             }
             BvpSolverConfig::Sci {
                 options,
@@ -942,6 +1062,7 @@ impl BvpSolver {
             last_solution: None,
             last_correction_newton_telemetry: None,
             boundary_values_binding,
+            damped_explicit_mesh,
         })
     }
 
@@ -1179,7 +1300,13 @@ impl BvpSolver {
                 }
             },
             BvpNativeSolver::Damped(solver) => {
-                if solver.try_solver().map_err(BvpApiError::Damped)?.is_none() {
+                let solve_result = if self.damped_explicit_mesh {
+                    let active_mesh = solver.x_mesh.iter().copied().collect();
+                    solver.try_solver_on_mesh(active_mesh)
+                } else {
+                    solver.try_solver()
+                };
+                if solve_result.map_err(BvpApiError::Damped)?.is_none() {
                     return Err(BvpApiError::MissingResult);
                 }
                 BvpSolution::Damped {
@@ -1522,6 +1649,17 @@ impl BvpSolver {
         }
     }
 
+    /// Return the opt-in Frozen Newton iteration trace, if this facade owns a
+    /// Frozen solver. The trace is empty unless detailed BVP logging is on.
+    pub fn frozen_iteration_trace_snapshot(
+        &self,
+    ) -> Option<crate::numerical::BVP_Damp::telemetry::BvpFrozenIterationTrace> {
+        match &self.native {
+            BvpNativeSolver::Frozen(solver) => Some(solver.frozen_iteration_trace_snapshot()),
+            _ => None,
+        }
+    }
+
     /// Build a common dataset view for plotting/export while retaining the
     /// route-native solution separately.
     pub fn postprocess_dataset(&self) -> Result<PostprocessDataset, PostprocessError> {
@@ -1695,6 +1833,100 @@ fn validate_initial_guess(
         )));
     }
     Ok(())
+}
+
+fn build_frozen_solver(
+    problem: &BvpProblem,
+    options: FrozenSolverOptions,
+    initial_guess: DMatrix<f64>,
+    node_aligned: bool,
+) -> Result<FrozenSolver, BvpApiError> {
+    let (native_guess, full_guess) = if node_aligned {
+        (
+            DMatrix::zeros(problem.state_names.len(), problem.mesh.len() - 1),
+            Some(initial_guess),
+        )
+    } else {
+        validate_initial_guess(problem, &initial_guess, problem.mesh.len() - 1)?;
+        (initial_guess, None)
+    };
+    let mut solver = FrozenSolver::new_with_options(
+        problem.equations.clone(),
+        native_guess,
+        problem.state_names.clone(),
+        problem.independent_variable.clone(),
+        problem.legacy_boundary_conditions(),
+        problem.mesh[0],
+        *problem.mesh.last().expect("validated mesh is non-empty"),
+        problem.mesh.len() - 1,
+        options,
+    );
+    if !is_uniform_mesh(&problem.mesh) {
+        solver
+            .try_set_explicit_mesh(problem.mesh.clone())
+            .map_err(BvpApiError::Frozen)?;
+    }
+    if let Some(full_guess) = full_guess {
+        solver
+            .try_set_node_aligned_initial_guess(full_guess)
+            .map_err(BvpApiError::Frozen)?;
+    }
+    Ok(solver)
+}
+
+fn reduce_node_aligned_guess(
+    problem: &BvpProblem,
+    initial_guess: &DMatrix<f64>,
+) -> Result<DMatrix<f64>, BvpApiError> {
+    validate_initial_guess(problem, initial_guess, problem.mesh.len())?;
+    let state_count = problem.state_names.len();
+    let interval_count = problem.mesh.len() - 1;
+    let mut constrained_side = vec![None; state_count];
+    for condition in &problem.boundary_conditions {
+        if constrained_side[condition.state]
+            .replace(condition.side)
+            .is_some()
+        {
+            return Err(BvpApiError::InvalidProblem(
+                "node-aligned Newton guesses require exactly one endpoint condition per state"
+                    .into(),
+            ));
+        }
+        let node = match condition.side {
+            BvpBoundarySide::Left => 0,
+            BvpBoundarySide::Right => interval_count,
+        };
+        let value = initial_guess[(condition.state, node)];
+        let scale = value.abs().max(condition.value.abs()).max(1.0);
+        if (value - condition.value).abs() > 64.0 * f64::EPSILON * scale {
+            return Err(BvpApiError::InvalidProblem(format!(
+                "node-aligned initial guess violates the {:?} boundary value for state {}: supplied {}, expected {}",
+                condition.side, problem.state_names[condition.state], value, condition.value
+            )));
+        }
+    }
+    if constrained_side.iter().any(Option::is_none) {
+        return Err(BvpApiError::InvalidProblem(
+            "node-aligned Newton guesses require exactly one endpoint condition per state".into(),
+        ));
+    }
+
+    let mut reduced = DMatrix::zeros(state_count, interval_count);
+    for state in 0..state_count {
+        let constrained_node = match constrained_side[state].expect("checked endpoint condition") {
+            BvpBoundarySide::Left => 0,
+            BvpBoundarySide::Right => interval_count,
+        };
+        let mut column = 0;
+        for node in 0..=interval_count {
+            if node == constrained_node {
+                continue;
+            }
+            reduced[(state, column)] = initial_guess[(state, node)];
+            column += 1;
+        }
+    }
+    Ok(reduced)
 }
 
 /// Convert the public state-major Damped profile to its native compact

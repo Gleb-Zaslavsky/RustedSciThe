@@ -54,6 +54,16 @@ fn guess_matrix(rows: Vec<Vec<f64>>, states: usize, nodes: usize) -> PyResult<DM
     }))
 }
 
+fn node_aligned_guess(layout: &str) -> PyResult<bool> {
+    match layout {
+        "free" => Ok(false),
+        "node_aligned" => Ok(true),
+        other => Err(InvalidConfigurationError::new_err(format!(
+            "initial_guess_layout must be 'free' or 'node_aligned'; got '{other}'"
+        ))),
+    }
+}
+
 fn problem(
     expressions: Vec<PyExpr>,
     state_variables: Vec<String>,
@@ -282,12 +292,12 @@ impl PyBvpPostprocessPlan {
 
 #[pymethods]
 impl PyBvpSolverRequest {
-    /// Configure the adaptive Damped Newton route. Its guess has one row per
+    /// Configure the adaptive Damped Newton route. By default its guess has one row per
     /// free-coordinate ordinal; each state omits its constrained endpoint and
     /// is sampled in increasing mesh order. The facade packs it for the native
     /// node-major iterate. Later mesh refinement remains solver-managed.
     #[staticmethod]
-    #[pyo3(signature=(expressions, state_variables, independent_variable, mesh, boundary_conditions, initial_guess, options=None, parameters=None, parameter_values=None, scheme="forward", strategy="Damped", tolerance=1e-6, max_iterations=25, bounds=None, loglevel=None, linear_sys_method=None, max_jacobian_refreshes=None, max_damping_iterations=None, damping_factor=None, max_refinements=None, grid_method=None, grid_parameters=None, logging_mode="off"))]
+    #[pyo3(signature=(expressions, state_variables, independent_variable, mesh, boundary_conditions, initial_guess, options=None, parameters=None, parameter_values=None, scheme="forward", strategy="Damped", tolerance=1e-6, max_iterations=25, bounds=None, loglevel=None, linear_sys_method=None, max_jacobian_refreshes=None, max_damping_iterations=None, damping_factor=None, max_refinements=None, grid_method=None, grid_parameters=None, logging_mode="off", initial_guess_layout="free"))]
     #[allow(clippy::too_many_arguments)]
     fn damped(
         expressions: Vec<PyExpr>,
@@ -313,6 +323,7 @@ impl PyBvpSolverRequest {
         grid_method: Option<String>,
         grid_parameters: Option<Vec<f64>>,
         logging_mode: &str,
+        initial_guess_layout: &str,
     ) -> PyResult<Self> {
         let options = shared_options(options)?;
         validate_symbolic_damp_route(&options)?;
@@ -331,10 +342,15 @@ impl PyBvpSolverRequest {
             mesh.clone(),
             boundary_conditions,
         )?;
+        let node_aligned = node_aligned_guess(initial_guess_layout)?;
         let guess = guess_matrix(
             initial_guess,
             state_variables.len(),
-            mesh.len().saturating_sub(1),
+            if node_aligned {
+                mesh.len()
+            } else {
+                mesh.len().saturating_sub(1)
+            },
         )?;
         let strategy_params = crate::bvp_damp::strategy_params(
             max_jacobian_refreshes,
@@ -362,9 +378,16 @@ impl PyBvpSolverRequest {
         )?;
         let mut damped_options = damped_options;
         damped_options.strategy = strategy.to_owned();
-        let config = BvpSolverConfig::Damped {
-            options: damped_options,
-            initial_guess: guess,
+        let config = if node_aligned {
+            BvpSolverConfig::DampedNodeAligned {
+                options: damped_options,
+                initial_guess: guess,
+            }
+        } else {
+            BvpSolverConfig::Damped {
+                options: damped_options,
+                initial_guess: guess,
+            }
         };
         Ok(Self {
             problem: Some(problem),
@@ -375,11 +398,13 @@ impl PyBvpSolverRequest {
         })
     }
 
-    /// Configure the fixed-mesh Frozen route. Its guess has one row per mesh
-    /// interval (the reduced Newton unknowns); results include both endpoints.
+    /// Configure the fixed-mesh Frozen route. `initial_guess_layout="free"`
+    /// accepts reduced Newton unknowns; `"node_aligned"` accepts a full
+    /// profile and checks its constrained endpoint values. Results include
+    /// both endpoints and the caller's explicit mesh.
     /// Algorithm controls remain distinct from Damped's adaptive options.
     #[staticmethod]
-    #[pyo3(signature=(expressions, state_variables, independent_variable, mesh, boundary_conditions, initial_guess, options=None, parameters=None, parameter_values=None, scheme="forward", strategy="Frozen", tolerance=1e-6, max_iterations=25, strategy_params=None, linear_sys_method=None, logging_mode="off"))]
+    #[pyo3(signature=(expressions, state_variables, independent_variable, mesh, boundary_conditions, initial_guess, options=None, parameters=None, parameter_values=None, scheme="forward", strategy="Frozen", tolerance=1e-6, max_iterations=25, strategy_params=None, linear_sys_method=None, logging_mode="off", initial_guess_layout="free"))]
     #[allow(clippy::too_many_arguments)]
     fn frozen(
         expressions: Vec<PyExpr>,
@@ -398,6 +423,7 @@ impl PyBvpSolverRequest {
         strategy_params: Option<HashMap<String, Option<Vec<f64>>>>,
         linear_sys_method: Option<String>,
         logging_mode: &str,
+        initial_guess_layout: &str,
     ) -> PyResult<Self> {
         let options = shared_options(options)?;
         validate_symbolic_damp_route(&options)?;
@@ -408,7 +434,13 @@ impl PyBvpSolverRequest {
             mesh.clone(),
             boundary_conditions,
         )?;
-        let guess = guess_matrix(initial_guess, state_variables.len(), mesh.len() - 1)?;
+        let node_aligned = node_aligned_guess(initial_guess_layout)?;
+        let guess_columns = if node_aligned {
+            mesh.len()
+        } else {
+            mesh.len() - 1
+        };
+        let guess = guess_matrix(initial_guess, state_variables.len(), guess_columns)?;
         let config = crate::bvp_damp::backend_config(
             &options,
             parse_bvp_logging_mode(logging_mode)?,
@@ -454,9 +486,16 @@ impl PyBvpSolverRequest {
         frozen.generated_backend_config = config;
         Ok(Self {
             problem: Some(problem),
-            config: Some(BvpSolverConfig::Frozen {
-                options: frozen,
-                initial_guess: guess,
+            config: Some(if node_aligned {
+                BvpSolverConfig::FrozenNodeAligned {
+                    options: frozen,
+                    initial_guess: guess,
+                }
+            } else {
+                BvpSolverConfig::Frozen {
+                    options: frozen,
+                    initial_guess: guess,
+                }
             }),
             route: if strategy == "Naive" {
                 "naive"
@@ -468,11 +507,11 @@ impl PyBvpSolverRequest {
         })
     }
 
-    /// Configure the fixed-grid correction-Newton route. The guess has one
-    /// row per interval; the endpoint values constrained by boundary
-    /// conditions are eliminated from the native unknown vector.
+    /// Configure fixed-grid correction-Newton. The default `free` guess has
+    /// one row per free mesh coordinate; `node_aligned` accepts the full
+    /// profile and validates constrained endpoint values.
     #[staticmethod]
-    #[pyo3(signature=(expressions, state_variables, independent_variable, mesh, boundary_conditions, initial_guess, options=None, tolerance=1e-8, max_iterations=100, max_jacobian_age=5, max_damping_trials=7, bounds=None, external_parameters=None, external_parameter_values=None))]
+    #[pyo3(signature=(expressions, state_variables, independent_variable, mesh, boundary_conditions, initial_guess, options=None, tolerance=1e-8, max_iterations=100, max_jacobian_age=5, max_damping_trials=7, bounds=None, external_parameters=None, external_parameter_values=None, initial_guess_layout="free"))]
     #[allow(clippy::too_many_arguments)]
     fn correction_newton(
         expressions: Vec<PyExpr>,
@@ -489,6 +528,7 @@ impl PyBvpSolverRequest {
         bounds: Option<HashMap<String, (f64, f64)>>,
         external_parameters: Option<Vec<String>>,
         external_parameter_values: Option<Vec<f64>>,
+        initial_guess_layout: &str,
     ) -> PyResult<Self> {
         let options = shared_options(options)?;
         if options.execution_policy() != "sequential" {
@@ -503,10 +543,15 @@ impl PyBvpSolverRequest {
             mesh.clone(),
             boundary_conditions,
         )?;
+        let node_aligned = node_aligned_guess(initial_guess_layout)?;
         let guess = guess_matrix(
             initial_guess,
             state_variables.len(),
-            mesh.len().saturating_sub(1),
+            if node_aligned {
+                mesh.len()
+            } else {
+                mesh.len().saturating_sub(1)
+            },
         )?;
         let frontend = match options.frontend() {
             "expr_legacy" => CorrectionNewtonSymbolicFrontend::ExprLegacy,
@@ -566,9 +611,16 @@ impl PyBvpSolverRequest {
         }
         Ok(Self {
             problem: Some(problem),
-            config: Some(BvpSolverConfig::CorrectionNewton {
-                options: native_options,
-                initial_guess: guess,
+            config: Some(if node_aligned {
+                BvpSolverConfig::CorrectionNewtonNodeAligned {
+                    options: native_options,
+                    initial_guess: guess,
+                }
+            } else {
+                BvpSolverConfig::CorrectionNewton {
+                    options: native_options,
+                    initial_guess: guess,
+                }
             }),
             route: "correction_newton",
             parameters: parameter_pair(external_parameters, external_parameter_values)?,
@@ -792,11 +844,14 @@ impl PyBvpSolverRequest {
             InvalidConfigurationError::new_err("request has already been prepared")
         })?;
         let correction_newton_telemetry_mode = match &config {
-            BvpSolverConfig::CorrectionNewton { options, .. } => Some(match options.telemetry_mode {
-                CorrectionNewtonTelemetryMode::Off => "off",
-                CorrectionNewtonTelemetryMode::Counters => "counters",
-                CorrectionNewtonTelemetryMode::Timings => "timings",
-            }),
+            BvpSolverConfig::CorrectionNewton { options, .. }
+            | BvpSolverConfig::CorrectionNewtonNodeAligned { options, .. } => {
+                Some(match options.telemetry_mode {
+                    CorrectionNewtonTelemetryMode::Off => "off",
+                    CorrectionNewtonTelemetryMode::Counters => "counters",
+                    CorrectionNewtonTelemetryMode::Timings => "timings",
+                })
+            }
             _ => None,
         };
         let parameters = self.parameters.take();

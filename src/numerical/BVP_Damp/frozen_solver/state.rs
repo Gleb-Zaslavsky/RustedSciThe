@@ -31,6 +31,7 @@ pub struct NRBVP {
     pub jac: Option<Box<dyn Jac>>,
     pub p: f64,
     pub y: Box<dyn VectorType>,
+    iteration_index: usize,
     m: usize, // iteration counter without jacobian recalculation
     /// Internal prepared factor for direct Dense/faer Frozen solves.
     /// Banded keeps ownership inside `BandedMatrixType`; legacy callers never
@@ -123,6 +124,15 @@ impl ApplyFrozenGeneratedSolverState for NRBVP {
 impl BuildFrozenSolverRequest for NRBVP {
     fn build_solver_request(&self) -> FrozenSolverBuildRequest {
         let h = (self.t_end - self.t0) / self.n_steps as f64;
+        let first_step = self.x_mesh[1] - self.x_mesh[0];
+        let mesh_scale = (self.t_end - self.t0).abs().max(first_step.abs()).max(1.0);
+        let mesh_tolerance = 32.0 * f64::EPSILON * mesh_scale;
+        let is_uniform = !self
+            .x_mesh
+            .as_slice()
+            .windows(2)
+            .any(|pair| ((pair[1] - pair[0]) - first_step).abs() > mesh_tolerance);
+        let explicit_mesh = (!is_uniform).then(|| self.x_mesh.iter().copied().collect());
         let effective_method = self.generated_backend_config.effective_method(&self.method);
         FrozenSolverBuildRequest {
             eq_system: self.eq_system.clone(),
@@ -133,7 +143,7 @@ impl BuildFrozenSolverRequest for NRBVP {
             t0: self.t0,
             n_steps: Some(self.n_steps),
             h: Some(h),
-            mesh: None,
+            mesh: explicit_mesh,
             border_conditions: self.BorderConditions.clone(),
             scheme: self.scheme.clone(),
             method: effective_method.clone(),

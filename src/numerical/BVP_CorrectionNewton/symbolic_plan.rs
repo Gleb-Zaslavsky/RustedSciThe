@@ -23,10 +23,42 @@ struct Contribution {
     scale: f64,
 }
 
+fn mesh_interval_width(mesh: Option<&[f64]>, uniform_h: f64, interval: usize) -> f64 {
+    mesh.map_or(uniform_h, |mesh| mesh[interval + 1] - mesh[interval])
+}
+
+fn mesh_node_coordinate(
+    mesh: Option<&[f64]>,
+    left: f64,
+    right: f64,
+    uniform_h: f64,
+    steps: usize,
+    node: usize,
+) -> f64 {
+    mesh.map_or_else(
+        || {
+            if node == steps {
+                right
+            } else {
+                left + node as f64 * uniform_h
+            }
+        },
+        |mesh| mesh[node],
+    )
+}
+
 /// Prepare fixed-grid trapezoid callbacks and their global structural pattern.
 pub(super) fn prepare(
     problem: CorrectionNewtonProblem,
     options: CorrectionNewtonOptions,
+) -> Result<CorrectionNewtonSolver, CorrectionNewtonSolverError> {
+    prepare_with_mesh(problem, options, None)
+}
+
+pub(super) fn prepare_with_mesh(
+    problem: CorrectionNewtonProblem,
+    options: CorrectionNewtonOptions,
+    explicit_mesh: Option<Vec<f64>>,
 ) -> Result<CorrectionNewtonSolver, CorrectionNewtonSolverError> {
     super::validate_expr_problem(&problem, &options)?;
     let packed = pack_bvp_initial_state(&problem)?;
@@ -48,8 +80,17 @@ pub(super) fn prepare(
     }
     let steps = problem.steps;
     let node_count = steps + 1;
+    if explicit_mesh
+        .as_ref()
+        .is_some_and(|mesh| mesh.len() != node_count)
+    {
+        return Err(CorrectionNewtonSolverError::InvalidConfiguration {
+            source: CorrectionNewtonConfigurationError::InvalidExplicitMesh,
+        });
+    }
     let full_size = component_count * node_count;
     let h = (problem.interval.1 - problem.interval.0) / steps as f64;
+    let mesh = explicit_mesh;
     let state_names = problem
         .state_names
         .iter()
@@ -178,7 +219,13 @@ pub(super) fn prepare(
                     let full_column = node * component_count + local_column;
                     if let Some(global_column) = full_to_unknown[full_column] {
                         global_coordinates.insert((global_row, global_column));
-                        pending.push((global_row, global_column, Some(node), local_slot, -0.5 * h));
+                        pending.push((
+                            global_row,
+                            global_column,
+                            Some(node),
+                            local_slot,
+                            -0.5 * mesh_interval_width(mesh.as_deref(), h, interval),
+                        ));
                     }
                 }
             }
@@ -249,7 +296,9 @@ pub(super) fn prepare(
         .collect::<Vec<_>>();
 
     let residual_plan = pointwise.clone();
-    let left_endpoint = problem.interval.0;
+    let residual_mesh = mesh.clone();
+    let residual_left = problem.interval.0;
+    let residual_right = problem.interval.1;
     let residual_positions = packed.full_state_positions.clone();
     let residual_fixed_positions = boundary_positions.clone();
     let residual_fixed_values = Arc::clone(&boundary_binding);
@@ -272,7 +321,14 @@ pub(super) fn prepare(
                 let output_start = state_start;
                 residual_plan
                     .evaluate_rhs(
-                        left_endpoint + node as f64 * h,
+                        mesh_node_coordinate(
+                            residual_mesh.as_deref(),
+                            residual_left,
+                            residual_right,
+                            h,
+                            steps,
+                            node,
+                        ),
                         &residual_full_state[state_start..state_start + component_count],
                         external_parameters,
                         &mut residual_arguments,
@@ -298,14 +354,18 @@ pub(super) fn prepare(
                     let right = (interval + 1) * component_count + equation;
                     output[row] = residual_full_state[right]
                         - residual_full_state[left]
-                        - 0.5 * h * (residual_rhs[left] + residual_rhs[right]);
+                        - 0.5
+                            * mesh_interval_width(residual_mesh.as_deref(), h, interval)
+                            * (residual_rhs[left] + residual_rhs[right]);
                 }
             }
             Ok(())
         };
 
     let jacobian_plan = pointwise;
-    let left_endpoint = problem.interval.0;
+    let jacobian_mesh = mesh.clone();
+    let jacobian_left = problem.interval.0;
+    let jacobian_right = problem.interval.1;
     let jacobian_positions = packed.full_state_positions.clone();
     let jacobian_fixed_positions = boundary_positions;
     let jacobian_fixed_values = Arc::clone(&boundary_binding);
@@ -358,7 +418,14 @@ pub(super) fn prepare(
                 jacobian_dense_scratch.fill(0.0);
                 jacobian_plan
                     .evaluate_jacobian_dense_with_scratch(
-                        left_endpoint + node as f64 * h,
+                        mesh_node_coordinate(
+                            jacobian_mesh.as_deref(),
+                            jacobian_left,
+                            jacobian_right,
+                            h,
+                            steps,
+                            node,
+                        ),
                         state,
                         external_parameters,
                         &mut jacobian_arguments,
@@ -372,7 +439,14 @@ pub(super) fn prepare(
             } else {
                 jacobian_plan
                     .evaluate_jacobian_values(
-                        left_endpoint + node as f64 * h,
+                        mesh_node_coordinate(
+                            jacobian_mesh.as_deref(),
+                            jacobian_left,
+                            jacobian_right,
+                            h,
+                            steps,
+                            node,
+                        ),
                         state,
                         external_parameters,
                         &mut jacobian_arguments,
@@ -418,8 +492,9 @@ pub(super) fn prepare(
     )?;
     solver.fixed_boundary_values = Some(boundary_binding);
     solver.fixed_boundary_bounds = Some(boundary_value_bounds);
-    solver.symbolic_mesh = Some(
-        (0..=steps)
+    solver.symbolic_mesh = Some(match mesh {
+        Some(mesh) => mesh,
+        None => (0..=steps)
             .map(|node| {
                 if node == steps {
                     problem.interval.1
@@ -428,6 +503,6 @@ pub(super) fn prepare(
                 }
             })
             .collect(),
-    );
+    });
     Ok(solver)
 }

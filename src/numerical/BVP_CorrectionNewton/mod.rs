@@ -253,6 +253,10 @@ pub enum CorrectionNewtonConfigurationError {
     },
     #[error("Newton state, tolerances, bounds, or iteration limits are inconsistent")]
     InvalidNewtonConfiguration,
+    #[error(
+        "explicit mesh must contain one finite, strictly increasing coordinate per node and match the configured endpoints"
+    )]
+    InvalidExplicitMesh,
     #[error("linear workspace initialization failed")]
     LinearWorkspace(#[source] CorrectionNewtonLinearError),
     #[error("external parameter names must be non-empty and unique")]
@@ -1049,6 +1053,29 @@ impl CorrectionNewtonSolver {
         options: CorrectionNewtonOptions,
     ) -> Result<Self, CorrectionNewtonSolverError> {
         symbolic_plan::prepare(problem, options)
+    }
+
+    /// Prepare the same fixed-mesh trapezoid system on explicit node
+    /// coordinates. `problem.steps` remains the number of intervals and must
+    /// equal `mesh.len() - 1`; its interval endpoints must match the mesh.
+    /// The ordinary [`Self::from_symbolic`] path retains its established
+    /// uniform-grid coordinate arithmetic.
+    pub fn from_symbolic_on_mesh(
+        problem: CorrectionNewtonProblem,
+        mesh: Vec<f64>,
+        options: CorrectionNewtonOptions,
+    ) -> Result<Self, CorrectionNewtonSolverError> {
+        if mesh.len() != problem.steps.saturating_add(1)
+            || mesh.iter().any(|value| !value.is_finite())
+            || !mesh.windows(2).all(|pair| pair[1] > pair[0])
+            || mesh.first().copied() != Some(problem.interval.0)
+            || mesh.last().copied() != Some(problem.interval.1)
+        {
+            return Err(CorrectionNewtonSolverError::InvalidConfiguration {
+                source: CorrectionNewtonConfigurationError::InvalidExplicitMesh,
+            });
+        }
+        symbolic_plan::prepare_with_mesh(problem, options, Some(mesh))
     }
 
     /// Legacy spelling for the configured symbolic frontend.

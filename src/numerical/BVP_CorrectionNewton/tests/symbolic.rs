@@ -114,6 +114,36 @@ fn selecting_aot_without_configuration_is_a_typed_configuration_failure() {
 }
 
 #[test]
+fn explicit_nonuniform_mesh_validation_returns_a_typed_mesh_error() {
+    let problem = CorrectionNewtonProblem {
+        equations: vec![Expr::parse_expression("-y")],
+        initial_guess: DMatrix::from_element(1, 2, 1.0),
+        state_names: vec!["y".into()],
+        independent_variable: "x".into(),
+        boundary_conditions: std::collections::HashMap::from([("y".into(), vec![(0, 1.0)])]),
+        interval: (0.0, 1.0),
+        steps: 2,
+    };
+    for mesh in [
+        vec![0.0, 1.0],
+        vec![0.0, 0.8, 0.7],
+        vec![0.0, f64::NAN, 1.0],
+        vec![0.0, 0.5, 1.01],
+    ] {
+        assert!(matches!(
+            CorrectionNewtonSolver::from_symbolic_on_mesh(
+                problem.clone(),
+                mesh,
+                CorrectionNewtonOptions::default(),
+            ),
+            Err(CorrectionNewtonSolverError::InvalidConfiguration {
+                source: CorrectionNewtonConfigurationError::InvalidExplicitMesh,
+            })
+        ));
+    }
+}
+
+#[test]
 fn symbolic_fixed_inputs_bind_and_rebind_without_repreparing_callbacks() {
     let make_problem = || CorrectionNewtonProblem {
         equations: vec![Expr::parse_expression("-(rate + offset)*y")],

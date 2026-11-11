@@ -68,6 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Маршрут CorrectionNewton через фасад показан в
 [`examples/bvp_api_correction_newton.rs`](../../../../examples/bvp_api_correction_newton.rs); пока
 это onboarding-пилот, а не production-ready маршрут первого тира.
+Пример с явной неравномерной сеткой и полным node-aligned приближением для
+Damped и CorrectionNewton находится в
+[`examples/bvp_api_nonuniform_mesh.rs`](../../../../examples/bvp_api_nonuniform_mesh.rs).
 
 ## Выбор маршрута и данные
 
@@ -87,10 +90,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 во внутренний compact node-major вектор; предварительно упаковывать его в
 публичную матрицу не нужно. Для Damped требуется ровно одно endpoint-условие
 на состояние; неоднозначная топология отклоняется типизированной ошибкой.
-Damped и Frozen принимают только равномерную
-сетку, поскольку их native constructors задаются концами интервала и числом
-шагов. CorrectionNewton также требует равномерную сетку и выполняет solve без её
-уточнения. Неравномерную сетку можно передать BVP_sci напрямую.
+Damped, Frozen и CorrectionNewton принимают явную строго возрастающую сетку из
+`BvpProblem`. Damped готовит начальные callbacks на этой сетке и затем может
+сгущать её своей настроенной стратегией; Frozen сохраняет её как fixed mesh.
+CorrectionNewton остаётся fixed-mesh,
+но использует собственную ширину `h_i` каждого интервала в trapezoid residual
+и Jacobian. Существующие конфиги с reduced guess не меняют семантику. Для
+маршрутов Damped, Frozen и CorrectionNewton метод
+`BvpSolverSettings::with_node_aligned_initial_guess` принимает
+полный state-major профиль формы `state_count x mesh.len()`; закреплённые
+endpoint-значения проверяются с допуском на машинное округление, после чего
+фасад убирает их и упаковывает только свободные неизвестные. Frozen также
+принимает явную неравномерную сетку и использует её при подготовке callbacks,
+сохраняя сетку неизменной во время solve; BVP_sci принимает произвольную напрямую.
 
 Адаптивное уточнение сетки в BVP_Damp выполняется самим solver во время
 решения: пользователь не перезапускает его вручную при нарушении критериев
@@ -247,6 +259,12 @@ solver-specific lifecycle, диагностики и изменения runtime-
 `BvpSolverConfig::with_logging_level(SolverLogLevel::Info)`. Она не меняет
 телеметрию и отдельный ограниченный decision trace. Rust-пример большого
 параметрического исследования горения: `examples/bvp_api_combustion_parameter_loop.rs`.
+
+Для диагностики Newton-траектории Frozen включите `BvpLoggingMode::Detailed`
+в native `FrozenSolverOptions` и прочитайте
+`BvpSolver::frozen_iteration_trace_snapshot()`. Ограниченный trace содержит
+метрики шага, состояние/возраст Jacobian и стадию терминальной ошибки callback.
+Callbacks повторно не вызываются; при выключенном detailed logging trace пуст.
 
 Task-document parser — самостоятельная подсистема. Для чтения и исполнения
 документов используйте `command_interpreter::task_parser_bvp`; он напрямую

@@ -5,8 +5,11 @@ use super::{
 };
 use crate::Utils::postprocessing::{PostprocessError, PostprocessPlan};
 use crate::numerical::BVP_CorrectionNewton::CorrectionNewtonOptions;
-use crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedSolverOptions;
+use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
+    AdaptiveGridConfig, DampedSolverOptions, SolverParams,
+};
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
+use crate::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use crate::numerical::BVP_Damp::telemetry::BvpSolveStatus;
 use crate::numerical::BVP_Damp::telemetry::{BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode};
 use crate::numerical::BVP_sci::new::BvpSciSparseFactorization as NativeBvpSciSparseFactorization;
@@ -27,6 +30,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[path = "correction_newton_continuation_tests.rs"]
 mod correction_newton_continuation;
+#[path = "mf1963_nonuniform_story_tests.rs"]
+mod mf1963_nonuniform_story;
 
 fn valid_problem() -> BvpProblem {
     BvpProblem::new(
@@ -41,6 +46,338 @@ fn valid_problem() -> BvpProblem {
         }],
     )
     .expect("valid BVP should construct")
+}
+
+fn nonuniform_linear_problem() -> (BvpProblem, DMatrix<f64>) {
+    let mesh = vec![0.0, 0.07, 0.31, 0.66, 1.0];
+    let guess = DMatrix::from_fn(1, mesh.len(), |_, node| 0.5 * mesh[node] * mesh[node]);
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("x")],
+        vec!["y".into()],
+        "x",
+        mesh,
+        vec![BvpBoundaryCondition {
+            state: 0,
+            side: BvpBoundarySide::Left,
+            value: 0.0,
+        }],
+    )
+    .expect("nonuniform linear fixture should be valid");
+    (problem, guess)
+}
+
+fn nonuniform_mixed_boundary_problem() -> (BvpProblem, DMatrix<f64>) {
+    let mesh = (0..=300)
+        .map(|index| {
+            let coordinate = index as f64 / 300.0;
+            coordinate * coordinate
+        })
+        .collect::<Vec<_>>();
+    let mut guess = DMatrix::from_fn(2, mesh.len(), |state, node| {
+        if state == 0 {
+            mesh[node]
+        } else {
+            1.0 - mesh[node]
+        }
+    });
+    guess[(0, 150)] += 0.01;
+    guess[(1, 150)] -= 0.02;
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("1"), Expr::parse_expression("-1")],
+        vec!["u".into(), "v".into()],
+        "x",
+        mesh,
+        vec![
+            BvpBoundaryCondition {
+                state: 0,
+                side: BvpBoundarySide::Left,
+                value: 0.0,
+            },
+            BvpBoundaryCondition {
+                state: 1,
+                side: BvpBoundarySide::Right,
+                value: 0.0,
+            },
+        ],
+    )
+    .expect("mixed-endpoint nonuniform problem should be valid");
+    (problem, guess)
+}
+
+#[test]
+fn correction_newton_node_aligned_seed_solves_on_explicit_nonuniform_mesh() {
+    let (problem, mut guess) = nonuniform_linear_problem();
+    guess[(0, 2)] += 0.05;
+    guess[(0, 0)] = 16.0 * f64::EPSILON;
+    let expected_mesh = problem.mesh.clone();
+    let config = BvpSolverSettings::CorrectionNewton(CorrectionNewtonOptions::default())
+        .with_node_aligned_initial_guess(guess.clone());
+    let mut solver = BvpSolver::new(problem, config)
+        .expect("CorrectionNewton should accept an explicit mesh and full seed");
+    solver
+        .solve()
+        .expect("exact trapezoid profile should solve");
+    let view = solver
+        .solution_view()
+        .expect("successful profile is retained");
+    assert_eq!(view.mesh(), expected_mesh.as_slice());
+    for (node, &x) in expected_mesh.iter().enumerate() {
+        assert!((view.value(node, 0).unwrap() - 0.5 * x * x).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn correction_newton_nonuniform_mesh_uses_local_widths_in_residual_and_jacobian() {
+    let mesh = vec![0.0, 0.04, 0.2, 0.47, 0.81, 1.0];
+    let mut exact_discrete = vec![1.0; mesh.len()];
+    for interval in 0..mesh.len() - 1 {
+        let h = mesh[interval + 1] - mesh[interval];
+        exact_discrete[interval + 1] = exact_discrete[interval] * (1.0 + 0.5 * h * mesh[interval])
+            / (1.0 - 0.5 * h * mesh[interval + 1]);
+    }
+    let mut seed = DMatrix::from_row_slice(1, mesh.len(), &exact_discrete);
+    seed[(0, 3)] *= 0.9;
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("x*y")],
+        vec!["y".into()],
+        "x",
+        mesh.clone(),
+        vec![BvpBoundaryCondition {
+            state: 0,
+            side: BvpBoundarySide::Left,
+            value: 1.0,
+        }],
+    )
+    .expect("nonuniform coordinate-dependent problem should be valid");
+    let mut solver = BvpSolver::new(
+        problem,
+        BvpSolverSettings::CorrectionNewton(CorrectionNewtonOptions::default())
+            .with_node_aligned_initial_guess(seed),
+    )
+    .expect("CorrectionNewton should prepare local interval contributions");
+    solver
+        .solve()
+        .expect("nonuniform linear trapezoid system should converge");
+    let view = solver
+        .solution_view()
+        .expect("nonuniform solution should be retained");
+    for (node, expected) in exact_discrete.into_iter().enumerate() {
+        assert!((view.value(node, 0).unwrap() - expected).abs() < 1e-10);
+    }
+}
+
+#[test]
+fn damped_node_aligned_seed_solves_on_explicit_nonuniform_mesh() {
+    let (problem, mut guess) = nonuniform_linear_problem();
+    guess[(0, 2)] += 0.05;
+    let expected_mesh = problem.mesh.clone();
+    let options = DampedSolverOptions::banded_damped()
+        .with_banded_lambdify()
+        .with_scheme_name("trapezoid")
+        .with_abs_tolerance(1e-10)
+        .with_rel_tolerance(HashMap::from([("y".to_string(), 1e-10)]))
+        .with_bounds(HashMap::from([("y".to_string(), (-1.0, 1.0))]))
+        .with_strategy_params(Some(SolverParams {
+            max_jac: Some(3),
+            max_damp_iter: Some(7),
+            damp_factor: Some(0.5),
+            adaptive: Some(AdaptiveGridConfig {
+                version: 1,
+                max_refinements: 1,
+                grid_method: GridRefinementMethod::DoublePoints,
+            }),
+        }));
+    let config = BvpSolverSettings::Damped(options).with_node_aligned_initial_guess(guess);
+    let mut solver = BvpSolver::new(problem, config)
+        .expect("Damped should accept an explicit mesh and full seed");
+    solver
+        .solve()
+        .expect("exact trapezoid profile should solve");
+    let view = solver
+        .solution_view()
+        .expect("successful profile is retained");
+    assert_eq!(view.mesh().len(), 2 * expected_mesh.len() - 1);
+    for &x in &expected_mesh {
+        assert!(
+            view.mesh().contains(&x),
+            "refinement should retain seed node {x}"
+        );
+    }
+    for (node, &x) in view.mesh().iter().enumerate() {
+        assert!((view.value(node, 0).unwrap() - 0.5 * x * x).abs() < 1e-12);
+    }
+    let refined_mesh = view.mesh().to_vec();
+    solver
+        .solve()
+        .expect("Damped replay should keep the active refined mesh");
+    assert_eq!(
+        solver
+            .solution_view()
+            .expect("replayed solution should be retained")
+            .mesh(),
+        refined_mesh.as_slice()
+    );
+}
+
+#[test]
+fn frozen_node_aligned_seed_solves_on_explicit_nonuniform_mesh() {
+    let (problem, mut guess) = nonuniform_linear_problem();
+    guess[(0, 2)] += 0.05;
+    let expected_mesh = problem.mesh.clone();
+    let options = FrozenSolverOptions::dense_frozen()
+        .trapezoid_derivative()
+        .with_tolerance(1e-10)
+        .with_max_iterations(12);
+    let config = BvpSolverSettings::Frozen(options).with_node_aligned_initial_guess(guess);
+    let mut solver = BvpSolver::new(problem, config)
+        .expect("Frozen should accept an explicit mesh and full seed");
+    solver
+        .solve()
+        .expect("Frozen should solve on the nonuniform mesh");
+    let view = solver
+        .solution_view()
+        .expect("successful Frozen profile is retained");
+    assert_eq!(view.mesh(), expected_mesh.as_slice());
+    for (node, &x) in expected_mesh.iter().enumerate() {
+        assert!((view.value(node, 0).unwrap() - 0.5 * x * x).abs() < 1e-10);
+    }
+}
+
+#[test]
+fn frozen_node_aligned_seed_rejects_shape_and_boundary_mismatch() {
+    let (problem, guess) = nonuniform_linear_problem();
+    let options = FrozenSolverOptions::dense_frozen();
+    assert!(matches!(
+        BvpSolver::new(
+            problem.clone(),
+            BvpSolverSettings::Frozen(options.clone())
+                .with_node_aligned_initial_guess(DMatrix::zeros(1, problem.mesh.len() - 1)),
+        ),
+        Err(BvpApiError::Frozen(_))
+    ));
+
+    let mut wrong_boundary = guess;
+    wrong_boundary[(0, 0)] = 1e-3;
+    assert!(matches!(
+        BvpSolver::new(
+            problem,
+            BvpSolverSettings::Frozen(options).with_node_aligned_initial_guess(wrong_boundary),
+        ),
+        Err(BvpApiError::Frozen(_))
+    ));
+}
+
+#[test]
+fn node_aligned_newton_routes_reject_bad_mesh_and_boundary_seed_atomically() {
+    let (mut problem, guess) = nonuniform_linear_problem();
+    problem.mesh = vec![0.0, 0.3, 0.2, 0.7, 1.0];
+    assert!(matches!(
+        BvpSolver::new(
+            problem.clone(),
+            BvpSolverSettings::CorrectionNewton(CorrectionNewtonOptions::default())
+                .with_node_aligned_initial_guess(guess.clone()),
+        ),
+        Err(BvpApiError::InvalidProblem(_))
+    ));
+
+    let (problem, mut incompatible_guess) = nonuniform_linear_problem();
+    let wrong_shape = DMatrix::zeros(1, problem.mesh.len() - 1);
+    assert!(matches!(
+        BvpSolver::new(
+            problem.clone(),
+            BvpSolverSettings::Damped(DampedSolverOptions::default())
+                .with_node_aligned_initial_guess(wrong_shape.clone()),
+        ),
+        Err(BvpApiError::InvalidProblem(_))
+    ));
+    assert!(matches!(
+        BvpSolver::new(
+            problem.clone(),
+            BvpSolverSettings::CorrectionNewton(CorrectionNewtonOptions::default())
+                .with_node_aligned_initial_guess(wrong_shape),
+        ),
+        Err(BvpApiError::InvalidProblem(_))
+    ));
+    incompatible_guess[(0, 0)] = 1e-4;
+    assert!(matches!(
+        BvpSolver::new(
+            problem.clone(),
+            BvpSolverSettings::Damped(DampedSolverOptions::default())
+                .with_node_aligned_initial_guess(incompatible_guess.clone()),
+        ),
+        Err(BvpApiError::InvalidProblem(_))
+    ));
+    assert!(matches!(
+        BvpSolver::new(
+            problem,
+            BvpSolverSettings::CorrectionNewton(CorrectionNewtonOptions::default())
+                .with_node_aligned_initial_guess(incompatible_guess),
+        ),
+        Err(BvpApiError::InvalidProblem(_))
+    ));
+}
+
+#[test]
+fn node_aligned_newton_routes_pack_mixed_endpoint_constraints_on_large_nonuniform_mesh() {
+    let (problem, guess) = nonuniform_mixed_boundary_problem();
+    let expected_mesh = problem.mesh.clone();
+    let mut correction_newton = BvpSolver::new(
+        problem,
+        BvpSolverSettings::CorrectionNewton(CorrectionNewtonOptions::default())
+            .with_node_aligned_initial_guess(guess.clone()),
+    )
+    .expect("CorrectionNewton should accept mixed endpoint BCs and full mesh seed");
+    correction_newton
+        .solve()
+        .expect("CorrectionNewton should solve mixed endpoint fixture");
+    let view = correction_newton
+        .solution_view()
+        .expect("CorrectionNewton solution should be retained");
+    assert_eq!(view.mesh(), expected_mesh.as_slice());
+    for (node, &x) in expected_mesh.iter().enumerate() {
+        assert!((view.value(node, 0).unwrap() - x).abs() < 1e-10);
+        assert!((view.value(node, 1).unwrap() - (1.0 - x)).abs() < 1e-10);
+    }
+
+    let (problem, guess) = nonuniform_mixed_boundary_problem();
+    let options = DampedSolverOptions::default()
+        .with_scheme_name("trapezoid")
+        .with_abs_tolerance(1e-10)
+        .with_rel_tolerance(HashMap::from([
+            ("u".to_string(), 1e-10),
+            ("v".to_string(), 1e-10),
+        ]))
+        .with_bounds(HashMap::from([
+            ("u".to_string(), (-1.0, 2.0)),
+            ("v".to_string(), (-1.0, 2.0)),
+        ]));
+    let mut damped = BvpSolver::new(
+        problem.clone(),
+        BvpSolverSettings::Damped(options).with_node_aligned_initial_guess(guess.clone()),
+    )
+    .expect("Damped should accept mixed endpoint BCs and full mesh seed");
+    let BvpNativeSolver::Damped(native) = damped.native() else {
+        panic!("expected Damped native route");
+    };
+    let expected_reduced_guess = DMatrix::from_fn(2, 300, |state, column| {
+        let node = if state == 0 { column + 1 } else { column };
+        guess[(state, node)]
+    });
+    assert_eq!(
+        native.initial_guess, expected_reduced_guess,
+        "full node-aligned profile must omit each state's own constrained endpoint"
+    );
+    damped
+        .solve()
+        .expect("Damped should solve mixed endpoint fixture");
+    let view = damped
+        .solution_view()
+        .expect("Damped solution should be retained");
+    assert_eq!(view.mesh(), expected_mesh.as_slice());
+    for (node, &x) in expected_mesh.iter().enumerate() {
+        assert!((view.value(node, 0).unwrap() - x).abs() < 1e-10);
+        assert!((view.value(node, 1).unwrap() - (1.0 - x)).abs() < 1e-10);
+    }
 }
 
 #[test]
@@ -1851,7 +2188,7 @@ fn sci_callback_failure_preserves_native_stage_and_allows_retry() {
 }
 
 #[test]
-fn legacy_damped_route_rejects_nonuniform_mesh_instead_of_silently_uniformizing_it() {
+fn legacy_damped_route_preserves_nonuniform_mesh_with_free_state_guess() {
     let problem = BvpProblem::new(
         vec![Expr::parse_expression("-y")],
         vec!["y".into()],
@@ -1864,16 +2201,22 @@ fn legacy_damped_route_rejects_nonuniform_mesh_instead_of_silently_uniformizing_
         }],
     )
     .expect("nonuniform BVP problem is valid");
-    let error = BvpSolver::new(
+    let mut solver = BvpSolver::new(
         problem,
         BvpSolverConfig::Damped {
-            options: DampedSolverOptions::default(),
+            options: DampedSolverOptions::default()
+                .with_abs_tolerance(1e-8)
+                .with_rel_tolerance(HashMap::from([("y".to_string(), 1e-8)]))
+                .with_bounds(HashMap::from([("y".to_string(), (-10.0, 10.0))])),
             initial_guess: DMatrix::from_element(1, 2, 1.0),
         },
     )
-    .err()
-    .expect("Damped native constructor cannot preserve arbitrary mesh nodes");
-    assert!(matches!(error, BvpApiError::UnsupportedRoute { .. }));
+    .expect("Damped should retain the supplied nonuniform mesh");
+    solver
+        .solve()
+        .expect("Damped should solve while retaining the supplied mesh");
+    let view = solver.solution_view().expect("solution should be retained");
+    assert_eq!(view.mesh(), [0.0, 0.2, 1.0]);
 }
 
 #[test]

@@ -1,5 +1,24 @@
 # BVP_CorrectionNewton TODO
 
+## Explicit Nonuniform Mesh And Node-Aligned Seed (2026-11-11)
+
+- [x] Keep the current interval/step-count problem and reduced free-node guess
+  contract unchanged. Add an explicit-mesh symbolic preparation entry point
+  used by BVP_api, with a full state-major `state_count x node_count` seed
+  accepted by a distinct facade config variant and checked against endpoint
+  BCs using a scale-aware floating-point tolerance.
+- [x] Assemble trapezoid residuals and Jacobian contributions using each
+  interval width `h_i`; evaluate pointwise RHS/Jacobian callbacks at the exact
+  supplied mesh coordinates. Preserve the current uniform preparation path
+  and arithmetic behavior.
+- [x] Add Debug tests for analytic nonuniform solutions, x-dependent RHS and
+  Jacobian coordinates, mixed-endpoint seed packing, malformed mesh/profile/BC
+  mismatch, and the local-width trapezoid recurrence. Verify existing uniform
+  tests remain unchanged.
+- [x] Expose the explicit-mesh/full-seed route through Python BVP_api; update
+  Rust/Python RU/EN guides and examples. Run focused and complete relevant
+  Debug correctness tests before considering Release measurements.
+
 This file tracks correctness and robustness work for the independent fixed-mesh
 damped correction-Newton solver. Keep confirmed defects, validation tasks, and
 optional design proposals distinct. The numerical core remains a stationary

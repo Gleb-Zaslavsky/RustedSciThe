@@ -102,6 +102,7 @@
 !src/symbolic/TODO.md
 !src/symbolic/View/TODO.md
 !src/numerical/BVP_Damp/TODO.md
+!src/numerical/BVP_api/KITHE_MF1963_SOLVER_SELECTION.md
 !src/numerical/BVP_sci/TODO.md
 !src/numerical/LSODE2/TODO.md
 !src/numerical/BE/TODO.md
@@ -181,3 +182,10 @@
 !/src/numerical/BVP_CorrectionNewton/reference/README.md
 !/src/numerical/BVP_CorrectionNewton/reference/comb01_scipy.csv
 !/src/numerical/BVP_CorrectionNewton/reference/comb02_scipy.csv
+
+# Numerical BVP_api regression fixtures copied from the KiThe literature case.
+!/src/numerical/BVP_api/fixtures/
+!/src/numerical/BVP_api/fixtures/*.csv
+
+# The broad bindings include rule above must not re-include local Python envs.
+/bindings/python/.venv/

@@ -22,6 +22,17 @@ AtomView сохраняют Lambdify/AOT callbacks; для изменения з
 `set_boundary_values` и `solve_with_boundary_values` для тех же подготовленных
 символьных маршрутов.
 
+Для символьного Damped низкоуровневая подготовка принимает явные координаты
+через `try_eq_generate(Some(mesh), bandwidth)`. Типизированный маршрут
+`BVP_api` сохраняет эту сетку при cold solve, после чего solver может выполнять
+своё адаптивное сгущение. Frozen/Naive также принимает через `BVP_api`
+неравномерную fixed mesh и готовит символьные callbacks на её координатах,
+но не изменяет и не уточняет её. Если начальный профиль известен в каждом узле,
+используйте `BvpSolverSettings::with_node_aligned_initial_guess`: фасад
+проверяет endpoint-значения и преобразует полный state-major профиль во
+внутренний порядок свободных неизвестных выбранного маршрута. Существующие
+reduced-guess API не меняют семантику.
+
 ## 2. Что именно передается в BVP-солвер
 
 Предпочтительный конструктор для нового кода - `NRBVP::new_with_options(...)`. Его сигнатура для Damped выглядит так:
@@ -771,6 +782,18 @@ Debug (только Detailed), а `DampingRejected` — Warn (Warnings или De
 При выключенном логировании новая трасса не хранит события. Смысл
 `BvpLogEvent::value_a/value_b` не меняется; однозначную диагностику alpha дает
 новый типизированный trace.
+
+Для Frozen `BvpLoggingMode::Detailed` дополнительно сохраняет ограниченный
+`BvpFrozenIterationTrace`, доступный через
+`NRBVP::frozen_iteration_trace_snapshot()` или
+`BvpSolver::frozen_iteration_trace_snapshot()`. Для каждого выполненного
+полного шага Ньютона trace хранит нормы residual и correction, максимальную
+поправку и её node-major индекс, нормы текущего/следующего состояния и возраст
+или факт обновления Jacobian. Терминальная ошибка residual/Jacobian callback
+фиксируется вместе с номером попытки и стадией; исходная typed error при этом
+сохраняется. Trace использует уже вычисленные значения, не повторяет callbacks
+и ограничивается `max_events`. При режиме логирования `Off` события не
+сохраняются.
 
 ## Запуск BVP-задач из текстовых документов
 

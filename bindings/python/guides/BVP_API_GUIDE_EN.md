@@ -50,9 +50,19 @@ mesh coordinate; the list's row index is a free-coordinate ordinal, not a
 shared physical node when boundary sides are mixed. The Rust facade packs this
 state-major profile into the native compact node-major iterate. Frozen uses one
 row per reduced unknown index. Both publish a full endpoint-inclusive profile
-with boundary values restored. BVP_sci expects one row per mesh node. Damped and Frozen require
-a uniform mesh; the native constructors accept endpoints and a count rather
-than arbitrary coordinates. BVP_sci accepts a nonuniform mesh.
+with boundary values restored. BVP_sci expects one row per mesh node. Frozen
+accepts full node-aligned profiles and explicit nonuniform meshes, which it
+retains for its fixed-mesh solve. Damped accepts an explicit nonuniform
+mesh and starts its adaptive refinement from those supplied coordinates.
+`correction_newton` accepts a nonuniform mesh and uses each interval's local
+width in its trapezoid residual and Jacobian. For Damped, Frozen, or
+CorrectionNewton, pass a full
+`[node][state]` seed with `initial_guess_layout="node_aligned"`; endpoint seed
+values must agree with the boundary conditions to floating-point roundoff.
+The default `initial_guess_layout="free"` preserves the existing reduced-
+coordinate input contract. BVP_sci continues to accept nonuniform meshes.
+See [`examples/bvp_api_nonuniform_mesh.py`](../examples/bvp_api_nonuniform_mesh.py)
+for a runnable full-profile example on an irregular mesh.
 
 The shared `SolverOptions` carries common frontend, execution, matrix layout,
 callback policy, telemetry, logging and AOT settings. Each factory also
@@ -62,10 +72,12 @@ does not silently fall back. The generic facade supports symbolic Lambdify
 and AOT routes. Numerical Python callback routes remain on the direct
 `BvpSciSolver` API.
 
-The `correction_newton` factory selects the fixed-uniform-grid trapezoid/Newton route.
+The `correction_newton` factory selects the fixed-mesh trapezoid/Newton route.
 It supports ExprLegacy or native AtomView with Lambdify or AOT, and Dense,
-Sparse, or automatically inferred Banded storage. Its initial guess has one
-row per interval; endpoint values are imposed by the boundary conditions.
+Sparse, or automatically inferred Banded storage. By default its initial guess
+has one row per free mesh coordinate; the optional `node_aligned` layout
+accepts a full profile and validates endpoint values against the boundary
+conditions.
 Grid refinement is not part of this fixed-mesh solver route. Fixed
 symbolic inputs can be supplied with `external_parameters` and
 `external_parameter_values`; the prepared Lambdify/AOT callbacks are reused

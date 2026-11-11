@@ -63,6 +63,9 @@ For fixed-input rebinding on Damped, see
 For a side-by-side Damped/Frozen comparison, including their different guess
 shapes, see
 [`examples/bvp_api_damped_frozen.rs`](../../../../examples/bvp_api_damped_frozen.rs).
+For an explicit nonuniform mesh with a full node-aligned seed on both Damped
+and CorrectionNewton, see
+[`examples/bvp_api_nonuniform_mesh.rs`](../../../../examples/bvp_api_nonuniform_mesh.rs).
 For a prepared BVP_sci external-input parameter loop, see
 [`examples/bvp_api_parameter_loop.rs`](../../../../examples/bvp_api_parameter_loop.rs).
 The fixed-mesh correction-Newton route supports ExprLegacy and native AtomView,
@@ -90,13 +93,21 @@ Initial-guess layout is solver-specific by design. Damped and CorrectionNewton e
 `state_count x interval_count`; Frozen/Naive and BVP_sci expect
 `state_count x mesh_point_count`. For Damped, each row is one state's free
 profile in increasing mesh order, omitting that state's constrained endpoint.
-The facade packs these rows into the native compact node-major Newton vector;
-callers must not pre-pack the native vector into the public matrix. This
-state-major contract requires exactly one endpoint condition per state on the
-Damped route. Damped and Frozen accept only uniform meshes
-because their native constructors take interval endpoints and a point/step
-count. BVP_sci receives the explicit mesh directly. CorrectionNewton also requires a
-uniform mesh and performs a fixed-mesh solve without refinement.
+The facade packs these rows into the native compact Newton vector; callers
+must not pre-pack native storage into the public matrix. This state-major
+contract requires exactly one endpoint condition per state on the Damped and
+Frozen routes. Damped, Frozen, and CorrectionNewton accept the explicit strictly
+increasing mesh stored in `BvpProblem`; Damped prepares its initial callbacks on
+that mesh and may subsequently refine it using its configured strategy.
+CorrectionNewton remains fixed-mesh and assembles each trapezoid interval with
+its own width. The existing reduced-guess config variants are unchanged. For
+Damped, Frozen, and CorrectionNewton, `BvpSolverSettings::with_node_aligned_initial_guess`
+accepts a full state-major `state_count x mesh.len()` profile; the facade checks
+its endpoint entries against the boundary conditions within floating-point
+roundoff, then removes constrained values and packs only free unknowns. Frozen
+uses the supplied nonuniform coordinates for symbolic callback generation and
+keeps its fixed mesh during solve; BVP_sci continues to receive arbitrary
+meshes directly.
 
 BVP_Damp's adaptive refinement is solver-managed inside the solve lifecycle;
 callers do not manually restart it when refinement criteria are unmet. The
@@ -183,8 +194,8 @@ that identifies `p`.
 ### Capability Boundaries
 
 The shared `BvpProblem` is symbolic-only. Damped and Frozen/Naive use their
-native generated-backend configuration, but require a uniform mesh because
-their constructors take endpoints and a node/interval count. Native numerical
+native generated-backend configuration and accept explicit strictly increasing
+meshes through the facade. Native numerical
 RHS/Jacobian callback constructors are not represented by this facade. For the
 same reason, a BVP_sci facade request with `BvpSciExecution::Numerical` or
 `BvpSciAssembly::Numerical` returns `UnsupportedRoute`; use the native
@@ -278,6 +289,15 @@ typed text-log setting across Damped, Frozen/Naive and BVP_sci. It does not
 replace each route's telemetry or bounded typed decision trace. The Rust
 counterpart of the combustion loop example is
 `examples/bvp_api_combustion_parameter_loop.rs`.
+
+For Frozen Newton iteration diagnostics, enable
+`BvpLoggingMode::Detailed` in the native `FrozenSolverOptions` and read
+`BvpSolver::frozen_iteration_trace_snapshot()`. The bounded trace records each
+completed update's residual and correction norms, largest correction index,
+iterate magnitudes, and Jacobian age/refresh. A terminal residual/Jacobian
+callback failure records its attempted iteration and stage, while the solve
+still returns the original typed error. Telemetry never repeats callbacks;
+the trace remains empty when detailed logging is disabled.
 
 The process-wide `log` interface currently cannot return file write/flush
 failures to the solver call site. Such a failure produces one stderr
