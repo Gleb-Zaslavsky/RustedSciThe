@@ -5,6 +5,7 @@
 //! stiff policy; native family-specific controls remain in the native
 //! configuration passed through `StiffSolverRequest`.
 
+use crate::command_interpreter::task_json::{TaskJsonError, settings_document_map_from_json};
 use crate::command_interpreter::task_parser::{DocumentMap, Value};
 use crate::command_interpreter::task_parser_ivp::{
     IvpMethodSpec, IvpSolverSettingsSpec, IvpTaskError, Lsode2TaskExecutionSpec,
@@ -20,6 +21,27 @@ use crate::numerical::StiffAPI::{
     StiffMatrixLayout, StiffPreset, StiffSolverKind, StiffSolverRequest, StiffSolverSettings,
 };
 use std::fmt::Write as _;
+use thiserror::Error;
+
+/// Errors from parsing a versioned JSON document containing hybrid IVP
+/// settings. Domain/model fields are intentionally not interpreted here.
+#[derive(Debug, Error)]
+pub enum HybridStiffSettingsJsonError {
+    #[error(transparent)]
+    Json(#[from] TaskJsonError),
+    #[error(transparent)]
+    Settings(#[from] IvpTaskError),
+}
+
+/// Parse only the IVP solver selector and options from a versioned JSON
+/// document. Other top-level fields, including client-owned nested physical
+/// model data, are ignored and never converted to the task DSL representation.
+pub fn parse_hybrid_stiff_settings_from_json(
+    input: &str,
+) -> Result<HybridStiffSettings, HybridStiffSettingsJsonError> {
+    let document = settings_document_map_from_json(input, &["task", "solver_options"])?;
+    Ok(parse_hybrid_stiff_settings_from_document(&document)?)
+}
 
 /// Parse the solver selector and common policy from an external application's
 /// document. The returned settings can only prepare a request for the same

@@ -31,6 +31,7 @@ use crate::numerical::BVP_sci::new::{
     BvpSciSolution, BvpSciSolver, BvpSciSparseFactorization as NativeBvpSciSparseFactorization,
     BvpSciTelemetryMode, BvpSciTelemetrySnapshot,
 };
+use crate::numerical::cancellation::CancellationToken;
 use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
 use crate::symbolic::symbolic_engine::Expr;
@@ -803,6 +804,12 @@ pub enum BvpApiError {
     Sci(#[from] BvpSciNewError),
     #[error("CorrectionNewton BVP route failed")]
     CorrectionNewton(#[from] CorrectionNewtonSolverError),
+    #[error("cooperative cancellation is not supported by the {solver} BVP route")]
+    CancellationUnsupported { solver: &'static str },
+    #[error("BVP solve was cancelled at a native Newton safe point")]
+    Cancelled {
+        snapshot: crate::numerical::BVP_Damp::telemetry::BvpDampCancelledSnapshot,
+    },
     #[error("postprocessing failed for {solver}")]
     Postprocessing {
         solver: &'static str,
@@ -1281,32 +1288,72 @@ impl BvpSolver {
     /// inspect the returned typed error and the current telemetry snapshot for
     /// diagnostics from the failed attempt.
     pub fn solve(&mut self) -> Result<&BvpSolution, BvpApiError> {
+        self.solve_internal(None)
+    }
+
+    /// Execute a solve with cooperative cancellation where the selected native
+    /// route has a documented safe checkpoint. Unsupported routes fail before
+    /// numerical work begins.
+    pub fn solve_with_cancellation_token(
+        &mut self,
+        token: &CancellationToken,
+    ) -> Result<&BvpSolution, BvpApiError> {
+        self.solve_internal(Some(token))
+    }
+
+    fn solve_internal(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<&BvpSolution, BvpApiError> {
         let solution = match &mut self.native {
-            BvpNativeSolver::CorrectionNewton(solver) => match solver.solve() {
-                Ok(report) => {
-                    self.last_correction_newton_telemetry = Some(report.telemetry.clone());
-                    let values = solver.full_grid_values(&report.state)?;
-                    BvpSolution::CorrectionNewton {
-                        mesh: DVector::from_vec(self.problem.mesh.clone()),
-                        values,
-                        report,
-                    }
-                }
-                Err(error) => {
-                    if let Some(report) = error.partial_report() {
+            BvpNativeSolver::CorrectionNewton(solver) => {
+                let result = match cancellation {
+                    Some(token) => solver.solve_with_cancellation_token(token),
+                    None => solver.solve(),
+                };
+                match result {
+                    Ok(report) => {
                         self.last_correction_newton_telemetry = Some(report.telemetry.clone());
+                        let values = solver.full_grid_values(&report.state)?;
+                        BvpSolution::CorrectionNewton {
+                            mesh: DVector::from_vec(self.problem.mesh.clone()),
+                            values,
+                            report,
+                        }
                     }
-                    return Err(BvpApiError::CorrectionNewton(error));
+                    Err(error) => {
+                        if let Some(report) = error.partial_report() {
+                            self.last_correction_newton_telemetry = Some(report.telemetry.clone());
+                        }
+                        return Err(BvpApiError::CorrectionNewton(error));
+                    }
                 }
-            },
+            }
             BvpNativeSolver::Damped(solver) => {
                 let solve_result = if self.damped_explicit_mesh {
                     let active_mesh = solver.x_mesh.iter().copied().collect();
-                    solver.try_solver_on_mesh(active_mesh)
+                    match cancellation {
+                        Some(token) => {
+                            solver.try_solver_with_cancellation_token_on_mesh(active_mesh, token)
+                        }
+                        None => solver.try_solver_on_mesh(active_mesh),
+                    }
                 } else {
-                    solver.try_solver()
+                    match cancellation {
+                        Some(token) => solver.try_solver_with_cancellation_token(token),
+                        None => solver.try_solver(),
+                    }
                 };
-                if solve_result.map_err(BvpApiError::Damped)?.is_none() {
+                let solve_result = match solve_result {
+                    Ok(result) => result,
+                    Err(BvpBackendIntegrationError::Cancelled { iteration }) => {
+                        return Err(BvpApiError::Cancelled {
+                            snapshot: solver.cancelled_snapshot(iteration),
+                        });
+                    }
+                    Err(error) => return Err(BvpApiError::Damped(error)),
+                };
+                if solve_result.is_none() {
                     return Err(BvpApiError::MissingResult);
                 }
                 BvpSolution::Damped {
@@ -1315,7 +1362,20 @@ impl BvpSolver {
                 }
             }
             BvpNativeSolver::Frozen(solver) => {
-                if solver.try_solver().map_err(BvpApiError::Frozen)?.is_none() {
+                let solve_result = match cancellation {
+                    Some(token) => solver.try_solver_with_cancellation_token(token),
+                    None => solver.try_solver(),
+                };
+                let solve_result = match solve_result {
+                    Ok(result) => result,
+                    Err(BvpBackendIntegrationError::Cancelled { iteration }) => {
+                        return Err(BvpApiError::Cancelled {
+                            snapshot: solver.cancelled_snapshot(iteration),
+                        });
+                    }
+                    Err(error) => return Err(BvpApiError::Frozen(error)),
+                };
+                if solve_result.is_none() {
                     return Err(BvpApiError::MissingResult);
                 }
                 BvpSolution::Frozen {
@@ -1323,7 +1383,10 @@ impl BvpSolver {
                     values: solver.get_result().ok_or(BvpApiError::MissingResult)?,
                 }
             }
-            BvpNativeSolver::Sci(solver) => BvpSolution::Sci(solver.solve()?),
+            BvpNativeSolver::Sci(solver) => BvpSolution::Sci(match cancellation {
+                Some(token) => solver.solve_with_cancellation_token(token)?,
+                None => solver.solve()?,
+            }),
         };
         self.last_solution = Some(solution);
         Ok(self

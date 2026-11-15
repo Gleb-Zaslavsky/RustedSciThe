@@ -1,6 +1,24 @@
 use crate::numerical::Nonlinear_systems::error::SolveError;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::time::Duration;
+
+/// Last accepted parameter vector and available telemetry at cancellation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CancelledLeastSquaresSnapshot {
+    /// Number of completed outer LM iterations.
+    pub completed_iterations: usize,
+    /// Last accepted parameter vector (never an unaccepted trial point).
+    pub parameters: Vec<f64>,
+    /// Residual norm at the last accepted point, when already evaluated.
+    pub residual_norm: Option<f64>,
+    /// Work counters, absent unless counter telemetry was requested.
+    pub residual_evaluations: Option<usize>,
+    pub jacobian_evaluations: Option<usize>,
+    pub linear_solves: Option<usize>,
+    /// Elapsed solve time, absent unless timing telemetry was requested.
+    pub elapsed: Option<Duration>,
+}
 
 /// Stage at which a least-squares evaluation failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +67,11 @@ pub enum LeastSquaresError {
     NumericalBreakdown {
         stage: LeastSquaresStage,
     },
+    /// Cooperative cancellation observed at a safe LM checkpoint.
+    Cancelled {
+        /// Partial state and telemetry from the last accepted point.
+        snapshot: Box<CancelledLeastSquaresSnapshot>,
+    },
     Problem(SolveError),
 }
 
@@ -93,6 +116,11 @@ impl Display for LeastSquaresError {
             Self::NumericalBreakdown { stage } => {
                 write!(f, "numerical breakdown during least-squares {stage:?}")
             }
+            Self::Cancelled { snapshot } => write!(
+                f,
+                "least-squares solve cancelled after {} completed iteration(s)",
+                snapshot.completed_iterations
+            ),
             Self::Problem(source) => write!(f, "least-squares problem evaluation failed: {source}"),
         }
     }

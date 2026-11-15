@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rustedscithe:agent-worker-response:v1",
+  "title": "RustedSciThe Agent Worker Response v1",
+  "type": "object",
+  "required": [
+    "worker_protocol_version",
+    "job_contract_version",
+    "job_id",
+    "status",
+    "task_result",
+    "acceptance",
+    "error"
+  ],
+  "properties": {
+    "worker_protocol_version": { "const": 1 },
+    "job_contract_version": { "const": 1 },
+    "job_id": { "type": ["string", "null"] },
+    "status": {
+      "enum": ["succeeded", "not_converged", "failed", "rejected"]
+    },
+    "task_result": { "type": ["object", "null"] },
+    "acceptance": { "type": ["object", "null"] },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": [
+            "code",
+            "error_type",
+            "field_path",
+            "details",
+            "message",
+            "source_chain",
+            "retryable"
+          ],
+          "properties": {
+            "code": { "type": "string" },
+            "error_type": { "type": "string" },
+            "field_path": { "type": ["string", "null"] },
+            "details": {},
+            "message": { "type": "string" },
+            "source_chain": { "type": "array", "items": { "type": "string" } },
+            "retryable": { "type": ["boolean", "null"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

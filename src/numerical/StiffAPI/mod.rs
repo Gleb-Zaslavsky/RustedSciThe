@@ -19,6 +19,7 @@ use crate::numerical::BDF::BDF_api::{
 use crate::numerical::BE::{
     BE, BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode,
 };
+use crate::numerical::CancellationToken;
 use crate::numerical::LSODE2::{
     Lsode2AotProfile, Lsode2AotToolchain, Lsode2Error, Lsode2LinearSolverChoice,
     Lsode2LinearSolverPolicy, Lsode2LinearSystemStructure, Lsode2NativeStatistics,
@@ -26,8 +27,9 @@ use crate::numerical::LSODE2::{
     Lsode2SymbolicExecutionMode,
 };
 use crate::numerical::Radau::api::{
-    RadauAotConfig, RadauConfig, RadauError, RadauExecution, RadauExecutionPolicy, RadauFrontend,
-    RadauMatrixLayout, RadauSolution, RadauSolver, RadauTelemetryReport,
+    RadauAotConfig, RadauCancellationError, RadauConfig, RadauError, RadauExecution,
+    RadauExecutionPolicy, RadauFrontend, RadauMatrixLayout, RadauSolution, RadauSolver,
+    RadauTelemetryReport,
 };
 use crate::numerical::SolverTelemetryMode;
 use crate::numerical::ivp_parameter_loop::{
@@ -173,6 +175,47 @@ pub enum StiffSolveError {
     Radau(RadauError),
     BackwardEuler(BeError),
     Lsode2(Lsode2Error),
+}
+
+/// Failure from the opt-in cancellation dispatch on the common stiff facade.
+#[derive(Debug)]
+pub enum StiffCancellationError {
+    Bdf(BdfSolveError),
+    Radau(RadauCancellationError),
+    BackwardEuler(BeError),
+    Lsode2(Lsode2Error),
+    Unsupported { solver: &'static str },
+}
+
+impl fmt::Display for StiffCancellationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bdf(error) => write!(f, "BDF cancellation-aware solve failed: {error}"),
+            Self::Radau(error) => write!(f, "Radau cancellation-aware solve failed: {error}"),
+            Self::BackwardEuler(error) => {
+                write!(f, "Backward Euler cancellation-aware solve failed: {error}")
+            }
+            Self::Lsode2(error) => write!(f, "LSODE2 cancellation-aware solve failed: {error}"),
+            Self::Unsupported { solver } => {
+                write!(
+                    f,
+                    "cooperative cancellation is not yet supported by {solver}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for StiffCancellationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Bdf(error) => Some(error),
+            Self::Radau(error) => Some(error),
+            Self::BackwardEuler(error) => Some(error),
+            Self::Lsode2(error) => Some(error),
+            Self::Unsupported { .. } => None,
+        }
+    }
 }
 
 /// One independent parameter-vector solve through the common stiff facade.
@@ -540,6 +583,40 @@ impl PreparedStiffSolver {
                 .solve_with_summary()
                 .map(StiffSolveOutcome::Lsode2)
                 .map_err(StiffSolveError::Lsode2),
+        }
+    }
+
+    /// Solve with opt-in cooperative cancellation where the selected native
+    /// route implements safe cancellation checkpoints.
+    ///
+    /// BDF, Radau, Backward Euler, and LSODE2 observe cancellation at
+    /// solver-owned safe checkpoints.
+    pub fn try_solve_with_cancellation_token(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> Result<StiffSolveOutcome, StiffCancellationError> {
+        match self {
+            Self::Bdf(solver) => solver
+                .try_solve_with_cancellation_token(cancellation)
+                .map(|()| StiffSolveOutcome::Bdf)
+                .map_err(StiffCancellationError::Bdf),
+            Self::BackwardEuler(solver) => solver
+                .try_solve_with_cancellation_token(cancellation)
+                .map(|()| StiffSolveOutcome::BackwardEuler)
+                .map_err(StiffCancellationError::BackwardEuler),
+            Self::Radau(prepared) => prepared
+                .solver
+                .try_solve_with_cancellation_token(
+                    &prepared.initial_state,
+                    &prepared.parameters,
+                    &cancellation,
+                )
+                .map(StiffSolveOutcome::Radau)
+                .map_err(StiffCancellationError::Radau),
+            Self::Lsode2(solver) => solver
+                .solve_with_cancellation_token(&cancellation)
+                .map(|()| StiffSolveOutcome::Lsode2(solver.summary()))
+                .map_err(StiffCancellationError::Lsode2),
         }
     }
 

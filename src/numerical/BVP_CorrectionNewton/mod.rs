@@ -14,6 +14,7 @@
 //! local here and are checked against independent transition-contract tests.
 
 use crate::numerical::BVP_sci::new::BvpSciNewError;
+use crate::numerical::cancellation::CancellationToken;
 use crate::numerical::logging::{
     SolverLogGuard, SolverLogLevel, SolverLoggingError, solver_debug, solver_info, solver_warn,
 };
@@ -670,6 +671,8 @@ pub struct CorrectionNewtonSolveReport {
     pub last_damping_factor: Option<f64>,
     /// Partial telemetry for this attempt.
     pub telemetry: CorrectionNewtonTelemetrySnapshot,
+    /// Requested detail level, so zero counters remain distinguishable from Off.
+    pub telemetry_mode: CorrectionNewtonTelemetryMode,
 }
 
 /// Typed failure with a partial report for the attempted solve.
@@ -775,6 +778,9 @@ pub enum CorrectionNewtonSolverError {
         .report.iterations
     )]
     NonConvergence { report: CorrectionNewtonSolveReport },
+    /// Cancellation requested between complete Newton iterations.
+    #[error("CorrectionNewton BVP solve was cancelled")]
+    Cancelled { report: CorrectionNewtonSolveReport },
 }
 
 impl CorrectionNewtonSolverError {
@@ -791,7 +797,8 @@ impl CorrectionNewtonSolverError {
             | Self::LinearBackend { report, .. }
             | Self::BoundsBlocked { report }
             | Self::NonFiniteCorrectionNorm { report }
-            | Self::NonConvergence { report } => Some(report),
+            | Self::NonConvergence { report }
+            | Self::Cancelled { report } => Some(report),
             Self::InvalidConfiguration { .. }
             | Self::MissingParameterValues { .. }
             | Self::SymbolicPreparation { .. }
@@ -1335,6 +1342,25 @@ impl CorrectionNewtonSolver {
 
     /// Runs the standalone fixed-mesh damped correction-Newton loop.
     pub fn solve(&mut self) -> Result<CorrectionNewtonSolveReport, CorrectionNewtonSolverError> {
+        self.solve_internal(None)
+    }
+
+    /// Solve with cooperative cancellation checked before each Newton iteration.
+    ///
+    /// An iteration, including all damping trials, is atomic with respect to
+    /// cancellation. The returned error retains the last accepted state and
+    /// telemetry accumulated under the configured telemetry mode.
+    pub fn solve_with_cancellation_token(
+        &mut self,
+        token: &CancellationToken,
+    ) -> Result<CorrectionNewtonSolveReport, CorrectionNewtonSolverError> {
+        self.solve_internal(Some(token))
+    }
+
+    fn solve_internal(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<CorrectionNewtonSolveReport, CorrectionNewtonSolverError> {
         if !self.external_parameters_bound {
             return Err(CorrectionNewtonSolverError::MissingParameterValues {
                 names: self.external_parameter_names.clone(),
@@ -1349,6 +1375,11 @@ impl CorrectionNewtonSolver {
         let mut jacobian_reevaluations_after_failed_damping = 0_usize;
 
         for iteration in 0..self.config.max_iterations {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                report.iterations = iteration;
+                report.state.clone_from(&self.state);
+                return Err(CorrectionNewtonSolverError::Cancelled { report });
+            }
             report.iterations = iteration + 1;
             // CorrectionNewton refreshes only once age is strictly greater than max age.
             if force_jacobian || jacobian_age > self.config.max_jacobian_age {
@@ -1647,6 +1678,7 @@ impl CorrectionNewtonSolver {
             last_bound_factor: None,
             last_damping_factor: None,
             telemetry: CorrectionNewtonTelemetrySnapshot::default(),
+            telemetry_mode: self.config.telemetry_mode,
         }
     }
 

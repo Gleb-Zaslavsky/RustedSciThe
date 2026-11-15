@@ -37,6 +37,27 @@ impl NonlinearSolver {
         }
     }
 
+    /// Root-solve dispatch with opt-in cooperative cancellation.
+    pub fn solve_root_with_cancellation_token<P: JacobianProvider>(
+        &self,
+        problem: &P,
+        initial_guess: DVector<f64>,
+        options: SolveOptions,
+        cancellation: crate::numerical::CancellationToken,
+    ) -> Result<SolveResult, SolveError> {
+        match self {
+            Self::Root(method) => method.clone().solve_with_cancellation_token(
+                problem,
+                initial_guess,
+                options,
+                cancellation,
+            ),
+            Self::LeastSquares(_) => Err(SolveError::InvalidConfig(
+                "least-squares selection cannot solve through the root-finding API".to_string(),
+            )),
+        }
+    }
+
     /// Minimizes a residual problem when this selector contains the LM route.
     pub fn minimize_least_squares<P: LeastSquaresProblem>(
         &self,
@@ -58,6 +79,20 @@ impl NonlinearSolver {
     ) -> Result<(P, MinimizationReport), LeastSquaresError> {
         match self {
             Self::LeastSquares(method) => method.try_minimize(problem),
+            _ => Err(LeastSquaresError::WrongSolverKind),
+        }
+    }
+
+    /// Fallible least-squares dispatch with opt-in cooperative cancellation.
+    pub fn try_minimize_least_squares_with_cancellation_token<P: LeastSquaresProblem>(
+        &self,
+        problem: P,
+        cancellation: crate::numerical::CancellationToken,
+    ) -> Result<(P, MinimizationReport), LeastSquaresError> {
+        match self {
+            Self::LeastSquares(method) => {
+                method.try_minimize_with_cancellation_token(problem, cancellation)
+            }
             _ => Err(LeastSquaresError::WrongSolverKind),
         }
     }
@@ -124,5 +159,64 @@ mod tests {
             .expect_err("least-squares variant must reject root dispatch");
 
         assert!(matches!(error, SolveError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn root_selector_forwards_opt_in_cancellation() {
+        use crate::numerical::SolverTelemetryMode;
+
+        let problem =
+            crate::numerical::Nonlinear_systems::symbolic::SymbolicNonlinearProblem::from_strings(
+                vec!["x - 1".to_string()],
+                Some(vec!["x".to_string()]),
+                None,
+                None,
+            )
+            .expect("symbolic root problem");
+        let token = crate::numerical::CancellationToken::new();
+        token.cancel();
+        let mut options = SolveOptions::default();
+        options.diagnostics.telemetry_mode = SolverTelemetryMode::Counters;
+
+        let error = NonlinearSolver::Root(NonlinearSolverMethod::Newton(
+            crate::numerical::Nonlinear_systems::prelude::NewtonMethod,
+        ))
+        .solve_root_with_cancellation_token(&problem, DVector::from_element(1, 0.0), options, token)
+        .expect_err("pre-cancelled root solve must stop");
+
+        let SolveError::Cancelled { snapshot } = error else {
+            panic!("expected typed cancellation error");
+        };
+        assert_eq!(snapshot.completed_iterations, 0);
+        assert_eq!(snapshot.current_state, vec![0.0]);
+        assert_eq!(snapshot.residual_evaluations, Some(0));
+        assert_eq!(snapshot.jacobian_evaluations, Some(0));
+        assert_eq!(snapshot.linear_solves, Some(0));
+        assert_eq!(snapshot.elapsed, None);
+    }
+
+    #[test]
+    fn least_squares_selector_forwards_opt_in_cancellation() {
+        use crate::numerical::Nonlinear_systems::least_squares::ClosureLeastSquaresProblem;
+
+        let problem = ClosureLeastSquaresProblem::new(
+            DVector::from_vec(vec![0.0]),
+            |x: &DVector<f64>| DVector::from_element(1, x[0] - 1.0),
+            |_x: &DVector<f64>| nalgebra::DMatrix::identity(1, 1),
+        );
+        let token = crate::numerical::CancellationToken::new();
+        token.cancel();
+        let result = NonlinearSolver::LeastSquares(LevenbergMarquardt::new())
+            .try_minimize_least_squares_with_cancellation_token(problem, token);
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("pre-cancelled least-squares solve unexpectedly succeeded"),
+        };
+
+        assert!(matches!(
+            error,
+            LeastSquaresError::Cancelled { ref snapshot }
+                if snapshot.completed_iterations == 0 && snapshot.parameters == vec![0.0]
+        ));
     }
 }

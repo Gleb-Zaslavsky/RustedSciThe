@@ -2555,7 +2555,6 @@ pub mod generated_bvp_large_chunk_variants {
         out[37] = t35;
         out[38] = t0;
     }
-
 }
 
 pub mod generated_bvp_large_chunk_variant_bindings {
@@ -2634,5 +2633,4 @@ pub mod generated_bvp_large_chunk_variant_bindings {
         generated_bvp_large_chunk_variants::fixture_bvp32_sparse_r16_chunk_2,
         generated_bvp_large_chunk_variants::fixture_bvp32_sparse_r16_chunk_3,
     ];
-
 }

@@ -748,7 +748,7 @@ use RustedSciThe::numerical::BVP_Damp::{
 use RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::GeneratedBackendConfig;
 
 let config = GeneratedBackendConfig::banded_lambdify_defaults()
-    // Counters is the compatibility default; Off is the zero-collection path.
+    // Telemetry defaults to Off; request counters explicitly when needed.
     .with_bvp_telemetry_mode(BvpTelemetryMode::Off)
     .with_bvp_logging_config(
         BvpLoggingConfig::new(BvpLoggingMode::Warnings).with_max_events(128),
@@ -758,8 +758,8 @@ let trace = &solver.get_statistics().telemetry;
 println!("solve_id={} dropped={}", trace.solve_id, trace.log_events_dropped);
 ```
 
-`BvpTelemetryMode::Off` disables solver counters and stage timers without
-changing the numerical algorithm. `Counters` collects discrete measurements
+`BvpTelemetryMode::Off` is the default and disables solver counters and stage
+timers without changing the numerical algorithm. `Counters` collects discrete measurements
 without starting clocks; `Timings` collects durations without incrementing
 discrete counters; `Detailed` collects both. The telemetry mode is independent
 from `BvpLoggingMode`, so a caller may retain a bounded decision trace while
@@ -916,3 +916,15 @@ runnable [`bvp_frozen_parameter_loop`](../../../examples/bvp_frozen_parameter_lo
 and [`bvp_damped_parameter_loop`](../../../examples/bvp_damped_parameter_loop.rs)
 examples. BVP_sci's current parameters are free Newton unknowns, not fixed
 model inputs, so they are not accepted by this loop.
+
+## Cooperative cancellation
+
+Damped and Frozen/Naive expose opt-in cancellation-token solve methods. The
+solver checks the token at safe Newton-iteration boundaries; it does not
+interrupt residual/Jacobian callbacks or copy solver state on every iteration.
+When cancellation is observed, the returned typed error can be queried for a
+partial snapshot containing the active mesh, packed reduced state, completed
+iteration index, and telemetry collected by the configured telemetry mode.
+Cancellation does not publish an incomplete solution or replace the previous
+successful result. With no cancellation request, the regular solve path does
+not allocate or populate this cancellation snapshot.

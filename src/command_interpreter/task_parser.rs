@@ -391,6 +391,19 @@ pub enum TemplateType {
 }
 
 pub type DocumentMap = HashMap<String, SectionMap>;
+
+/// Shared task-document spelling for opt-in solver telemetry levels.
+///
+/// Family parsers map this request to the selected solver's native telemetry
+/// mode; `Off` remains the default when the field is omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TaskTelemetryMode {
+    #[default]
+    Off,
+    Counters,
+    Timings,
+    Detailed,
+}
 type SectionMap = HashMap<String, Option<Vec<Value>>>;
 type TemplateMap = HashMap<String, HashMap<String, Option<Vec<TemplateType>>>>;
 

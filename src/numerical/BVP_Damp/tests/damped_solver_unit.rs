@@ -82,7 +82,7 @@ fn explicit_damped_off_overrides_structured_event_logging_mode() {
 }
 
 fn sparse_surface_test_solver() -> NRBVP {
-    NRBVP::new_with_options(
+    let mut solver = NRBVP::new_with_options(
         vec![Expr::parse_expression("z"), Expr::parse_expression("-y")],
         DMatrix::from_element(2, 4, 0.1),
         vec!["y".to_string(), "z".to_string()],
@@ -95,7 +95,9 @@ fn sparse_surface_test_solver() -> NRBVP {
         1.0,
         4,
         DampedSolverOptions::sparse_damped(),
-    )
+    );
+    solver.set_bvp_telemetry_mode(BvpTelemetryMode::Counters);
+    solver
 }
 
 fn sparse_surface_test_solver_with_tolerances() -> NRBVP {
@@ -112,7 +114,7 @@ fn sparse_surface_test_solver_with_tolerances() -> NRBVP {
         bounds: Some(bounds),
         ..DampedSolverOptions::sparse_damped()
     };
-    NRBVP::new_with_options(
+    let mut solver = NRBVP::new_with_options(
         vec![Expr::parse_expression("y-z"), Expr::parse_expression("-z")],
         DMatrix::from_element(2, 5, 0.25),
         vec!["z".to_string(), "y".to_string()],
@@ -125,7 +127,9 @@ fn sparse_surface_test_solver_with_tolerances() -> NRBVP {
         1.0,
         5,
         options,
-    )
+    );
+    solver.set_bvp_telemetry_mode(BvpTelemetryMode::Counters);
+    solver
 }
 
 #[test]
@@ -744,7 +748,8 @@ fn damped_parameter_rebind_invalidates_owned_factor() {
 
 #[test]
 fn damped_statistics_keep_legacy_projection_and_typed_snapshot_in_sync() {
-    let solver = NRBVP::default();
+    let mut solver = NRBVP::default();
+    solver.set_bvp_telemetry_mode(BvpTelemetryMode::Counters);
     let stats = solver.get_statistics();
 
     assert_eq!(
@@ -764,7 +769,8 @@ fn damped_statistics_keep_legacy_projection_and_typed_snapshot_in_sync() {
 
 #[test]
 fn damped_statistics_count_residual_requests_from_shared_self_boundary() {
-    let solver = NRBVP::default();
+    let mut solver = NRBVP::default();
+    solver.set_bvp_telemetry_mode(BvpTelemetryMode::Counters);
     let _ = solver.calc_residual(solver.y.clone_box());
     let stats = solver.get_statistics();
 

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rustedscithe:acceptance-report:v1",
+  "title": "RustedSciThe Acceptance Report v1",
+  "type": "object",
+  "required": ["status", "checks"],
+  "properties": {
+    "status": { "enum": ["not_requested", "accepted", "rejected", "not_evaluated"] },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "observed"],
+        "properties": {
+          "name": { "enum": ["solver_converged", "finite_result"] },
+          "status": { "enum": ["passed", "failed", "not_evaluated"] },
+          "observed": {}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

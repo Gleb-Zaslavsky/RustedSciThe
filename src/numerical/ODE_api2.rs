@@ -12,7 +12,8 @@ use crate::numerical::BDF::BDF_api::{
     BdfSolveError, BdfSolverOptions, BdfStopConditionError, BdfTelemetryMode,
     ODEsolver as BdfOdeSolver,
 };
-use crate::numerical::BE::{BE, BeError, BeSolverOptions};
+use crate::numerical::BE::{BE, BeError, BeSolverOptions, BeTelemetryMode};
+use crate::numerical::CancellationToken;
 use crate::numerical::LSODE2::{Lsode2Error, Lsode2ProblemConfig, Lsode2Solver};
 use crate::numerical::NonStiff_api::{Dop853Error, Dop853Options, nonstiffODE};
 #[cfg(test)]
@@ -305,6 +306,7 @@ pub enum UniversalOdeError {
     Radau(RadauError),
     LegacyRadauDisabled,
     UnsupportedGeneratedBackendForMethod { method: String },
+    CancellationUnsupported { method: String },
 }
 
 impl std::fmt::Display for UniversalOdeError {
@@ -327,6 +329,10 @@ impl std::fmt::Display for UniversalOdeError {
                     "generated/AOT backend selection is not supported for method `{method}`"
                 )
             }
+            Self::CancellationUnsupported { method } => write!(
+                f,
+                "cooperative cancellation is not yet supported for IVP method `{method}`"
+            ),
         }
     }
 }
@@ -343,6 +349,7 @@ impl std::error::Error for UniversalOdeError {
             Self::Radau(err) => Some(err),
             Self::LegacyRadauDisabled => None,
             Self::UnsupportedGeneratedBackendForMethod { .. } => None,
+            Self::CancellationUnsupported { .. } => None,
         }
     }
 }
@@ -428,6 +435,7 @@ pub struct UniversalODESolver {
     max_step: Option<f64>,
     radau_telemetry_mode: RadauTelemetryMode,
     bdf_telemetry_mode: BdfTelemetryMode,
+    be_telemetry_mode: BeTelemetryMode,
     nonstiff_symbolic_telemetry: IvpTelemetry,
     first_step: Option<f64>,
     vectorized: bool,
@@ -473,6 +481,7 @@ impl UniversalODESolver {
             max_step: None,
             radau_telemetry_mode: RadauTelemetryMode::Off,
             bdf_telemetry_mode: BdfTelemetryMode::Off,
+            be_telemetry_mode: BeTelemetryMode::Off,
             nonstiff_symbolic_telemetry: IvpTelemetry::disabled(),
             first_step: None,
             vectorized: false,
@@ -714,6 +723,12 @@ impl UniversalODESolver {
     /// Selects telemetry for the BDF route. Telemetry remains disabled by default.
     pub fn with_bdf_telemetry_mode(mut self, mode: BdfTelemetryMode) -> Self {
         self.bdf_telemetry_mode = mode;
+        self
+    }
+
+    /// Selects telemetry for Backward Euler. Telemetry remains disabled by default.
+    pub fn with_be_telemetry_mode(mut self, mode: BeTelemetryMode) -> Self {
+        self.be_telemetry_mode = mode;
         self
     }
 
@@ -961,6 +976,7 @@ impl UniversalODESolver {
                     options = options.with_generated_backend_config(config);
                 }
                 let mut solver = BE::try_new_with_options(options)?;
+                solver.try_set_telemetry_mode(self.be_telemetry_mode)?;
                 if let Some(rhs) = self.native_residual.clone() {
                     let jac = self.native_jacobian.clone();
                     solver.set_native_ode_callbacks(
@@ -1065,6 +1081,47 @@ impl UniversalODESolver {
         Ok(())
     }
 
+    /// Runs the selected IVP solver with cooperative cancellation when its
+    /// native route supports it. Unsupported methods return a typed error.
+    pub fn try_solve_with_cancellation_token(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> Result<(), UniversalOdeError> {
+        if self.solver_instance.is_none() {
+            self.try_initialize()?;
+        }
+        let method = self.method_label();
+        match self
+            .solver_instance
+            .as_mut()
+            .expect("solver instance should be initialized")
+        {
+            SolverInstance::NonStiff(solver) if solver.supports_cancellation() => {
+                let result = solver.try_solve_with_cancellation_token(cancellation);
+                let (t_result, y_result) = solver.get_result();
+                self.t_result = Some(t_result);
+                self.y_result = Some(y_result);
+                result?;
+            }
+            SolverInstance::BDF(solver) => {
+                let result = solver.try_solve_with_cancellation_token(cancellation);
+                let (t_result, y_result) = solver.get_result();
+                self.t_result = Some(t_result);
+                self.y_result = Some(y_result);
+                result?;
+            }
+            SolverInstance::BE(solver) => {
+                let result = solver.try_solve_with_cancellation_token(cancellation);
+                let (t_result, y_result) = solver.get_result();
+                self.t_result = t_result;
+                self.y_result = y_result;
+                result?;
+            }
+            _ => return Err(UniversalOdeError::CancellationUnsupported { method }),
+        }
+        Ok(())
+    }
+
     pub fn solve(&mut self) {
         self.try_solve()
             .expect("universal ODE solver execution should succeed");
@@ -1115,22 +1172,21 @@ impl UniversalODESolver {
         let method = self.method_label();
         let backend = self.backend_label();
         match self.solver_instance.as_ref()? {
-            SolverInstance::NonStiff(solver) => {
-                solver
-                    .dop853_statistics()
-                    .map(|stats| UniversalIvpStatistics {
-                        method_label: method,
-                        backend_label: backend,
-                        solve_ms_total: stats.solve_ms,
-                        integration_loop_ms_total: stats.solve_ms,
-                        residual_calls: stats.function_evaluations,
-                        step_calls: stats.attempted_steps,
-                        accepted_steps_total: stats.accepted_steps,
-                        candidate_step_attempts_total: stats.attempted_steps,
-                        rejected_step_attempts_total: stats.rejected_steps,
-                        ..UniversalIvpStatistics::default()
-                    })
-            }
+            SolverInstance::NonStiff(solver) => solver
+                .dop853_statistics()
+                .filter(|stats| stats.counters_collected || stats.timings_collected)
+                .map(|stats| UniversalIvpStatistics {
+                    method_label: method,
+                    backend_label: backend,
+                    solve_ms_total: stats.solve_ms,
+                    integration_loop_ms_total: stats.solve_ms,
+                    residual_calls: stats.function_evaluations,
+                    step_calls: stats.attempted_steps,
+                    accepted_steps_total: stats.accepted_steps,
+                    candidate_step_attempts_total: stats.attempted_steps,
+                    rejected_step_attempts_total: stats.rejected_steps,
+                    ..UniversalIvpStatistics::default()
+                }),
             #[cfg(test)]
             SolverInstance::Radau(solver) => Some(UniversalIvpStatistics::from_radau_stats(
                 method,
@@ -1439,6 +1495,118 @@ mod tests {
     }
 
     #[test]
+    fn universal_bdf_forwards_cancellation_and_partial_result() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver =
+            UniversalODESolver::new(eq_system, values, arg, SolverType::Bdf, 0.0, y0, 0.1)
+                .with_bdf_telemetry_mode(BdfTelemetryMode::Counters);
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let error = solver
+            .try_solve_with_cancellation_token(token)
+            .expect_err("pre-cancelled BDF route should preserve its native failure");
+        let UniversalOdeError::Bdf(BdfSolveError::Cancelled { snapshot }) = error else {
+            panic!("expected BDF cancellation outcome through ODE_api2");
+        };
+        assert_eq!(snapshot.current_time, 0.0);
+        assert_eq!(snapshot.current_state, vec![1.0]);
+        let (times, states) = solver.get_result();
+        assert_eq!(times.unwrap().as_slice(), &[0.0]);
+        assert_eq!(states.unwrap()[(0, 0)], 1.0);
+    }
+
+    #[test]
+    fn universal_backward_euler_forwards_cancellation_and_partial_result() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::BackwardEuler,
+            0.0,
+            y0,
+            0.1,
+        );
+        solver.set_step_size(0.05);
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let error = solver
+            .try_solve_with_cancellation_token(token)
+            .expect_err("pre-cancelled BE route should preserve its native failure");
+        let UniversalOdeError::BackwardEuler(crate::numerical::BE::BeError::Cancelled { snapshot }) =
+            error
+        else {
+            panic!("expected BE cancellation outcome through ODE_api2");
+        };
+        assert_eq!(snapshot.current_time, 0.0);
+        assert_eq!(snapshot.current_state, vec![1.0]);
+        let (times, states) = solver.get_result();
+        assert_eq!(times.unwrap().as_slice(), &[0.0]);
+        assert_eq!(states.unwrap()[(0, 0)], 1.0);
+    }
+
+    #[test]
+    fn universal_dop853_forwards_cancellation_and_partial_result() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::NonStiff(NonStiffMethod::Dop853),
+            0.0,
+            y0,
+            0.1,
+        );
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let error = solver
+            .try_solve_with_cancellation_token(token)
+            .expect_err("pre-cancelled DOP853 should preserve its native failure");
+        let UniversalOdeError::NonStiff(crate::numerical::NonStiff_api::NonStiffError::Dop853(
+            Dop853Error::Cancelled { snapshot },
+        )) = error
+        else {
+            panic!("expected DOP853 cancellation through ODE_api2");
+        };
+        assert_eq!(snapshot.current_time, 0.0);
+        assert_eq!(snapshot.current_state, vec![1.0]);
+        let (times, states) = solver.get_result();
+        assert_eq!(times.unwrap().as_slice(), &[0.0]);
+        assert_eq!(states.unwrap()[(0, 0)], 1.0);
+    }
+
+    #[test]
+    fn universal_ode_forwards_legacy_nonstiff_cancellation_snapshot() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::NonStiff(NonStiffMethod::Rk45),
+            0.0,
+            y0,
+            0.1,
+        );
+        let token = CancellationToken::new();
+        token.cancel();
+        let error = solver
+            .try_solve_with_cancellation_token(token)
+            .expect_err("legacy explicit route should return a typed pre-cancel");
+        assert!(matches!(
+            error,
+            UniversalOdeError::NonStiff(
+                crate::numerical::NonStiff_api::NonStiffError::Cancelled { .. }
+            )
+        ));
+        let (times, states) = solver.get_result();
+        assert_eq!(times.unwrap().as_slice(), &[0.0]);
+        assert_eq!(states.unwrap()[(0, 0)], 1.0);
+    }
+
+    #[test]
     fn universal_nonstiff_unknown_method_is_returned_as_typed_error() {
         let (eq_system, values, arg, y0) = simple_decay_problem();
         let mut solver = UniversalODESolver::new(
@@ -1556,6 +1724,28 @@ mod tests {
                 .unwrap()
                 .contains("accepted_steps=")
         );
+    }
+
+    #[test]
+    fn universal_dop853_does_not_publish_statistics_when_telemetry_is_off() {
+        let (eq_system, values, arg, y0) = simple_decay_problem();
+        let mut solver = UniversalODESolver::new(
+            eq_system,
+            values,
+            arg,
+            SolverType::NonStiff(NonStiffMethod::Dop853),
+            0.0,
+            y0,
+            1.0,
+        );
+        solver
+            .try_solve()
+            .expect("DOP853 should solve with telemetry disabled");
+
+        assert!(solver.get_statistics().is_none());
+        let (_, values) = solver.get_result();
+        let values = values.expect("successful DOP853 result");
+        assert!((values[(values.nrows() - 1, 0)] - (-1.0_f64).exp()).abs() < 1e-7);
     }
 
     #[test]
@@ -1765,7 +1955,8 @@ mod tests {
             1e-8,
             20,
             Some(1e-2),
-        );
+        )
+        .with_be_telemetry_mode(BeTelemetryMode::Counters);
         solver.solve();
         let stats = solver
             .get_statistics()
@@ -1925,6 +2116,7 @@ mod tests {
             20,
             Some(1e-2),
         )
+        .with_be_telemetry_mode(BeTelemetryMode::Counters)
         .with_native_ode_callbacks(
             decay_rhs,
             Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
@@ -2019,6 +2211,7 @@ mod tests {
             40,
             Some(1e-4),
         )
+        .with_be_telemetry_mode(BeTelemetryMode::Counters)
         .with_native_ode_callbacks(stiff_coupled_rhs, Some(stiff_coupled_jac));
         solver.solve();
         assert_finished_status(&solver);
@@ -2047,6 +2240,7 @@ mod tests {
             40,
             Some(1e-4),
         )
+        .with_be_telemetry_mode(BeTelemetryMode::Counters)
         .with_native_ode_callbacks(
             stiff_coupled_rhs,
             Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,
@@ -2158,6 +2352,7 @@ mod tests {
             80,
             Some(2e-4),
         )
+        .with_be_telemetry_mode(BeTelemetryMode::Counters)
         .with_native_ode_callbacks(robertson_rhs, Some(robertson_jac));
         solver.solve();
         assert_finished_status(&solver);
@@ -2181,6 +2376,7 @@ mod tests {
             80,
             Some(2e-4),
         )
+        .with_be_telemetry_mode(BeTelemetryMode::Counters)
         .with_native_ode_callbacks(
             robertson_rhs,
             Option::<fn(f64, &DVector<f64>) -> DMatrix<f64>>::None,

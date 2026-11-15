@@ -1,6 +1,6 @@
 # Task Documents in RustedSciThe: Practical Guide for IVP/BVP Workflows
 
-This guide explains how to write task documents for RustedSciThe so you can run IVP and BVP jobs from plain text files. The target reader is a Rust developer who wants a reproducible, human-readable input format for numerical experiments, CI scenarios, and solver benchmarking, without building a custom driver for every single model.
+This guide explains how to write task documents for RustedSciThe so you can run IVP, BVP, nonlinear, and fitting jobs from plain text or JSON. The target reader is a Rust developer who wants a reproducible input format for numerical experiments, CI scenarios, and solver benchmarking, without building a custom driver for every single model.
 
 The parser stack lives in:
 
@@ -26,6 +26,172 @@ RustedSciThe task docs are section-based text files. You describe:
 
 The runner (`task_runner`) detects task kind automatically and dispatches to the corresponding parser and solver route.
 
+## JSON Input
+
+The core accepts JSON directly through `parse_task_spec_from_json` and
+`run_task_from_json`. JSON files are also accepted by the file runner when the
+extension is `.json`; the task batch runner uses the same extension rule. JSON
+is converted in Rust to the normalized `DocumentMap` and then sent through the
+same family-specific parser as the text DSL. The Python binding follows this
+same core path with `TaskDocument.from_json(...)`; it does not parse task
+schemas independently.
+
+The JSON object requires root `format_version: 1`. The remaining top-level
+objects mirror DSL sections, and each field is a scalar or a homogeneous
+array. For example:
+
+```json
+{
+  "format_version": 1,
+  "problem": {
+    "formulation": "root",
+    "variables": "x",
+    "equations": "x - 2",
+    "initial_guess": 0.0
+  },
+  "solver": { "method": "newton" }
+}
+```
+
+Numeric arrays become numeric vectors where a field accepts a numeric vector;
+arrays of strings or booleans become repeated field values. `null` is accepted
+only by fields whose contract is nullable. Nested objects/arrays and
+heterogeneous arrays are rejected with a typed parse error that identifies the
+JSON path. Duplicate object keys and unknown task sections or fixed fields are
+also rejected with typed path diagnostics. Dynamic IVP/BVP
+state and parameter names are checked against declarations where applicable.
+All semantic validation remains in the native IVP, BVP, nonlinear, or
+optimization parser.
+
+JSON uses canonical field names; the text DSL's header/field aliases are not
+implicitly normalized on the JSON path. In particular, declare symbolic
+equation parameters with `equations.parameters` and `equations.parameter_values`.
+
+The machine-readable Draft 2020-12 shape is maintained in
+[`task_document.schema.json`](task_document.schema.json) and included in the
+published Rust crate source. Rust clients can also access the embedded schema
+as `command_interpreter::task_json::TASK_DOCUMENT_JSON_SCHEMA`. It documents
+the four task families, fixed field types, and expressible method-specific
+constraints. Symbol resolution, route capabilities, dimensions, and other
+cross-field rules remain authoritative in the native typed parsers; JSON
+Schema validation is a preflight aid, not a replacement.
+
+The bounded execution response has its own Draft 2020-12 schema at
+[`task_result.schema.json`](task_result.schema.json), exposed as
+`command_interpreter::task_contract::TASK_RESULT_JSON_SCHEMA`. It describes
+success, numerical non-convergence, execution failures, and family-specific
+result shapes. The schema is tested against actual responses from all four
+task families; native typed APIs remain the source for full in-process results.
+Acceptance evaluation is a separate object with its own schema at
+[`acceptance_report.schema.json`](acceptance_report.schema.json), exposed as
+`command_interpreter::agent_job::ACCEPTANCE_REPORT_JSON_SCHEMA`; it never
+overwrites the native solver outcome.
+
+```rust
+use RustedSciThe::command_interpreter::task_runner::run_task_from_json;
+
+let result = run_task_from_json(json_document)?;
+println!("{:?}", result.kind());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+For an agent or workflow that must validate a request before execution, use the
+non-executing typed preflight and capability catalog:
+
+```rust
+use RustedSciThe::command_interpreter::task_contract::{
+    inspect_task_json,
+    task_capabilities_json,
+};
+
+let capabilities = task_capabilities_json();
+let inspection = inspect_task_json(json_document)?;
+println!("{}", inspection.to_json());
+# let _ = capabilities;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Inspection validates JSON structure, symbolic expression syntax, and the
+family parser's semantic and cross-field rules. It does not construct a solver,
+prepare callbacks, compile AOT artifacts, or run a numerical solve. A valid
+inspection is not a guarantee that native preparation or numerical convergence
+will succeed. The capability catalog is versioned, but listed route axes are
+not a promise that every combination is supported; the typed parser is
+authoritative for each specific request. The inspection's `effective_defaults`
+contains adapter-resolved settings; a string value `native_default` means that
+the selected native solver owns the default. Unbounded limits are represented
+as `unbounded`, not as JSON `null`.
+
+The capability response includes a versioned `preset_catalog`. Presets are
+fixed route templates, not model-aware solver recommendations. Expand one with
+`command_interpreter::task_presets::expand_task_preset_json`; route selectors
+must agree with the preset, while explicit numeric tuning values override
+preset defaults. Always inspect the expanded task to see the effective
+settings and validate compatibility before execution:
+
+```rust
+use RustedSciThe::command_interpreter::task_contract::inspect_task_json;
+use RustedSciThe::command_interpreter::task_presets::expand_task_preset_json;
+
+let expanded = expand_task_preset_json(task_json, "ivp_bdf_sparse")?;
+let expanded_json = serde_json::to_string(&expanded)?;
+let inspection = inspect_task_json(&expanded_json)?;
+println!("{}", inspection.to_json());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The preset catalog is an initial route-level set, not yet an exhaustive list
+of every solver control. Use the task JSON Schema and typed inspection as the
+authoritative sources for custom settings.
+
+To run JSON directly and receive a compact worker-friendly response, Rust
+clients can call `task_contract::run_task_json_envelope`. The response uses
+`contract_version: 1` and distinguishes `succeeded`, `not_converged`, and
+`failed`. A numerical non-convergence contains a result and termination
+message, but no execution error. A failure contains a stable variant-oriented
+error code and category, stage, optional field path and structured details,
+typed task-error origin, task family and solver when identifiable, message,
+source chain, and process exit code. Native BVP, IVP, nonlinear root and
+least-squares, and fitting errors are mapped from typed variants to stable
+machine codes. When a native variant contains only an opaque callback/compiler
+source, its code identifies that typed failure category and the source chain
+retains the available diagnostic text; no code is derived by parsing
+`Display` output.
+`retryable: null` means RST makes no generic retry claim; the client must not
+infer that retrying is safe.
+
+Some validation failures additionally include optional `expected`, `allowed`,
+and `hint` fields. They are emitted only where the parser or capability catalog
+provides reliable guidance; absence means RST has no safe generic suggestion.
+Hints never rewrite the submitted task or relax numerical settings.
+
+This is the executable numerical task contract, not a worker-job envelope. The
+separate versioned wrapper, its strict schema, typed preflight, generic
+acceptance checks, and worker ownership boundary are described in
+[`AI_AGENT_INTEROP_JOB_CONTRACT.md`](../AI_AGENT_INTEROP_JOB_CONTRACT.md).
+`parse_agent_job_json()` validates that wrapper and its embedded task, but does
+not execute it or enforce the worker's wall-time, memory, or CPU budget. The
+worker passes the validated embedded task to `run_task_json_envelope()` after
+applying its own resource policy. Oversized results are still omitted rather
+than persisted to durable artifacts.
+
+Canonical small JSON examples for all four task families and a complete outer
+job are maintained under [`agent_interop/examples`](../agent_interop/examples/)
+and exercised by Rust tests. The request schema does not define physical units;
+the client must document units and model-specific admissibility alongside its
+job rather than expecting RST to infer them.
+
+IVP/BVP numeric arrays and nonlinear solution vectors are included inline only
+when the total numeric payload is at most 4096 values. Otherwise the response
+sets the corresponding data field to `null`, reports its size, and marks it as
+omitted. The existing typed Rust `TaskRunResult` API still exposes full results
+in-process. Durable artifact storage/reference transport for large worker
+results is not part of this envelope yet. IVP `states` are indexed as
+`[sample][state]`, aligned with the `time` array. BVP `values` use the same
+`[mesh_sample][state]` orientation, with a parallel `mesh` array. Non-finite
+floating-point values are encoded as JSON `null` and counted explicitly in
+`non_finite_values_encoded_as_null`.
+
 From executable mode:
 
 ```bash
@@ -42,6 +208,38 @@ let result = run_task_from_file("examples/task_docs/ivp_decay_task.txt")?;
 println!("{:?}", result.kind());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+---
+
+## Hybrid Settings-Only JSON
+
+Some clients own the physical model and use RST only to interpret solver
+settings. The JSON settings adapters mirror the text hybrid parsers and do not
+parse or convert client-owned domain fields. They accept the usual
+`format_version: 1`, extract only solver-owned sections, and pass those through
+the same native settings parser used by the text route. Nested domain objects
+therefore remain valid and opaque to RST.
+
+```rust
+use RustedSciThe::command_interpreter::task_parser_ivp_hybrid::
+    parse_hybrid_stiff_settings_from_json;
+
+let settings = parse_hybrid_stiff_settings_from_json(json_document)?;
+// The caller builds the equations and initial state, then supplies them via
+// the ordinary StiffAPI request before calling `settings.prepare(...)`.
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The IVP JSON settings shape uses `task` and `solver_options`; the BVP shape uses
+`solver_settings` and supported companion sections such as `bounds` or
+`grid_refinement`. The BVP entry point is
+`parse_hybrid_bvp_solver_settings_from_json`. Example inputs live at
+[`ivp_hybrid_settings.json`](../agent_interop/examples/ivp_hybrid_settings.json)
+and [`bvp_hybrid_settings.json`](../agent_interop/examples/bvp_hybrid_settings.json).
+Top-level domain sections are intentionally ignored by these settings-only
+functions. Unknown or incompatible fields inside recognized solver-settings
+sections remain typed errors. These JSON objects configure a solver; they do
+not carry equations, boundary/initial conditions, or physical semantics.
 
 ---
 
@@ -572,3 +770,18 @@ Then adapt step by step:
 4. only then run multi-run performance stories.
 
 This sequence keeps debugging local and avoids mixing model errors with backend orchestration noise.
+
+## Cooperative Cancellation
+
+`run_task_from_json_with_cancellation_token` forwards cancellation for single
+IVP tasks using BDF, Backward Euler, Radau, LSODE2, DOP853, RK45, DOPRI, or
+AB4; BVP routes; nonlinear root and symbolic least-squares tasks; and classic
+LM/VarPro fitting tasks. Supported native routes return typed partial
+snapshots; the JSON error envelope keeps `result: null` and places available
+diagnostics under `error.details`. IVP parameter-continuation task documents
+and Gavin fitting return an explicit unsupported-route error; they do not
+silently ignore the token. For
+nonlinear root, the symbolic problem object is constructed before the native
+engine observes a pre-cancelled token, but no residual/Jacobian evaluation is
+performed and the snapshot retains the initial guess with zero completed
+iterations.

@@ -161,6 +161,18 @@ collection, `Counters` records discrete work without reading the clock, and
 combines both and retains the per-mesh/Newton trace. Timing scopes may overlap;
 do not add parent and child durations together.
 
+## Cooperative cancellation
+
+The native solver and `BVP_api` expose an opt-in
+`solve_with_cancellation_token(&CancellationToken)` operation. Cancellation is
+checked before a mesh pass and between complete Newton iterations; an active
+iteration, including its backtracking work, finishes atomically. The typed
+`BvpSciNewError::Cancelled` carries the current mesh, accepted node-major state,
+free parameters, completed mesh/Newton work, and telemetry collected by the
+selected mode. With telemetry `Off`, the snapshot explicitly identifies that
+no telemetry was collected. Cancellation is a failed solve, not a published
+partial solution; callers may inspect the snapshot for diagnostics.
+
 ## Ordered fixed-parameter solves
 
 `parameter_names` declares unknowns that BVP_sci solves together with the

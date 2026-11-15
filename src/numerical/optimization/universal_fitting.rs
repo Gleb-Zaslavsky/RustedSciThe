@@ -7,6 +7,7 @@
 //! symbolic variable projection. Controller-specific options remain explicit
 //! and unsupported shared options return a typed error.
 
+use crate::numerical::CancellationToken;
 use crate::numerical::Nonlinear_systems::least_squares::{
     LeastSquaresError, LeastSquaresTelemetryMode, LevenbergMarquardt,
 };
@@ -507,6 +508,28 @@ impl UniversalFitting {
 
     /// Build and solve the selected backend.
     pub fn build(self) -> Result<UniversalFittingResult, UniversalFittingError> {
+        self.build_with_optional_cancellation(None)
+    }
+
+    /// Build and solve with cooperative cancellation on LM and VarPro routes.
+    /// Gavin currently rejects this option explicitly.
+    pub fn build_with_cancellation_token(
+        self,
+        cancellation: CancellationToken,
+    ) -> Result<UniversalFittingResult, UniversalFittingError> {
+        if self.method == Method::GAVIN {
+            return Err(UniversalFittingError::UnsupportedOption {
+                method: self.method,
+                option: "cancellation_token",
+            });
+        }
+        self.build_with_optional_cancellation(Some(cancellation))
+    }
+
+    fn build_with_optional_cancellation(
+        self,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<UniversalFittingResult, UniversalFittingError> {
         if self.observation_policy.is_some() && self.method != Method::LM {
             return Err(UniversalFittingError::UnsupportedOption {
                 method: self.method,
@@ -530,7 +553,11 @@ impl UniversalFitting {
                 if let Some(policy) = self.observation_policy {
                     lm = lm.with_observation_policy(policy);
                 }
-                let fit = lm.try_build()?;
+                let fit = if let Some(cancellation) = cancellation {
+                    lm.try_build_with_cancellation_token(cancellation)?
+                } else {
+                    lm.try_build()?
+                };
                 let parameters = fit
                     .solution_map_ref()
                     .ok_or(FittedModelError::MissingFittedParameters)?;
@@ -577,7 +604,12 @@ impl UniversalFitting {
                 if let Some(scale_diag) = self.scale_diag {
                     solver = solver.with_scale_diag(scale_diag);
                 }
-                let fit = varpro.clone().solve_with_solver(solver)?;
+                let fit = match cancellation {
+                    Some(token) => varpro
+                        .clone()
+                        .solve_with_solver_and_cancellation_token(solver, token)?,
+                    None => varpro.clone().solve_with_solver(solver)?,
+                };
                 let fitted_model = varpro.fitted_model(&fit)?;
                 if self.logging_enabled {
                     log::info!(
@@ -871,6 +903,70 @@ mod tests {
         let map = fitting.map_of_solutions.as_ref().unwrap();
         assert_relative_eq!(map["a"], 3.0, epsilon = 1e-6);
         assert_relative_eq!(map["b"], 2.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn universal_lm_and_varpro_forward_cancellation_while_gavin_rejects_it() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let result = UniversalFitting::new()
+            .with_data(vec![0.0, 1.0, 2.0], vec![1.0, 3.0, 5.0])
+            .with_equation_str("a*x+b")
+            .with_arg("x")
+            .with_unknowns(["a", "b"])
+            .with_initial_guess(vec![0.0, 0.0])
+            .build_with_cancellation_token(cancellation);
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("pre-cancelled fitting solve unexpectedly succeeded"),
+        };
+
+        assert!(matches!(
+            error,
+            UniversalFittingError::Fitting(FittingError::Solver(
+                LeastSquaresError::Cancelled { ref snapshot }
+            )) if snapshot.completed_iterations == 0 && snapshot.parameters == vec![0.0, 0.0]
+        ));
+
+        let varpro_cancellation = CancellationToken::new();
+        varpro_cancellation.cancel();
+        let result = UniversalFitting::new()
+            .with_varpro()
+            .with_data(vec![0.0, 1.0, 2.0, 3.0], vec![2.0, 1.5, 1.0, 0.8])
+            .with_arg("x")
+            .with_parameters(["tau"])
+            .with_initial_guess(vec![1.2])
+            .with_basis_str("tau", "exp(-x/tau)")
+            .with_equation_str("1")
+            .build_with_cancellation_token(varpro_cancellation);
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("pre-cancelled VarPro solve unexpectedly succeeded"),
+        };
+        assert!(matches!(
+            error,
+            UniversalFittingError::VarPro(
+                crate::numerical::optimization::varpro::symbolic::SymbolicVarProError::SolverFailed {
+                    source: Some(LeastSquaresError::Cancelled { ref snapshot }),
+                    ..
+                }
+            ) if snapshot.completed_iterations == 0 && snapshot.parameters == vec![1.2]
+        ));
+
+        let result = UniversalFitting::new()
+            .with_gavin()
+            .build_with_cancellation_token(CancellationToken::new());
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("VarPro unexpectedly accepted cancellation"),
+        };
+        assert!(matches!(
+            error,
+            UniversalFittingError::UnsupportedOption {
+                method: Method::GAVIN,
+                option: "cancellation_token"
+            }
+        ));
     }
 
     #[test]

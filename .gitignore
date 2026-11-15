@@ -86,6 +86,12 @@
 !/bindings/python/**/*.md
 !/bindings/python/**/*.py
 !/src/somelinalg/TODO.md
+!/src/AI_AGENT_INTEROP_TODO.md
+!/src/AI_AGENT_INTEROP_ARCHITECTURE_CHEATSHEET.md
+!/src/AI_AGENT_INTEROP_JOB_CONTRACT.md
+!/src/AI_AGENT_INTEROP_OPEN_DECISIONS.md
+!/src/AI_AGENT_INTEROP_PERFORMANCE.md
+!/src/AI_AGENT_INTEROP_JOB_CONTRACT.md
 !/src/numerical/BVP_api/TODO.md
 !/src/numerical/BVP_CorrectionNewton/TODO.md
 !/examples/README_correction_newton_continuation.md

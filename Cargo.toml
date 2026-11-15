@@ -1,6 +1,6 @@
 [package]
 name = "RustedSciThe"
-version = "0.4.35"
+version = "0.5.0"
 edition = "2024"
 description = "Rust framework for symbolic and numerical computing:BVP ( Newton-Raphson frozen/damped/with collocations ), IVP( BDF, Radau, Backward Euler, LSODE, LSODA, RK45, DoPri), nonlinear equations ( Levenberg, Gavin) and more"
 author = "Gleb Zaslavsky"
@@ -20,6 +20,21 @@ include = [
     "src/**/*_USER_GUIDE_RU.md",
     "src/command_interpreter/TASK_DOCS_GUIDE_EN.md",
     "src/command_interpreter/TASK_DOCUMENT_GUIDE.md",
+    "src/command_interpreter/task_document.schema.json",
+    "src/command_interpreter/agent_job.schema.json",
+    "src/command_interpreter/agent_worker_response.schema.json",
+    "src/command_interpreter/task_result.schema.json",
+    "src/command_interpreter/acceptance_report.schema.json",
+    "src/agent_interop/examples/ivp_decay.json",
+    "src/agent_interop/examples/bvp_constant.json",
+    "src/agent_interop/examples/nonlinear_root.json",
+    "src/agent_interop/examples/fitting_linear.json",
+    "src/agent_interop/examples/job_ivp_decay.json",
+    "src/agent_interop/examples/**",
+    "src/AI_AGENT_INTEROP_JOB_CONTRACT.md",
+    "src/AI_AGENT_INTEROP_WORKER.md",
+    "src/AI_AGENT_INTEROP_OPEN_DECISIONS.md",
+    "src/AI_AGENT_INTEROP_PERFORMANCE.md",
     "src/numerical/BVP_sci/BVP_SOLVER_USER_GUIDE.md",
     "src/RST_ARCHITECTURAL_GUIDELINE.md",
     "scripts/**/*.ps1",
@@ -135,6 +150,11 @@ debug = false
 [[bench]]
 name = "bvp_benches"
 harness = false
+
+[[bench]]
+name = "ai_agent_interop_json"
+harness = false
+
 [[bench]]
 name = "bvp_damp_workloads"
 harness = false
@@ -310,6 +330,8 @@ faer =  { version ="0.24.4", features = [ "rayon"] }
 faer_gmres = "0.5.0"
 rayon="1.11.0"
 regex = "1.13.1"
+serde = "1.0"
+serde_json = "1.0"
 strum = "0.28.0"
 strum_macros = "0.28.0"
 simplelog = "0.12.2"
@@ -363,6 +385,7 @@ typed_test_gen = "0.1"
 [dev-dependencies]
 levenberg-marquardt = "=0.15.0"
 nalgebra_lm = { package = "nalgebra", version = "0.34" }
+jsonschema = { version = "0.29", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.15.0", features = ["flamegraph", "criterion"] }

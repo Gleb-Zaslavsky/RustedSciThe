@@ -1,0 +1,14 @@
+{
+  "format_version": 1,
+  "problem": {
+    "formulation": "root",
+    "variables": "x",
+    "equations": "x^2 - 2",
+    "initial_guess": 1.0
+  },
+  "solver": {
+    "method": "newton",
+    "tolerance": 1e-8,
+    "max_iterations": 50
+  }
+}

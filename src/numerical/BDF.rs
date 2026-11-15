@@ -10,8 +10,9 @@ pub mod parameter_loop;
 /// application needs to provide a custom implementation.
 pub mod prelude {
     pub use super::BDF_api::{
-        BdfAotProvenance, BdfNativeJacobianSource, BdfPreparationTimings, BdfSolveError,
-        BdfSolverOptions, BdfStatus, BdfStopConditionError, BdfTelemetryMode, ODEsolver,
+        BdfAotProvenance, BdfCancelledSnapshot, BdfNativeJacobianSource, BdfPreparationTimings,
+        BdfSolveError, BdfSolverOptions, BdfStatus, BdfStopConditionError, BdfTelemetryMode,
+        ODEsolver,
     };
     pub use crate::numerical::BDF::BDF_solver::{
         BdfConfigurationError, BdfJacobian, BdfJacobianCallbackError, BdfJacobianSource,

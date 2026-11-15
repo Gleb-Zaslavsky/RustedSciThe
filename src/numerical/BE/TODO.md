@@ -237,9 +237,12 @@ the default merely because LSODE2 benefits on large sparse diffusion problems.
 - [x] **BE-12: Use the normative four-level telemetry contract.**
   `Off` disables collection, `Counters` records discrete work without clock
   reads, `Timings` records durations without discrete counts, and `Detailed`
-  records both. The former combined `Timings` default is preserved as
-  `Detailed`, including the `Enabled` compatibility alias. Tests assert each
-  mode's independent counter/timing behavior. Separate BE
+  records both. The historical `Detailed` default (kept for compatibility in
+  the original BE-12 implementation, including the `Enabled` alias) was
+  intentionally changed on 2026-11-15 to `Off` to honor the cross-solver
+  opt-in telemetry contract. Callers that need the former data must request
+  `Detailed` explicitly. Tests assert each mode's independent counter/timing
+  behavior. Separate BE
   detailed statistics report parameter-bind attempts/success/failure and
   timings, typed operation failure counts (configuration/backend/generated
   backend/Newton/underflow/step limit), FD auxiliary RHS calls, Newton

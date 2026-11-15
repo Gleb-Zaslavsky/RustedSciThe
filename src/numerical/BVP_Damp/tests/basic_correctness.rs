@@ -333,6 +333,7 @@ mod tests {
         ]);
         let rel_tolerance = HashMap::from([("y".to_string(), 1e-6), ("z".to_string(), 1e-6)]);
         DampedSolverOptions::sparse_damped()
+            .with_bvp_telemetry_mode(crate::numerical::BVP_Damp::BvpTelemetryMode::Counters)
             .with_strategy_params(Some(SolverParams::default()))
             .with_abs_tolerance(1e-8)
             .with_rel_tolerance(rel_tolerance)
@@ -1432,6 +1433,7 @@ mod tests {
         };
         let options = base_linear_bvp_options()
             .with_sparse_generated_backend_defaults()
+            .with_bvp_telemetry_mode(crate::numerical::BVP_Damp::BvpTelemetryMode::Counters)
             .with_strategy_params(Some(strategy));
         let coarse_steps = 20usize;
         let (mut solver, t0, t_end, _n_steps) = linear_bvp_numeric_fixture(coarse_steps, options);
@@ -1503,6 +1505,7 @@ mod tests {
         };
         let options = base_linear_bvp_options()
             .with_banded_generated_backend_defaults()
+            .with_bvp_telemetry_mode(crate::numerical::BVP_Damp::BvpTelemetryMode::Counters)
             .with_strategy_params(Some(strategy));
         let coarse_steps = 20usize;
         let (mut solver, t0, t_end, _n_steps) = linear_bvp_numeric_fixture(coarse_steps, options);

@@ -20,7 +20,7 @@ pub mod utils;
 #[cfg(test)]
 mod parity_tests;
 
-pub use errors::{LeastSquaresError, LeastSquaresStage};
+pub use errors::{CancelledLeastSquaresSnapshot, LeastSquaresError, LeastSquaresStage};
 pub use lm::{
     LeastSquaresTelemetryMode, LevenbergMarquardt, MinimizationReport,
     TerminationReason as LeastSquaresTerminationReason,

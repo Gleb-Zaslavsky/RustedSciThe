@@ -12,7 +12,7 @@ use super::controller::{
     clamp_step_to_bound, initial_probe_step, is_finished, min_step, predict_factor, safety_factor,
     select_initial_step_from_probes,
 };
-use super::error::{RadauError, RadauStage};
+use super::error::{RadauCancellationState, RadauError, RadauStage};
 use super::linear::PreparedLinearBackend;
 use super::output::{RadauOutput, RadauOutputCollector};
 use super::session::RadauSession;
@@ -22,6 +22,7 @@ use super::step::{
 };
 use super::telemetry::{RadauAdaptiveStepTrace, RadauCallbackStage};
 use super::workspace::RadauWorkspace;
+use crate::numerical::CancellationToken;
 
 /// Final state and basic lifecycle counters for one adaptive solve.
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +115,15 @@ pub(crate) fn try_solve_symbolic_dense_with_output(
     callbacks: &mut SymbolicCallbackSession<'_>,
     y0: &[f64],
 ) -> Result<(RadauSolveResult, RadauOutput), RadauError> {
+    try_solve_symbolic_dense_with_output_and_cancellation(config, callbacks, y0, None)
+}
+
+pub(crate) fn try_solve_symbolic_dense_with_output_and_cancellation(
+    config: &RadauConfig,
+    callbacks: &mut SymbolicCallbackSession<'_>,
+    y0: &[f64],
+    cancellation: Option<&CancellationToken>,
+) -> Result<(RadauSolveResult, RadauOutput), RadauError> {
     config.validate()?;
     callbacks.telemetry_mut().set_mode(config.telemetry);
     if y0.is_empty() {
@@ -122,6 +132,9 @@ pub(crate) fn try_solve_symbolic_dense_with_output(
             expected: 1,
             actual: 0,
         });
+    }
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(cancelled_error_at(config, y0));
     }
     let backend = PreparedLinearBackend::from_layout_and_pattern(
         config.matrix_layout,
@@ -140,7 +153,8 @@ pub(crate) fn try_solve_symbolic_dense_with_output(
         workspace,
     };
     let mut collector = RadauOutputCollector::new(config.output.clone(), y0.len())?;
-    let result = run_adaptive_dense_with_output(config, y0, &mut runner, Some(&mut collector));
+    let result =
+        run_adaptive_dense_with_output(config, y0, &mut runner, Some(&mut collector), cancellation);
     let runtime_telemetry = runner.workspace.telemetry.clone();
     drop(runner);
     callbacks.telemetry_mut().absorb_runtime(&runtime_telemetry);
@@ -426,7 +440,7 @@ fn run_adaptive_dense<R>(
 where
     R: AdaptiveStepRunner,
 {
-    run_adaptive_dense_with_output(config, y0, runner, None)
+    run_adaptive_dense_with_output(config, y0, runner, None, None)
 }
 
 fn run_adaptive_dense_with_output<R>(
@@ -434,11 +448,15 @@ fn run_adaptive_dense_with_output<R>(
     y0: &[f64],
     runner: &mut R,
     mut output: Option<&mut RadauOutputCollector>,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<RadauSolveResult, RadauError>
 where
     R: AdaptiveStepRunner,
 {
     let mut state = RadauSolverState::new(config, y0)?;
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        return Err(cancelled_error(&state));
+    }
     if config.first_step.is_none() {
         state.h_abs = runner.select_initial_step(config, state.t, state.direction, &state.y)?;
     }
@@ -452,7 +470,13 @@ where
     // prior accepted-step controller history unchanged until commit succeeds.
     let mut retry_state: Option<(f64, Option<f64>, Option<f64>)> = None;
 
-    while !is_finished(state.t, config) {
+    loop {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(cancelled_error(&state));
+        }
+        if is_finished(state.t, config) {
+            break;
+        }
         if state.attempts >= config.max_steps {
             return Err(RadauError::StepBudgetExceeded {
                 steps: state.attempts,
@@ -510,6 +534,9 @@ where
                     factor_invalidated,
                     jacobian_refreshed: recompute_jac,
                 });
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    return Err(cancelled_error(&state));
+                }
                 if let Some(collector) = output.as_mut() {
                     if let Some(segment) = runner.dense_output_segment()? {
                         collector.push(segment)?;
@@ -569,6 +596,9 @@ where
                 state.rejected_steps += 1;
                 retries += 1;
                 runner.record_step(false);
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    return Err(cancelled_error(&state));
+                }
                 if !runner.jacobian_current() {
                     // SciPy retries the same h with a freshly evaluated J when
                     // the retained Jacobian is stale.  A current J instead
@@ -619,6 +649,30 @@ where
         accepted_steps: state.accepted_steps,
         rejected_steps: state.rejected_steps,
     })
+}
+
+fn cancelled_error(state: &RadauSolverState) -> RadauError {
+    RadauError::Cancelled {
+        state: RadauCancellationState {
+            t: state.t,
+            y: state.y.clone(),
+            attempts: state.attempts,
+            accepted_steps: state.accepted_steps,
+            rejected_steps: state.rejected_steps,
+        },
+    }
+}
+
+fn cancelled_error_at(config: &RadauConfig, y: &[f64]) -> RadauError {
+    RadauError::Cancelled {
+        state: RadauCancellationState {
+            t: config.t0,
+            y: y.to_vec(),
+            attempts: 0,
+            accepted_steps: 0,
+            rejected_steps: 0,
+        },
+    }
 }
 
 /// Convenience wrapper for callers that do not need to retain a session.
@@ -692,9 +746,61 @@ where
         workspace: &mut workspace,
     };
     let mut collector = RadauOutputCollector::new(config.output.clone(), y0.len())?;
-    let result = run_adaptive_dense_with_output(config, y0, &mut runner, Some(&mut collector))?;
+    let result =
+        run_adaptive_dense_with_output(config, y0, &mut runner, Some(&mut collector), None)?;
     let telemetry = runner.workspace.telemetry.clone();
     Ok((result, collector.finish()?, telemetry))
+}
+
+pub(crate) fn try_solve_dense_with_callbacks_with_output_and_cancellation<R, J>(
+    config: &RadauConfig,
+    residual: &mut R,
+    jacobian: &mut J,
+    y0: &[f64],
+    cancellation: &CancellationToken,
+) -> Result<
+    (
+        Result<(RadauSolveResult, RadauOutput), RadauError>,
+        super::telemetry::RadauTelemetry,
+    ),
+    RadauError,
+>
+where
+    R: ResidualCallback,
+    J: DenseJacobianCallback,
+{
+    config.validate()?;
+    if y0.is_empty() {
+        return Err(RadauError::ShapeMismatch {
+            stage: RadauStage::Preparation,
+            expected: 1,
+            actual: 0,
+        });
+    }
+    let mut workspace = RadauWorkspace::default();
+    workspace.telemetry.set_mode(config.telemetry);
+    if cancellation.is_cancelled() {
+        return Ok((Err(cancelled_error_at(config, y0)), workspace.telemetry));
+    }
+    workspace.resize_for_layout(y0.len(), RadauMatrixLayout::Dense)?;
+    let mut runner = CallbackStepRunner {
+        config,
+        residual,
+        jacobian,
+        workspace: &mut workspace,
+    };
+    let mut collector = RadauOutputCollector::new(config.output.clone(), y0.len())?;
+    let result = run_adaptive_dense_with_output(
+        config,
+        y0,
+        &mut runner,
+        Some(&mut collector),
+        Some(cancellation),
+    )
+    .map(|result| (result, collector.finish()))
+    .and_then(|(result, output)| output.map(|output| (result, output)));
+    let telemetry = runner.workspace.telemetry.clone();
+    Ok((result, telemetry))
 }
 
 struct CallbackStepRunner<'a, R, J> {

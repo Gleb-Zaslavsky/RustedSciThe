@@ -78,7 +78,7 @@ use crate::stiff_api::{
 };
 use crate::symbolic_arrays::{PyExprMatrix, PyExprVector};
 use crate::system::{LambdifiedSystem, SymbolicSystem};
-use crate::task::{BvpTaskResult, IvpTaskResult, TaskDocument};
+use crate::task::{BvpTaskResult, IvpTaskResult, NonlinearTaskResult, TaskDocument};
 use crate::tridiagonal::PivotedTridiagonalLu;
 use crate::universal_fitting::{PyUniversalFitting, PyUniversalFittingSolution};
 use crate::varpro::{VarProSolution, VarProSolver};
@@ -157,6 +157,7 @@ fn _native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<TaskDocument>()?;
     module.add_class::<IvpTaskResult>()?;
     module.add_class::<BvpTaskResult>()?;
+    module.add_class::<NonlinearTaskResult>()?;
     #[cfg(feature = "test-panic-probe")]
     module.add_class::<crate::errors::PanicProbeSolver>()?;
 

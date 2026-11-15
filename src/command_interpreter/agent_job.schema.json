@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rustedscithe:agent-job:v1",
+  "title": "RustedSciThe Agent Job v1",
+  "description": "Worker-job metadata wrapping one versioned RustedSciThe TaskDocument. The worker, not the numerical solver, enforces resource_budget.",
+  "type": "object",
+  "required": ["job_contract_version", "task"],
+  "properties": {
+    "job_contract_version": { "const": 1 },
+    "job_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "\\S" },
+    "task": { "$ref": "urn:rustedscithe:task-document:v1" },
+    "acceptance": { "$ref": "#/$defs/acceptance" },
+    "resource_budget": { "$ref": "#/$defs/resourceBudget" },
+    "output_policy": { "$ref": "#/$defs/outputPolicy" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "acceptance": {
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["solver_converged", "finite_result"] }
+        }
+      },
+      "additionalProperties": false
+    },
+    "resourceBudget": {
+      "type": "object",
+      "properties": {
+        "wall_time_ms": { "type": "integer", "minimum": 1 },
+        "memory_bytes": { "type": "integer", "minimum": 1 },
+        "cpu_threads": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "outputPolicy": {
+      "type": "object",
+      "properties": {
+        "large_result": { "const": "omit", "default": "omit" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

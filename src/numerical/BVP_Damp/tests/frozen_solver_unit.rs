@@ -345,6 +345,7 @@ fn changing_continuation_parameter_invalidates_owned_factor() {
         1e-8,
         1,
     );
+    solver.set_bvp_telemetry_mode(BvpTelemetryMode::Counters);
     *solver.factor_owner.borrow_mut() = Some(
         prepare_factor_owner_runtime(&DMatrix::from_row_slice(1, 1, &[2.0]), (0, 0), None)
             .expect("dense factor owner runtime"),
@@ -382,6 +383,7 @@ fn changing_parameters_invalidates_owned_factor() {
         1e-8,
         1,
     );
+    solver.set_bvp_telemetry_mode(BvpTelemetryMode::Counters);
     *solver.factor_owner.borrow_mut() = Some(
         prepare_factor_owner_runtime(&DMatrix::from_row_slice(1, 1, &[2.0]), (0, 0), None)
             .expect("dense factor owner runtime"),
@@ -555,12 +557,13 @@ fn sparse_surface_test_solver() -> NRBVP {
         0.0,
         1.0,
         4,
-        FrozenSolverOptions::sparse_frozen(),
+        FrozenSolverOptions::sparse_frozen().with_bvp_telemetry_mode(BvpTelemetryMode::Counters),
     )
 }
 
 fn sparse_surface_test_solver_with_naive_strategy() -> NRBVP {
     let options = FrozenSolverOptions::sparse_frozen()
+        .with_bvp_telemetry_mode(BvpTelemetryMode::Counters)
         .with_strategy_params(Some(HashMap::from([("Frozen_naive".to_string(), None)])))
         .with_tolerance(1e-6)
         .with_max_iterations(10);
@@ -1531,6 +1534,7 @@ fn frozen_sparse_lambdify_linear_bvp_solves_against_exact_profile() {
 fn frozen_banded_default_atomview_lambdify_linear_bvp_solves_against_exact_profile() {
     let options = FrozenSolverOptions::banded_frozen()
         .with_banded_lambdify()
+        .with_bvp_telemetry_mode(BvpTelemetryMode::Counters)
         .with_strategy_params(Some(HashMap::from([("Frozen_naive".to_string(), None)])))
         .with_tolerance(1e-8)
         .with_max_iterations(20);

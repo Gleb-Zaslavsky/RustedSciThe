@@ -74,3 +74,10 @@ evaluations. Sequential reported sequential dispatch only; forced Parallel
 reported parallel dispatch; Auto reported its effective dispatch. Final states
 matched within `1e-10` across policies. This confirms callback scheduling and
 telemetry behavior in debug; it is not a performance claim.
+
+### Cancellation Forwarding
+
+`stiff_api_forwards_radau_cancellation_snapshot` verifies a pre-cancelled
+prepared Radau request returns the typed Radau cancellation variant through
+StiffAPI, retains the initial state and Detailed telemetry mode, and does not
+report a successful solve.

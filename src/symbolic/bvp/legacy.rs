@@ -1325,6 +1325,8 @@ pub struct BvpLegacySolverBundle {
 /// Fallible wrapper error for the staged BVP backend-selection / AOT path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BvpBackendIntegrationError {
+    /// A cooperative cancellation request was observed at a solver safe point.
+    Cancelled { iteration: usize },
     /// User supplied a malformed BVP problem before backend preparation.
     InvalidProblem { field: String, message: String },
     /// User supplied an unsupported or internally inconsistent solver option.
@@ -1422,6 +1424,10 @@ pub enum BvpBackendIntegrationError {
 impl fmt::Display for BvpBackendIntegrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled { iteration } => write!(
+                f,
+                "BVP solve cancelled at a Newton safe point after {iteration} completed iteration(s)"
+            ),
             Self::InvalidProblem { field, message } => {
                 write!(f, "invalid BVP problem field `{field}`: {message}")
             }

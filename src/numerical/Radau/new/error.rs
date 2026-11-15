@@ -4,6 +4,15 @@
 
 use thiserror::Error;
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RadauCancellationState {
+    pub(crate) t: f64,
+    pub(crate) y: Vec<f64>,
+    pub(crate) attempts: usize,
+    pub(crate) accepted_steps: usize,
+    pub(crate) rejected_steps: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Identifies the solver stage that produced an operational error.
 pub(crate) enum RadauStage {
@@ -136,4 +145,6 @@ pub(crate) enum RadauError {
     InvalidDenseOutput,
     #[error("Radau AOT lifecycle failed: {message}")]
     AotLifecycle { message: String },
+    #[error("Radau solve cancelled")]
+    Cancelled { state: RadauCancellationState },
 }

@@ -48,7 +48,9 @@ pub use config::{
     SCIPY_MAX_BACKTRACKING_TRIALS, SCIPY_MAX_JACOBIAN_REFRESHES, SCIPY_MAX_MESH_ITERATIONS,
     SCIPY_MAX_NEWTON_ITERATIONS,
 };
-pub use error::{BvpSciAotFailureKind, BvpSciNewError, BvpSciStage, BvpSciStatus};
+pub use error::{
+    BvpSciAotFailureKind, BvpSciCancelledSnapshot, BvpSciNewError, BvpSciStage, BvpSciStatus,
+};
 pub use frontends::{AtomViewNativeLambdifyPlan, BvpSciAotPlan, ExprLegacyLambdifyPlan};
 pub use numerical::{
     BvpSciNumericalPlan, NumericalJacobianCallback, NumericalParameterJacobianCallback,

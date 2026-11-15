@@ -11,8 +11,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use rustedscithe_core::Utils::postprocessing::{PostprocessPlan, PostprocessStatus};
 use rustedscithe_core::numerical::BVP_CorrectionNewton::{
-    CorrectionNewtonOptions, CorrectionNewtonMatrixLayout, CorrectionNewtonSymbolicExecution, CorrectionNewtonSymbolicFrontend,
-    CorrectionNewtonTelemetryMode,
+    CorrectionNewtonMatrixLayout, CorrectionNewtonOptions, CorrectionNewtonSymbolicExecution,
+    CorrectionNewtonSymbolicFrontend, CorrectionNewtonTelemetryMode,
 };
 use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
 use rustedscithe_core::numerical::BVP_Damp::telemetry::BvpLoggingMode;
@@ -33,7 +33,9 @@ use crate::expr::PyExpr;
 
 #[path = "bvp_api_correction_newton_loop.rs"]
 mod correction_newton_loop;
-pub use correction_newton_loop::{BvpCorrectionNewtonParameterLoopPoint, BvpCorrectionNewtonParameterLoopReport};
+pub use correction_newton_loop::{
+    BvpCorrectionNewtonParameterLoopPoint, BvpCorrectionNewtonParameterLoopReport,
+};
 
 /// Turn route-specific row-major Python guess data into the shared state-major
 /// matrix. Reduced Newton routes use a free-coordinate ordinal for the row
@@ -601,7 +603,10 @@ impl PyBvpSolverRequest {
             max_iterations,
             max_jacobian_age,
             max_damping_trials,
-            logging_level: crate::contract::native_logging_level(&options, "bvp_correction_newton")?,
+            logging_level: crate::contract::native_logging_level(
+                &options,
+                "bvp_correction_newton",
+            )?,
             telemetry_mode,
             ..CorrectionNewtonOptions::default()
         };
@@ -978,24 +983,18 @@ impl PyPreparedBvpSolver {
     }
 
     /// Solve again with new numeric boundary values, reusing prepared callbacks.
-    pub fn solve_with_boundary_values(
-        &mut self,
-        values: Vec<f64>,
-    ) -> PyResult<PyBvpApiSolution> {
+    pub fn solve_with_boundary_values(&mut self, values: Vec<f64>) -> PyResult<PyBvpApiSolution> {
         crate::radau::finite_vector(&values, "boundary_values")?;
         let route = self.route;
-        let solution = self.panic_state.run(
-            "solve_with_boundary_values",
-            "bvp_api",
-            route,
-            || {
-                Ok(self
-                    .inner
-                    .solve_with_boundary_values(values)
-                    .map_err(map_api_error)?
-                    .clone())
-            },
-        )?;
+        let solution =
+            self.panic_state
+                .run("solve_with_boundary_values", "bvp_api", route, || {
+                    Ok(self
+                        .inner
+                        .solve_with_boundary_values(values)
+                        .map_err(map_api_error)?
+                        .clone())
+                })?;
         let view = self
             .inner
             .solution_view()
@@ -1244,9 +1243,12 @@ impl PyPreparedBvpSolver {
                 output.set_item("scopes", scopes)?;
             }
             BvpSolverTelemetrySnapshot::CorrectionNewton(snapshot) => {
-                let mode = self.correction_newton_telemetry_mode.unwrap_or("not_started");
+                let mode = self
+                    .correction_newton_telemetry_mode
+                    .unwrap_or("not_started");
                 output.set_item("mode", mode)?;
-                let (counters, timings) = correction_newton_loop::telemetry_maps(snapshot.as_ref(), mode);
+                let (counters, timings) =
+                    correction_newton_loop::telemetry_maps(snapshot.as_ref(), mode);
                 output.set_item("counters", counters)?;
                 output.set_item("timings_ms", timings)?;
             }

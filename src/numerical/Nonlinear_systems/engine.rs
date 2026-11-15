@@ -1,4 +1,7 @@
-use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
+use crate::numerical::CancellationToken;
+use crate::numerical::Nonlinear_systems::error::{
+    CancelledSolveSnapshot, SolveError, TerminationReason,
+};
 use crate::numerical::Nonlinear_systems::problem::{Bounds, JacobianProvider};
 use crate::numerical::SolverTelemetryMode;
 use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
@@ -597,6 +600,7 @@ pub struct NewtonMethod;
 pub struct SolverEngine<M> {
     method: M,
     options: SolveOptions,
+    cancellation: Option<CancellationToken>,
 }
 
 /// Reusable storage for temporary trial points created during one solve.
@@ -719,7 +723,17 @@ impl IterationWorkspace {
 impl<M> SolverEngine<M> {
     /// Creates a new engine.
     pub fn new(method: M, options: SolveOptions) -> Self {
-        Self { method, options }
+        Self {
+            method,
+            options,
+            cancellation: None,
+        }
+    }
+
+    /// Attaches an opt-in cancellation token checked only between iterations.
+    pub fn with_cancellation_token(mut self, token: CancellationToken) -> Self {
+        self.cancellation = Some(token);
+        self
     }
 }
 
@@ -752,6 +766,22 @@ impl<M: NonlinearMethod> SolverEngine<M> {
             StatisticsAvailability::NotCollected
         };
         stats.timings_collected = telemetry_mode.collects_timings();
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(cancelled_solve_error(
+                x0.as_slice(),
+                None,
+                None,
+                0,
+                stats,
+                None,
+                telemetry_mode,
+                solve_started,
+            ));
+        }
         let mut history = if self.options.diagnostics.collect_history {
             Vec::with_capacity(self.options.max_iterations + 1)
         } else {
@@ -800,6 +830,23 @@ impl<M: NonlinearMethod> SolverEngine<M> {
             ));
         }
 
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(cancelled_solve_error(
+                state.x.as_slice(),
+                Some(state.residual.as_slice()),
+                Some(state.residual_norm),
+                0,
+                stats,
+                None,
+                telemetry_mode,
+                solve_started,
+            ));
+        }
+
         log_message(
             &self.options,
             EngineLogLevel::Info,
@@ -815,6 +862,22 @@ impl<M: NonlinearMethod> SolverEngine<M> {
         let mut runtime = RuntimeDiagnostics::new(telemetry_mode);
 
         for iteration in 0..self.options.max_iterations {
+            if self
+                .cancellation
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(cancelled_solve_error(
+                    state.x.as_slice(),
+                    Some(state.residual.as_slice()),
+                    Some(state.residual_norm),
+                    iteration,
+                    stats,
+                    Some(&runtime),
+                    telemetry_mode,
+                    solve_started,
+                ));
+            }
             state.iteration = iteration;
             let attempt_start = telemetry_mode
                 .is_enabled()
@@ -1018,6 +1081,23 @@ impl<M: NonlinearMethod> SolverEngine<M> {
             }
         }
 
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            return Err(cancelled_solve_error(
+                state.x.as_slice(),
+                Some(state.residual.as_slice()),
+                Some(state.residual_norm),
+                self.options.max_iterations,
+                stats,
+                Some(&runtime),
+                telemetry_mode,
+                solve_started,
+            ));
+        }
+
         stats.iterations = self.options.max_iterations;
         merge_runtime(&mut stats, &runtime, telemetry_mode);
         Ok(build_result(
@@ -1032,6 +1112,38 @@ impl<M: NonlinearMethod> SolverEngine<M> {
             self.options.diagnostics.enable_memory_diagnostics,
             solve_started,
         ))
+    }
+}
+
+fn cancelled_solve_error(
+    current_state: &[f64],
+    current_residual: Option<&[f64]>,
+    residual_norm: Option<f64>,
+    completed_iterations: usize,
+    mut statistics: SolveStatistics,
+    runtime: Option<&RuntimeDiagnostics>,
+    telemetry_mode: SolverTelemetryMode,
+    solve_started: Option<Instant>,
+) -> SolveError {
+    if let Some(runtime) = runtime {
+        merge_runtime(&mut statistics, runtime, telemetry_mode);
+    }
+    let collect_counters = telemetry_mode.collects_counters();
+    let snapshot = CancelledSolveSnapshot {
+        completed_iterations,
+        current_state: current_state.to_vec(),
+        current_residual: current_residual.map(<[f64]>::to_vec),
+        residual_norm,
+        residual_evaluations: collect_counters.then_some(statistics.residual_evaluations),
+        jacobian_evaluations: collect_counters.then_some(statistics.jacobian_evaluations),
+        linear_solves: collect_counters.then_some(statistics.linear_solves),
+        elapsed: telemetry_mode
+            .collects_timings()
+            .then(|| solve_started.map(|started| started.elapsed()))
+            .flatten(),
+    };
+    SolveError::Cancelled {
+        snapshot: Box::new(snapshot),
     }
 }
 //======================================================================================
@@ -1895,6 +2007,101 @@ mod tests {
         fn jacobian(&self, x: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
             self.jacobian_calls.set(self.jacobian_calls.get() + 1);
             Ok(DMatrix::from_row_slice(1, 1, &[2.0 * x[0]]))
+        }
+    }
+
+    struct CancelDuringFirstStep(CancellationToken);
+
+    impl NonlinearMethod for CancelDuringFirstStep {
+        type MethodState = ();
+
+        fn init<P: JacobianProvider>(
+            &self,
+            _problem: &P,
+            _x0: &DVector<f64>,
+            _options: &SolveOptions,
+            _residual: &DVector<f64>,
+            _jacobian: &DMatrix<f64>,
+        ) -> Result<Self::MethodState, SolveError> {
+            Ok(())
+        }
+
+        fn step<P: JacobianProvider>(
+            &self,
+            _problem: &P,
+            state: &IterationState,
+            _method_state: &mut Self::MethodState,
+            _options: &SolveOptions,
+            _runtime: &mut RuntimeDiagnostics,
+        ) -> Result<StepOutcome, SolveError> {
+            self.0.cancel();
+            Ok(StepOutcome::Continue {
+                next_x: state.x.clone(),
+                accepted: false,
+            })
+        }
+    }
+
+    #[test]
+    fn pre_cancelled_engine_skips_callbacks_and_returns_explicit_partial_snapshot() {
+        let problem = CountingScalarQuadraticProblem::new();
+        let token = CancellationToken::new();
+        token.cancel();
+        let engine = SolverEngine::new(
+            NewtonMethod,
+            SolveOptions {
+                diagnostics: DiagnosticsOptions::default()
+                    .with_telemetry(SolverTelemetryMode::Counters),
+                ..SolveOptions::default()
+            },
+        )
+        .with_cancellation_token(token);
+
+        let error = engine
+            .solve(&problem, DVector::from_vec(vec![1.5]))
+            .unwrap_err();
+        assert_eq!(problem.residual_calls.get(), 0);
+        assert_eq!(problem.jacobian_calls.get(), 0);
+        match error {
+            SolveError::Cancelled { snapshot } => {
+                assert_eq!(snapshot.completed_iterations, 0);
+                assert_eq!(snapshot.current_state, vec![1.5]);
+                assert!(snapshot.current_residual.is_none());
+                assert_eq!(snapshot.residual_evaluations, Some(0));
+                assert_eq!(snapshot.jacobian_evaluations, Some(0));
+                assert!(snapshot.elapsed.is_none());
+            }
+            other => panic!("expected typed cancellation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancellation_requested_inside_step_is_observed_at_next_safe_boundary() {
+        let problem = ScalarQuadraticProblem;
+        let token = CancellationToken::new();
+        let engine = SolverEngine::new(
+            CancelDuringFirstStep(token.clone()),
+            SolveOptions {
+                diagnostics: DiagnosticsOptions::default()
+                    .with_telemetry(SolverTelemetryMode::Detailed),
+                ..SolveOptions::default()
+            },
+        )
+        .with_cancellation_token(token);
+
+        let error = engine
+            .solve(&problem, DVector::from_vec(vec![1.5]))
+            .unwrap_err();
+        match error {
+            SolveError::Cancelled { snapshot } => {
+                assert_eq!(snapshot.completed_iterations, 1);
+                assert_eq!(snapshot.current_state, vec![1.5]);
+                assert_eq!(snapshot.current_residual, Some(vec![0.25]));
+                assert_eq!(snapshot.residual_evaluations, Some(1));
+                assert_eq!(snapshot.jacobian_evaluations, Some(1));
+                assert!(snapshot.elapsed.is_some());
+            }
+            other => panic!("expected typed cancellation, got {other:?}"),
         }
     }
 

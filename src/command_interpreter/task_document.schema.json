@@ -1,0 +1,431 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rustedscithe:task-document:v1",
+  "title": "RustedSciThe Task Document v1",
+  "description": "Versioned JSON input for IVP, BVP, nonlinear-system, and optimization task parsers. Runtime symbol and solver-capability validation is performed by RustedSciThe.",
+  "oneOf": [
+    { "$ref": "#/$defs/ivpTask" },
+    { "$ref": "#/$defs/bvpTask" },
+    { "$ref": "#/$defs/nonlinearTask" },
+    { "$ref": "#/$defs/optimizationTask" }
+  ],
+  "$defs": {
+    "formatVersion": { "const": 1 },
+    "stringOrStringArray": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "array", "items": { "type": "string" } }
+      ]
+    },
+    "numberOrNumberArray": {
+      "oneOf": [
+        { "type": "number" },
+        { "type": "array", "items": { "type": "number" } }
+      ]
+    },
+    "namedNumberMap": {
+      "type": "object",
+      "additionalProperties": { "type": "number" }
+    },
+    "namedExpressionMap": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "continuation": {
+      "type": "object",
+      "properties": {
+        "parameters": { "$ref": "#/$defs/stringOrStringArray" },
+        "parameter": { "type": "string" },
+        "values": { "$ref": "#/$defs/numberOrNumberArray" },
+        "mode": { "type": "string" },
+        "restart_each": { "type": "boolean" },
+        "restart_policy": { "type": "string" },
+        "monotonic": { "type": "string" },
+        "y0_values": { "$ref": "#/$defs/numberOrNumberArray" },
+        "t0_values": { "$ref": "#/$defs/numberOrNumberArray" },
+        "t_end_values": { "$ref": "#/$defs/numberOrNumberArray" }
+      },
+      "patternProperties": {
+        "^[A-Za-z_][A-Za-z0-9_]*_values$": { "$ref": "#/$defs/numberOrNumberArray" }
+      },
+      "additionalProperties": false
+    },
+    "symbolicEquationFields": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["unknowns", "rhs"],
+          "properties": {
+            "arg": { "type": "string" },
+            "unknowns": { "$ref": "#/$defs/stringOrStringArray" },
+            "rhs": { "$ref": "#/$defs/stringOrStringArray" },
+            "parameters": { "$ref": "#/$defs/stringOrStringArray" },
+            "parameter_values": { "$ref": "#/$defs/numberOrNumberArray" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "arg": { "type": "string" },
+            "parameters": { "$ref": "#/$defs/stringOrStringArray" },
+            "parameter_values": { "$ref": "#/$defs/numberOrNumberArray" }
+          },
+          "patternProperties": {
+            "^(?!arg$|unknowns$|rhs$|parameters$|parameter_values$|params$|parameter_names$|params_values$|param_values$)[A-Za-z_][A-Za-z0-9_]*$": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        }
+      ]
+    },
+    "ivpEquationFields": {
+      "$ref": "#/$defs/symbolicEquationFields"
+    },
+    "ivpSolverOptions": {
+      "type": "object",
+      "properties": {
+        "step_size": { "type": "number" },
+        "tolerance": { "type": "number" },
+        "max_iterations": { "type": "integer", "minimum": 0 },
+        "rtol": { "type": "number" },
+        "atol": { "type": "number" },
+        "max_step": { "type": "number" },
+        "first_step": { "type": ["number", "null"] },
+        "vectorized": { "type": "boolean" },
+        "parallel": { "type": "boolean" },
+        "neighborhood_check": { "type": "number" },
+        "symbolic_frontend": { "type": "string" },
+        "symbolic_assembly": { "type": "string" },
+        "symbolic_execution": { "type": "string" },
+        "aot_toolchain": { "type": "string" },
+        "aot_profile": { "type": "string" },
+        "aot_output_dir": { "type": "string" },
+        "matrix_layout": { "type": "string" },
+        "linear_structure": { "type": "string" },
+        "banded_lower": { "type": "integer", "minimum": 0 },
+        "banded_kl": { "type": "integer", "minimum": 0 },
+        "banded_upper": { "type": "integer", "minimum": 0 },
+        "banded_ku": { "type": "integer", "minimum": 0 },
+        "execution_policy": { "type": "string" },
+        "parallel_min_work": { "type": "integer", "minimum": 0 },
+        "telemetry": { "type": "string" },
+        "logging": { "type": "string" },
+        "log_level": { "type": "string" },
+        "lsode2_method_family": { "type": "string" },
+        "lsode2_controller": { "type": "string" },
+        "lsode2_symbolic_assembly": { "type": "string" },
+        "lsode2_symbolic_execution": { "type": "string" },
+        "lsode2_aot_toolchain": { "type": "string" },
+        "lsode2_aot_profile": { "type": "string" },
+        "lsode2_aot_output_dir": { "type": "string" },
+        "lsode2_linear_structure": { "type": "string" },
+        "lsode2_banded_kl": { "type": "integer", "minimum": 0 },
+        "lsode2_banded_ku": { "type": "integer", "minimum": 0 },
+        "lsode2_linear_solver_policy": { "type": "string" },
+        "lsode2_native_execution": { "type": "string" },
+        "lsode2_native_max_step_attempts": { "type": "integer", "minimum": 0 },
+        "lsode2_native_max_accepted_steps": { "type": "integer", "minimum": 0 },
+        "lsode2_stop_variable": { "type": "string" },
+        "lsode2_stop_comparator": { "type": "string" },
+        "lsode2_stop_target": { "type": "number" },
+        "lsode2_stop_tolerance": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "bvpEquationFields": {
+      "$ref": "#/$defs/symbolicEquationFields"
+    },
+    "bvpSolverOptions": {
+      "type": "object",
+      "properties": {
+        "tolerance": { "type": "number" },
+        "boundary_tolerance": { "type": "number" },
+        "max_iterations": { "type": "integer", "minimum": 0 },
+        "max_nodes": { "type": "integer", "minimum": 0 },
+        "max_newton_iterations": { "type": "integer", "minimum": 0 },
+        "max_jacobian_refreshes": { "type": "integer", "minimum": 0 },
+        "max_mesh_refinements": { "type": "integer", "minimum": 0 },
+        "max_backtracking_steps": { "type": "integer", "minimum": 0 },
+        "banded_lower": { "type": "integer", "minimum": 0 },
+        "banded_upper": { "type": "integer", "minimum": 0 },
+        "sparse_factorization": { "type": "string" },
+        "execution_policy": { "type": "string" },
+        "execution_min_work": { "type": "integer", "minimum": 0 },
+        "telemetry": { "type": "string" },
+        "output_policy": { "type": "string" },
+        "singular_term_a": { "type": "number" },
+        "singular_term_matrix": { "$ref": "#/$defs/numberOrNumberArray" },
+        "linear_sys_method": { "type": "string" },
+        "loglevel": { "type": "string" },
+        "generated_backend": { "type": "string" },
+        "matrix_backend": { "type": "string" },
+        "backend_policy": { "type": "string" },
+        "symbolic_backend": { "type": "string" },
+        "aot_codegen_backend": { "type": "string" },
+        "aot_c_compiler": { "type": "string" },
+        "aot_build_policy": { "type": "string" },
+        "aot_build_profile": { "type": "string" },
+        "aot_compile_preset": { "type": "string" },
+        "aot_execution_policy": { "type": "string" },
+        "aot_output_dir": { "type": "string" },
+        "aot_handoff_path": { "type": "string" },
+        "banded_linear_solver": { "type": "string" },
+        "refinement_steps": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "postprocessing": {
+      "type": "object",
+      "properties": {
+        "save_csv": { "type": "boolean" },
+        "csv_path": { "type": "string" },
+        "save_txt": { "type": "boolean" },
+        "txt_path": { "type": "string" },
+        "write_report": { "type": "boolean" },
+        "report_path": { "type": "string" },
+        "plotters_png": { "type": "boolean" },
+        "plotters_dir": { "type": "string" },
+        "gnuplot_png": { "type": "boolean" },
+        "gnuplot_dir": { "type": "string" },
+        "terminal_plot": { "type": "boolean" },
+        "output_policy": { "type": "string" },
+        "plot": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "ivpTask": {
+      "type": "object",
+      "required": ["format_version", "task", "equations", "initial_conditions"],
+      "properties": {
+        "format_version": { "$ref": "#/$defs/formatVersion" },
+        "task": {
+          "type": "object",
+          "required": ["solver", "method"],
+          "properties": {
+            "solver": { "type": "string" },
+            "method": { "type": "string" },
+            "schema_version": { "type": "integer", "const": 1 }
+          },
+          "additionalProperties": false
+        },
+        "equations": { "$ref": "#/$defs/ivpEquationFields" },
+        "parameters": { "$ref": "#/$defs/namedNumberMap" },
+        "where": { "$ref": "#/$defs/namedExpressionMap" },
+        "substitute": { "$ref": "#/$defs/namedExpressionMap" },
+        "initial_conditions": {
+          "type": "object",
+          "required": ["t0", "t_end", "y0"],
+          "properties": {
+            "t0": { "type": "number" },
+            "t_end": { "type": "number" },
+            "y0": { "$ref": "#/$defs/numberOrNumberArray" }
+          },
+          "additionalProperties": false
+        },
+        "solver_options": { "$ref": "#/$defs/ivpSolverOptions" },
+        "postprocessing": { "$ref": "#/$defs/postprocessing" },
+        "continuation": { "$ref": "#/$defs/continuation" }
+      },
+      "additionalProperties": false
+    },
+    "bvpTask": {
+      "type": "object",
+      "required": ["format_version", "task", "equations", "boundary_conditions", "mesh", "initial_guess"],
+      "properties": {
+        "format_version": { "$ref": "#/$defs/formatVersion" },
+        "task": {
+          "type": "object",
+          "required": ["solver"],
+          "properties": {
+            "solver": { "type": "string" },
+            "strategy": { "type": "string" },
+            "scheme": { "type": "string" },
+            "method": { "type": "string" },
+            "backend": { "type": "string" },
+            "frontend": { "type": "string" },
+            "execution": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "equations": { "$ref": "#/$defs/bvpEquationFields" },
+        "parameters": { "$ref": "#/$defs/namedNumberMap" },
+        "where": { "$ref": "#/$defs/namedExpressionMap" },
+        "substitute": { "$ref": "#/$defs/namedExpressionMap" },
+        "boundary_conditions": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*_(left|right)$": { "type": "number" }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        },
+        "mesh": {
+          "type": "object",
+          "required": ["t0", "t_end", "n_steps"],
+          "properties": {
+            "t0": { "type": "number" },
+            "t_end": { "type": "number" },
+            "n_steps": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "initial_guess": {
+          "type": "object",
+          "properties": {
+            "guess": { "$ref": "#/$defs/numberOrNumberArray" }
+          },
+          "patternProperties": {
+            "^(?!guess$)[A-Za-z_][A-Za-z0-9_]*$": { "type": "number" }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        },
+        "bounds": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*$": {
+              "type": "array",
+              "prefixItems": [{ "type": "number" }, { "type": "number" }],
+              "items": false,
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        "solver_options": { "$ref": "#/$defs/bvpSolverOptions" },
+        "postprocessing": { "$ref": "#/$defs/postprocessing" },
+        "continuation": { "$ref": "#/$defs/continuation" }
+      },
+      "additionalProperties": false
+    },
+    "nonlinearTask": {
+      "type": "object",
+      "required": ["format_version", "problem", "solver"],
+      "properties": {
+        "format_version": { "$ref": "#/$defs/formatVersion" },
+        "problem": {
+          "type": "object",
+          "required": ["formulation", "variables", "equations", "initial_guess"],
+          "properties": {
+            "formulation": { "type": "string" },
+            "variables": { "$ref": "#/$defs/stringOrStringArray" },
+            "equations": { "$ref": "#/$defs/stringOrStringArray" },
+            "initial_guess": { "$ref": "#/$defs/numberOrNumberArray" },
+            "parameters": { "$ref": "#/$defs/stringOrStringArray" },
+            "parameter_values": { "$ref": "#/$defs/numberOrNumberArray" }
+          },
+          "additionalProperties": false
+        },
+        "solver": {
+          "type": "object",
+          "required": ["method"],
+          "properties": {
+            "method": { "type": "string" },
+            "tolerance": { "type": "number", "exclusiveMinimum": 0 },
+            "residual_tolerance": { "type": "number", "exclusiveMinimum": 0 },
+            "gradient_tolerance": { "type": "number", "exclusiveMinimum": 0 },
+            "max_iterations": { "type": "integer", "minimum": 1 },
+            "telemetry": { "enum": ["off", "counters", "timings", "detailed"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "problem": { "properties": { "formulation": { "pattern": "^[Rr][Oo][Oo][Tt](_[Ff][Ii][Nn][Dd][Ii][Nn][Gg])?$" } } } },
+            "required": ["problem"]
+          },
+          "then": {
+            "properties": {
+              "solver": { "not": { "anyOf": [ { "required": ["residual_tolerance"] }, { "required": ["gradient_tolerance"] } ] } }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "problem": { "properties": { "formulation": { "pattern": "^[Ll][Ee][Aa][Ss][Tt]_[Ss][Qq][Uu][Aa][Rr][Ee][Ss]$|^[Ll][Ee][Aa][Ss][Tt]-[Ss][Qq][Uu][Aa][Rr][Ee][Ss]$" } } } },
+            "required": ["problem"]
+          },
+          "then": {
+            "properties": {
+              "solver": { "properties": { "method": { "pattern": "^([Ll][Mm]|[Ll][Ee][Vv][Ee][Nn][Bb][Ee][Rr][Gg]_[Mm][Aa][Rr][Qq][Uu][Aa][Rr][Dd][Tt])$|^([Ll][Ee][Vv][Ee][Nn][Bb][Ee][Rr][Gg]-[Mm][Aa][Rr][Qq][Uu][Aa][Rr][Dd][Tt])$" } } }
+            }
+          }
+        }
+      ]
+    },
+    "optimizationTask": {
+      "type": "object",
+      "required": ["format_version", "data", "model"],
+      "properties": {
+        "format_version": { "$ref": "#/$defs/formatVersion" },
+        "data": {
+          "type": "object",
+          "required": ["x", "y"],
+          "properties": {
+            "arg": { "type": "string" },
+            "x": { "$ref": "#/$defs/numberOrNumberArray" },
+            "y": { "$ref": "#/$defs/numberOrNumberArray" }
+          },
+          "additionalProperties": false
+        },
+        "model": {
+          "type": "object",
+          "required": ["method", "parameters", "initial_guess"],
+          "properties": {
+            "method": { "type": "string" },
+            "parameters": { "$ref": "#/$defs/stringOrStringArray" },
+            "initial_guess": { "$ref": "#/$defs/numberOrNumberArray" },
+            "equations": { "$ref": "#/$defs/stringOrStringArray" },
+            "basis_parameters": { "$ref": "#/$defs/stringOrStringArray" },
+            "basis_equations": { "$ref": "#/$defs/stringOrStringArray" },
+            "invariants": { "$ref": "#/$defs/stringOrStringArray" }
+          },
+          "additionalProperties": false
+        },
+        "solver": {
+          "type": "object",
+          "properties": {
+            "tolerance": { "type": "number", "exclusiveMinimum": 0 },
+            "objective_tolerance": { "type": "number", "exclusiveMinimum": 0 },
+            "gradient_tolerance": { "type": "number", "exclusiveMinimum": 0 },
+            "max_iterations": { "type": "integer", "minimum": 1 },
+            "gavin_weights": { "$ref": "#/$defs/numberOrNumberArray" },
+            "gavin_positive_parameters": { "$ref": "#/$defs/stringOrStringArray" },
+            "telemetry": { "enum": ["off", "counters", "timings", "detailed"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "model": { "properties": { "method": { "pattern": "^[Vv][Aa][Rr][Pp][Rr][Oo]$|^[Vv][Aa][Rr][Ii][Aa][Bb][Ll][Ee]_[Pp][Rr][Oo][Jj][Ee][Cc][Tt][Ii][Oo][Nn]$|^[Vv][Aa][Rr][Ii][Aa][Bb][Ll][Ee]-[Pp][Rr][Oo][Jj][Ee][Cc][Tt][Ii][Oo][Nn]$" } } } }, "required": ["model"] },
+          "then": {
+            "properties": {
+              "model": {
+                "required": ["basis_parameters", "basis_equations"],
+                "not": { "required": ["equations"] }
+              },
+              "solver": { "not": { "anyOf": [ { "required": ["gavin_weights"] }, { "required": ["gavin_positive_parameters"] } ] } }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "model": { "properties": { "method": { "pattern": "^[Gg][Aa][Vv][Ii][Nn]$|^[Gg][Aa][Vv][Ii][Nn]_[Ll][Mm]$|^[Gg][Aa][Vv][Ii][Nn]-[Ll][Mm]$" } } } }, "required": ["model"] },
+          "then": { "properties": { "model": { "required": ["equations"], "not": { "anyOf": [ { "required": ["basis_parameters"] }, { "required": ["basis_equations"] }, { "required": ["invariants"] } ] } } } }
+        },
+        {
+          "if": { "properties": { "model": { "properties": { "method": { "pattern": "^[Ll][Mm]$|^[Ll][Ee][Vv][Ee][Nn][Bb][Ee][Rr][Gg]_[Mm][Aa][Rr][Qq][Uu][Aa][Rr][Dd][Tt]$|^[Ll][Ee][Vv][Ee][Nn][Bb][Ee][Rr][Gg]-[Mm][Aa][Rr][Qq][Uu][Aa][Rr][Dd][Tt]$" } } } }, "required": ["model"] },
+          "then": { "properties": { "model": { "required": ["equations"], "not": { "anyOf": [ { "required": ["basis_parameters"] }, { "required": ["basis_equations"] }, { "required": ["invariants"] } ] } }, "solver": { "not": { "anyOf": [ { "required": ["gavin_weights"] }, { "required": ["gavin_positive_parameters"] } ] } } } }
+        }
+      ]
+    }
+  }
+}

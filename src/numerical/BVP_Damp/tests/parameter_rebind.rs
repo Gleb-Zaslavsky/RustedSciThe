@@ -50,6 +50,7 @@ mod tests {
                 .with_symbolic_assembly_backend(frontend);
             options
                 .with_generated_backend_config(config)
+                .with_bvp_telemetry_mode(crate::numerical::BVP_Damp::BvpTelemetryMode::Counters)
                 .with_strategy_params(Some(SolverParams::default()))
                 .with_abs_tolerance(1e-8)
                 .with_rel_tolerance(HashMap::from([

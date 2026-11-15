@@ -61,6 +61,7 @@ mod tests {
                 .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly))
                 .with_symbolic_assembly_backend(frontend);
             base.with_generated_backend_config(config)
+                .with_bvp_telemetry_mode(crate::numerical::BVP_Damp::BvpTelemetryMode::Counters)
                 .with_strategy_params(Some(SolverParams::default()))
                 .with_abs_tolerance(1e-8)
                 .with_rel_tolerance(HashMap::from([
@@ -204,7 +205,9 @@ mod tests {
             .clone()
             .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly))
             .with_symbolic_assembly_backend(frontend);
-        let options = base.with_generated_backend_config(config);
+        let options = base.with_generated_backend_config(
+            config.with_bvp_telemetry_mode(crate::numerical::BVP_Damp::BvpTelemetryMode::Counters),
+        );
         let mut solver = FrozenNRBVP::new_with_options(
             vec![
                 Expr::parse_expression("alpha*y-z"),

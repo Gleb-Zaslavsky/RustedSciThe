@@ -4,6 +4,14 @@ Task files use sections followed by `key: value` fields. Control keys are
 case-insensitive; names inside `equations`, `parameters`, `where`, and
 `substitute` are preserved because they are symbolic names.
 
+## Nonlinear And Fitting Telemetry
+
+Nonlinear-system and optimization tasks accept an optional `telemetry` field
+in the `solver` section: `off`, `counters`, `timings`, or `detailed`. If
+omitted, collection stays off. Each task adapter maps the request to the native
+telemetry mode for its selected method; counters and timings retain their
+native availability semantics and are not inferred when unavailable.
+
 ## Continuation
 
 Continuation is an explicit section, not a second interpretation of

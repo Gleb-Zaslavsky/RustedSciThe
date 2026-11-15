@@ -212,7 +212,10 @@ pub(super) fn validate_task(spec: &BvpTaskSpec) -> Result<(), BvpTaskError> {
     Ok(())
 }
 
-pub(super) fn run_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
+pub(super) fn run_task(
+    spec: BvpTaskSpec,
+    cancellation: Option<&crate::numerical::cancellation::CancellationToken>,
+) -> Result<BvpTaskRunResult, BvpTaskError> {
     let options = native_options(&spec.solver, &spec.solver_options)?;
     let problem = CorrectionNewtonProblem {
         equations: spec.equations.rhs.clone(),
@@ -229,7 +232,11 @@ pub(super) fn run_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskErr
     };
     let mut solver = CorrectionNewtonSolver::from_symbolic(problem, options)
         .map_err(BvpTaskError::CorrectionNewton)?;
-    let report = solver.solve().map_err(BvpTaskError::CorrectionNewton)?;
+    let report = match cancellation {
+        Some(token) => solver.solve_with_cancellation_token(token),
+        None => solver.solve(),
+    }
+    .map_err(BvpTaskError::CorrectionNewton)?;
     let values = solver
         .full_grid_values(&report.state)
         .map_err(BvpTaskError::CorrectionNewton)?;

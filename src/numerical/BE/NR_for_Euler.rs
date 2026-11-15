@@ -339,7 +339,7 @@ impl NRE {
             statistics: Arc::new(Mutex::new(IvpBackendStatistics::default())),
             finite_difference_error: Arc::new(Mutex::new(None)),
             uses_finite_difference_jacobian: false,
-            telemetry_mode: BeTelemetryMode::Detailed,
+            telemetry_mode: BeTelemetryMode::Off,
             symbolic_ivp_telemetry: IvpTelemetry::disabled(),
             symbolic_assembly_backend: BeSymbolicAssemblyBackend::default(),
             detailed_statistics: Arc::new(Mutex::new(BeDetailedStatistics::default())),
@@ -1341,7 +1341,7 @@ mod tests {
     }
 
     fn make_nre() -> NRE {
-        NRE::new(
+        let mut solver = NRE::new(
             vec![Expr::parse_expression("0")],
             DVector::from_vec(vec![1.0]),
             vec!["y".to_string()],
@@ -1351,7 +1351,9 @@ mod tests {
             0.1,
             true,
             None,
-        )
+        );
+        solver.set_telemetry_mode(BeTelemetryMode::Counters);
+        solver
     }
 
     #[test]

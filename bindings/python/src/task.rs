@@ -13,8 +13,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use rustedscithe_core::command_interpreter::task_runner::{
-    ParsedTaskSpec, TaskDocumentKind, TaskRunResult, TaskRunnerError, parse_task_spec_from_str,
-    render_task_check, render_task_preview, run_task_from_str,
+    ParsedTaskSpec, TaskDocumentKind, TaskRunResult, TaskRunnerError, parse_task_spec_from_json,
+    parse_task_spec_from_str, render_task_check, render_task_preview, run_task_from_json,
+    run_task_from_str,
 };
 
 use rustedscithe_core::command_interpreter::task_parser_bvp::{
@@ -27,8 +28,20 @@ use rustedscithe_core::command_interpreter::task_parser_common::{
 use rustedscithe_core::command_interpreter::task_parser_ivp::{
     IvpMethodSpec, IvpRunStatus, IvpTaskError, IvpTaskRunResult,
 };
+use rustedscithe_core::command_interpreter::task_parser_nonlinear::{
+    NonlinearFormulation, NonlinearMethodSpec, NonlinearTaskRunResult,
+};
+use rustedscithe_core::command_interpreter::task_parser_optimization::{
+    OptimizationMethodSpec, OptimizationModelSpec,
+};
+use rustedscithe_core::numerical::Nonlinear_systems::error::TerminationReason as RootTermination;
+use rustedscithe_core::numerical::SolverTelemetryMode;
+use rustedscithe_core::numerical::optimization::universal_fitting::{
+    Method as FittingMethod, UniversalFittingResult,
+};
 
-use crate::errors::{BvpError, TaskDocumentError, annotate, catch_panic};
+use crate::errors::{BvpError, SolverError, TaskDocumentError, annotate, catch_panic};
+use crate::universal_fitting::PyUniversalFittingSolution;
 
 fn task_location(error: &TaskRunnerError) -> (Option<usize>, Option<usize>) {
     match error {
@@ -83,6 +96,122 @@ fn map_bvp_task_error(error: TaskRunnerError) -> PyErr {
             annotate_task_error(mapped, &wrapped)
         }
         other => map_task_error(other),
+    }
+}
+
+fn map_native_task_error(error: TaskRunnerError, route: &'static str) -> PyErr {
+    match error {
+        TaskRunnerError::NonlinearRun(source) => annotate(
+            SolverError::new_err(format!("solver: {source}")),
+            "solve",
+            route,
+            "native",
+        ),
+        TaskRunnerError::OptimizationRun(source) => annotate(
+            SolverError::new_err(format!("solver: {source}")),
+            "solve",
+            route,
+            "native",
+        ),
+        other => map_task_error(other),
+    }
+}
+
+/// Detached nonlinear task result. Root and rectangular least-squares fields
+/// remain distinguishable through `formulation` and optional values.
+#[pyclass(name = "NonlinearTaskResult", module = "rustedscithe")]
+pub struct NonlinearTaskResult {
+    formulation: String,
+    solution: Option<Vec<f64>>,
+    residual: Vec<f64>,
+    residual_norm: Option<f64>,
+    objective_function: Option<f64>,
+    iterations: usize,
+    termination: String,
+    successful: bool,
+    counters: HashMap<String, u64>,
+    timings_ms: HashMap<String, f64>,
+}
+
+impl NonlinearTaskResult {
+    fn from_native(result: NonlinearTaskRunResult) -> Self {
+        match result {
+            NonlinearTaskRunResult::Root(result) => Self {
+                formulation: "root".to_owned(),
+                solution: Some(vector_values(Some(&result.x))),
+                residual: vector_values(Some(&result.residual)),
+                residual_norm: Some(result.residual_norm),
+                objective_function: None,
+                iterations: result.iterations,
+                successful: matches!(&result.termination, RootTermination::Converged),
+                termination: format!("{:?}", result.termination),
+                counters: crate::nonlinear::statistics_counters(&result.statistics),
+                timings_ms: crate::nonlinear::statistics_timings(&result.statistics),
+            },
+            NonlinearTaskRunResult::LeastSquares { report, solution } => Self {
+                formulation: "least_squares".to_owned(),
+                solution: solution.map(|value| vector_values(Some(&value))),
+                residual: Vec::new(),
+                residual_norm: None,
+                objective_function: Some(report.objective_function),
+                iterations: report.statistics.iterations,
+                successful: report.termination.was_successful(),
+                termination: format!("{:?}", report.termination),
+                counters: crate::nonlinear::statistics_counters(&report.statistics),
+                timings_ms: crate::nonlinear::statistics_timings(&report.statistics),
+            },
+        }
+    }
+}
+
+#[pymethods]
+impl NonlinearTaskResult {
+    #[getter]
+    /// Problem form: `root` or `least_squares`.
+    pub fn formulation(&self) -> &str {
+        &self.formulation
+    }
+    #[getter]
+    /// Solved variables in declaration order, or `None` when unavailable.
+    pub fn solution(&self) -> Option<Vec<f64>> {
+        self.solution.clone()
+    }
+    /// Final root residual; rectangular least-squares tasks expose the objective instead.
+    pub fn residual(&self) -> Vec<f64> {
+        self.residual.clone()
+    }
+    #[getter]
+    /// Euclidean norm of the final root residual, when applicable.
+    pub fn residual_norm(&self) -> Option<f64> {
+        self.residual_norm
+    }
+    #[getter]
+    /// Least-squares objective value, when applicable.
+    pub fn objective_function(&self) -> Option<f64> {
+        self.objective_function
+    }
+    #[getter]
+    /// Number of solver iterations reported by the native route.
+    pub fn iterations(&self) -> usize {
+        self.iterations
+    }
+    #[getter]
+    /// Native termination label.
+    pub fn termination(&self) -> &str {
+        &self.termination
+    }
+    #[getter]
+    /// Whether the native termination is considered successful.
+    pub fn successful(&self) -> bool {
+        self.successful
+    }
+    /// Discrete native telemetry counters; empty when telemetry was disabled.
+    pub fn telemetry_counters(&self) -> HashMap<String, u64> {
+        self.counters.clone()
+    }
+    /// Native stage timings in milliseconds; empty when timing was disabled.
+    pub fn telemetry_timings_ms(&self) -> HashMap<String, f64> {
+        self.timings_ms.clone()
     }
 }
 
@@ -645,6 +774,7 @@ impl IvpTaskResult {
 pub struct TaskDocument {
     source: String,
     spec: ParsedTaskSpec,
+    is_json: bool,
 }
 
 impl TaskDocument {
@@ -655,7 +785,62 @@ impl TaskDocument {
             ));
         }
         let spec = parse_task_spec_from_str(&source).map_err(map_task_error)?;
-        Ok(Self { source, spec })
+        Ok(Self {
+            source,
+            spec,
+            is_json: false,
+        })
+    }
+
+    fn from_json_source(source: String) -> PyResult<Self> {
+        if source.trim().is_empty() {
+            return Err(TaskDocumentError::new_err(
+                "configuration: task JSON must not be empty",
+            ));
+        }
+        let spec = parse_task_spec_from_json(&source).map_err(map_task_error)?;
+        Ok(Self {
+            source,
+            spec,
+            is_json: true,
+        })
+    }
+
+    fn run_native_task(&self) -> Result<TaskRunResult, TaskRunnerError> {
+        if self.is_json {
+            run_task_from_json(&self.source)
+        } else {
+            run_task_from_str(&self.source)
+        }
+    }
+
+    fn require_kind(&self, expected: TaskDocumentKind, method: &str) -> PyResult<()> {
+        if self.spec.kind() == expected {
+            Ok(())
+        } else {
+            Err(TaskDocumentError::new_err(format!(
+                "unsupported_route: {method} cannot run a {} task document",
+                self.kind()
+            )))
+        }
+    }
+}
+
+fn nonlinear_method_label(method: NonlinearMethodSpec) -> &'static str {
+    match method {
+        NonlinearMethodSpec::Newton => "newton",
+        NonlinearMethodSpec::DampedNewton => "damped_newton",
+        NonlinearMethodSpec::DampedNewtonAdvanced => "damped_newton_advanced",
+        NonlinearMethodSpec::LevenbergMarquardt => "levenberg_marquardt",
+        NonlinearMethodSpec::BacktrackingLevenbergMarquardt => "backtracking_levenberg_marquardt",
+        NonlinearMethodSpec::LevenbergMarquardtMinpack => "levenberg_marquardt_minpack",
+        NonlinearMethodSpec::NielsenLevenbergMarquardt => "nielsen_levenberg_marquardt",
+        NonlinearMethodSpec::NielsenLevenbergMarquardtAdvanced => {
+            "nielsen_levenberg_marquardt_advanced"
+        }
+        NonlinearMethodSpec::TrustRegion => "trust_region",
+        NonlinearMethodSpec::PowellDogleg => "powell_dogleg",
+        NonlinearMethodSpec::TrustRegionLm => "trust_region_lm",
     }
 }
 
@@ -877,10 +1062,16 @@ fn float_map_to_dict<'py>(
 
 #[pymethods]
 impl TaskDocument {
-    /// Parse an IVP/BVP task document without executing a solver.
+    /// Parse an IVP, BVP, nonlinear, or fitting task without running it.
     #[staticmethod]
     pub fn parse(source: &str) -> PyResult<Self> {
         Self::from_source(source.to_owned())
+    }
+
+    /// Parse JSON using the native Rust task-schema adapter without running it.
+    #[staticmethod]
+    pub fn from_json(source: &str) -> PyResult<Self> {
+        Self::from_json_source(source.to_owned())
     }
 
     /// Load and parse a task document from a UTF-8 text file.
@@ -893,15 +1084,25 @@ impl TaskDocument {
                 path_ref.display()
             ))
         })?;
-        Self::from_source(source)
+        if path_ref
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        {
+            Self::from_json_source(source)
+        } else {
+            Self::from_source(source)
+        }
     }
 
-    /// Lowercase document family: `ivp` or `bvp`.
+    /// Lowercase document family: `ivp`, `bvp`, `nonlinear`, or `optimization`.
     #[getter]
     pub fn kind(&self) -> &'static str {
         match self.spec.kind() {
             TaskDocumentKind::Ivp => "ivp",
             TaskDocumentKind::Bvp => "bvp",
+            TaskDocumentKind::Nonlinear => "nonlinear",
+            TaskDocumentKind::Optimization => "optimization",
         }
     }
 
@@ -999,6 +1200,41 @@ impl TaskDocument {
                         "true"
                     } else {
                         "false"
+                    }
+                    .to_owned(),
+                );
+            }
+            ParsedTaskSpec::Nonlinear(spec) => {
+                route.insert("family".to_owned(), "nonlinear".to_owned());
+                route.insert(
+                    "formulation".to_owned(),
+                    match spec.problem.formulation {
+                        NonlinearFormulation::Root => "root",
+                        NonlinearFormulation::LeastSquares => "least_squares",
+                    }
+                    .to_owned(),
+                );
+                route.insert(
+                    "method".to_owned(),
+                    nonlinear_method_label(spec.method).to_owned(),
+                );
+            }
+            ParsedTaskSpec::Optimization(spec) => {
+                route.insert("family".to_owned(), "optimization".to_owned());
+                route.insert(
+                    "method".to_owned(),
+                    match spec.method {
+                        OptimizationMethodSpec::LevenbergMarquardt => "lm",
+                        OptimizationMethodSpec::Gavin => "gavin",
+                        OptimizationMethodSpec::VarPro => "varpro",
+                    }
+                    .to_owned(),
+                );
+                route.insert(
+                    "model".to_owned(),
+                    match &spec.model {
+                        OptimizationModelSpec::EquationModel { .. } => "equation_model",
+                        OptimizationModelSpec::VarProModel { .. } => "varpro_model",
                     }
                     .to_owned(),
                 );
@@ -1162,6 +1398,42 @@ impl TaskDocument {
                     generated.refinement_steps,
                 );
             }
+            ParsedTaskSpec::Nonlinear(spec) => {
+                insert_optional_debug(&mut options, "tolerance", spec.solver_options.tolerance);
+                insert_optional_debug(
+                    &mut options,
+                    "residual_tolerance",
+                    spec.solver_options.residual_tolerance,
+                );
+                insert_optional_debug(
+                    &mut options,
+                    "gradient_tolerance",
+                    spec.solver_options.gradient_tolerance,
+                );
+                insert_optional_debug(
+                    &mut options,
+                    "max_iterations",
+                    spec.solver_options.max_iterations,
+                );
+            }
+            ParsedTaskSpec::Optimization(spec) => {
+                insert_optional_debug(&mut options, "tolerance", spec.solver_options.tolerance);
+                insert_optional_debug(
+                    &mut options,
+                    "objective_tolerance",
+                    spec.solver_options.objective_tolerance,
+                );
+                insert_optional_debug(
+                    &mut options,
+                    "gradient_tolerance",
+                    spec.solver_options.gradient_tolerance,
+                );
+                insert_optional_debug(
+                    &mut options,
+                    "max_iterations",
+                    spec.solver_options.max_iterations,
+                );
+            }
         }
         options
     }
@@ -1319,12 +1591,93 @@ impl TaskDocument {
                     Some(policy),
                 )?
             }
+            ParsedTaskSpec::Nonlinear(spec) => {
+                result.set_item("task_schema_version", 1)?;
+                problem.set_item(
+                    "formulation",
+                    match spec.problem.formulation {
+                        NonlinearFormulation::Root => "root",
+                        NonlinearFormulation::LeastSquares => "least_squares",
+                    },
+                )?;
+                problem.set_item("variables", &spec.problem.variables)?;
+                problem.set_item(
+                    "equations",
+                    spec.problem
+                        .equations
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )?;
+                problem.set_item("initial_guess", &spec.problem.initial_guess)?;
+                let parameters = PyDict::new(py);
+                for (name, value) in spec
+                    .problem
+                    .parameter_names
+                    .iter()
+                    .zip(&spec.problem.parameter_values)
+                {
+                    parameters.set_item(name, value)?;
+                }
+                problem.set_item("parameters", parameters)?;
+                PyDict::new(py)
+            }
+            ParsedTaskSpec::Optimization(spec) => {
+                result.set_item("task_schema_version", 1)?;
+                problem.set_item("arg", &spec.data.arg)?;
+                problem.set_item("x", &spec.data.x)?;
+                problem.set_item("y", &spec.data.y)?;
+                match &spec.model {
+                    OptimizationModelSpec::EquationModel {
+                        equations,
+                        parameter_names,
+                        initial_guess,
+                    } => {
+                        problem.set_item("model_type", "equations")?;
+                        problem.set_item("parameters", parameter_names)?;
+                        problem.set_item("initial_guess", initial_guess)?;
+                        problem.set_item(
+                            "equations",
+                            equations
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>(),
+                        )?;
+                    }
+                    OptimizationModelSpec::VarProModel {
+                        parameter_names,
+                        initial_guess,
+                        basis,
+                        invariants,
+                    } => {
+                        problem.set_item("model_type", "varpro")?;
+                        problem.set_item("parameters", parameter_names)?;
+                        problem.set_item("initial_guess", initial_guess)?;
+                        let basis_dict = PyDict::new(py);
+                        for (name, expression) in basis {
+                            basis_dict.set_item(name, expression.to_string())?;
+                        }
+                        problem.set_item("basis", basis_dict)?;
+                        problem.set_item(
+                            "invariants",
+                            invariants
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>(),
+                        )?;
+                    }
+                }
+                problem.set_item("gavin_weights", &spec.gavin_weights)?;
+                problem.set_item("gavin_positive_parameters", &spec.gavin_positive_parameters)?;
+                PyDict::new(py)
+            }
         };
         result.set_item("problem", problem)?;
         result.set_item("postprocessing", postprocessing)?;
         let continuation = match &self.spec {
             ParsedTaskSpec::Ivp(spec) => spec.continuation.as_ref(),
             ParsedTaskSpec::Bvp(spec) => spec.continuation.as_ref(),
+            ParsedTaskSpec::Nonlinear(_) | ParsedTaskSpec::Optimization(_) => None,
         };
         if let Some(continuation) = continuation {
             result.set_item("continuation", continuation_to_dict(py, continuation)?)?;
@@ -1339,34 +1692,88 @@ impl TaskDocument {
     /// BVP documents use the explicit [`Self::run_bvp`] method so Python code
     /// cannot accidentally assume that an IVP trajectory has been returned.
     pub fn run(&self) -> PyResult<IvpTaskResult> {
-        catch_panic(
-            "task_run",
-            "ivp_task",
-            "native",
-            || match run_task_from_str(&self.source).map_err(map_task_error)? {
+        self.require_kind(TaskDocumentKind::Ivp, "run()")?;
+        catch_panic("task_run", "ivp_task", "native", || {
+            match self.run_native_task().map_err(map_task_error)? {
                 TaskRunResult::Ivp(result) => Ok(IvpTaskResult::from_native(result)),
                 TaskRunResult::Bvp(_) => Err(TaskDocumentError::new_err(
                     "unsupported_route: use TaskDocument.run_bvp() for BVP documents",
                 )),
-            },
-        )
+                TaskRunResult::Nonlinear(_) => Err(TaskDocumentError::new_err(
+                    "unsupported_route: use TaskDocument.run_nonlinear() for nonlinear documents",
+                )),
+                TaskRunResult::Optimization(_) => Err(TaskDocumentError::new_err(
+                    "unsupported_route: use TaskDocument.run_optimization() for fitting documents",
+                )),
+            }
+        })
     }
 
     /// Execute a BVP document through the same native runner used by the
     /// command-line task shell.  The result contains the actual adaptive mesh,
     /// detached state matrix, continuation lifecycle and compact telemetry.
     pub fn run_bvp(&self) -> PyResult<BvpTaskResult> {
-        catch_panic(
-            "task_run",
-            "bvp_task",
-            "native",
-            || match run_task_from_str(&self.source).map_err(map_bvp_task_error)? {
+        self.require_kind(TaskDocumentKind::Bvp, "run_bvp()")?;
+        catch_panic("task_run", "bvp_task", "native", || {
+            match self.run_native_task().map_err(map_bvp_task_error)? {
                 TaskRunResult::Bvp(result) => Ok(BvpTaskResult::from_native(result)),
                 TaskRunResult::Ivp(_) => Err(TaskDocumentError::new_err(
                     "unsupported_route: use TaskDocument.run() for IVP documents",
                 )),
-            },
-        )
+                TaskRunResult::Nonlinear(_) => Err(TaskDocumentError::new_err(
+                    "unsupported_route: use TaskDocument.run_nonlinear() for nonlinear documents",
+                )),
+                TaskRunResult::Optimization(_) => Err(TaskDocumentError::new_err(
+                    "unsupported_route: use TaskDocument.run_optimization() for fitting documents",
+                )),
+            }
+        })
+    }
+
+    /// Execute a nonlinear root or rectangular least-squares task.
+    pub fn run_nonlinear(&self) -> PyResult<NonlinearTaskResult> {
+        self.require_kind(TaskDocumentKind::Nonlinear, "run_nonlinear()")?;
+        catch_panic("task_run", "nonlinear_task", "native", || {
+            match self
+                .run_native_task()
+                .map_err(|error| map_native_task_error(error, "nonlinear_task"))?
+            {
+                TaskRunResult::Nonlinear(result) => Ok(NonlinearTaskResult::from_native(result)),
+                TaskRunResult::Ivp(_) | TaskRunResult::Bvp(_) | TaskRunResult::Optimization(_) => {
+                    Err(TaskDocumentError::new_err(
+                        "unsupported_route: run_nonlinear() requires a nonlinear task document",
+                    ))
+                }
+            }
+        })
+    }
+
+    /// Execute a data-fitting task and return its reusable fitted-model result.
+    pub fn run_optimization(&self) -> PyResult<PyUniversalFittingSolution> {
+        self.require_kind(TaskDocumentKind::Optimization, "run_optimization()")?;
+        catch_panic("task_run", "optimization_task", "native", || {
+            let native = match self
+                .run_native_task()
+                .map_err(|error| map_native_task_error(error, "optimization_task"))?
+            {
+                TaskRunResult::Optimization(result) => result,
+                TaskRunResult::Ivp(_) | TaskRunResult::Bvp(_) | TaskRunResult::Nonlinear(_) => {
+                    return Err(TaskDocumentError::new_err(
+                        "unsupported_route: run_optimization() requires an optimization task document",
+                    ));
+                }
+            };
+            let method = match &native {
+                UniversalFittingResult::LM(_) => FittingMethod::LM,
+                UniversalFittingResult::VARPRO(_) => FittingMethod::VARPRO,
+                UniversalFittingResult::GAVIN(_) => FittingMethod::GAVIN,
+            };
+            Ok(PyUniversalFittingSolution::from_native(
+                method,
+                SolverTelemetryMode::Off,
+                native,
+            ))
+        })
     }
 
     fn __repr__(&self) -> String {

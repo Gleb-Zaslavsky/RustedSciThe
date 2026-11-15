@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rustedscithe:task-result:v1",
+  "title": "RustedSciThe Task Result Envelope v1",
+  "description": "Bounded result or typed execution-failure envelope returned by run_task_json_envelope.",
+  "type": "object",
+  "required": ["contract_version", "status", "task_family", "result", "error"],
+  "properties": {
+    "contract_version": { "const": 1 },
+    "status": { "enum": ["succeeded", "not_converged", "failed"] },
+    "task_family": { "enum": ["ivp", "bvp", "nonlinear", "optimization", null] },
+    "solver": { "type": ["string", "null"] },
+    "termination_message": { "type": "string" },
+    "result": {
+      "oneOf": [
+        { "$ref": "#/$defs/ivpResult" },
+        { "$ref": "#/$defs/bvpResult" },
+        { "$ref": "#/$defs/nonlinearRootResult" },
+        { "$ref": "#/$defs/nonlinearLeastSquaresResult" },
+        { "$ref": "#/$defs/fittingResult" },
+        { "type": "null" }
+      ]
+    },
+    "error": {
+      "oneOf": [
+        { "$ref": "#/$defs/error" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "failed" } } },
+      "then": {
+        "properties": {
+          "result": { "type": "null" },
+          "error": { "$ref": "#/$defs/error" }
+        }
+      },
+      "else": {
+        "properties": {
+          "task_family": { "enum": ["ivp", "bvp", "nonlinear", "optimization"] },
+          "result": { "type": "object" },
+          "error": { "type": "null" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "finiteOrNull": { "type": ["number", "null"] },
+    "numberArray": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finiteOrNull" }
+    },
+    "matrix": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/numberArray" }
+    },
+    "ivpResult": {
+      "type": "object",
+      "required": ["solver", "solver_status", "sample_count", "state_count", "numeric_value_count", "non_finite_values_encoded_as_null", "data", "data_omitted", "omission_reason"],
+      "properties": {
+        "solver": { "type": "string" },
+        "solver_status": { "type": ["string", "null"] },
+        "sample_count": { "type": "integer", "minimum": 0 },
+        "state_count": { "type": "integer", "minimum": 0 },
+        "numeric_value_count": { "type": "integer", "minimum": 0 },
+        "non_finite_values_encoded_as_null": { "type": "integer", "minimum": 0 },
+        "data": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["time", "states"],
+              "properties": {
+                "time": { "$ref": "#/$defs/numberArray" },
+                "states": { "$ref": "#/$defs/matrix" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "data_omitted": { "type": "boolean" },
+        "omission_reason": { "type": ["string", "null"] }
+      }
+    },
+    "bvpResult": {
+      "type": "object",
+      "required": ["solver", "sample_count", "state_count", "numeric_value_count", "non_finite_values_encoded_as_null", "data", "data_omitted", "omission_reason"],
+      "properties": {
+        "solver": { "type": "string" },
+        "sample_count": { "type": "integer", "minimum": 0 },
+        "state_count": { "type": "integer", "minimum": 0 },
+        "numeric_value_count": { "type": "integer", "minimum": 0 },
+        "non_finite_values_encoded_as_null": { "type": "integer", "minimum": 0 },
+        "data": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["mesh", "values", "mesh_orientation", "state_orientation"],
+              "properties": {
+                "mesh": { "$ref": "#/$defs/numberArray" },
+                "values": { "$ref": "#/$defs/matrix" },
+                "mesh_orientation": { "const": "rows" },
+                "state_orientation": { "const": "columns" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "data_omitted": { "type": "boolean" },
+        "omission_reason": { "type": ["string", "null"] }
+      }
+    },
+    "nonlinearRootResult": {
+      "type": "object",
+      "required": ["formulation", "termination", "iterations", "residual_norm", "solution", "solution_length", "solution_omitted", "non_finite_values_encoded_as_null"],
+      "properties": {
+        "formulation": { "const": "root" },
+        "termination": { "type": "string" },
+        "iterations": { "type": "integer", "minimum": 0 },
+        "residual_norm": { "$ref": "#/$defs/finiteOrNull" },
+        "solution": { "oneOf": [{ "$ref": "#/$defs/numberArray" }, { "type": "null" }] },
+        "solution_length": { "type": "integer", "minimum": 0 },
+        "solution_omitted": { "type": "boolean" },
+        "non_finite_values_encoded_as_null": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "nonlinearLeastSquaresResult": {
+      "type": "object",
+      "required": ["formulation", "termination", "evaluations", "objective", "solution", "solution_length", "solution_omitted", "non_finite_values_encoded_as_null"],
+      "properties": {
+        "formulation": { "const": "least_squares" },
+        "termination": { "type": "string" },
+        "evaluations": { "type": "integer", "minimum": 0 },
+        "objective": { "$ref": "#/$defs/finiteOrNull" },
+        "solution": { "oneOf": [{ "$ref": "#/$defs/numberArray" }, { "type": "null" }] },
+        "solution_length": { "type": "integer", "minimum": 0 },
+        "solution_omitted": { "type": "boolean" },
+        "non_finite_values_encoded_as_null": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fittingResult": {
+      "type": "object",
+      "required": ["method", "parameters", "parameter_count", "parameters_omitted", "r_squared", "non_finite_values_encoded_as_null"],
+      "properties": {
+        "method": { "enum": ["lm", "varpro", "gavin"] },
+        "parameters": { "type": ["object", "null"], "additionalProperties": { "$ref": "#/$defs/finiteOrNull" } },
+        "parameter_count": { "type": "integer", "minimum": 0 },
+        "parameters_omitted": { "type": "boolean" },
+        "r_squared": { "$ref": "#/$defs/finiteOrNull" },
+        "non_finite_values_encoded_as_null": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["code", "error_type", "category", "stage", "field_path", "details", "retryable", "message", "source_chain", "process_exit_code"],
+      "properties": {
+        "code": { "type": "string" },
+        "error_type": { "type": "string" },
+        "category": { "type": "string" },
+        "stage": { "type": "string" },
+        "field_path": { "type": ["string", "null"] },
+        "details": {},
+        "expected": { "type": "string" },
+        "allowed": { "type": "array" },
+        "hint": { "type": "string" },
+        "retryable": { "type": "null" },
+        "message": { "type": "string" },
+        "source_chain": { "type": "array", "items": { "type": "string" } },
+        "process_exit_code": { "type": ["integer", "null"] }
+      }
+    }
+  }
+}

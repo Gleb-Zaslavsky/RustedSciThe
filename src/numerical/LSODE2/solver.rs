@@ -11,10 +11,9 @@ use super::config::{
 };
 use super::linear_backends::{FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend};
 use super::native_integration::{
-    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativeTerminationKind,
-    run_native_integration, run_native_integration_for_method,
+    Lsode2NativeIntegrationLimits, Lsode2NativeIntegrationSummary, Lsode2NativePartialState,
+    Lsode2NativeTerminationKind,
     run_native_integration_for_method_with_policy_and_optional_callbacks,
-    run_native_integration_for_method_with_prepared_callbacks,
 };
 use super::native_jacobian::{
     NativeJacobianStorage, compile_native_sparse_aot_jacobian_with_parameter_handle_and_telemetry,
@@ -25,13 +24,17 @@ use super::native_preflight::{
     run_native_step_preflight_with_prepared_callbacks,
 };
 use super::native_step_engine::{
-    Lsode2NativeStepEngine, Lsode2NativeStepMethod, PreparedNativeCallbacks,
+    Lsode2NativeStepAttemptReport, Lsode2NativeStepEngine, Lsode2NativeStepMethod,
+    PreparedNativeCallbacks,
 };
 use super::statistics::Lsode2NativeStatistics;
 use crate::Utils::postprocessing::{
     PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
 };
-use crate::numerical::BDF::BDF_api::{BdfSolverOptions, ODEsolver as BdfOdeSolver};
+use crate::numerical::BDF::BDF_api::{
+    BdfCancelledSnapshot, BdfSolveError, BdfSolverOptions, ODEsolver as BdfOdeSolver,
+};
+use crate::numerical::CancellationToken;
 use crate::numerical::logging::SolverLogGuard;
 pub use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::ivp_telemetry::{
@@ -107,6 +110,28 @@ pub enum Lsode2Error {
     InvalidConfig(String),
     GeneratedBackend(IvpBackendError),
     NativeStep(String),
+    Bridge(BdfSolveError),
+    Cancelled {
+        snapshot: Box<Lsode2CancelledSnapshot>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lsode2CancellationRoute {
+    NativeIntegration,
+    BdfBridge,
+}
+
+#[derive(Debug, Clone)]
+pub struct Lsode2CancelledSnapshot {
+    pub route: Lsode2CancellationRoute,
+    pub current_time: f64,
+    pub current_state: Vec<f64>,
+    pub accepted_times: Vec<f64>,
+    pub accepted_states: Vec<Vec<f64>>,
+    pub native_statistics: Lsode2NativeStatistics,
+    pub callback_statistics: IvpBackendStatistics,
+    pub telemetry: IvpTelemetrySnapshot,
 }
 
 impl fmt::Display for Lsode2Error {
@@ -116,6 +141,13 @@ impl fmt::Display for Lsode2Error {
             Self::InvalidConfig(message) => write!(f, "{message}"),
             Self::GeneratedBackend(err) => write!(f, "{err}"),
             Self::NativeStep(message) => write!(f, "{message}"),
+            Self::Bridge(error) => write!(f, "LSODE2 BDF bridge solve failed: {error}"),
+            Self::Cancelled { snapshot } => write!(
+                f,
+                "LSODE2 solve cancelled at t={} after {} accepted sample(s)",
+                snapshot.current_time,
+                snapshot.accepted_times.len().saturating_sub(1)
+            ),
         }
     }
 }
@@ -124,7 +156,11 @@ impl std::error::Error for Lsode2Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::GeneratedBackend(error) => Some(error),
-            Self::UnsupportedBackend(_) | Self::InvalidConfig(_) | Self::NativeStep(_) => None,
+            Self::Bridge(error) => Some(error),
+            Self::UnsupportedBackend(_)
+            | Self::InvalidConfig(_)
+            | Self::NativeStep(_)
+            | Self::Cancelled { .. } => None,
         }
     }
 }
@@ -566,23 +602,62 @@ impl Lsode2Solver {
     }
 
     pub fn solve(&mut self) -> Result<(), Lsode2Error> {
+        self.solve_internal(None)
+    }
+
+    /// Runs LSODE2 with cooperative cancellation at native accepted-step
+    /// boundaries or through the BDF bridge's native safe checkpoint.
+    pub fn solve_with_cancellation_token(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<(), Lsode2Error> {
+        self.solve_internal(Some(cancellation))
+    }
+
+    fn solve_internal(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), Lsode2Error> {
         let _logging_scope = SolverLogGuard::enter(self.logging_level);
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            let route = match self.config.native_execution {
+                Lsode2NativeExecutionConfig::BridgeSolve
+                | Lsode2NativeExecutionConfig::Disabled => Lsode2CancellationRoute::BdfBridge,
+                Lsode2NativeExecutionConfig::NativeSolve { .. }
+                | Lsode2NativeExecutionConfig::ProbeBeforeBridge { .. } => {
+                    Lsode2CancellationRoute::NativeIntegration
+                }
+            };
+            return Err(self.cancelled_from_current_state(
+                route,
+                self.config.t0,
+                self.config.y0.as_slice(),
+                &[self.config.t0],
+                &[self.config.y0.as_slice().to_vec()],
+            ));
+        }
         self.native_integration_preview = None;
         self.native_integration_solve = None;
-        self.native_override_status = None;
-        self.native_override_result = None;
         let mut decision = self.algorithm_switch_decision_stateful();
         self.algorithm.record_switch_decision(decision);
         self.native_statistics.record_algorithm_decision(&decision);
-        let mut run_bridge = false;
         match self.config.native_execution {
             Lsode2NativeExecutionConfig::NativeSolve {
                 max_step_attempts,
                 max_accepted_steps,
             } => {
                 self.prepare()?;
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    return Err(self.cancelled_from_current_state(
+                        Lsode2CancellationRoute::NativeIntegration,
+                        self.config.t0,
+                        self.config.y0.as_slice(),
+                        &[self.config.t0],
+                        &[self.config.y0.as_slice().to_vec()],
+                    ));
+                }
                 if self.should_run_switch_probe_before_full_native_solve(decision) {
-                    self.run_switch_probe_before_full_native_solve(decision)?;
+                    self.run_switch_probe_before_full_native_solve(decision, cancellation)?;
                     decision = self.algorithm_switch_decision_stateful();
                     self.algorithm.record_switch_decision(decision);
                     self.native_statistics.record_algorithm_decision(&decision);
@@ -593,13 +668,19 @@ impl Lsode2Solver {
                     Lsode2NativeIntegrationLimits::new(max_step_attempts, max_accepted_steps);
                 let maybe_solve_summary =
                     if self.config.controller.mode == Lsode2ControllerMode::AutomaticAdamsBdf {
-                        self.run_native_integration_internal_with_method(limits, true, None)?
+                        self.run_native_integration_internal_with_method_and_cancellation(
+                            limits,
+                            true,
+                            None,
+                            cancellation,
+                        )?
                     } else {
                         let native_method = native_method_for_decision(&decision);
-                        self.run_native_integration_internal_with_method(
+                        self.run_native_integration_internal_with_method_and_cancellation(
                             limits,
                             false,
                             Some(native_method),
+                            cancellation,
                         )?
                     };
                 if let Some(solve_summary) = maybe_solve_summary {
@@ -622,13 +703,20 @@ impl Lsode2Solver {
                 }
                 // Keep bridge path reachable as an explicit fallback when
                 // native faithful integration is unavailable for a given route.
-                run_bridge = true;
                 self.prepare_bridge()?;
                 self.native_step_probe = self.run_native_step_probe()?;
             }
             Lsode2NativeExecutionConfig::BridgeSolve | Lsode2NativeExecutionConfig::Disabled => {
-                run_bridge = true;
                 self.prepare()?;
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    return Err(self.cancelled_from_current_state(
+                        Lsode2CancellationRoute::BdfBridge,
+                        self.config.t0,
+                        self.config.y0.as_slice(),
+                        &[self.config.t0],
+                        &[self.config.y0.as_slice().to_vec()],
+                    ));
+                }
                 self.native_step_probe = self.run_native_step_probe()?;
             }
             Lsode2NativeExecutionConfig::ProbeBeforeBridge {
@@ -637,32 +725,47 @@ impl Lsode2Solver {
             } => {
                 self.prepare()?;
                 let native_method = native_method_for_decision(&decision);
-                let preview = self.run_native_integration_internal_with_method(
+                let preview = self.run_native_integration_internal_with_method_and_cancellation(
                     Lsode2NativeIntegrationLimits::new(max_step_attempts, max_accepted_steps),
                     false,
                     Some(native_method),
+                    cancellation,
                 )?;
                 self.native_integration_preview = preview.clone();
                 self.native_step_probe = preview
                     .as_ref()
                     .map(native_step_probe_from_integration_summary);
                 // ProbeBeforeBridge must always continue to the bridge solve path.
-                run_bridge = true;
             }
-        }
-        if !run_bridge {
-            return Ok(());
         }
 
         let started = Instant::now();
         let _solve_scope = self.config.telemetry.scoped_warm_stage(IvpWarmStage::Solve);
         let bridge_accepted_before = self.native_statistics.bridge_accepted_steps;
         let bridge_solve_calls_before = self.native_statistics.bridge_solve_calls;
-        self.inner.main_loop();
+        if let Some(cancellation) = cancellation {
+            if let Err(error) = self
+                .inner
+                .try_solve_with_cancellation_token(cancellation.clone())
+            {
+                self.native_statistics
+                    .sync_from_bridge(&self.inner.get_statistics());
+                match error {
+                    BdfSolveError::Cancelled { snapshot } => {
+                        return Err(self.cancelled_from_bridge_snapshot(&snapshot));
+                    }
+                    other => return Err(Lsode2Error::Bridge(other)),
+                }
+            }
+        } else {
+            self.inner.main_loop();
+        }
         self.native_statistics
             .record_solve_duration(started.elapsed());
         self.native_statistics
             .sync_from_bridge(&self.inner.get_statistics());
+        self.native_override_status = None;
+        self.native_override_result = None;
         // The BDF telemetry may be disabled, but this facade still knows that
         // it invoked the bridge solve and must report that lifecycle event.
         self.native_statistics.bridge_solve_calls = self
@@ -675,6 +778,61 @@ impl Lsode2Solver {
         self.algorithm
             .record_accepted_steps_for_switch_probe(accepted_steps_delta);
         Ok(())
+    }
+
+    fn cancelled_from_current_state(
+        &self,
+        route: Lsode2CancellationRoute,
+        current_time: f64,
+        current_state: &[f64],
+        accepted_times: &[f64],
+        accepted_states: &[Vec<f64>],
+    ) -> Lsode2Error {
+        Lsode2Error::Cancelled {
+            snapshot: Box::new(Lsode2CancelledSnapshot {
+                route,
+                current_time,
+                current_state: current_state.to_vec(),
+                accepted_times: accepted_times.to_vec(),
+                accepted_states: accepted_states.to_vec(),
+                native_statistics: self.native_statistics(),
+                callback_statistics: self.statistics(),
+                telemetry: self.telemetry_snapshot(),
+            }),
+        }
+    }
+
+    fn cancelled_from_native_partial(&self, partial: Lsode2NativePartialState) -> Lsode2Error {
+        self.cancelled_from_current_state(
+            Lsode2CancellationRoute::NativeIntegration,
+            partial.final_t,
+            &partial.final_y,
+            &partial.accepted_t_history,
+            &partial.accepted_y_history,
+        )
+    }
+
+    fn cancelled_from_bridge_snapshot(&self, bdf: &BdfCancelledSnapshot) -> Lsode2Error {
+        let (times, values) = self.inner.get_result_ref();
+        let accepted_times = if times.is_empty() {
+            vec![bdf.current_time]
+        } else {
+            times.as_slice().to_vec()
+        };
+        let accepted_states = if values.nrows() == 0 {
+            vec![bdf.current_state.clone()]
+        } else {
+            (0..values.nrows())
+                .map(|row| values.row(row).iter().copied().collect())
+                .collect()
+        };
+        self.cancelled_from_current_state(
+            Lsode2CancellationRoute::BdfBridge,
+            bdf.current_time,
+            &bdf.current_state,
+            &accepted_times,
+            &accepted_states,
+        )
     }
 
     /// Solves the problem and returns a compact diagnostics/result snapshot.
@@ -906,6 +1064,21 @@ impl Lsode2Solver {
         record_decision: bool,
         method_override: Option<Lsode2NativeStepMethod>,
     ) -> Result<Option<Lsode2NativeIntegrationSummary>, Lsode2Error> {
+        self.run_native_integration_internal_with_method_and_cancellation(
+            limits,
+            record_decision,
+            method_override,
+            None,
+        )
+    }
+
+    fn run_native_integration_internal_with_method_and_cancellation(
+        &mut self,
+        limits: Lsode2NativeIntegrationLimits,
+        record_decision: bool,
+        method_override: Option<Lsode2NativeStepMethod>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Option<Lsode2NativeIntegrationSummary>, Lsode2Error> {
         let lsoda_probe_flow_enabled = self.lsoda_probe_flow_enabled();
         let decision = if record_decision {
             self.algorithm_switch_decision_stateful()
@@ -927,83 +1100,70 @@ impl Lsode2Solver {
             let native_statistics = &mut self.native_statistics;
             let last_native_switch_telemetry = &mut self.last_native_switch_telemetry;
             let switch_telemetry_hints = self.switch_telemetry_hints;
+            let policy = |report: &Lsode2NativeStepAttemptReport,
+                          current: Lsode2NativeStepMethod| {
+                let family = method_family_from_native_step_method(current);
+                native_statistics
+                    .record_native_method_cost_sample(family, report.iterations.max(1) as f64);
+                *last_native_switch_telemetry = Some(report.telemetry);
+                if report.accepted() {
+                    algorithm.record_accepted_steps_for_switch_probe(1);
+                }
+                let mut telemetry = Lsode2SwitchTelemetry::default()
+                    .with_accepted_steps(native_statistics.native_step_accepts + 1)
+                    .with_rejected_steps(
+                        native_statistics.native_step_rejects_error_test
+                            + native_statistics.native_step_rejects_nonlinear,
+                    )
+                    .with_convergence_failures(native_statistics.native_step_rejects_nonlinear)
+                    .with_adams_cost_samples(native_statistics.native_adams_cost_samples)
+                    .with_bdf_cost_samples(native_statistics.native_bdf_cost_samples);
+                if let Some(cost) = native_statistics.adams_step_cost_estimate() {
+                    telemetry = telemetry.with_adams_step_cost_estimate(cost);
+                }
+                if let Some(cost) = native_statistics.bdf_step_cost_estimate() {
+                    telemetry = telemetry.with_bdf_step_cost_estimate(cost);
+                }
+                if telemetry
+                    .stiffness_ratio
+                    .is_none_or(|ratio| !ratio.is_finite() || ratio <= 0.0)
+                {
+                    telemetry.stiffness_ratio = report.telemetry.stiffness_ratio;
+                }
+                if telemetry.adams_step_size_cap_estimate.is_none() {
+                    telemetry.adams_step_size_cap_estimate =
+                        report.telemetry.adams_step_size_cap_estimate;
+                }
+                if telemetry.bdf_step_size_cap_estimate.is_none() {
+                    telemetry.bdf_step_size_cap_estimate =
+                        report.telemetry.bdf_step_size_cap_estimate;
+                }
+                telemetry = switch_telemetry_hints.apply_to(telemetry);
+                let decision = algorithm.switch_decision_stateful(telemetry);
+                algorithm.record_switch_decision_at(decision, report.accepted_t());
+                native_statistics.record_algorithm_decision(&decision);
+                decision.executed_family().map(native_method_for_family)
+            };
             run_native_integration_for_method_with_policy_and_optional_callbacks(
                 config,
                 limits,
                 method,
                 self.native_callbacks.as_ref(),
-                |report, current| {
-                    let family = method_family_from_native_step_method(current);
-                    native_statistics
-                        .record_native_method_cost_sample(family, report.iterations.max(1) as f64);
-                    *last_native_switch_telemetry = Some(report.telemetry);
-                    if report.accepted() {
-                        algorithm.record_accepted_steps_for_switch_probe(1);
-                    }
-                    let mut telemetry = Lsode2SwitchTelemetry::default()
-                        .with_accepted_steps(native_statistics.native_step_accepts + 1)
-                        .with_rejected_steps(
-                            native_statistics.native_step_rejects_error_test
-                                + native_statistics.native_step_rejects_nonlinear,
-                        )
-                        .with_convergence_failures(native_statistics.native_step_rejects_nonlinear)
-                        .with_adams_cost_samples(native_statistics.native_adams_cost_samples)
-                        .with_bdf_cost_samples(native_statistics.native_bdf_cost_samples);
-                    if let Some(cost) = native_statistics.adams_step_cost_estimate() {
-                        telemetry = telemetry.with_adams_step_cost_estimate(cost);
-                    }
-                    if let Some(cost) = native_statistics.bdf_step_cost_estimate() {
-                        telemetry = telemetry.with_bdf_step_cost_estimate(cost);
-                    }
-                    if telemetry
-                        .stiffness_ratio
-                        .is_none_or(|ratio| !ratio.is_finite() || ratio <= 0.0)
-                    {
-                        telemetry.stiffness_ratio = report.telemetry.stiffness_ratio;
-                    }
-                    if telemetry.adams_step_size_cap_estimate.is_none() {
-                        telemetry.adams_step_size_cap_estimate =
-                            report.telemetry.adams_step_size_cap_estimate;
-                    }
-                    if telemetry.bdf_step_size_cap_estimate.is_none() {
-                        telemetry.bdf_step_size_cap_estimate =
-                            report.telemetry.bdf_step_size_cap_estimate;
-                    }
-                    telemetry = switch_telemetry_hints.apply_to(telemetry);
-                    let decision = algorithm.switch_decision_stateful(telemetry);
-                    algorithm.record_switch_decision_at(decision, report.accepted_t());
-                    native_statistics.record_algorithm_decision(&decision);
-                    decision.executed_family().map(native_method_for_family)
-                },
+                policy,
+                cancellation,
             )
             .map_err(Lsode2Error::from)?
         } else {
             let callbacks = self.native_callbacks.as_ref();
-            match method {
-                Lsode2NativeStepMethod::BdfLike => match callbacks {
-                    Some(callbacks) => run_native_integration_for_method_with_prepared_callbacks(
-                        &self.config,
-                        limits,
-                        method,
-                        callbacks,
-                    )
-                    .map_err(Lsode2Error::from)?,
-                    None => {
-                        run_native_integration(&self.config, limits).map_err(Lsode2Error::from)?
-                    }
-                },
-                Lsode2NativeStepMethod::AdamsLike => match callbacks {
-                    Some(callbacks) => run_native_integration_for_method_with_prepared_callbacks(
-                        &self.config,
-                        limits,
-                        method,
-                        callbacks,
-                    )
-                    .map_err(Lsode2Error::from)?,
-                    None => run_native_integration_for_method(&self.config, limits, method)
-                        .map_err(Lsode2Error::from)?,
-                },
-            }
+            run_native_integration_for_method_with_policy_and_optional_callbacks(
+                &self.config,
+                limits,
+                method,
+                callbacks,
+                |_, _| None,
+                cancellation,
+            )
+            .map_err(Lsode2Error::from)?
         };
         if let Some(summary) = &outcome.summary {
             let family = method_family_from_native_step_method(method);
@@ -1018,6 +1178,9 @@ impl Lsode2Solver {
             }
         }
         merge_native_statistics(&mut self.native_statistics, &outcome.statistics);
+        if let Some(partial) = outcome.cancelled_state {
+            return Err(self.cancelled_from_native_partial(partial));
+        }
         if lsoda_probe_flow_enabled {
             if let Some(summary) = &outcome.summary {
                 self.algorithm
@@ -1190,14 +1353,19 @@ impl Lsode2Solver {
     fn run_switch_probe_before_full_native_solve(
         &mut self,
         decision: Lsode2SwitchDecision,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<(), Lsode2Error> {
         // LSODA-first choreography:
         // - warmup gate: run one bounded probe to open the ICOUNT-like window;
         // - cost-evidence gate: run one targeted probe for the missing family.
         let limits = self.probe_limits_for_switch_choreography(&decision);
         let probe_method = self.probe_method_for_switch_choreography(&decision);
-        let _probe_summary =
-            self.run_native_integration_internal_with_method(limits, false, Some(probe_method))?;
+        let _probe_summary = self.run_native_integration_internal_with_method_and_cancellation(
+            limits,
+            false,
+            Some(probe_method),
+            cancellation,
+        )?;
         Ok(())
     }
 
@@ -1881,6 +2049,107 @@ mod tests {
     }
 
     #[test]
+    fn native_cancellation_keeps_last_accepted_step_and_does_not_build_summary() {
+        let config = Lsode2ProblemConfig::new(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.02,
+            1.0e-6,
+            1.0e-8,
+        )
+        .with_native_sparse_faer_backend()
+        .with_faithful_bdf_solve(128, 128);
+        let token = CancellationToken::new();
+        let outcome = super::super::native_integration::
+            run_native_integration_for_method_with_policy_and_optional_callbacks(
+                &config,
+                Lsode2NativeIntegrationLimits::new(128, 128),
+                Lsode2NativeStepMethod::BdfLike,
+                None,
+                |_, _| {
+                    token.cancel();
+                    None
+                },
+                Some(&token),
+            )
+            .expect("cooperative cancellation is a normal partial outcome");
+
+        assert!(outcome.summary.is_none());
+        let partial = outcome.cancelled_state.expect("partial state is retained");
+        assert_eq!(partial.accepted_steps, 1);
+        assert_eq!(partial.accepted_t_history.len(), 2);
+        assert_eq!(partial.accepted_y_history.len(), 2);
+        assert!(partial.final_t > config.t0);
+        assert_eq!(partial.final_y.len(), 1);
+    }
+
+    #[test]
+    fn pre_cancelled_native_solve_returns_typed_snapshot_without_result_publication() {
+        let config = Lsode2ProblemConfig::new(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.02,
+            1.0e-6,
+            1.0e-8,
+        )
+        .with_native_sparse_faer_backend()
+        .with_faithful_bdf_solve(128, 128);
+        let mut solver = Lsode2Solver::new(config).expect("solver configuration is valid");
+        let previous = solver.get_result();
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let error = solver
+            .solve_with_cancellation_token(&token)
+            .expect_err("pre-cancelled solve must not begin");
+        let Lsode2Error::Cancelled { snapshot } = error else {
+            panic!("expected typed cancellation error");
+        };
+        assert_eq!(snapshot.route, Lsode2CancellationRoute::NativeIntegration);
+        assert_eq!(snapshot.current_time, 0.0);
+        assert_eq!(snapshot.accepted_times, vec![0.0]);
+        assert_eq!(solver.get_result(), previous);
+    }
+
+    #[test]
+    fn pre_cancelled_bridge_solve_reports_bridge_route_and_keeps_result() {
+        let config = Lsode2ProblemConfig::new(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.02,
+            1.0e-6,
+            1.0e-8,
+        )
+        .with_bridge_solve();
+        let mut solver = Lsode2Solver::new(config).expect("solver configuration is valid");
+        solver.prepare().expect("bridge route should prepare");
+        let previous = solver.get_result();
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let error = solver
+            .solve_with_cancellation_token(&token)
+            .expect_err("pre-cancelled bridge solve must not start");
+        let Lsode2Error::Cancelled { snapshot } = error else {
+            panic!("expected typed cancellation error");
+        };
+        assert_eq!(snapshot.route, Lsode2CancellationRoute::BdfBridge);
+        assert_eq!(solver.get_result(), previous);
+    }
+
+    #[test]
     fn switch_telemetry_hints_accumulate_cross_family_native_signals() {
         let mut hints = Lsode2SwitchTelemetryHints::default();
         hints.absorb(
@@ -1988,13 +2257,16 @@ mod tests {
         assert_eq!(solver.native_statistics.native_bdf_cost_samples, 0);
 
         solver
-            .run_switch_probe_before_full_native_solve(Lsode2SwitchDecision {
-                preferred_family: Lsode2MethodFamily::Bdf,
-                executable_family: Some(Lsode2MethodFamily::Bdf),
-                uses_fallback: false,
-                reason: Lsode2SwitchReason::SwitchProbeWarmup,
-                message: "test warmup",
-            })
+            .run_switch_probe_before_full_native_solve(
+                Lsode2SwitchDecision {
+                    preferred_family: Lsode2MethodFamily::Bdf,
+                    executable_family: Some(Lsode2MethodFamily::Bdf),
+                    uses_fallback: false,
+                    reason: Lsode2SwitchReason::SwitchProbeWarmup,
+                    message: "test warmup",
+                },
+                None,
+            )
             .expect("warmup probe should run for the active family");
 
         assert!(
@@ -2039,13 +2311,16 @@ mod tests {
         solver.native_statistics.native_adams_step_cost_accum = 0.0;
 
         solver
-            .run_switch_probe_before_full_native_solve(Lsode2SwitchDecision {
-                preferred_family: Lsode2MethodFamily::Bdf,
-                executable_family: Some(Lsode2MethodFamily::Bdf),
-                uses_fallback: false,
-                reason: Lsode2SwitchReason::InsufficientCostEvidence,
-                message: "test insufficient cost",
-            })
+            .run_switch_probe_before_full_native_solve(
+                Lsode2SwitchDecision {
+                    preferred_family: Lsode2MethodFamily::Bdf,
+                    executable_family: Some(Lsode2MethodFamily::Bdf),
+                    uses_fallback: false,
+                    reason: Lsode2SwitchReason::InsufficientCostEvidence,
+                    message: "test insufficient cost",
+                },
+                None,
+            )
             .expect("insufficient-cost probe should run on missing family");
 
         assert!(

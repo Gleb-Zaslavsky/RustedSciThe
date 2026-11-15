@@ -446,3 +446,14 @@ modified Newton, оценка локальной ошибки, адаптивн�
 Кроме того, проверены только три задачи на одной машине; другие уравнения,
 размеры, layout и окружения могут дать иные результаты. Исходный отчёт:
 `test_reports/Radau_SciPy_Parity/release/numerical__Radau__tests__scipy_parity__radau_scipy_release_core_timing_benchmark_story.md`.
+
+## Cooperative cancellation
+
+Подготовленный symbolic Radau принимает
+`try_solve_with_cancellation_token(y0, parameters, token)`, а native callback
+route — `solve_with_cancellation_token(y0, token)`. Отмена проверяется до
+создания per-solve workspace и между завершенными adaptive attempts. Текущая
+попытка не обрывается; typed snapshot содержит только последнее принятое
+состояние `(t, y)`, счётчики попыток и telemetry выбранного режима. Частичное
+решение не возвращается как успешный результат. `StiffAPI` передает тот же
+контракт. IVP JSON continuation пока явно отклоняется.

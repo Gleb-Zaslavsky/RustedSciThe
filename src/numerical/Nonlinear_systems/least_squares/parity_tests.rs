@@ -6,8 +6,10 @@
 
 use super::lm::{LeastSquaresTelemetryMode, LevenbergMarquardt};
 use super::problem::{ClosureLeastSquaresProblem, LeastSquaresProblem};
+use crate::numerical::CancellationToken;
 use levenberg_marquardt::LeastSquaresProblem as UpstreamLeastSquaresProblem;
 use nalgebra::{DMatrix, DVector};
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -475,4 +477,143 @@ fn staged_lm_try_api_reports_invalid_configuration_without_panicking() {
         error,
         super::errors::LeastSquaresError::InvalidConfiguration { field: "ftol", .. }
     ));
+}
+
+#[test]
+fn staged_lm_cancellation_before_callbacks_returns_zero_work_snapshot() {
+    let residual_calls = std::rc::Rc::new(Cell::new(0));
+    let jacobian_calls = std::rc::Rc::new(Cell::new(0));
+    let problem = ClosureLeastSquaresProblem::new(
+        DVector::from_vec(vec![3.0]),
+        {
+            let residual_calls = residual_calls.clone();
+            move |_x: &DVector<f64>| {
+                residual_calls.set(residual_calls.get() + 1);
+                DVector::from_element(1, 1.0)
+            }
+        },
+        {
+            let jacobian_calls = jacobian_calls.clone();
+            move |_x: &DVector<f64>| {
+                jacobian_calls.set(jacobian_calls.get() + 1);
+                DMatrix::identity(1, 1)
+            }
+        },
+    );
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    let result = LevenbergMarquardt::new()
+        .with_telemetry(LeastSquaresTelemetryMode::Counters)
+        .try_minimize_with_cancellation_token(problem, cancellation);
+
+    assert_eq!(residual_calls.get(), 0);
+    assert_eq!(jacobian_calls.get(), 0);
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("pre-cancelled solve unexpectedly succeeded"),
+    };
+    let super::errors::LeastSquaresError::Cancelled { snapshot } = error else {
+        panic!("expected typed cancellation error");
+    };
+    assert_eq!(snapshot.completed_iterations, 0);
+    assert_eq!(snapshot.parameters, vec![3.0]);
+    assert!(snapshot.residual_norm.is_none());
+    assert_eq!(snapshot.residual_evaluations, Some(0));
+    assert_eq!(snapshot.jacobian_evaluations, Some(0));
+    assert_eq!(snapshot.linear_solves, Some(0));
+    assert!(snapshot.elapsed.is_none());
+}
+
+#[test]
+fn staged_lm_cancellation_after_initial_residual_preserves_measured_state() {
+    let residual_calls = std::rc::Rc::new(Cell::new(0));
+    let jacobian_calls = std::rc::Rc::new(Cell::new(0));
+    let cancellation = CancellationToken::new();
+    let problem = ClosureLeastSquaresProblem::new(
+        DVector::from_vec(vec![3.0]),
+        {
+            let residual_calls = residual_calls.clone();
+            let cancellation = cancellation.clone();
+            move |x: &DVector<f64>| {
+                residual_calls.set(residual_calls.get() + 1);
+                cancellation.cancel();
+                DVector::from_element(1, x[0] - 2.0)
+            }
+        },
+        {
+            let jacobian_calls = jacobian_calls.clone();
+            move |_x: &DVector<f64>| {
+                jacobian_calls.set(jacobian_calls.get() + 1);
+                DMatrix::identity(1, 1)
+            }
+        },
+    );
+
+    let result = LevenbergMarquardt::new()
+        .with_telemetry(LeastSquaresTelemetryMode::Detailed)
+        .try_minimize_with_cancellation_token(problem, cancellation);
+
+    assert_eq!(residual_calls.get(), 1);
+    assert_eq!(jacobian_calls.get(), 0);
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("cancelled solve unexpectedly succeeded"),
+    };
+    let super::errors::LeastSquaresError::Cancelled { snapshot } = error else {
+        panic!("expected typed cancellation error");
+    };
+    assert_eq!(snapshot.completed_iterations, 0);
+    assert_eq!(snapshot.parameters, vec![3.0]);
+    assert_eq!(snapshot.residual_norm, Some(1.0));
+    assert_eq!(snapshot.residual_evaluations, Some(1));
+    assert_eq!(snapshot.jacobian_evaluations, Some(0));
+    assert!(snapshot.elapsed.is_some());
+}
+
+#[test]
+fn staged_lm_cancellation_from_jacobian_stops_before_trial_residual() {
+    let residual_calls = std::rc::Rc::new(Cell::new(0));
+    let jacobian_calls = std::rc::Rc::new(Cell::new(0));
+    let cancellation = CancellationToken::new();
+    let problem = ClosureLeastSquaresProblem::new(
+        DVector::from_vec(vec![3.0]),
+        {
+            let residual_calls = residual_calls.clone();
+            move |x: &DVector<f64>| {
+                residual_calls.set(residual_calls.get() + 1);
+                DVector::from_element(1, x[0] - 2.0)
+            }
+        },
+        {
+            let jacobian_calls = jacobian_calls.clone();
+            let cancellation = cancellation.clone();
+            move |_x: &DVector<f64>| {
+                jacobian_calls.set(jacobian_calls.get() + 1);
+                cancellation.cancel();
+                DMatrix::identity(1, 1)
+            }
+        },
+    );
+
+    let result = LevenbergMarquardt::new()
+        .with_telemetry(LeastSquaresTelemetryMode::Counters)
+        .try_minimize_with_cancellation_token(problem, cancellation);
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("cancelled solve unexpectedly succeeded"),
+    };
+
+    assert_eq!(residual_calls.get(), 1);
+    assert_eq!(jacobian_calls.get(), 1);
+    let super::errors::LeastSquaresError::Cancelled { snapshot } = error else {
+        panic!("expected typed cancellation error");
+    };
+    assert_eq!(snapshot.completed_iterations, 0);
+    assert_eq!(snapshot.parameters, vec![3.0]);
+    assert_eq!(snapshot.residual_norm, Some(1.0));
+    assert_eq!(snapshot.residual_evaluations, Some(1));
+    assert_eq!(snapshot.jacobian_evaluations, Some(1));
+    assert_eq!(snapshot.linear_solves, Some(0));
+    assert!(snapshot.elapsed.is_none());
 }

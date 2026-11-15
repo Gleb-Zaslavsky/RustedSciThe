@@ -1,5 +1,25 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::time::Duration;
+
+/// Last safe iterate and available telemetry captured when cancellation is observed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CancelledSolveSnapshot {
+    /// Number of completed outer iterations.
+    pub completed_iterations: usize,
+    /// Last completed/current iterate.
+    pub current_state: Vec<f64>,
+    /// Residual for the current iterate, when it had already been evaluated.
+    pub current_residual: Option<Vec<f64>>,
+    /// Residual norm, when available.
+    pub residual_norm: Option<f64>,
+    /// Work counters, absent unless counter telemetry was requested.
+    pub residual_evaluations: Option<usize>,
+    pub jacobian_evaluations: Option<usize>,
+    pub linear_solves: Option<usize>,
+    /// Elapsed solve time, absent unless timing telemetry was requested.
+    pub elapsed: Option<Duration>,
+}
 
 /// Describes why the nonlinear solve stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +108,11 @@ pub enum SolveError {
     SingularJacobian,
     /// Numerical breakdown such as NaN or Inf.
     NumericalBreakdown(String),
+    /// Cooperative cancellation observed at a safe nonlinear iteration boundary.
+    Cancelled {
+        /// Partial state and telemetry from the last completed safe point.
+        snapshot: Box<CancelledSolveSnapshot>,
+    },
 }
 
 impl Display for SolveError {
@@ -160,6 +185,11 @@ impl Display for SolveError {
             SolveError::LinearSolveFailure(msg) => write!(f, "linear solve failed: {msg}"),
             SolveError::SingularJacobian => write!(f, "jacobian is singular or ill-conditioned"),
             SolveError::NumericalBreakdown(msg) => write!(f, "numerical breakdown: {msg}"),
+            SolveError::Cancelled { snapshot } => write!(
+                f,
+                "nonlinear solve cancelled after {} completed iteration(s)",
+                snapshot.completed_iterations
+            ),
         }
     }
 }

@@ -1,3 +1,4 @@
+use crate::numerical::CancellationToken;
 use crate::numerical::Nonlinear_systems::engine::SolveStatistics;
 use crate::numerical::Nonlinear_systems::least_squares::{
     LeastSquaresError, LeastSquaresProblem, LeastSquaresTelemetryMode,
@@ -433,6 +434,16 @@ impl Fitting {
         Ok(self)
     }
 
+    /// Build and solve with opt-in cooperative cancellation for the canonical
+    /// rectangular LM execution phase.
+    pub fn try_build_with_cancellation_token(
+        mut self,
+        cancellation: CancellationToken,
+    ) -> Result<Self, FittingError> {
+        self.try_solve_with_cancellation_token(cancellation)?;
+        Ok(self)
+    }
+
     /// Validate the fitting data and infer unknown coefficient names.
     fn try_validate_and_infer(&mut self) -> Result<(), FittingError> {
         if self.x_data.is_empty() {
@@ -735,6 +746,21 @@ impl Fitting {
     /// solution before doing validation/preparation, so stale results cannot
     /// be observed as the output of the latest request.
     pub fn try_solve(&mut self) -> Result<MinimizationReport, FittingError> {
+        self.try_solve_with_optional_cancellation(None)
+    }
+
+    /// Re-solve this fitting problem with opt-in cooperative cancellation.
+    pub fn try_solve_with_cancellation_token(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> Result<MinimizationReport, FittingError> {
+        self.try_solve_with_optional_cancellation(Some(cancellation))
+    }
+
+    fn try_solve_with_optional_cancellation(
+        &mut self,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<MinimizationReport, FittingError> {
         self.clear_last_solution();
         self.try_validate_and_infer()?;
         // Validate every attempt, including reuse after a policy-only change.
@@ -788,7 +814,11 @@ impl Fitting {
             observation_policy,
         );
 
-        let (problem, report) = solver.minimize(problem);
+        let (problem, report) = if let Some(cancellation) = cancellation {
+            solver.minimize_with_cancellation_token(problem, cancellation)
+        } else {
+            solver.minimize(problem)
+        };
         self.last_statistics = Some(report.statistics.clone());
         if let Some(error) = report.error.clone() {
             return Err(FittingError::Solver(error));

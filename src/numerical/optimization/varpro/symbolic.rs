@@ -8,6 +8,7 @@
 use nalgebra::DVector;
 use thiserror::Error as ThisError;
 
+use crate::numerical::CancellationToken;
 use crate::numerical::Nonlinear_systems::least_squares::{
     LeastSquaresError, LeastSquaresTerminationReason, LevenbergMarquardt,
 };
@@ -292,6 +293,25 @@ impl SymbolicVarProBuilder {
         self,
         solver: LevenbergMarquardt,
     ) -> Result<SymbolicVarProFit, SymbolicVarProError> {
+        self.solve_with_solver_optional_cancellation(solver, None)
+    }
+
+    /// Build and solve with cancellation checked by the underlying LM between
+    /// complete iterations; the last accepted parameter vector is retained in
+    /// the typed least-squares cancellation error.
+    pub fn solve_with_solver_and_cancellation_token(
+        self,
+        solver: LevenbergMarquardt,
+        cancellation: CancellationToken,
+    ) -> Result<SymbolicVarProFit, SymbolicVarProError> {
+        self.solve_with_solver_optional_cancellation(solver, Some(cancellation))
+    }
+
+    fn solve_with_solver_optional_cancellation(
+        self,
+        solver: LevenbergMarquardt,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<SymbolicVarProFit, SymbolicVarProError> {
         let y_data = self
             .y_data
             .clone()
@@ -301,21 +321,24 @@ impl SymbolicVarProBuilder {
             .observations(y_data)
             .build()?;
 
-        LevMarSolver::with_solver(solver)
-            .solve(problem)
-            .map_err(|fit| {
-                let termination = &fit.minimization_report.termination;
-                let exhausted = matches!(
-                    termination,
-                    LeastSquaresTerminationReason::MaxIterationsReached { .. }
-                        | LeastSquaresTerminationReason::LostPatience
-                );
-                SymbolicVarProError::SolverFailed {
-                    termination: format!("{termination:?}"),
-                    exhausted,
-                    source: fit.minimization_report.error,
-                }
-            })
+        let varpro_solver = LevMarSolver::with_solver(solver);
+        let fit_result = match cancellation {
+            Some(token) => varpro_solver.solve_with_svd_and_cancellation_token(problem, token),
+            None => varpro_solver.solve(problem),
+        };
+        fit_result.map_err(|fit| {
+            let termination = &fit.minimization_report.termination;
+            let exhausted = matches!(
+                termination,
+                LeastSquaresTerminationReason::MaxIterationsReached { .. }
+                    | LeastSquaresTerminationReason::LostPatience
+            );
+            SymbolicVarProError::SolverFailed {
+                termination: format!("{termination:?}"),
+                exhausted,
+                source: fit.minimization_report.error,
+            }
+        })
     }
 
     /// Build a reusable scalar fitted evaluator without changing the fit result.

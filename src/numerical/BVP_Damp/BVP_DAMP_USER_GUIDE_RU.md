@@ -743,7 +743,7 @@ use RustedSciThe::numerical::BVP_Damp::{
 use RustedSciThe::numerical::BVP_Damp::generated_solver_handoff::GeneratedBackendConfig;
 
 let config = GeneratedBackendConfig::banded_lambdify_defaults()
-    // Counters — совместимый режим; Off отключает сбор счетчиков и таймеров.
+    // По умолчанию телеметрия отключена; явно включите Counters при необходимости.
     .with_bvp_telemetry_mode(BvpTelemetryMode::Off)
     .with_bvp_logging_config(
         BvpLoggingConfig::new(BvpLoggingMode::Warnings).with_max_events(128),
@@ -753,8 +753,8 @@ let trace = &solver.get_statistics().telemetry;
 println!("solve_id={} dropped={}", trace.solve_id, trace.log_events_dropped);
 ```
 
-`BvpTelemetryMode::Off` отключает счетчики solver-а и stage timers без
-изменения численного алгоритма. `Counters` собирает дискретные показатели,
+`BvpTelemetryMode::Off` действует по умолчанию и отключает счетчики solver-а и
+stage timers без изменения численного алгоритма. `Counters` собирает дискретные показатели,
 не запуская часы; `Timings` измеряет длительности без увеличения дискретных
 счетчиков; `Detailed` собирает оба вида данных. Режим telemetry независим от
 `BvpLoggingMode`: можно оставить ограниченный decision trace при отключенных

@@ -27,6 +27,7 @@ use crate::numerical::BDF::BDF_api::{
 use crate::numerical::BE::{
     BE, BeError, BeSolverOptions, BeSymbolicAssemblyBackend, BeTelemetryMode,
 };
+use crate::numerical::CancellationToken;
 use crate::numerical::LSODE2::{
     FaerSparseBdfLinearBackend, FaithfulBandedBdfLinearBackend, IvpTelemetry, Lsode2AotProfile,
     Lsode2AotToolchain, Lsode2ControllerConfig, Lsode2JacobianBackend, Lsode2LinearSolverChoice,
@@ -38,6 +39,7 @@ use crate::numerical::LSODE2::{Lsode2Error, Lsode2Solver};
 use crate::numerical::ODE_api2::{
     NonStiffMethod, SolverType, UniversalODESolver, UniversalOdeError,
 };
+use crate::numerical::Radau::api::RadauCancellationError;
 use crate::numerical::Radau::{
     RadauAotConfig, RadauConfig, RadauError, RadauExecution, RadauExecutionPolicy, RadauFrontend,
     RadauMatrixLayout, RadauProblem, RadauSolution, RadauSolver, RadauTelemetryMode,
@@ -87,6 +89,17 @@ pub enum IvpMethodSpec {
 }
 
 impl IvpMethodSpec {
+    pub(crate) fn cancellation_supported(&self) -> bool {
+        match self {
+            Self::NonStiff(method) => ["RK45", "DOPRI", "AB4", "DOP853"]
+                .iter()
+                .any(|supported| method.eq_ignore_ascii_case(supported)),
+            Self::Radau5 | Self::Bdf | Self::BackwardEuler => true,
+            Self::Lsode | Self::Lsoda => false,
+            Self::Lsode2 => true,
+        }
+    }
+
     fn to_solver_type(&self) -> Result<SolverType, IvpTaskError> {
         match self {
             Self::NonStiff(name) => Ok(SolverType::NonStiff(NonStiffMethod::from_name(
@@ -112,6 +125,7 @@ impl IvpMethodSpec {
                 Ok(Self::NonStiff("DOPRI".to_string()))
             }
             "ab4" => Ok(Self::NonStiff("AB4".to_string())),
+            "dop853" => Ok(Self::NonStiff("DOP853".to_string())),
             "radau5" | "radau-5" | "radau_iia_5" => Ok(Self::Radau5),
             "bdf" => Ok(Self::Bdf),
             "backwardeuler" | "backward_euler" | "implicit_euler" => Ok(Self::BackwardEuler),
@@ -617,6 +631,57 @@ impl IvpTaskSolver {
         }
     }
 
+    fn try_solve_with_cancellation_token(
+        &mut self,
+        cancellation: &CancellationToken,
+    ) -> Result<(), IvpTaskError> {
+        match self {
+            Self::Universal(solver) => solver
+                .try_solve_with_cancellation_token(cancellation.clone())
+                .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Universal(error))),
+            Self::Bdf(solver) => solver
+                .try_solve_with_cancellation_token(cancellation.clone())
+                .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Bdf(error))),
+            Self::BackwardEuler(solver) => solver
+                .try_solve_with_cancellation_token(cancellation.clone())
+                .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::BackwardEuler(error))),
+            Self::Radau {
+                solver,
+                y0,
+                parameters,
+                last_solution,
+            } => {
+                let solution = solver
+                    .try_solve_with_cancellation_token(y0.as_slice(), parameters, cancellation)
+                    .map_err(|error| match error {
+                        RadauCancellationError::Cancelled { snapshot } => {
+                            IvpTaskError::Native(IvpNativeSolverError::RadauCancelled { snapshot })
+                        }
+                        RadauCancellationError::Solver(error) => {
+                            IvpTaskError::Native(IvpNativeSolverError::Radau(error))
+                        }
+                    })?;
+                *last_solution = Some(solution);
+                Ok(())
+            }
+            Self::Lsode2(solver) => {
+                solver
+                    .solve_with_cancellation_token(cancellation)
+                    .map_err(|error| match error {
+                        Lsode2Error::Cancelled { snapshot } => {
+                            IvpTaskError::Native(IvpNativeSolverError::Lsode2Cancelled {
+                                snapshot: *snapshot,
+                            })
+                        }
+                        other => IvpTaskError::Native(IvpNativeSolverError::Lsode2(other)),
+                    })
+            }
+            Self::RadauSolution(_) => Err(IvpTaskError::CancellationUnsupported {
+                solver: "completed Radau solution".to_owned(),
+            }),
+        }
+    }
+
     /// Adapt solver-owned result storage to the task-runner's common shape.
     ///
     /// This conversion is intentionally at the boundary: the native solver
@@ -794,8 +859,18 @@ pub enum IvpNativeSolverError {
     BackwardEuler(BeError),
     /// Failure from the native Radau API.
     Radau(RadauError),
+    /// Cooperative cancellation from the native Radau route, with its last
+    /// committed state and mode-selected telemetry.
+    RadauCancelled {
+        snapshot: crate::numerical::Radau::api::RadauCancellationSnapshot,
+    },
     /// Failure from the native LSODE2 API.
     Lsode2(Lsode2Error),
+    /// Cooperative cancellation from native LSODE2, with accepted history
+    /// and telemetry retained by the solver.
+    Lsode2Cancelled {
+        snapshot: crate::numerical::LSODE2::solver::Lsode2CancelledSnapshot,
+    },
 }
 
 impl std::fmt::Display for IvpNativeSolverError {
@@ -805,7 +880,17 @@ impl std::fmt::Display for IvpNativeSolverError {
             Self::Bdf(error) => write!(f, "native BDF solver failed: {error}"),
             Self::BackwardEuler(error) => write!(f, "native Backward Euler solver failed: {error}"),
             Self::Radau(error) => write!(f, "native Radau solver failed: {error}"),
+            Self::RadauCancelled { snapshot } => write!(
+                f,
+                "native Radau solve cancelled after {} accepted steps",
+                snapshot.accepted_steps
+            ),
             Self::Lsode2(error) => write!(f, "native LSODE2 solver failed: {error}"),
+            Self::Lsode2Cancelled { snapshot } => write!(
+                f,
+                "native LSODE2 solve cancelled after {} accepted points",
+                snapshot.accepted_times.len()
+            ),
         }
     }
 }
@@ -817,7 +902,9 @@ impl std::error::Error for IvpNativeSolverError {
             Self::Bdf(error) => Some(error),
             Self::BackwardEuler(error) => Some(error),
             Self::Radau(error) => Some(error),
+            Self::RadauCancelled { .. } => None,
             Self::Lsode2(error) => Some(error),
+            Self::Lsode2Cancelled { .. } => None,
         }
     }
 }
@@ -858,6 +945,12 @@ pub enum IvpTaskError {
         method: String,
         mode: String,
     },
+    CancellationUnsupported {
+        solver: String,
+    },
+    CancelledBeforePreparation {
+        solver: String,
+    },
     Continuation {
         method: String,
         message: String,
@@ -895,7 +988,27 @@ impl IvpTaskError {
             | Self::Semantic(_)
             | Self::SymbolDiagnostic { .. } => "configuration",
             Self::UnsupportedOption { .. } => "unsupported_option",
+            Self::CancellationUnsupported { .. } => "unsupported_route",
+            Self::CancelledBeforePreparation { .. } => "cancelled",
             Self::UnsupportedContinuation { .. } | Self::Continuation { .. } => "continuation",
+            Self::Native(IvpNativeSolverError::Bdf(BdfSolveError::Cancelled { .. }))
+            | Self::Native(IvpNativeSolverError::BackwardEuler(BeError::Cancelled { .. }))
+            | Self::Native(IvpNativeSolverError::RadauCancelled { .. })
+            | Self::Native(IvpNativeSolverError::Lsode2Cancelled { .. })
+            | Self::Native(IvpNativeSolverError::Universal(UniversalOdeError::Bdf(
+                BdfSolveError::Cancelled { .. },
+            )))
+            | Self::Native(IvpNativeSolverError::Universal(UniversalOdeError::BackwardEuler(
+                BeError::Cancelled { .. },
+            )))
+            | Self::Native(IvpNativeSolverError::Universal(UniversalOdeError::NonStiff(
+                crate::numerical::NonStiff_api::NonStiffError::Dop853(
+                    crate::numerical::NonStiff_api::Dop853Error::Cancelled { .. },
+                ),
+            ))) => "cancelled",
+            Self::Native(IvpNativeSolverError::Universal(UniversalOdeError::NonStiff(
+                crate::numerical::NonStiff_api::NonStiffError::Cancelled { .. },
+            ))) => "cancelled",
             Self::Native(_) => "solver",
             Self::Postprocess(_) => "postprocess",
         }
@@ -930,6 +1043,14 @@ impl std::fmt::Display for IvpTaskError {
             Self::UnsupportedOption { method, option } => write!(
                 f,
                 "IVP method `{method}` does not support solver option `{option}`"
+            ),
+            Self::CancellationUnsupported { solver } => write!(
+                f,
+                "cooperative cancellation is not supported by IVP route `{solver}`"
+            ),
+            Self::CancelledBeforePreparation { solver } => write!(
+                f,
+                "IVP task for `{solver}` was cancelled before solver preparation"
             ),
             Self::UnsupportedContinuation { method, mode } => write!(
                 f,
@@ -2080,7 +2201,46 @@ pub fn run_ivp_task(spec: IvpTaskSpec) -> Result<IvpTaskRunResult, IvpTaskError>
         });
     }
     let mut solver = build_ivp_solver_from_spec(&spec)?;
-    solver.try_solve()?;
+    run_ivp_task_single(spec, solver, None)
+}
+
+/// Run one IVP task with cooperative cancellation for routes that expose a
+/// native safe checkpoint. Continuation loops are rejected explicitly until
+/// their inter-segment lifecycle has a cancellation contract.
+pub fn run_ivp_task_with_cancellation_token(
+    spec: IvpTaskSpec,
+    cancellation: &CancellationToken,
+) -> Result<IvpTaskRunResult, IvpTaskError> {
+    let solver_name = ivp_method_name(&spec.solver.method).to_owned();
+    if !spec.solver.method.cancellation_supported() {
+        return Err(IvpTaskError::CancellationUnsupported {
+            solver: solver_name,
+        });
+    }
+    if spec.continuation.is_some() {
+        return Err(IvpTaskError::CancellationUnsupported {
+            solver: format!("{solver_name} parameter continuation"),
+        });
+    }
+    if cancellation.is_cancelled() {
+        return Err(IvpTaskError::CancelledBeforePreparation {
+            solver: solver_name,
+        });
+    }
+    let solver = build_ivp_solver_from_spec(&spec)?;
+    run_ivp_task_single(spec, solver, Some(cancellation))
+}
+
+fn run_ivp_task_single(
+    spec: IvpTaskSpec,
+    mut solver: IvpTaskSolver,
+    cancellation: Option<&CancellationToken>,
+) -> Result<IvpTaskRunResult, IvpTaskError> {
+    if let Some(cancellation) = cancellation {
+        solver.try_solve_with_cancellation_token(cancellation)?;
+    } else {
+        solver.try_solve()?;
+    }
     let (t_result, y_result) = solver.get_result();
     let status = solver.status();
     let status_code = solver.status_code();

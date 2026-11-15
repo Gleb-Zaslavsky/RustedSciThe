@@ -10,21 +10,21 @@ use std::collections::HashMap;
 use nalgebra::DMatrix;
 use pyo3::prelude::*;
 
+use rustedscithe_core::numerical::BVP_Damp::BvpLambdifyTelemetryMode;
+use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_damped::{
+    AdaptiveGridConfig, DampedParameterLoopOutcome, DampedParameterLoopReport, DampedSolverOptions,
+    NRBVP, SolverParams,
+};
+use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_frozen::{
+    FrozenParameterLoopOutcome, FrozenParameterLoopReport, FrozenSolverOptions,
+    NRBVP as FrozenNRBVP,
+};
 use rustedscithe_core::numerical::BVP_Damp::generated_solver_handoff::{
     AotBuildPolicy, AotBuildProfile, AotExecutionPolicy, GeneratedBackendConfig,
 };
 use rustedscithe_core::numerical::BVP_Damp::grid_api::GridRefinementMethod;
 use rustedscithe_core::numerical::BVP_Damp::telemetry::{
     BvpCallbackStage, BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode, BvpTelemetrySnapshot,
-};
-use rustedscithe_core::numerical::BVP_Damp::BvpLambdifyTelemetryMode;
-use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_damped::{
-    AdaptiveGridConfig, DampedParameterLoopOutcome, DampedParameterLoopReport, DampedSolverOptions,
-    SolverParams, NRBVP,
-};
-use rustedscithe_core::numerical::BVP_Damp::NR_Damp_solver_frozen::{
-    FrozenParameterLoopOutcome, FrozenParameterLoopReport, FrozenSolverOptions,
-    NRBVP as FrozenNRBVP,
 };
 use rustedscithe_core::somelinalg::banded::{
     FallbackPolicy, LinearSolverConfig, LinearSolverPolicy,
@@ -41,9 +41,8 @@ use rustedscithe_core::symbolic::codegen::codegen_provider_api::MatrixBackend;
 
 use crate::contract::SolverOptions;
 use crate::errors::{
-    annotate, annotate_native, catch_panic, native_variant, ExhaustionError,
-    InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
-    UnsupportedOptionError,
+    ExhaustionError, InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
+    UnsupportedOptionError, annotate, annotate_native, catch_panic, native_variant,
 };
 use crate::expr::PyExpr;
 use crate::telemetry::write_report;
@@ -2122,7 +2121,8 @@ impl BvpDampNaiveSolver {
         native_options.linear_sys_method = linear_sys_method.map(str::to_owned);
         native_options.generated_backend_config = config;
         let interval_count = mesh.len() - 1;
-        let initial_guess = flatten_node_major(initial_state, interval_count, state_variables.len())?;
+        let initial_guess =
+            flatten_node_major(initial_state, interval_count, state_variables.len())?;
         let route = format!(
             "{}:{}:{}",
             options.frontend(),
@@ -2239,15 +2239,18 @@ impl BvpDampNaiveSolver {
 
     /// Re-solve with new fixed inputs, seeding from the last successful profile.
     pub fn solve_with_parameter_values(&mut self, values: Vec<f64>) -> PyResult<BvpDampSolution> {
-        let previous = self.has_successful_solution.then(|| {
-            self.solver.result.as_ref().map(|result| {
-                DMatrix::from_column_slice(
-                    self.solver.values.len(),
-                    self.solver.n_steps,
-                    result.as_slice(),
-                )
+        let previous = self
+            .has_successful_solution
+            .then(|| {
+                self.solver.result.as_ref().map(|result| {
+                    DMatrix::from_column_slice(
+                        self.solver.values.len(),
+                        self.solver.n_steps,
+                        result.as_slice(),
+                    )
+                })
             })
-        }).flatten();
+            .flatten();
         self.set_parameter_values(values)?;
         if let Some(previous) = previous {
             self.set_prepared_iterate(matrix_to_node_major(&previous))?;
@@ -2549,15 +2552,19 @@ impl BvpDampFrozenSolver {
 
     /// Re-solve with new fixed inputs, seeding from the last successful profile.
     pub fn solve_with_parameter_values(&mut self, values: Vec<f64>) -> PyResult<BvpDampSolution> {
-        let previous = self.inner.has_successful_solution.then(|| {
-            self.inner.solver.result.as_ref().map(|result| {
-                DMatrix::from_column_slice(
-                    self.inner.solver.values.len(),
-                    self.inner.solver.n_steps,
-                    result.as_slice(),
-                )
+        let previous = self
+            .inner
+            .has_successful_solution
+            .then(|| {
+                self.inner.solver.result.as_ref().map(|result| {
+                    DMatrix::from_column_slice(
+                        self.inner.solver.values.len(),
+                        self.inner.solver.n_steps,
+                        result.as_slice(),
+                    )
+                })
             })
-        }).flatten();
+            .flatten();
         self.set_parameter_values(values)?;
         if let Some(previous) = previous {
             self.set_prepared_iterate(matrix_to_node_major(&previous))?;

@@ -5,6 +5,7 @@
 //! This implementation intentionally exposes accepted mesh points only; dense
 //! output is a separate feature and is not fabricated by interpolation here.
 
+use crate::numerical::CancellationToken;
 use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpWarmStage};
 use nalgebra::DVector;
 use std::error::Error;
@@ -243,6 +244,14 @@ impl Default for Dop853Options {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Dop853Statistics {
+    /// Whether public counter fields were requested and collected. Numeric
+    /// counter fields are zero when this is false and must not be interpreted
+    /// as measured zeros.
+    pub counters_collected: bool,
+    /// Whether public duration fields were requested and collected. Duration
+    /// fields are zero when this is false and must not be interpreted as
+    /// measured zeros.
+    pub timings_collected: bool,
     pub function_evaluations: usize,
     pub accepted_steps: usize,
     pub rejected_steps: usize,
@@ -258,6 +267,16 @@ pub struct Dop853Solution {
     /// One state vector per time sample.
     pub states: Vec<Vec<f64>>,
     pub status: Dop853Status,
+    pub statistics: Dop853Statistics,
+}
+
+/// Last accepted DOP853 trajectory retained on cooperative cancellation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dop853CancelledSnapshot {
+    pub current_time: f64,
+    pub current_state: Vec<f64>,
+    pub times: Vec<f64>,
+    pub states: Vec<Vec<f64>>,
     pub statistics: Dop853Statistics,
 }
 
@@ -290,6 +309,9 @@ pub enum Dop853Error {
     MaximumStepsExceeded {
         limit: usize,
         time: f64,
+    },
+    Cancelled {
+        snapshot: Box<Dop853CancelledSnapshot>,
     },
     NonFiniteErrorEstimate {
         time: f64,
@@ -325,6 +347,11 @@ impl Display for Dop853Error {
                 f,
                 "DOP853 exceeded the maximum of {limit} accepted steps at t={time:e}"
             ),
+            Self::Cancelled { snapshot } => write!(
+                f,
+                "DOP853 solve cancelled at t={} after {} accepted step(s)",
+                snapshot.current_time, snapshot.statistics.accepted_steps
+            ),
             Self::NonFiniteErrorEstimate { time } => write!(
                 f,
                 "DOP853 produced a non-finite error estimate at t={time:e}"
@@ -343,6 +370,7 @@ pub struct Dop853 {
     options: Dop853Options,
     telemetry: IvpTelemetry,
     statistics: Dop853Statistics,
+    function_evaluation_index: usize,
 }
 
 impl Dop853 {
@@ -369,6 +397,7 @@ impl Dop853 {
             options,
             telemetry,
             statistics: Dop853Statistics::default(),
+            function_evaluation_index: 0,
         })
     }
 
@@ -380,15 +409,50 @@ impl Dop853 {
         &mut self,
         stop_condition: Option<&dyn Fn(&DVector<f64>) -> bool>,
     ) -> Result<Dop853Solution, Dop853Error> {
-        let started = Some(Instant::now());
+        self.solve_with_optional_cancellation(stop_condition, None)
+    }
+
+    pub fn solve_with_cancellation_token(
+        &mut self,
+        stop_condition: Option<&dyn Fn(&DVector<f64>) -> bool>,
+        cancellation: CancellationToken,
+    ) -> Result<Dop853Solution, Dop853Error> {
+        self.solve_with_optional_cancellation(stop_condition, Some(&cancellation))
+    }
+
+    fn solve_with_optional_cancellation(
+        &mut self,
+        stop_condition: Option<&dyn Fn(&DVector<f64>) -> bool>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Dop853Solution, Dop853Error> {
+        let mode = self.telemetry.mode();
+        let started = mode.collects_timings().then(Instant::now);
         let direction = (self.t_bound - self.t0).signum();
         let interval = (self.t_bound - self.t0).abs();
         let mut times = vec![self.t0];
         let mut states = vec![self.y0.as_slice().to_vec()];
-        self.statistics = Dop853Statistics::default();
+        self.statistics = Dop853Statistics {
+            counters_collected: mode.collects_counters(),
+            timings_collected: mode.collects_timings(),
+            ..Dop853Statistics::default()
+        };
+        self.function_evaluation_index = 0;
 
         let mut y = self.y0.clone();
         let mut t = self.t0;
+        let mut accepted_steps = 0usize;
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            self.finish_timing(started);
+            return Err(Dop853Error::Cancelled {
+                snapshot: Box::new(Dop853CancelledSnapshot {
+                    current_time: t,
+                    current_state: y.as_slice().to_vec(),
+                    times,
+                    states,
+                    statistics: self.statistics.clone(),
+                }),
+            });
+        }
         let mut k: Vec<DVector<f64>> = (0..=N).map(|_| DVector::zeros(y.len())).collect();
         k[0] = match self.evaluate(t, &y) {
             Ok(value) => value,
@@ -414,7 +478,19 @@ impl Dop853 {
         let mut rejected_before_accept = false;
 
         while direction * (self.t_bound - t) > 0.0 {
-            if self.statistics.accepted_steps >= self.options.max_steps {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                self.finish_timing(started);
+                return Err(Dop853Error::Cancelled {
+                    snapshot: Box::new(Dop853CancelledSnapshot {
+                        current_time: t,
+                        current_state: y.as_slice().to_vec(),
+                        times,
+                        states,
+                        statistics: self.statistics.clone(),
+                    }),
+                });
+            }
+            if accepted_steps >= self.options.max_steps {
                 self.finish_timing(started);
                 return Err(Dop853Error::MaximumStepsExceeded {
                     limit: self.options.max_steps,
@@ -436,7 +512,9 @@ impl Dop853 {
                 h_abs = h.abs();
             }
 
-            self.statistics.attempted_steps += 1;
+            if mode.collects_counters() {
+                self.statistics.attempted_steps += 1;
+            }
             let t_new = t + h;
             for stage in 1..N {
                 let mut y_stage = y.clone();
@@ -481,18 +559,19 @@ impl Dop853 {
                 t = t_new;
                 y = y_new;
                 k[0] = k[N].clone();
-                self.statistics.accepted_steps += 1;
-                self.statistics.minimum_accepted_step = Some(
-                    self.statistics
-                        .minimum_accepted_step
-                        .map_or(h_abs, |old| old.min(h_abs)),
-                );
-                self.statistics.maximum_accepted_step = Some(
-                    self.statistics
-                        .maximum_accepted_step
-                        .map_or(h_abs, |old| old.max(h_abs)),
-                );
+                accepted_steps += 1;
                 if self.telemetry.mode().collects_counters() {
+                    self.statistics.accepted_steps += 1;
+                    self.statistics.minimum_accepted_step = Some(
+                        self.statistics
+                            .minimum_accepted_step
+                            .map_or(h_abs, |old| old.min(h_abs)),
+                    );
+                    self.statistics.maximum_accepted_step = Some(
+                        self.statistics
+                            .maximum_accepted_step
+                            .map_or(h_abs, |old| old.max(h_abs)),
+                    );
                     self.telemetry.record_accepted_step();
                 }
                 times.push(t);
@@ -513,8 +592,8 @@ impl Dop853 {
                 h_abs *= factor;
             } else {
                 rejected_before_accept = true;
-                self.statistics.rejected_steps += 1;
                 if self.telemetry.mode().collects_counters() {
+                    self.statistics.rejected_steps += 1;
                     self.telemetry.record_rejected_step();
                 }
                 h_abs *= (SAFETY * error_norm.powf(ERROR_EXPONENT)).max(MIN_FACTOR);
@@ -532,18 +611,21 @@ impl Dop853 {
 
     fn evaluate(&mut self, t: f64, y: &DVector<f64>) -> Result<DVector<f64>, Dop853Error> {
         let value = (self.rhs)(t, y);
-        self.statistics.function_evaluations += 1;
+        self.function_evaluation_index += 1;
+        if self.statistics.counters_collected {
+            self.statistics.function_evaluations += 1;
+        }
         if value.len() != y.len() {
             return Err(Dop853Error::RhsDimension {
                 expected: y.len(),
                 actual: value.len(),
-                evaluation: self.statistics.function_evaluations,
+                evaluation: self.function_evaluation_index,
             });
         }
         if let Some(index) = value.iter().position(|entry| !entry.is_finite()) {
             return Err(Dop853Error::NonFiniteRhs {
                 index,
-                evaluation: self.statistics.function_evaluations,
+                evaluation: self.function_evaluation_index,
             });
         }
         Ok(value)
@@ -622,10 +704,8 @@ impl Dop853 {
         if let Some(started) = started {
             let elapsed = started.elapsed();
             self.statistics.solve_ms = elapsed.as_secs_f64() * 1e3;
-            if self.telemetry.mode().collects_timings() {
-                self.telemetry
-                    .record_warm_stage_duration(IvpWarmStage::Solve, elapsed);
-            }
+            self.telemetry
+                .record_warm_stage_duration(IvpWarmStage::Solve, elapsed);
         }
     }
 }
@@ -723,7 +803,7 @@ mod tests {
             0.0,
             t_bound,
             options,
-            IvpTelemetry::disabled(),
+            IvpTelemetry::counters(),
         )
         .unwrap()
         .solve(None)
@@ -744,6 +824,121 @@ mod tests {
             solution.statistics.function_evaluations,
             2 + 12 * solution.statistics.attempted_steps
         );
+    }
+
+    #[test]
+    fn dop853_pre_cancellation_skips_rhs_and_retains_initial_snapshot() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rhs_calls = Arc::clone(&calls);
+        let mut solver = Dop853::new(
+            Box::new(move |_, y| {
+                rhs_calls.fetch_add(1, Ordering::SeqCst);
+                y.clone()
+            }),
+            DVector::from_element(1, 1.0),
+            0.0,
+            1.0,
+            Dop853Options::default(),
+            IvpTelemetry::disabled(),
+        )
+        .unwrap();
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let Dop853Error::Cancelled { snapshot } = solver
+            .solve_with_cancellation_token(None, token)
+            .expect_err("pre-cancelled DOP853 should return a partial snapshot")
+        else {
+            panic!("expected DOP853 cancellation");
+        };
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(snapshot.current_time, 0.0);
+        assert_eq!(snapshot.current_state, vec![1.0]);
+        assert_eq!(snapshot.times, vec![0.0]);
+        assert_eq!(snapshot.states, vec![vec![1.0]]);
+        assert_eq!(snapshot.statistics.function_evaluations, 0);
+        assert!(!snapshot.statistics.counters_collected);
+        assert!(!snapshot.statistics.timings_collected);
+    }
+
+    #[test]
+    fn dop853_cancellation_during_trial_finishes_step_and_keeps_accepted_history() {
+        let token = CancellationToken::new();
+        let callback_token = token.clone();
+        let mut solver = Dop853::new(
+            Box::new(move |t, y| {
+                if t > 0.0 {
+                    callback_token.cancel();
+                }
+                y.clone()
+            }),
+            DVector::from_element(1, 1.0),
+            0.0,
+            1.0,
+            Dop853Options {
+                first_step: Some(0.1),
+                max_step: 0.1,
+                ..Dop853Options::default()
+            },
+            IvpTelemetry::counters(),
+        )
+        .unwrap();
+
+        let Dop853Error::Cancelled { snapshot } = solver
+            .solve_with_cancellation_token(None, token)
+            .expect_err("request during a trial should stop at the next step boundary")
+        else {
+            panic!("expected DOP853 cancellation");
+        };
+        assert_eq!(snapshot.statistics.accepted_steps, 1);
+        assert_eq!(snapshot.times.len(), 2);
+        assert_eq!(snapshot.current_time, snapshot.times[1]);
+        assert_eq!(snapshot.current_state, snapshot.states[1]);
+        assert!((snapshot.current_state[0] - 0.1_f64.exp()).abs() < 2e-10);
+    }
+
+    #[test]
+    fn dop853_statistics_follow_opt_in_telemetry_mode_without_changing_solution() {
+        let options = Dop853Options {
+            first_step: Some(0.1),
+            max_step: 0.1,
+            ..Dop853Options::default()
+        };
+        let make_solver = |telemetry| {
+            Dop853::new(
+                Box::new(|_, y| y.clone()),
+                DVector::from_element(1, 1.0),
+                0.0,
+                1.0,
+                options,
+                telemetry,
+            )
+            .unwrap()
+        };
+
+        let off_solution = make_solver(IvpTelemetry::disabled()).solve(None).unwrap();
+        assert!(!off_solution.statistics.counters_collected);
+        assert!(!off_solution.statistics.timings_collected);
+        assert_eq!(off_solution.statistics.function_evaluations, 0);
+        assert_eq!(off_solution.statistics.accepted_steps, 0);
+        assert_eq!(off_solution.statistics.solve_ms, 0.0);
+
+        let counter_solution = make_solver(IvpTelemetry::counters()).solve(None).unwrap();
+        assert!(counter_solution.statistics.counters_collected);
+        assert!(!counter_solution.statistics.timings_collected);
+        assert!(counter_solution.statistics.accepted_steps > 0);
+
+        assert_eq!(off_solution.times, counter_solution.times);
+        assert_eq!(off_solution.states, counter_solution.states);
+
+        let timing_solution = make_solver(IvpTelemetry::timings()).solve(None).unwrap();
+        assert!(!timing_solution.statistics.counters_collected);
+        assert!(timing_solution.statistics.timings_collected);
+        assert_eq!(timing_solution.statistics.accepted_steps, 0);
+        assert!(timing_solution.statistics.solve_ms >= 0.0);
     }
 
     #[test]

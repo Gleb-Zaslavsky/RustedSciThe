@@ -30,6 +30,19 @@ numbers are diagnostic and should be compared only for the same build profile,
 machine, workload, step count, telemetry mode and revision. Debug results must
 not replace release baselines.
 
+## 2026-11-15 Telemetry Default Alignment
+
+BE public construction paths now default to `BeTelemetryMode::Off`, including
+`BeSolverOptions::default()`, `BE::new()` and the direct `NRE::new()` route.
+Counter-dependent correctness fixtures explicitly request `Counters`; the
+solver does not collect stage counters or timings merely because a caller used
+the default constructor. Regression gate:
+`be_telemetry_is_off_by_default_for_all_public_setup_paths`.
+
+Debug verification: `cargo test --lib numerical::BE:: -- --test-threads=1`
+passed 78 tests, with 3 ignored. This is a default/lifecycle contract change,
+not a numerical algorithm or performance claim.
+
 ## Symbolic Execution Benchmarks
 
 `be_symbolic_execution_benches` compares full solves for the shared eight-state

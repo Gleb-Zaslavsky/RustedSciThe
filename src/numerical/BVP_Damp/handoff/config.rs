@@ -264,7 +264,7 @@ impl Default for GeneratedBackendConfig {
             expr_dependency_columns_enabled: true,
             bvp_logging_mode: BvpLoggingMode::Off,
             bvp_logging_max_events: BvpLoggingConfig::default().max_events,
-            bvp_telemetry_mode: BvpTelemetryMode::Counters,
+            bvp_telemetry_mode: BvpTelemetryMode::Off,
         }
     }
 }
@@ -505,7 +505,7 @@ impl GeneratedBackendConfig {
             expr_dependency_columns_enabled: true,
             bvp_logging_mode: BvpLoggingMode::Off,
             bvp_logging_max_events: BvpLoggingConfig::default().max_events,
-            bvp_telemetry_mode: BvpTelemetryMode::Counters,
+            bvp_telemetry_mode: BvpTelemetryMode::Off,
         }
     }
 

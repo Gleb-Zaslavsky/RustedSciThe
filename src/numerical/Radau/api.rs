@@ -34,15 +34,17 @@ use super::new::config::{
     RadauExecution as InternalExecution, RadauJacobianSource as InternalJacobianSource,
     RadauMatrixLayout as InternalLayout,
 };
-use super::new::error::RadauError as InternalError;
+use super::new::error::{RadauCancellationState, RadauError as InternalError};
 use super::new::finite_difference::FiniteDifferenceJacobianCallback;
 use super::new::native_callbacks::{NativeJacobianFn, NativeResidualCallback, NativeResidualFn};
 use super::new::output::{RadauOutput, RadauOutputPolicy as InternalOutputPolicy};
 use super::new::solver::{
     RadauSolveResult, try_solve_dense_with_callbacks_with_output,
-    try_solve_symbolic_dense_with_output,
+    try_solve_dense_with_callbacks_with_output_and_cancellation,
+    try_solve_symbolic_dense_with_output, try_solve_symbolic_dense_with_output_and_cancellation,
 };
 use super::new::telemetry::{RadauTelemetry, RadauTelemetryMode as InternalTelemetryMode};
+use crate::numerical::CancellationToken;
 
 /// Symbolic frontend used to prepare residual and Jacobian callbacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,6 +332,7 @@ impl RadauProblem {
 /// Machine-readable public error category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RadauErrorKind {
+    Cancelled,
     Configuration,
     Callback,
     NonFiniteCallback,
@@ -379,6 +382,7 @@ impl From<InternalError> for RadauError {
             InternalError::StepControlFailure { .. } => RadauErrorKind::StepControl,
             InternalError::UnsupportedRoute(_) => RadauErrorKind::Unsupported,
             InternalError::AotLifecycle { .. } => RadauErrorKind::Aot,
+            InternalError::Cancelled { .. } => RadauErrorKind::Cancelled,
             InternalError::WorkspaceSizeOverflow { .. } => RadauErrorKind::Workspace,
             InternalError::LinearSolveFailure { .. } => RadauErrorKind::LinearSolve,
             InternalError::OutputNotAvailable
@@ -389,6 +393,72 @@ impl From<InternalError> for RadauError {
             kind,
             message: error.to_string(),
         }
+    }
+}
+
+/// Last committed Radau state captured when cooperative cancellation is observed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RadauCancellationSnapshot {
+    pub t: f64,
+    pub y: Vec<f64>,
+    pub attempts: usize,
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
+    pub telemetry: RadauTelemetryReport,
+}
+
+/// Failure from a cancellation-aware Radau solve.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RadauCancellationError {
+    Cancelled { snapshot: RadauCancellationSnapshot },
+    Solver(RadauError),
+}
+
+impl fmt::Display for RadauCancellationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled { snapshot } => write!(
+                formatter,
+                "Radau solve cancelled after {} accepted steps and {} attempts",
+                snapshot.accepted_steps, snapshot.attempts
+            ),
+            Self::Solver(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl Error for RadauCancellationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Cancelled { .. } => None,
+            Self::Solver(error) => Some(error),
+        }
+    }
+}
+
+fn cancellation_error(
+    error: InternalError,
+    telemetry: RadauTelemetryReport,
+) -> RadauCancellationError {
+    match error {
+        InternalError::Cancelled { state } => RadauCancellationError::Cancelled {
+            snapshot: cancellation_snapshot(state, telemetry),
+        },
+        error => RadauCancellationError::Solver(error.into()),
+    }
+}
+
+fn cancellation_snapshot(
+    state: RadauCancellationState,
+    telemetry: RadauTelemetryReport,
+) -> RadauCancellationSnapshot {
+    RadauCancellationSnapshot {
+        t: state.t,
+        y: state.y,
+        attempts: state.attempts,
+        accepted_steps: state.accepted_steps,
+        rejected_steps: state.rejected_steps,
+        telemetry,
     }
 }
 
@@ -868,6 +938,53 @@ impl RadauNativeSolver {
         Ok(solution)
     }
 
+    /// Solve with cooperative cancellation checked between complete adaptive
+    /// step attempts. The returned snapshot contains only the last committed
+    /// state; an in-flight trial is never exposed as a partial solution.
+    pub fn solve_with_cancellation_token(
+        &mut self,
+        y0: &[f64],
+        cancellation: &CancellationToken,
+    ) -> Result<RadauSolution, RadauCancellationError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
+        let mut residual = NativeResidualCallback::new(self.residual.clone());
+        let mut jacobian = match self.jacobian.clone() {
+            Some(callback) => {
+                NativeJacobianAdapter::Analytic(AnalyticJacobianCallback::new(callback))
+            }
+            None => NativeJacobianAdapter::FiniteDifference(FiniteDifferenceJacobianCallback::new(
+                self.residual.clone(),
+                self.config.atol,
+                self.config.telemetry != InternalTelemetryMode::Off,
+            )),
+        };
+        let (solve_result, mut telemetry) =
+            try_solve_dense_with_callbacks_with_output_and_cancellation(
+                &self.config,
+                &mut residual,
+                &mut jacobian,
+                y0,
+                cancellation,
+            )
+            .map_err(|error| RadauCancellationError::Solver(error.into()))?;
+        if let NativeJacobianAdapter::FiniteDifference(callback) = &jacobian {
+            telemetry.counters.finite_difference_probes = callback.probes();
+        }
+        let telemetry = RadauTelemetryReport::from_internal(&telemetry);
+        match solve_result {
+            Ok((result, output)) => Ok(RadauSolution {
+                t: result.t,
+                y: result.y,
+                attempts: result.attempts,
+                accepted_steps: result.accepted_steps,
+                rejected_steps: result.rejected_steps,
+                output,
+                telemetry,
+            }),
+            Err(error) => Err(cancellation_error(error, telemetry)),
+        }
+    }
+
     /// Legacy alias for solving the same callback model from a supplied state.
     #[deprecated(note = "this is a fresh solve from y0, not continuation; use solve")]
     pub fn continue_with_initial_state(&mut self, y0: &[f64]) -> Result<RadauSolution, RadauError> {
@@ -1167,6 +1284,52 @@ impl RadauSolver {
                 crate::numerical::logging::solver_warn!("Radau solve failed: {error}");
                 Err(error)
             }
+        }
+    }
+
+    /// Solve with cooperative cancellation at accepted-step boundaries.
+    ///
+    /// A cancelled solve returns the last committed `(t, y)` and its telemetry
+    /// through [`RadauCancellationError::Cancelled`], never as a successful
+    /// `RadauSolution`.
+    pub fn try_solve_with_cancellation_token(
+        &mut self,
+        y0: &[f64],
+        parameters: &[f64],
+        cancellation: &CancellationToken,
+    ) -> Result<RadauSolution, RadauCancellationError> {
+        let _logging_scope = SolverLogGuard::enter(self.logging_level);
+        self.last_solve_telemetry = None;
+        if parameters.len() != self.parameter_count {
+            return Err(RadauCancellationError::Solver(RadauError {
+                kind: RadauErrorKind::Shape,
+                message: format!(
+                    "parameter length mismatch: expected {}, got {}",
+                    self.parameter_count,
+                    parameters.len()
+                ),
+            }));
+        }
+        let mut session = self.callbacks.session_with_telemetry(self.config.telemetry);
+        session.set_jacobian_policy(self.config.jacobian_source, self.config.atol);
+        session
+            .rebind_parameters(parameters)
+            .map_err(|error| RadauCancellationError::Solver(error.into()))?;
+        let solve_result = try_solve_symbolic_dense_with_output_and_cancellation(
+            &self.config,
+            &mut session,
+            y0,
+            Some(cancellation),
+        );
+        session.absorb_runtime_telemetry();
+        let telemetry = RadauTelemetryReport::from_internal_pair(
+            &self.preparation_telemetry,
+            &session.telemetry(),
+        );
+        self.last_solve_telemetry = Some(telemetry.clone());
+        match solve_result {
+            Ok((result, output)) => Ok(self.solution(result, output, telemetry)),
+            Err(error) => Err(cancellation_error(error, telemetry)),
         }
     }
 

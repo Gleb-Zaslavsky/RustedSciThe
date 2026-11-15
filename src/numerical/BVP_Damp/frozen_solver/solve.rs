@@ -245,6 +245,13 @@ impl NRBVP {
 
     /// Fallible internal Newton loop used by [`NRBVP::try_solver`].
     pub fn try_main_loop(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_main_loop_with_cancellation(None)
+    }
+
+    fn try_main_loop_with_cancellation(
+        &mut self,
+        cancellation: Option<&crate::numerical::cancellation::CancellationToken>,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         info!("solving system of equations with Newton-Raphson method! \n \n");
         let y = self.packed_initial_guess_node_major()?;
         self.y = Vectors_type_casting(&y, self.method.clone());
@@ -252,6 +259,13 @@ impl NRBVP {
         let mut i = 0;
 
         while i < self.max_iterations {
+            if cancellation
+                .is_some_and(crate::numerical::cancellation::CancellationToken::is_cancelled)
+            {
+                return Err(BvpBackendIntegrationError::Cancelled {
+                    iteration: i as usize,
+                });
+            }
             self.iteration_index = i + 1;
             self.telemetry_counters.record_iteration();
             let iteration_started = self.telemetry_counters.start_iteration_scope();
@@ -296,6 +310,21 @@ impl NRBVP {
     /// errors. Enabled logging must initialize its persistent file sink before
     /// numerical work begins.
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_solver_with_cancellation(None)
+    }
+
+    /// Cold solve with cancellation polling between complete Newton iterations.
+    pub fn try_solver_with_cancellation_token(
+        &mut self,
+        token: &crate::numerical::cancellation::CancellationToken,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_solver_with_cancellation(Some(token))
+    }
+
+    fn try_solver_with_cancellation(
+        &mut self,
+        cancellation: Option<&crate::numerical::cancellation::CancellationToken>,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         let log_level =
             self.logging_level
                 .unwrap_or_else(|| match self.telemetry_counters.logging_mode() {
@@ -314,7 +343,7 @@ impl NRBVP {
             self.custom_timer.symbolic_operations_tic();
             self.try_eq_generate()?;
             self.custom_timer.symbolic_operations_tac();
-            self.try_main_loop()
+            self.try_main_loop_with_cancellation(cancellation)
         })();
         self.custom_timer.finish();
         self.telemetry_counters.finish_solve(&res);
@@ -340,6 +369,21 @@ impl NRBVP {
     pub fn try_solver_prepared(
         &mut self,
     ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_solver_prepared_with_cancellation(None)
+    }
+
+    /// Reuse prepared callbacks while polling cancellation between iterations.
+    pub fn try_solver_prepared_with_cancellation_token(
+        &mut self,
+        token: &crate::numerical::cancellation::CancellationToken,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_solver_prepared_with_cancellation(Some(token))
+    }
+
+    fn try_solver_prepared_with_cancellation(
+        &mut self,
+        cancellation: Option<&crate::numerical::cancellation::CancellationToken>,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         let log_level =
             self.logging_level
                 .unwrap_or_else(|| match self.telemetry_counters.logging_mode() {
@@ -364,7 +408,7 @@ impl NRBVP {
         }
         self.telemetry_counters.begin_solve();
         self.custom_timer.start();
-        let result = self.try_main_loop();
+        let result = self.try_main_loop_with_cancellation(cancellation);
         self.custom_timer.finish();
         self.telemetry_counters.finish_solve(&result);
         self.telemetry_counters.record_termination(
@@ -376,6 +420,21 @@ impl NRBVP {
             },
         );
         result
+    }
+
+    /// Materialize the accepted partial state only after cancellation stops the loop.
+    pub fn cancelled_snapshot(
+        &self,
+        iteration: usize,
+    ) -> crate::numerical::BVP_Damp::telemetry::BvpDampCancelledSnapshot {
+        let statistics = self.get_statistics();
+        crate::numerical::BVP_Damp::telemetry::BvpDampCancelledSnapshot {
+            route: crate::numerical::BVP_Damp::telemetry::BvpDampCancellationRoute::Frozen,
+            iteration,
+            mesh: self.x_mesh.iter().copied().collect(),
+            packed_state: self.y.to_DVectorType().as_slice().to_vec(),
+            telemetry: statistics.telemetry,
+        }
     }
     /// Compatibility-only wrapper over [`NRBVP::try_solver`].
     ///

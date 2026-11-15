@@ -3,8 +3,8 @@
 //! The fixture is a six-state hot-branch BVP seed. Its public input is a
 //! state-major profile with each state's constrained endpoint omitted.
 
-use crate::numerical::BVP_Damp::telemetry::{BvpLoggingConfig, BvpLoggingMode};
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{DampedSolverOptions, SolverParams};
+use crate::numerical::BVP_Damp::telemetry::{BvpLoggingConfig, BvpLoggingMode};
 use crate::numerical::BVP_api::{
     BvpBoundaryCondition, BvpBoundarySide, BvpProblem, BvpSolver, BvpSolverConfig,
 };

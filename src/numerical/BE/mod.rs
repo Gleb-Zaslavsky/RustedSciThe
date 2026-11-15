@@ -1,6 +1,7 @@
 use core::fmt::Display;
 
 use crate::Utils::plots::plots;
+use crate::numerical::CancellationToken;
 /// Backward Euler method for solving systems of ordinary differential equation
 /// Newton-Raphson calculation on each step of the method is made by using the analytic jacobian
 pub mod NR_for_Euler;
@@ -11,8 +12,9 @@ pub mod parameter_loop;
 pub mod prelude {
     pub use super::NR_for_Euler::{NRE, NreError, NreSolverOptions, NreStepMode};
     pub use super::{
-        BE, BeContinuationStatistics, BeDetailedStatistics, BeError, BeSolverOptions, BeStatus,
-        BeSymbolicAssemblyBackend, BeTelemetryMode, DEFAULT_BE_MAX_STEPS,
+        BE, BeCancelledSnapshot, BeContinuationStatistics, BeDetailedStatistics, BeError,
+        BeSolverOptions, BeStatus, BeSymbolicAssemblyBackend, BeTelemetryMode,
+        DEFAULT_BE_MAX_STEPS,
     };
     pub use crate::numerical::logging::SolverLogLevel;
     pub use crate::symbolic::symbolic_engine::Expr;
@@ -68,16 +70,13 @@ impl BeSymbolicAssemblyBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BeTelemetryMode {
     /// Do not install instrumentation or collect counters.
+    #[default]
     Off,
     /// Collect work counters without reading the clock.
     Counters,
     /// Collect elapsed wall-clock stage timings without discrete counters.
     Timings,
     /// Collect both work counters and wall-clock stage timings.
-    ///
-    /// This remains the default to preserve the solver's former combined
-    /// telemetry behavior while `Timings` now has strict duration-only semantics.
-    #[default]
     Detailed,
 }
 
@@ -111,6 +110,8 @@ pub enum BeStatus {
     StoppedByCondition,
     /// Integration failed.
     Failed,
+    /// Integration stopped at a safe boundary after cancellation.
+    Cancelled,
 }
 
 impl BeStatus {
@@ -121,6 +122,7 @@ impl BeStatus {
             Self::Finished => "finished",
             Self::StoppedByCondition => "stopped_by_condition",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -133,6 +135,25 @@ pub enum BeError {
     Newton(NreError),
     StepUnderflow { time: f64, step: f64 },
     StepLimit { max_steps: usize },
+    Cancelled { snapshot: Box<BeCancelledSnapshot> },
+}
+
+/// Last accepted Backward Euler state retained on cooperative cancellation.
+#[derive(Debug, Clone)]
+pub struct BeCancelledSnapshot {
+    pub current_time: f64,
+    pub current_state: Vec<f64>,
+    pub completed_steps: usize,
+    /// Callback work is present only when counter telemetry was requested.
+    pub callback_statistics: Option<IvpBackendStatistics>,
+    /// Callback timings are present only when timing telemetry was requested.
+    pub callback_timings: Option<IvpBackendStatistics>,
+    /// BE/NRE counters are present only when counter telemetry was requested.
+    pub detailed_statistics: Option<BeDetailedStatistics>,
+    /// BE/NRE timings are present only when timing telemetry was requested.
+    pub detailed_timings: Option<BeDetailedStatistics>,
+    /// Present only when timing telemetry was requested.
+    pub elapsed: Option<std::time::Duration>,
 }
 
 /// Telemetry classification for failures returned by BE operations.
@@ -144,6 +165,7 @@ pub enum BeFailureKind {
     Newton,
     StepUnderflow,
     StepLimit,
+    Cancelled,
 }
 
 impl BeError {
@@ -155,6 +177,7 @@ impl BeError {
             Self::Newton(_) => BeFailureKind::Newton,
             Self::StepUnderflow { .. } => BeFailureKind::StepUnderflow,
             Self::StepLimit { .. } => BeFailureKind::StepLimit,
+            Self::Cancelled { .. } => BeFailureKind::Cancelled,
         }
     }
 }
@@ -212,6 +235,7 @@ pub struct BeDetailedStatistics {
     pub newton_failures: usize,
     pub step_underflow_failures: usize,
     pub step_limit_failures: usize,
+    pub cancellation_failures: usize,
     /// RHS evaluations performed only to construct a finite-difference Jacobian.
     pub fd_rhs_evaluations: usize,
     /// Newton matrix factorizations attempted.
@@ -262,6 +286,7 @@ impl BeDetailedStatistics {
             BeFailureKind::Newton => &mut self.newton_failures,
             BeFailureKind::StepUnderflow => &mut self.step_underflow_failures,
             BeFailureKind::StepLimit => &mut self.step_limit_failures,
+            BeFailureKind::Cancelled => &mut self.cancellation_failures,
         };
         *count = count.saturating_add(1);
     }
@@ -338,6 +363,11 @@ impl std::fmt::Display for BeError {
                     "Backward Euler exceeded the maximum of {max_steps} steps"
                 )
             }
+            Self::Cancelled { snapshot } => write!(
+                f,
+                "Backward Euler solve cancelled at t={} after {} accepted step(s)",
+                snapshot.current_time, snapshot.completed_steps
+            ),
         }
     }
 }
@@ -425,7 +455,7 @@ impl BeSolverOptions {
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
             symbolic_assembly_backend: BeSymbolicAssemblyBackend::default(),
             max_steps: DEFAULT_BE_MAX_STEPS,
-            telemetry_mode: BeTelemetryMode::Detailed,
+            telemetry_mode: BeTelemetryMode::Off,
             logging_level: SolverLogLevel::Off,
         }
     }
@@ -601,7 +631,7 @@ impl BE {
             last_error: None,
             continuation_statistics: BeContinuationStatistics::default(),
             max_steps: DEFAULT_BE_MAX_STEPS,
-            telemetry_mode: BeTelemetryMode::Detailed,
+            telemetry_mode: BeTelemetryMode::Off,
             logging_level: SolverLogLevel::Off,
             telemetry_locked: false,
         }
@@ -1269,22 +1299,37 @@ impl BE {
         Ok(())
     }
 
-    fn run_main_loop(&mut self) {
+    fn run_main_loop(&mut self, cancellation: Option<&CancellationToken>) {
         self.telemetry_locked = true;
         match self.telemetry_mode {
-            BeTelemetryMode::Off => self.main_loop_impl::<false, false>(),
-            BeTelemetryMode::Counters => self.main_loop_impl::<true, false>(),
-            BeTelemetryMode::Timings => self.main_loop_impl::<false, true>(),
-            BeTelemetryMode::Detailed => self.main_loop_impl::<true, true>(),
+            BeTelemetryMode::Off => self.main_loop_impl::<false, false>(cancellation),
+            BeTelemetryMode::Counters => self.main_loop_impl::<true, false>(cancellation),
+            BeTelemetryMode::Timings => self.main_loop_impl::<false, true>(cancellation),
+            BeTelemetryMode::Detailed => self.main_loop_impl::<true, true>(cancellation),
         }
     }
 
     /// Runs the integration loop using callbacks/backend already installed on BE.
     /// Prefer [`BE::try_solve`] when preparation and integration should be combined.
     pub fn try_main_loop(&mut self) -> Result<(), BeError> {
+        self.try_main_loop_with_optional_cancellation(None)
+    }
+
+    /// Runs a prepared integration with opt-in cancellation between accepted steps.
+    pub fn try_main_loop_with_cancellation_token(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> Result<(), BeError> {
+        self.try_main_loop_with_optional_cancellation(Some(&cancellation))
+    }
+
+    fn try_main_loop_with_optional_cancellation(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), BeError> {
         self.last_error = None;
         self.install_native_callbacks();
-        self.run_main_loop();
+        self.run_main_loop(cancellation);
         let result = if let Some(error) = self.last_error.take() {
             Err(error)
         } else if matches!(
@@ -1314,7 +1359,10 @@ impl BE {
         }
     }
 
-    fn main_loop_impl<const COUNTERS: bool, const TIMINGS: bool>(&mut self) {
+    fn main_loop_impl<const COUNTERS: bool, const TIMINGS: bool>(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) {
         let start = if TIMINGS { Some(Instant::now()) } else { None };
         // Analogue of https://github.com/scipy/scipy/blob/main/scipy/integrate/_ivp/ivp.py
 
@@ -1325,6 +1373,41 @@ impl BE {
         let mut t: Vec<f64> = vec![self.t];
         let mut step_count = 0usize;
         while integr_status.is_none() {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                let error = BeError::Cancelled {
+                    snapshot: Box::new(BeCancelledSnapshot {
+                        current_time: self.t,
+                        current_state: self.y.as_slice().to_vec(),
+                        completed_steps: step_count,
+                        callback_statistics: self
+                            .telemetry_mode
+                            .collects_counters()
+                            .then(|| self.get_statistics()),
+                        detailed_statistics: self
+                            .telemetry_mode
+                            .collects_counters()
+                            .then(|| self.detailed_statistics()),
+                        callback_timings: self
+                            .telemetry_mode
+                            .collects_timings()
+                            .then(|| self.get_statistics()),
+                        detailed_timings: self
+                            .telemetry_mode
+                            .collects_timings()
+                            .then(|| self.detailed_statistics()),
+                        elapsed: if TIMINGS {
+                            start.map(|started| started.elapsed())
+                        } else {
+                            None
+                        },
+                    }),
+                };
+                self.status = BeStatus::Cancelled;
+                self.message = Some(error.to_string());
+                self.last_error = Some(error);
+                integr_status = Some(-1);
+                break;
+            }
             if step_count >= self.max_steps {
                 self.status = BeStatus::Failed;
                 let error = BeError::StepLimit {
@@ -1396,6 +1479,22 @@ impl BE {
     } //
 
     pub fn try_solve(&mut self) -> Result<(), BeError> {
+        self.try_solve_with_optional_cancellation(None)
+    }
+
+    /// Starts a fresh solve with cooperative cancellation at BE timestep
+    /// boundaries. The active Newton solve, if any, completes before polling.
+    pub fn try_solve_with_cancellation_token(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> Result<(), BeError> {
+        self.try_solve_with_optional_cancellation(Some(&cancellation))
+    }
+
+    fn try_solve_with_optional_cancellation(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), BeError> {
         let _logging_scope = SolverLogGuard::enter(self.logging_level);
         self.t = self.t0;
         self.y = self.y0.clone();
@@ -1407,7 +1506,44 @@ impl BE {
         self.last_error = None;
         self.newton.set_initial_guess(self.y0.clone());
 
-        let result = self.run_current_interval();
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            let error = BeError::Cancelled {
+                snapshot: Box::new(BeCancelledSnapshot {
+                    current_time: self.t,
+                    current_state: self.y.as_slice().to_vec(),
+                    completed_steps: 0,
+                    callback_statistics: self
+                        .telemetry_mode
+                        .collects_counters()
+                        .then(|| self.get_statistics()),
+                    detailed_statistics: self
+                        .telemetry_mode
+                        .collects_counters()
+                        .then(|| self.detailed_statistics()),
+                    callback_timings: self
+                        .telemetry_mode
+                        .collects_timings()
+                        .then(|| self.get_statistics()),
+                    detailed_timings: self
+                        .telemetry_mode
+                        .collects_timings()
+                        .then(|| self.detailed_statistics()),
+                    elapsed: self
+                        .telemetry_mode
+                        .collects_timings()
+                        .then_some(std::time::Duration::ZERO),
+                }),
+            };
+            self.status = BeStatus::Cancelled;
+            self.message = Some(error.to_string());
+            self.last_error = Some(error);
+            return Err(self
+                .last_error
+                .take()
+                .expect("cancellation error was installed"));
+        }
+
+        let result = self.run_current_interval_with_cancellation(cancellation);
         if let Err(error) = &result {
             if self.telemetry_mode.collects_counters() {
                 self.newton.record_failure(error.failure_kind());
@@ -1586,6 +1722,13 @@ impl BE {
     }
 
     fn run_current_interval(&mut self) -> Result<(), BeError> {
+        self.run_current_interval_with_cancellation(None)
+    }
+
+    fn run_current_interval_with_cancellation(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), BeError> {
         let _logging_scope = SolverLogGuard::enter(self.logging_level);
         self.telemetry_locked = true;
         if self.t_bound == self.t {
@@ -1595,6 +1738,42 @@ impl BE {
         if self.check_stop_condition(&self.y) {
             self.status = BeStatus::StoppedByCondition;
             return Ok(());
+        }
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            let error = BeError::Cancelled {
+                snapshot: Box::new(BeCancelledSnapshot {
+                    current_time: self.t,
+                    current_state: self.y.as_slice().to_vec(),
+                    completed_steps: 0,
+                    callback_statistics: self
+                        .telemetry_mode
+                        .collects_counters()
+                        .then(|| self.get_statistics()),
+                    detailed_statistics: self
+                        .telemetry_mode
+                        .collects_counters()
+                        .then(|| self.detailed_statistics()),
+                    callback_timings: self
+                        .telemetry_mode
+                        .collects_timings()
+                        .then(|| self.get_statistics()),
+                    detailed_timings: self
+                        .telemetry_mode
+                        .collects_timings()
+                        .then(|| self.detailed_statistics()),
+                    elapsed: self
+                        .telemetry_mode
+                        .collects_timings()
+                        .then_some(std::time::Duration::ZERO),
+                }),
+            };
+            self.status = BeStatus::Cancelled;
+            self.message = Some(error.to_string());
+            self.last_error = Some(error);
+            return Err(self
+                .last_error
+                .take()
+                .expect("cancellation error was installed"));
         }
 
         self.install_native_callbacks();
@@ -1640,7 +1819,7 @@ impl BE {
                 }
             }
         }
-        self.run_main_loop();
+        self.run_main_loop(cancellation);
         if let Some(error) = self.last_error.take() {
             return Err(error);
         }

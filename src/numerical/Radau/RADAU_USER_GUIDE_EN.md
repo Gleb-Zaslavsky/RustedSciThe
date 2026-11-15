@@ -482,3 +482,17 @@ construction. The sample is also limited to three workloads on one machine;
 other equations, dimensions, layouts, and runtime environments can produce
 different results. See the archived report
 `test_reports/Radau_SciPy_Parity/release/numerical__Radau__tests__scipy_parity__radau_scipy_release_core_timing_benchmark_story.md`.
+
+## Cooperative Cancellation
+
+Prepared symbolic solvers expose
+`try_solve_with_cancellation_token(y0, parameters, token)`; native callback
+solvers expose `solve_with_cancellation_token(y0, token)`. Cancellation is
+checked before per-solve numerical workspace setup and between complete
+adaptive-step attempts. An active Newton/error-control trial is not interrupted.
+Cancellation returns a typed `RadauCancellationError::Cancelled` containing
+the last committed time/state, step counters, and telemetry collected under
+the configured mode; it never returns the partial state as a successful
+solution. `StiffAPI` forwards the same contract for Radau. Task-JSON IVP
+cancellation remains unsupported until the IVP task runner has token-aware
+execution.

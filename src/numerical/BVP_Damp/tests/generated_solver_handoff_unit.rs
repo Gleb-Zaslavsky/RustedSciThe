@@ -8,6 +8,7 @@ use super::{
     BandedGeneratedBackendMode, DampedSolverBuildRequest, FrozenSolverBuildRequest,
     GeneratedBackendConfig, SparseGeneratedBackendMode,
 };
+use crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode;
 use crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode;
 use crate::symbolic::bvp::telemetry::{BvpLambdifyExecutionPolicy, BvpLambdifyTelemetryMode};
 use crate::symbolic::codegen::CodegenIR::AtomOptimizationProfile;
@@ -51,12 +52,43 @@ fn expr_legacy_preparation_optimizations_are_production_defaults() {
     let defaults = GeneratedBackendConfig::default();
     assert!(defaults.expr_indexed_lambdify_enabled);
     assert!(defaults.expr_dependency_columns_enabled);
+    assert_eq!(defaults.bvp_telemetry_mode, BvpTelemetryMode::Off);
 
     let legacy_comparison = GeneratedBackendConfig::sparse_defaults()
         .with_expr_indexed_lambdify(false)
         .with_expr_dependency_columns(false);
     assert!(!legacy_comparison.expr_indexed_lambdify_enabled);
     assert!(!legacy_comparison.expr_dependency_columns_enabled);
+}
+
+#[test]
+fn damped_and_frozen_telemetry_defaults_are_off_across_option_presets() {
+    use crate::numerical::BVP_Damp::NR_Damp_solver_damped::DampedSolverOptions;
+    use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::FrozenSolverOptions;
+
+    assert_eq!(BvpTelemetryMode::default(), BvpTelemetryMode::Off);
+    for mode in [
+        DampedSolverOptions::default()
+            .generated_backend_config
+            .bvp_telemetry_mode,
+        DampedSolverOptions::sparse_damped()
+            .generated_backend_config
+            .bvp_telemetry_mode,
+        DampedSolverOptions::banded_damped()
+            .generated_backend_config
+            .bvp_telemetry_mode,
+        FrozenSolverOptions::default()
+            .generated_backend_config
+            .bvp_telemetry_mode,
+        FrozenSolverOptions::sparse_frozen()
+            .generated_backend_config
+            .bvp_telemetry_mode,
+        FrozenSolverOptions::banded_frozen()
+            .generated_backend_config
+            .bvp_telemetry_mode,
+    ] {
+        assert_eq!(mode, BvpTelemetryMode::Off);
+    }
 }
 
 fn real_bvp_inputs() -> (
@@ -309,6 +341,7 @@ fn public_default_selects_atomview_and_tcc_aot() {
     );
     assert_eq!(config.aot_codegen_backend, AotCodegenBackend::C);
     assert_eq!(config.aot_c_compiler.as_deref(), Some("tcc"));
+    assert_eq!(config.bvp_telemetry_mode, BvpTelemetryMode::Off);
     assert_eq!(
         config.aot_build_policy,
         super::AotBuildPolicy::UseIfAvailable

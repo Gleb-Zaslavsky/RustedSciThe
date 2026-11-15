@@ -182,7 +182,7 @@ pub struct PyUniversalFittingSolution {
 }
 
 impl PyUniversalFittingSolution {
-    fn from_native(
+    pub(crate) fn from_native(
         method: Method,
         telemetry_mode: SolverTelemetryMode,
         result: UniversalFittingResult,

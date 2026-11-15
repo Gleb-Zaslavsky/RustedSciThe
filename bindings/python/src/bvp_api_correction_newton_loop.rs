@@ -5,13 +5,18 @@ use super::{PyBvpApiSolution, map_api_error};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use rustedscithe_core::numerical::BVP_CorrectionNewton::{
-    CorrectionNewtonParameterLoopOutcome, CorrectionNewtonParameterLoopReport, CorrectionNewtonTelemetrySnapshot,
+    CorrectionNewtonParameterLoopOutcome, CorrectionNewtonParameterLoopReport,
+    CorrectionNewtonTelemetrySnapshot,
 };
 use rustedscithe_core::numerical::BVP_api::BvpApiError;
 use std::collections::HashMap;
 
 /// One detached attempt from a CorrectionNewton parameter sweep.
-#[pyclass(name = "BvpCorrectionNewtonParameterLoopPoint", module = "rustedscithe", unsendable)]
+#[pyclass(
+    name = "BvpCorrectionNewtonParameterLoopPoint",
+    module = "rustedscithe",
+    unsendable
+)]
 pub struct BvpCorrectionNewtonParameterLoopPoint {
     /// Zero-based position in the requested parameter sequence.
     #[pyo3(get)]
@@ -69,7 +74,11 @@ impl BvpCorrectionNewtonParameterLoopPoint {
 }
 
 /// Ordered CorrectionNewton parameter-loop results and optional stop failure.
-#[pyclass(name = "BvpCorrectionNewtonParameterLoopReport", module = "rustedscithe", unsendable)]
+#[pyclass(
+    name = "BvpCorrectionNewtonParameterLoopReport",
+    module = "rustedscithe",
+    unsendable
+)]
 pub struct BvpCorrectionNewtonParameterLoopReport {
     points: Vec<Py<BvpCorrectionNewtonParameterLoopPoint>>,
     stop_error: Option<Py<PyAny>>,
@@ -80,7 +89,10 @@ impl BvpCorrectionNewtonParameterLoopReport {
     /// Return detached point records in input order.
     #[getter]
     fn points(&self, py: Python<'_>) -> Vec<Py<BvpCorrectionNewtonParameterLoopPoint>> {
-        self.points.iter().map(|point| point.clone_ref(py)).collect()
+        self.points
+            .iter()
+            .map(|point| point.clone_ref(py))
+            .collect()
     }
 
     /// Return an error that stopped the loop before all points were attempted.
@@ -140,12 +152,20 @@ pub(super) fn from_native(
     let mut points = Vec::with_capacity(report.points.len());
     for point in report.points {
         let (solution, error, diagnostic) = match point.outcome {
-            CorrectionNewtonParameterLoopOutcome::Converged { mesh, values, report } => (
+            CorrectionNewtonParameterLoopOutcome::Converged {
+                mesh,
+                values,
+                report,
+            } => (
                 Some(PyBvpApiSolution {
                     route: "correction_newton".into(),
                     mesh,
                     values: (0..values.nrows())
-                        .map(|node| (0..values.ncols()).map(|state| values[(node, state)]).collect())
+                        .map(|node| {
+                            (0..values.ncols())
+                                .map(|state| values[(node, state)])
+                                .collect()
+                        })
                         .collect(),
                     sci_details: None,
                 }),
@@ -156,26 +176,46 @@ pub(super) fn from_native(
                 let diagnostic = error.partial_report().cloned();
                 let exception = map_api_error(BvpApiError::CorrectionNewton(error));
                 exception.value(py).setattr("operation", "parameter_loop")?;
-                (None, Some(exception.value(py).clone().unbind().into_any()), diagnostic)
+                (
+                    None,
+                    Some(exception.value(py).clone().unbind().into_any()),
+                    diagnostic,
+                )
             }
         };
-        let (counters, timings_ms) = telemetry_maps(
-            diagnostic.as_ref().map(|report| &report.telemetry), mode,
-        );
-        points.push(Py::new(py, BvpCorrectionNewtonParameterLoopPoint {
-            index: point.index,
-            parameters: point.parameters,
-            guess_source_index: point.guess_source_index,
-            status: if solution.is_some() { "converged" } else { "failed" }.into(),
-            telemetry_mode: mode.into(),
-            iterations: diagnostic.as_ref().map(|report| report.iterations),
-            correction_norm: diagnostic.as_ref().and_then(|report| report.correction_norm),
-            residual_norm: diagnostic.as_ref().and_then(|report| report.residual_norm),
-            solution, error, counters, timings_ms,
-        })?);
+        let (counters, timings_ms) =
+            telemetry_maps(diagnostic.as_ref().map(|report| &report.telemetry), mode);
+        points.push(Py::new(
+            py,
+            BvpCorrectionNewtonParameterLoopPoint {
+                index: point.index,
+                parameters: point.parameters,
+                guess_source_index: point.guess_source_index,
+                status: if solution.is_some() {
+                    "converged"
+                } else {
+                    "failed"
+                }
+                .into(),
+                telemetry_mode: mode.into(),
+                iterations: diagnostic.as_ref().map(|report| report.iterations),
+                correction_norm: diagnostic
+                    .as_ref()
+                    .and_then(|report| report.correction_norm),
+                residual_norm: diagnostic.as_ref().and_then(|report| report.residual_norm),
+                solution,
+                error,
+                counters,
+                timings_ms,
+            },
+        )?);
     }
     let stop_error = report.stop_error.map(|error| {
-        map_api_error(BvpApiError::CorrectionNewton(error)).value(py).clone().unbind().into_any()
+        map_api_error(BvpApiError::CorrectionNewton(error))
+            .value(py)
+            .clone()
+            .unbind()
+            .into_any()
     });
     Ok(BvpCorrectionNewtonParameterLoopReport { points, stop_error })
 }

@@ -8,6 +8,9 @@
 //! are needed. The retired `ODE_api` and `NR_for_ODE` modules are intentionally
 //! not kept as compatibility shims.
 pub mod BDF;
+/// Shared opt-in cancellation signal for safe solver checkpoints.
+pub mod cancellation;
+pub use cancellation::CancellationToken;
 /// Shared opt-in logging policy and timestamped file sink for numerical solvers.
 pub mod logging;
 pub use logging::{

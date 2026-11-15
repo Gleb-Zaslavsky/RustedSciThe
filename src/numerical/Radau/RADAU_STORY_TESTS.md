@@ -924,3 +924,12 @@ out). This is correctness/output-policy evidence, not a performance result.
 The captured summary is the
 [`IVP parameter-loop Release report`](../../../test_reports/IVP_parameter_loop_release/20261028T093912725Z-12916/summary.md);
 the full test output is in `technical/Radau.log`.
+
+### Cooperative Cancellation Contract
+
+Debug regressions cover native pre-cancellation (no callback calls, initial
+state snapshot), cancellation requested from inside a callback (the active
+adaptive attempt completes and only its committed state is reported), and
+snapshot forwarding through `StiffAPI`. The snapshot includes attempt/accepted/
+rejected counts and mode-selected telemetry. IVP task-JSON cancellation remains
+explicitly unsupported at this stage.

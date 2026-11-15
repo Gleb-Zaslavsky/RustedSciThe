@@ -25,9 +25,9 @@ use rustedscithe_core::numerical::BVP_sci::new::{
 
 use crate::contract::SolverOptions;
 use crate::errors::{
-    annotate_native, catch_panic, native_variant, CallbackError, CallbackFailureState,
-    ExhaustionError, InvalidConfigurationError, PreparationError, SolverError, SolverPanicState,
-    UnsupportedOptionError,
+    CallbackError, CallbackFailureState, ExhaustionError, InvalidConfigurationError,
+    PreparationError, SolverError, SolverPanicState, UnsupportedOptionError, annotate_native,
+    catch_panic, native_variant,
 };
 use crate::expr::PyExpr;
 use crate::lambdify::LambdifiedExpr;

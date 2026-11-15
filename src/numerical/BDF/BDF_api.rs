@@ -147,6 +147,7 @@ use crate::symbolic::symbolic_ivp_generated::{
 extern crate nalgebra as na;
 use crate::Utils::plots::plots_ref;
 use crate::numerical::BDF::common::NumberOrVec;
+use crate::numerical::CancellationToken;
 use na::{DMatrix, DVector};
 
 use csv::Writer;
@@ -292,6 +293,7 @@ pub enum BdfStatus {
     Running,
     Finished,
     Failed,
+    Cancelled,
     StoppedByCondition,
 }
 
@@ -302,6 +304,7 @@ pub enum BdfSolveError {
     Configuration(BdfConfigurationError),
     Step(BdfStepError),
     MaxStepsExceeded { max_steps: usize },
+    Cancelled { snapshot: Box<BdfCancelledSnapshot> },
     InvalidMaxSteps,
     InvalidContinuationBound,
     ContinuationRequiresPreparedBackend,
@@ -316,6 +319,11 @@ impl std::fmt::Display for BdfSolveError {
             Self::MaxStepsExceeded { max_steps } => {
                 write!(f, "BDF exceeded the configured limit of {max_steps} steps")
             }
+            Self::Cancelled { snapshot } => write!(
+                f,
+                "BDF solve cancelled at t={} after {} accepted step(s)",
+                snapshot.current_time, snapshot.accepted_steps
+            ),
             Self::InvalidMaxSteps => f.write_str("BDF max_steps must be greater than zero"),
             Self::InvalidContinuationBound => {
                 f.write_str("continuation bound must be finite and differ from the current time")
@@ -334,11 +342,26 @@ impl std::error::Error for BdfSolveError {
             Self::Configuration(error) => Some(error),
             Self::Step(error) => Some(error),
             Self::MaxStepsExceeded { .. }
+            | Self::Cancelled { .. }
             | Self::InvalidMaxSteps
             | Self::InvalidContinuationBound
             | Self::ContinuationRequiresPreparedBackend => None,
         }
     }
+}
+
+/// Last accepted BDF state and telemetry available when cancellation is observed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BdfCancelledSnapshot {
+    pub current_time: f64,
+    pub current_state: Vec<f64>,
+    pub accepted_steps: usize,
+    /// Work counters are absent when counter telemetry was not requested.
+    pub rhs_evaluations: Option<usize>,
+    pub jacobian_evaluations: Option<usize>,
+    pub rejected_step_attempts: Option<usize>,
+    /// Elapsed solve time is absent when timing telemetry was not requested.
+    pub elapsed: Option<std::time::Duration>,
 }
 
 impl BdfStatus {
@@ -347,6 +370,7 @@ impl BdfStatus {
             Self::Running => "running",
             Self::Finished => "finished",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
             Self::StoppedByCondition => "stopped_by_condition",
         }
     }
@@ -2049,7 +2073,42 @@ impl ODEsolver {
     /// Executes a complete solve and returns a typed failure while preserving
     /// the initial state and every accepted point in `get_result_ref()`.
     pub fn try_solve(&mut self) -> Result<(), BdfSolveError> {
+        self.try_solve_with_optional_cancellation(None)
+    }
+
+    /// Executes BDF with opt-in cooperative cancellation between accepted steps.
+    ///
+    /// Cancellation is checked before backend preparation and at step
+    /// boundaries. An in-progress BDF step is allowed to finish; on cancellation
+    /// the last accepted state and partial trajectory remain available.
+    pub fn try_solve_with_cancellation_token(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> Result<(), BdfSolveError> {
+        self.try_solve_with_optional_cancellation(Some(&cancellation))
+    }
+
+    fn try_solve_with_optional_cancellation(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), BdfSolveError> {
         let _logging_scope = crate::numerical::logging::SolverLogGuard::enter(self.logging_level);
+        if self.backend_prepared && self.integration_is_finished() {
+            return Ok(());
+        }
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            let elapsed = self
+                .telemetry_mode
+                .collects_timings()
+                .then_some(std::time::Duration::ZERO);
+            let snapshot = self.cancelled_snapshot(elapsed);
+            self.publish_single_state_result(snapshot.current_time, &snapshot.current_state);
+            self.status = BdfStatus::Cancelled;
+            self.message = Some("BDF solve cancelled before backend preparation".to_string());
+            return Err(BdfSolveError::Cancelled {
+                snapshot: Box::new(snapshot),
+            });
+        }
         if self.max_steps == 0 {
             return Err(BdfSolveError::InvalidMaxSteps);
         }
@@ -2063,7 +2122,7 @@ impl ODEsolver {
                 self.try_generate().map_err(BdfSolveError::Backend)?;
             }
         }
-        self.try_main_loop()
+        self.try_main_loop_with_cancellation(cancellation)
     }
 
     fn validate_callback_options(&self) -> Result<(), BdfConfigurationError> {
@@ -2095,8 +2154,18 @@ impl ODEsolver {
     }
 
     fn try_main_loop(&mut self) -> Result<(), BdfSolveError> {
+        self.try_main_loop_with_cancellation(None)
+    }
+
+    fn try_main_loop_with_cancellation(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), BdfSolveError> {
         if self.integration_is_finished() {
             return Ok(());
+        }
+        if self.status == BdfStatus::Cancelled {
+            self.status = BdfStatus::Running;
         }
 
         let solve_start = self.telemetry_mode.collects_timings().then(Instant::now);
@@ -2117,6 +2186,15 @@ impl ODEsolver {
         let mut failure = None;
 
         while !self.integration_is_finished() {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                self.status = BdfStatus::Cancelled;
+                let elapsed = solve_start.map(|start| start.elapsed());
+                failure = Some(BdfSolveError::Cancelled {
+                    snapshot: Box::new(self.cancelled_snapshot(elapsed)),
+                });
+                self.message = failure.as_ref().map(ToString::to_string);
+                break;
+            }
             if step_calls >= self.max_steps {
                 self.status = BdfStatus::Failed;
                 let error = BdfSolveError::MaxStepsExceeded {
@@ -2281,6 +2359,64 @@ impl ODEsolver {
     fn append_current_state(&self, t: &mut Vec<f64>, y: &mut Vec<DVector<f64>>) {
         t.push(self.Solver_instance.t);
         y.push(self.Solver_instance.y.clone());
+    }
+
+    fn cancelled_snapshot(&self, elapsed: Option<std::time::Duration>) -> BdfCancelledSnapshot {
+        let (current_time, current_state, counters) = if self.backend_prepared {
+            (
+                self.Solver_instance.t,
+                self.Solver_instance.y.as_slice().to_vec(),
+                self.Solver_instance.operation_counters(),
+            )
+        } else {
+            (
+                self.t0,
+                self.y0.as_slice().to_vec(),
+                BdfOperationCounters::default(),
+            )
+        };
+        let collect_counters = self.telemetry_mode.collects_counters();
+        let delta = |current: usize, previous: usize| current.saturating_sub(previous);
+        BdfCancelledSnapshot {
+            current_time,
+            current_state,
+            accepted_steps: if self.backend_prepared {
+                delta(
+                    counters.accepted_steps,
+                    self.reported_bdf_counters.accepted_steps,
+                )
+            } else {
+                0
+            },
+            rhs_evaluations: collect_counters.then(|| {
+                delta(
+                    counters.rhs_evaluations,
+                    self.reported_bdf_counters.rhs_evaluations,
+                )
+            }),
+            jacobian_evaluations: collect_counters.then(|| {
+                delta(
+                    counters.jacobian_evaluations,
+                    self.reported_bdf_counters.jacobian_evaluations,
+                )
+            }),
+            rejected_step_attempts: collect_counters.then(|| {
+                delta(
+                    counters.rejected_step_attempts,
+                    self.reported_bdf_counters.rejected_step_attempts,
+                )
+            }),
+            elapsed: self
+                .telemetry_mode
+                .collects_timings()
+                .then_some(elapsed)
+                .flatten(),
+        }
+    }
+
+    fn publish_single_state_result(&mut self, time: f64, state: &[f64]) {
+        self.t_result = DVector::from_element(1, time);
+        self.y_result = DMatrix::from_row_slice(1, state.len(), state);
     }
 
     fn integration_is_finished(&self) -> bool {
@@ -2457,6 +2593,105 @@ mod tests {
             solver.current_state()[0],
             trajectory[(trajectory.nrows() - 1, 0)]
         );
+    }
+
+    #[test]
+    fn pre_cancelled_bdf_skips_callbacks_and_returns_initial_state_snapshot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let options = BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.1,
+            1e-6,
+            1e-8,
+            None,
+            false,
+            None,
+        )
+        .with_telemetry_mode(BdfTelemetryMode::Counters);
+        let mut solver = ODEsolver::new_with_options(options);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        solver.set_native_ode_callbacks_with_jacobian_source(
+            move |_, y| {
+                callback_calls.fetch_add(1, Ordering::SeqCst);
+                -y
+            },
+            BdfNativeJacobianSource::Constant(DMatrix::from_element(1, 1, -1.0)),
+        );
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let error = solver
+            .try_solve_with_cancellation_token(token)
+            .expect_err("pre-cancelled solve must stop before callback work");
+        let BdfSolveError::Cancelled { snapshot } = error else {
+            panic!("expected typed cancellation");
+        };
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(snapshot.current_time, 0.0);
+        assert_eq!(snapshot.current_state, vec![1.0]);
+        assert_eq!(snapshot.accepted_steps, 0);
+        assert_eq!(snapshot.rhs_evaluations, Some(0));
+        assert_eq!(snapshot.jacobian_evaluations, Some(0));
+        assert_eq!(snapshot.elapsed, None);
+        assert_eq!(solver.status_kind(), BdfStatus::Cancelled);
+        let (times, states) = solver.get_result_ref();
+        assert_eq!(times.as_slice(), &[0.0]);
+        assert_eq!(states.shape(), (1, 1));
+        assert_eq!(states[(0, 0)], 1.0);
+    }
+
+    #[test]
+    fn bdf_cancellation_after_rhs_work_preserves_last_accepted_step_and_timing() {
+        let token = CancellationToken::new();
+        let callback_token = token.clone();
+        let options = BdfSolverOptions::for_bdf(
+            vec![Expr::parse_expression("-y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            0.0,
+            DVector::from_vec(vec![1.0]),
+            1.0,
+            0.1,
+            1e-3,
+            1e-6,
+            None,
+            false,
+            Some(0.05),
+        )
+        .with_telemetry_mode(BdfTelemetryMode::Detailed);
+        let mut solver = ODEsolver::new_with_options(options);
+        solver.set_native_ode_callbacks_with_jacobian_source(
+            move |t, y| {
+                if t > 0.0 {
+                    callback_token.cancel();
+                }
+                -y
+            },
+            BdfNativeJacobianSource::Constant(DMatrix::from_element(1, 1, -1.0)),
+        );
+
+        let error = solver
+            .try_solve_with_cancellation_token(token)
+            .expect_err("cancellation requested during a step must stop at its boundary");
+        let BdfSolveError::Cancelled { snapshot } = error else {
+            panic!("expected typed cancellation");
+        };
+        assert!(snapshot.accepted_steps >= 1);
+        assert!(snapshot.current_time > 0.0);
+        assert!((snapshot.current_state[0] - (-snapshot.current_time).exp()).abs() < 2e-3);
+        assert!(snapshot.rhs_evaluations.is_some_and(|count| count > 0));
+        assert!(snapshot.elapsed.is_some());
+        let (times, states) = solver.get_result_ref();
+        assert_eq!(times[times.len() - 1], snapshot.current_time);
+        assert_eq!(states[(states.nrows() - 1, 0)], snapshot.current_state[0]);
+        assert_eq!(solver.status_kind(), BdfStatus::Cancelled);
     }
 
     #[test]

@@ -1,0 +1,23 @@
+{
+  "format_version": 1,
+  "task": {
+    "solver": "BVP_sci",
+    "method": "Sparse"
+  },
+  "equations": {
+    "arg": "x",
+    "unknowns": "y",
+    "rhs": "0"
+  },
+  "boundary_conditions": {
+    "y_left": 1.0
+  },
+  "mesh": {
+    "t0": 0.0,
+    "t_end": 1.0,
+    "n_steps": 8
+  },
+  "initial_guess": {
+    "y": 1.0
+  }
+}

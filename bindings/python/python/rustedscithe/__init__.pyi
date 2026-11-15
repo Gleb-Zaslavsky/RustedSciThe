@@ -55,7 +55,7 @@ __all__ = [
     "UniversalFittingSolution", "SymbolicFrontend",
     "ExecutionRoute", "MatrixLayout", "ExecutionPolicy", "TelemetryMode",
     "SolverOptions", "SolverCapabilities", "StiffPreset", "StiffSolverRequest", "PreparedStiffSolver", "StiffPostprocessPlan", "TaskDocument", "IvpTaskResult",
-    "BvpTaskResult", "ShootingBvpSolver", "ShootingBvpSolution", "parse_expr", "symbol", "symbols", "indexed_symbols", "constant", "capabilities",
+    "BvpTaskResult", "NonlinearTaskResult", "ShootingBvpSolver", "ShootingBvpSolution", "parse_expr", "symbol", "symbols", "indexed_symbols", "constant", "capabilities",
     "RustedSciTheError", "InvalidExpressionError", "UnsupportedOptionError",
     "UnsupportedSymbolicOperationError",
     "InvalidConfigurationError", "SolverError", "PreparationError",

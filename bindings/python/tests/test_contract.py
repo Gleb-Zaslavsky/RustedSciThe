@@ -617,6 +617,97 @@ def test_task_document_reports_typed_parse_and_io_errors(tmp_path):
         TaskDocument.from_file(str(tmp_path / "missing-task.txt"))
 
 
+def test_task_document_runs_nonlinear_root_with_typed_result():
+    document = TaskDocument.parse(
+        """problem
+formulation: root
+variables: x
+equations: x - 2
+initial_guess: 0.0
+solver
+method: newton
+"""
+    )
+    assert document.kind == "nonlinear"
+    assert document.route()["formulation"] == "root"
+    assert document.route()["method"] == "newton"
+    payload = document.to_dict()
+    assert payload["problem"]["variables"] == ["x"]
+    assert payload["problem"]["equations"] == ["x - 2"]
+    result = document.run_nonlinear()
+    assert result.formulation == "root"
+    assert result.successful
+    assert result.solution == pytest.approx([2.0])
+    assert result.residual_norm == pytest.approx(0.0, abs=1e-10)
+    with pytest.raises(TaskDocumentError, match="unsupported_route"):
+        document.run()
+
+
+def test_task_document_runs_optimization_and_returns_reusable_fitted_model():
+    document = TaskDocument.parse(
+        """data
+arg: x
+x: 0.0, 1.0, 2.0
+y: 1.0, 3.0, 5.0
+model
+method: lm
+parameters: a, b
+initial_guess: 0.0, 0.0
+equations: a*x + b
+"""
+    )
+    assert document.kind == "optimization"
+    assert document.route()["method"] == "lm"
+    payload = document.to_dict()
+    assert payload["problem"]["model_type"] == "equations"
+    assert payload["problem"]["parameters"] == ["a", "b"]
+    result = document.run_optimization()
+    solution = result.solution_map()
+    assert solution["a"] == pytest.approx(2.0, rel=1e-5)
+    assert solution["b"] == pytest.approx(1.0, rel=1e-5)
+    x, values = result.evaluate_at([0.5, 1.5])
+    np.testing.assert_allclose(x, [0.5, 1.5])
+    np.testing.assert_allclose(values[:, 0], [2.0, 4.0], rtol=1e-5)
+    with pytest.raises(TaskDocumentError, match="unsupported_route"):
+        document.run_bvp()
+
+
+def test_task_document_json_routes_through_core_for_parse_run_and_file(tmp_path):
+    nonlinear_json = (
+        '{"format_version":1,"problem":{"formulation":"root","variables":"x",'
+        '"equations":"x - 2","initial_guess":0.0},'
+        '"solver":{"method":"newton"}}'
+    )
+    document = TaskDocument.from_json(nonlinear_json)
+    assert document.kind == "nonlinear"
+    assert document.to_dict()["problem"]["equations"] == ["x - 2"]
+    assert document.run_nonlinear().solution == pytest.approx([2.0])
+
+    json_path = tmp_path / "root_task.json"
+    json_path.write_text(nonlinear_json, encoding="utf-8")
+    from_file = TaskDocument.from_file(str(json_path))
+    assert from_file.kind == "nonlinear"
+    assert from_file.run_nonlinear().solution == pytest.approx([2.0])
+    assert python_facade.task(json_path).kind == "nonlinear"
+    assert python_facade.task(nonlinear_json).kind == "nonlinear"
+
+    with pytest.raises(TaskDocumentError, match="invalid task JSON"):
+        TaskDocument.from_json("{broken}")
+    with pytest.raises(TaskDocumentError, match="duplicate JSON object key"):
+        TaskDocument.from_json(
+            '{"format_version":1,"problem":{"formulation":"root",'
+            '"variables":"x","equations":"x - 2","initial_guess":0.0},'
+            '"solver":{"method":"newton","method":"gavin"}}'
+        )
+    with pytest.raises(TaskDocumentError, match=r"\$\.solver_options\.rtoll"):
+        TaskDocument.from_json(
+            '{"format_version":1,"task":{"solver":"IVP","method":"RK45"},'
+            '"equations":{"y":"-y"},"initial_conditions":'
+            '{"t0":0.0,"t_end":1.0,"y0":1.0},'
+            '"solver_options":{"rtoll":1e-6}}'
+        )
+
+
 def test_task_document_preserves_source_positions_on_semantic_diagnostics():
     with pytest.raises(TaskDocumentError) as captured:
         TaskDocument.parse(

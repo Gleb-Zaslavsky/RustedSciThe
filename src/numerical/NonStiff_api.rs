@@ -11,12 +11,31 @@ use std::env;
 use std::path::Path;
 
 mod dop853;
-pub use dop853::{Dop853Error, Dop853Options, Dop853Solution, Dop853Statistics, Dop853Status};
+pub use dop853::{
+    Dop853CancelledSnapshot, Dop853Error, Dop853Options, Dop853Solution, Dop853Statistics,
+    Dop853Status,
+};
+
+/// Last completed legacy explicit-IVP step retained after cancellation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NonStiffCancelledSnapshot {
+    pub current_time: f64,
+    pub current_state: Vec<f64>,
+    pub times: Vec<f64>,
+    pub states: Vec<Vec<f64>>,
+    pub symbolic_telemetry: IvpTelemetrySnapshot,
+}
 
 #[derive(Debug)]
 pub enum NonStiffError {
     Backend(IvpBackendError),
     Dop853(Dop853Error),
+    Cancelled {
+        snapshot: Box<NonStiffCancelledSnapshot>,
+    },
+    CancellationUnsupported {
+        method: String,
+    },
 }
 
 impl std::fmt::Display for NonStiffError {
@@ -24,6 +43,18 @@ impl std::fmt::Display for NonStiffError {
         match self {
             Self::Backend(error) => write!(f, "{error}"),
             Self::Dop853(error) => write!(f, "{error}"),
+            Self::Cancelled { snapshot } => write!(
+                f,
+                "non-stiff solve cancelled at t={} with {} retained sample(s)",
+                snapshot.current_time,
+                snapshot.times.len()
+            ),
+            Self::CancellationUnsupported { method } => {
+                write!(
+                    f,
+                    "cooperative cancellation is unsupported for non-stiff method `{method}`"
+                )
+            }
         }
     }
 }
@@ -33,6 +64,7 @@ impl std::error::Error for NonStiffError {
         match self {
             Self::Backend(error) => Some(error),
             Self::Dop853(error) => Some(error),
+            Self::Cancelled { .. } | Self::CancellationUnsupported { .. } => None,
         }
     }
 }
@@ -260,8 +292,18 @@ impl nonstiffODE {
         self.dop853_options = options;
     }
 
+    /// Returns DOP853 statistics when that route was selected. Check the
+    /// availability flags: counters and timings are collected independently
+    /// and remain unavailable under telemetry `Off`.
     pub fn dop853_statistics(&self) -> Option<&Dop853Statistics> {
         self.dop853_solver.as_ref().map(dop853::Dop853::statistics)
+    }
+
+    pub fn supports_cancellation(&self) -> bool {
+        matches!(
+            self.method.to_ascii_uppercase().as_str(),
+            "RK45" | "DOPRI" | "AB4" | "DOP853"
+        )
     }
 
     /// Returns a snapshot of symbolic preparation and RHS callback telemetry.
@@ -308,12 +350,26 @@ impl nonstiffODE {
             .expect("non-stiff symbolic residual preparation should succeed");
     }
     pub fn main_loop(&mut self) {
+        self.main_loop_with_cancellation(None)
+            .expect("uncancelled non-stiff loop cannot produce a cancellation snapshot");
+    }
+
+    fn main_loop_with_cancellation(
+        &mut self,
+        cancellation: Option<&crate::numerical::CancellationToken>,
+    ) -> Result<(), NonStiffCancelledSnapshot> {
         let mut integr_status: Option<i8> = None;
         let mut y: Vec<DVector<f64>> = Vec::new();
         let mut t: Vec<f64> = Vec::new();
         let mut _i: i64 = 0;
 
         while integr_status.is_none() {
+            if cancellation.is_some_and(crate::numerical::CancellationToken::is_cancelled) {
+                let snapshot = self.legacy_cancelled_snapshot(&t, &y);
+                self.status = "cancelled".to_string();
+                self.publish_cancelled_legacy_result(&snapshot);
+                return Err(snapshot);
+            }
             match &mut self.solver_instance {
                 Solvers::RK45(rk45) => {
                     rk45.step(self.t_bound, &mut self.status, &mut self.message);
@@ -379,9 +435,98 @@ impl nonstiffODE {
         let t_res = DVector::from_vec(t);
         self.t_result = t_res;
         self.y_result = y_res;
+        Ok(())
+    }
+
+    fn legacy_cancelled_snapshot(
+        &self,
+        times: &[f64],
+        states: &[DVector<f64>],
+    ) -> NonStiffCancelledSnapshot {
+        let (current_time, current_state, retained_times, retained_states) =
+            if let Some(time) = times.last() {
+                (
+                    *time,
+                    states
+                        .last()
+                        .expect("sample time/state lengths match")
+                        .as_slice()
+                        .to_vec(),
+                    times.to_vec(),
+                    states
+                        .iter()
+                        .map(|state| state.as_slice().to_vec())
+                        .collect(),
+                )
+            } else {
+                (
+                    self.t0,
+                    self.y0.as_slice().to_vec(),
+                    vec![self.t0],
+                    vec![self.y0.as_slice().to_vec()],
+                )
+            };
+        NonStiffCancelledSnapshot {
+            current_time,
+            current_state,
+            times: retained_times,
+            states: retained_states,
+            symbolic_telemetry: self.symbolic_telemetry.snapshot(),
+        }
+    }
+
+    fn publish_cancelled_legacy_result(&mut self, snapshot: &NonStiffCancelledSnapshot) {
+        self.t_result = DVector::from_vec(snapshot.times.clone());
+        self.y_result = DMatrix::from_fn(snapshot.states.len(), self.y0.len(), |row, column| {
+            snapshot.states[row][column]
+        });
     }
 
     pub fn try_solve(&mut self) -> Result<(), NonStiffError> {
+        self.try_solve_with_optional_cancellation(None)
+    }
+
+    pub fn try_solve_with_cancellation_token(
+        &mut self,
+        cancellation: crate::numerical::CancellationToken,
+    ) -> Result<(), NonStiffError> {
+        self.try_solve_with_optional_cancellation(Some(cancellation))
+    }
+
+    fn try_solve_with_optional_cancellation(
+        &mut self,
+        cancellation: Option<crate::numerical::CancellationToken>,
+    ) -> Result<(), NonStiffError> {
+        if cancellation
+            .as_ref()
+            .is_some_and(crate::numerical::CancellationToken::is_cancelled)
+        {
+            self.status = "cancelled".to_string();
+            if self.method.eq_ignore_ascii_case("DOP853") {
+                self.t_result = DVector::from_element(1, self.t0);
+                self.y_result = DMatrix::from_row_slice(1, self.y0.len(), self.y0.as_slice());
+                let mode = self.symbolic_telemetry.mode();
+                return Err(Dop853Error::Cancelled {
+                    snapshot: Box::new(Dop853CancelledSnapshot {
+                        current_time: self.t0,
+                        current_state: self.y0.as_slice().to_vec(),
+                        times: vec![self.t0],
+                        states: vec![self.y0.as_slice().to_vec()],
+                        statistics: Dop853Statistics {
+                            counters_collected: mode.collects_counters(),
+                            timings_collected: mode.collects_timings(),
+                            ..Dop853Statistics::default()
+                        },
+                    }),
+                }
+                .into());
+            }
+            let snapshot = self.legacy_cancelled_snapshot(&[], &[]);
+            self.publish_cancelled_legacy_result(&snapshot);
+            return Err(NonStiffError::Cancelled {
+                snapshot: Box::new(snapshot),
+            });
+        }
         self.try_generate()?;
         if self.method.eq_ignore_ascii_case("DOP853") {
             let stop_condition = self.stop_condition.as_ref().map(|conditions| {
@@ -411,15 +556,31 @@ impl nonstiffODE {
                 self.dop853_options,
                 self.symbolic_telemetry.clone(),
             )?);
-            let solution = self
+            let solver = self
                 .dop853_solver
                 .as_mut()
-                .expect("DOP853 solver is initialized during symbolic preparation")
-                .solve(
-                    stop_condition
-                        .as_ref()
-                        .map(|predicate| predicate as &dyn Fn(&DVector<f64>) -> bool),
-                )?;
+                .expect("DOP853 solver is initialized during symbolic preparation");
+            let stop_condition = stop_condition
+                .as_ref()
+                .map(|predicate| predicate as &dyn Fn(&DVector<f64>) -> bool);
+            let result = if let Some(cancellation) = cancellation {
+                solver.solve_with_cancellation_token(stop_condition, cancellation)
+            } else {
+                solver.solve(stop_condition)
+            };
+            let solution = match result {
+                Ok(solution) => solution,
+                Err(Dop853Error::Cancelled { snapshot }) => {
+                    self.status = "cancelled".to_owned();
+                    self.t_result = DVector::from_vec(snapshot.times.clone());
+                    let rows = snapshot.states.len();
+                    let cols = self.y0.len();
+                    let flat: Vec<f64> = snapshot.states.iter().flatten().copied().collect();
+                    self.y_result = DMatrix::from_row_slice(rows, cols, &flat);
+                    return Err(Dop853Error::Cancelled { snapshot }.into());
+                }
+                Err(error) => return Err(error.into()),
+            };
             self.status = match solution.status {
                 Dop853Status::Finished => "finished".to_owned(),
                 Dop853Status::StoppedByCondition => "stopped_by_condition".to_owned(),
@@ -431,7 +592,11 @@ impl nonstiffODE {
             self.y_result = DMatrix::from_row_slice(rows, cols, &flat);
             return Ok(());
         }
-        self.main_loop();
+        if let Err(snapshot) = self.main_loop_with_cancellation(cancellation.as_ref()) {
+            return Err(NonStiffError::Cancelled {
+                snapshot: Box::new(snapshot),
+            });
+        }
         Ok(())
     }
 
@@ -819,6 +984,44 @@ mod tests_nonstiff_api {
     use crate::symbolic::symbolic_engine::Expr;
     use approx::assert_relative_eq;
     use nalgebra::DVector;
+
+    #[test]
+    fn legacy_explicit_methods_support_pre_cancel_without_preparing_rhs() {
+        for method in ["RK45", "DOPRI", "AB4"] {
+            let mut solver = nonstiffODE::new(
+                vec![Expr::parse_expression("-y")],
+                vec!["y".to_string()],
+                "t".to_string(),
+                method.to_string(),
+                0.0,
+                DVector::from_element(1, 1.0),
+                1.0,
+                1e-3,
+                None,
+            );
+            solver.set_symbolic_telemetry(IvpTelemetry::detailed());
+            assert!(solver.supports_cancellation());
+            let token = crate::numerical::CancellationToken::new();
+            token.cancel();
+
+            let NonStiffError::Cancelled { snapshot } = solver
+                .try_solve_with_cancellation_token(token)
+                .expect_err("pre-cancel must stop before preparation")
+            else {
+                panic!("expected a typed cancellation snapshot for {method}");
+            };
+            assert_eq!(snapshot.current_time, 0.0);
+            assert_eq!(snapshot.current_state, vec![1.0]);
+            assert_eq!(snapshot.times, vec![0.0]);
+            assert_eq!(snapshot.states, vec![vec![1.0]]);
+            assert_eq!(snapshot.symbolic_telemetry.residual_evaluations, 0);
+            let (times, states) = solver.get_result();
+            assert_eq!(times.as_slice(), &[0.0]);
+            assert_eq!(states.shape(), (1, 1));
+            assert_eq!(states[(0, 0)], 1.0);
+            assert_eq!(solver.get_status(), "cancelled");
+        }
+    }
 
     #[test]
     fn nonstiff_fallible_constructor_returns_typed_error_for_unknown_method() {

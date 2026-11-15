@@ -251,6 +251,7 @@ pub(crate) fn map_radau_error(error: RadauError) -> PyErr {
     let message = error.to_string();
     annotate_native(
         match error.kind() {
+            RadauErrorKind::Cancelled => SolverError::new_err(message),
             RadauErrorKind::Configuration => InvalidConfigurationError::new_err(message),
             RadauErrorKind::Unsupported => UnsupportedOptionError::new_err(message),
             RadauErrorKind::Aot | RadauErrorKind::Workspace => PreparationError::new_err(message),

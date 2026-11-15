@@ -1,5 +1,17 @@
 # LSODE2 in RustedSciThe: user guide
 
+## Cooperative cancellation
+
+Call `Lsode2Solver::solve_with_cancellation_token(&token)` to opt into
+cooperative cancellation. The native integration route polls between complete
+step attempts and returns `Lsode2Error::Cancelled { snapshot }` with the last
+accepted time/state history, native statistics, callback statistics, and the
+mode-selected symbolic telemetry. The BDF bridge route delegates to BDF's
+safe cancellation checkpoint and labels the snapshot route accordingly. A
+cancelled attempt is not published as a successful result; an earlier
+successful result remains available. Ordinary `solve()` has no cancellation
+polling or cancellation-only snapshot copies.
+
 This guide is written for a Rust developer who opens LSODE2 for the first time and wants to move quickly from “what is this solver?” to a practical, reproducible configuration. We will not only list options, but explain why those options exist, what trade-offs they encode, and when one route is better than another.
 
 It helps to set the scope up front. LSODE2 in RustedSciThe combines two goals: it mirrors the ODEPACK family philosophy (especially LSODA-like Adams/BDF auto-switching), and it integrates with the modern symbolic/codegen/linear-algebra pipeline of the crate. So LSODE2 has an algorithmic side and an infrastructure side. If you mix them mentally, configuration feels chaotic; if you separate them, the system becomes straightforward.

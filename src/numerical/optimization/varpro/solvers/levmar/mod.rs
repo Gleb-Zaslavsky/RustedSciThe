@@ -1,3 +1,4 @@
+use crate::numerical::CancellationToken;
 use crate::numerical::Nonlinear_systems::least_squares::{LeastSquaresProblem, LevenbergMarquardt};
 use crate::numerical::optimization::varpro::fit::FitResult;
 use crate::numerical::optimization::varpro::prelude::*;
@@ -47,7 +48,38 @@ where
         Solver: LinearSolver<ScalarType = f64>,
         LevMarProblem<Model, Rhs, Solver>: LeastSquaresProblem,
     {
-        let (problem, report) = self.solver.minimize(problem);
+        self.solve_generic_inner(problem, None)
+    }
+
+    /// Solve a prepared VarPro LM problem with opt-in cooperative cancellation.
+    #[allow(clippy::result_large_err)]
+    pub fn solve_generic_with_cancellation_token<Rhs, Solver>(
+        &self,
+        problem: LevMarProblem<Model, Rhs, Solver>,
+        cancellation: CancellationToken,
+    ) -> Result<FitResult<Model, Rhs>, FitResult<Model, Rhs>>
+    where
+        Rhs: RhsType,
+        Solver: LinearSolver<ScalarType = f64>,
+        LevMarProblem<Model, Rhs, Solver>: LeastSquaresProblem,
+    {
+        self.solve_generic_inner(problem, Some(cancellation))
+    }
+
+    fn solve_generic_inner<Rhs, Solver>(
+        &self,
+        problem: LevMarProblem<Model, Rhs, Solver>,
+        cancellation: Option<CancellationToken>,
+    ) -> Result<FitResult<Model, Rhs>, FitResult<Model, Rhs>>
+    where
+        Rhs: RhsType,
+        Solver: LinearSolver<ScalarType = f64>,
+        LevMarProblem<Model, Rhs, Solver>: LeastSquaresProblem,
+    {
+        let (problem, report) = match cancellation {
+            Some(token) => self.solver.minimize_with_cancellation_token(problem, token),
+            None => self.solver.minimize(problem),
+        };
 
         let LevMarProblem {
             separable_problem,
@@ -80,6 +112,17 @@ where
         problem: SeparableProblem<Model, Rhs>,
     ) -> Result<FitResult<Model, Rhs>, FitResult<Model, Rhs>> {
         self.solve_with_svd(problem)
+    }
+
+    /// Solve with the SVD backend and cooperative cancellation between LM
+    /// iterations.
+    #[allow(clippy::result_large_err)]
+    pub fn solve_with_svd_and_cancellation_token<Rhs: RhsType>(
+        &self,
+        problem: SeparableProblem<Model, Rhs>,
+        cancellation: CancellationToken,
+    ) -> Result<FitResult<Model, Rhs>, FitResult<Model, Rhs>> {
+        self.solve_generic_with_cancellation_token(LevMarProblemSvd::from(problem), cancellation)
     }
 }
 

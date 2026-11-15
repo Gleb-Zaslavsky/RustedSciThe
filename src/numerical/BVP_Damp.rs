@@ -52,6 +52,10 @@ mod test_factorization_cache;
 #[cfg(test)]
 #[path = "BVP_Damp/tests/frozen_runtime_story.rs"]
 mod test_frozen_runtime_story;
+/// Regression for the public state-major initial-guess contract on mixed BCs.
+#[cfg(test)]
+#[path = "BVP_Damp/tests/initial_guess_packing.rs"]
+mod test_initial_guess_packing;
 /// exact-solution and nonlinear solver-level pure-Lambdify acceptance gates
 #[cfg(test)]
 #[path = "BVP_Damp/tests/lambdify_acceptance.rs"]
@@ -76,10 +80,6 @@ pub(crate) mod test_large_native_regressions;
 #[cfg(test)]
 #[path = "BVP_Damp/tests/programmatic_solver_ab.rs"]
 mod test_programmatic_solver_ab;
-/// Regression for the public state-major initial-guess contract on mixed BCs.
-#[cfg(test)]
-#[path = "BVP_Damp/tests/initial_guess_packing.rs"]
-mod test_initial_guess_packing;
 
 /// Reuses the maintained KiThe large-combustion fixture from perf-gates.
 /// This is feature-gated so the test fixture does not enter ordinary builds.
@@ -152,7 +152,6 @@ pub use resolved_plan::{
     BvpEvaluatorKind, BvpLinearAlgorithmKind, BvpParameterBinding, BvpResolvedPlan, BvpStrategyKind,
 };
 pub use telemetry::{
-    BvpFrozenFailureEvent, BvpFrozenFailureStage, BvpFrozenIterationEvent,
-    BvpFrozenIterationTrace, BvpLogEvent, BvpLogEventKind, BvpLogLevel, BvpLoggingConfig,
-    BvpLoggingMode, BvpTelemetryMode,
+    BvpFrozenFailureEvent, BvpFrozenFailureStage, BvpFrozenIterationEvent, BvpFrozenIterationTrace,
+    BvpLogEvent, BvpLogEventKind, BvpLogLevel, BvpLoggingConfig, BvpLoggingMode, BvpTelemetryMode,
 };

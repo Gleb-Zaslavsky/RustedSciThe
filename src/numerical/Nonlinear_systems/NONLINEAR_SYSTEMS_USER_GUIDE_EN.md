@@ -178,6 +178,39 @@ this public option; they do not write directly to stdout. The default path
 therefore avoids log formatting and emission, while applications that install
 the `log` facade can opt into `Info`, `Warn`, or `Debug` records explicitly.
 
+### Cooperative Cancellation
+
+Root, rectangular least-squares, and classic symbolic fitting LM solves can
+opt in to cooperative cancellation with a cloneable token. The token can be
+held by a supervising thread and passed into the engine; the solver checks
+only at safe boundaries, never inside residual/Jacobian callbacks. A cancelled
+solve returns a typed error containing the last available iterate (for LM, the
+last accepted parameter vector). Counter and elapsed-time fields are present
+only when the corresponding telemetry mode was requested. Existing solve
+methods remain unchanged and do not collect or copy cancellation state when no
+token is used.
+
+```rust
+let cancellation = CancellationToken::new();
+let engine = SolverEngine::new(method, options)
+    .with_cancellation_token(cancellation.clone());
+
+// The caller may call cancellation.cancel() from another thread.
+match engine.solve(&problem, initial_guess) {
+    Ok(_) => println!("solve completed"),
+    Err(SolveError::Cancelled { snapshot }) => {
+        eprintln!("cancelled after {} iterations", snapshot.completed_iterations);
+    }
+    Err(error) => eprintln!("solve failed: {error}"),
+}
+```
+
+The classic fitting facade exposes `Fitting::try_solve_with_cancellation_token`
+and `UniversalFitting::build_with_cancellation_token`; the latter explicitly
+rejects VarPro and Gavin until their controllers gain checkpoints. IVP, BVP,
+and the JSONL worker do not yet accept this token; use external process
+supervision for hard worker deadlines.
+
 ### AOT Artifact Lifecycle
 
 For a cold production-style run, request an output directory and use

@@ -36,7 +36,9 @@ impl PyIvpParameterLoopPoint {
     /// The normal detached solver result, including trajectory and telemetry.
     #[getter]
     fn solution(&self, py: Python<'_>) -> Option<Py<PyAny>> {
-        self.solution.as_ref().map(|solution| solution.clone_ref(py))
+        self.solution
+            .as_ref()
+            .map(|solution| solution.clone_ref(py))
     }
 
     /// The original typed Python exception for a failed point, if any.
@@ -46,7 +48,11 @@ impl PyIvpParameterLoopPoint {
     }
 
     fn __repr__(&self) -> String {
-        let outcome = if self.solution.is_some() { "success" } else { "failed" };
+        let outcome = if self.solution.is_some() {
+            "success"
+        } else {
+            "failed"
+        };
         format!(
             "IvpParameterLoopPoint(index={}, outcome='{}', parameter_values={:?})",
             self.index, outcome, self.parameter_values

@@ -30,6 +30,9 @@ fn backward_euler_logging_is_off_by_default_and_can_be_enabled_without_logger_se
 fn one_state_be(t_bound: f64, h: Option<f64>) -> BE {
     let mut solver = BE::new();
     solver
+        .try_set_telemetry_mode(BeTelemetryMode::Counters)
+        .unwrap();
+    solver
         .try_set_initial(
             vec![Expr::parse_expression("-y")],
             vec!["y".to_string()],
@@ -43,6 +46,162 @@ fn one_state_be(t_bound: f64, h: Option<f64>) -> BE {
         )
         .unwrap();
     solver
+}
+
+#[test]
+fn pre_cancelled_be_skips_callbacks_and_keeps_initial_result() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut solver = one_state_be(0.1, Some(0.05));
+    solver.try_set_telemetry_mode(BeTelemetryMode::Off).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::clone(&calls);
+    solver.set_native_ode_callbacks(
+        move |_, y| {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+            -y
+        },
+        Some(decay_jac),
+    );
+    let token = CancellationToken::new();
+    token.cancel();
+
+    let error = solver
+        .try_solve_with_cancellation_token(token)
+        .expect_err("pre-cancelled BE should return a typed cancellation error");
+    let BeError::Cancelled { snapshot } = error else {
+        panic!("expected BE cancellation outcome");
+    };
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshot.current_time, 0.0);
+    assert_eq!(snapshot.current_state, vec![1.0]);
+    assert_eq!(snapshot.completed_steps, 0);
+    assert_eq!(snapshot.elapsed, None);
+    assert!(snapshot.callback_statistics.is_none());
+    assert!(snapshot.callback_timings.is_none());
+    assert!(snapshot.detailed_statistics.is_none());
+    assert!(snapshot.detailed_timings.is_none());
+    assert_eq!(solver.status(), BeStatus::Cancelled);
+    let (times, states) = solver.get_result();
+    assert_eq!(times.unwrap().as_slice(), &[0.0]);
+    assert_eq!(states.unwrap().shape(), (1, 1));
+}
+
+#[test]
+fn be_cancellation_after_newton_step_preserves_partial_trajectory_and_timing() {
+    let mut solver = one_state_be(0.2, Some(0.05));
+    solver
+        .try_set_telemetry_mode(BeTelemetryMode::Detailed)
+        .unwrap();
+    let token = CancellationToken::new();
+    let callback_token = token.clone();
+    solver.set_native_ode_callbacks(
+        move |t, y| {
+            if t > 0.0 {
+                callback_token.cancel();
+            }
+            -y
+        },
+        Some(decay_jac),
+    );
+
+    let error = solver
+        .try_solve_with_cancellation_token(token)
+        .expect_err("cancellation requested during Newton should stop after the BE step");
+    let BeError::Cancelled { snapshot } = error else {
+        panic!("expected BE cancellation outcome");
+    };
+    assert_eq!(snapshot.completed_steps, 1);
+    assert_eq!(snapshot.current_time, 0.05);
+    assert!((snapshot.current_state[0] - 1.0 / 1.05).abs() < 1e-12);
+    assert!(snapshot.elapsed.is_some());
+    let callback_statistics = snapshot
+        .callback_statistics
+        .as_ref()
+        .expect("counter mode exposes callback statistics");
+    assert!(callback_statistics.residual_calls > 0);
+    let detailed_statistics = snapshot
+        .detailed_statistics
+        .as_ref()
+        .expect("counter mode exposes BE/NRE statistics");
+    assert_eq!(detailed_statistics.accepted_steps, 1);
+    assert!(detailed_statistics.factorization_calls > 0);
+    assert!(snapshot.callback_timings.is_some());
+    assert!(snapshot.detailed_timings.is_some());
+    let (times, states) = solver.get_result();
+    assert_eq!(times.unwrap().as_slice(), &[0.0, 0.05]);
+    assert_eq!(states.unwrap()[(1, 0)], snapshot.current_state[0]);
+    assert_eq!(solver.status(), BeStatus::Cancelled);
+}
+
+#[test]
+fn be_cancellation_timing_mode_exposes_timings_without_counter_blocks() {
+    let mut solver = one_state_be(0.2, Some(0.05));
+    solver
+        .try_set_telemetry_mode(BeTelemetryMode::Timings)
+        .unwrap();
+    let token = CancellationToken::new();
+    let callback_token = token.clone();
+    solver.set_native_ode_callbacks(
+        move |t, y| {
+            if t > 0.0 {
+                callback_token.cancel();
+            }
+            -y
+        },
+        Some(decay_jac),
+    );
+
+    let BeError::Cancelled { snapshot } = solver
+        .try_solve_with_cancellation_token(token)
+        .expect_err("timings-mode cancellation should retain timing diagnostics")
+    else {
+        panic!("expected BE cancellation");
+    };
+    assert_eq!(snapshot.completed_steps, 1);
+    assert!(snapshot.callback_statistics.is_none());
+    assert!(snapshot.detailed_statistics.is_none());
+    assert!(snapshot.callback_timings.is_some());
+    assert!(snapshot.detailed_timings.is_some());
+    assert!(snapshot.elapsed.is_some());
+}
+
+#[test]
+fn be_telemetry_is_off_by_default_for_all_public_setup_paths() {
+    assert_eq!(BeTelemetryMode::default(), BeTelemetryMode::Off);
+    assert_eq!(BE::new().telemetry_mode(), BeTelemetryMode::Off);
+
+    let options = BeSolverOptions::new(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".to_string()],
+        "t".to_string(),
+        1e-8,
+        10,
+        Some(0.05),
+        0.0,
+        0.1,
+        DVector::from_vec(vec![1.0]),
+    );
+    assert_eq!(options.telemetry_mode, BeTelemetryMode::Off);
+    assert_eq!(
+        BE::try_new_with_options(options).unwrap().telemetry_mode(),
+        BeTelemetryMode::Off
+    );
+
+    let mut nre = NRE::new(
+        vec![Expr::parse_expression("0")],
+        DVector::from_vec(vec![1.0]),
+        vec!["y".to_string()],
+        "t".to_string(),
+        1e-8,
+        4,
+        0.1,
+        true,
+        None,
+    );
+    nre.try_eq_generate().unwrap();
+    assert!(nre.symbolic_ivp_telemetry_snapshot().is_none());
 }
 
 fn decay_rhs(_: f64, y: &DVector<f64>) -> DVector<f64> {
@@ -114,6 +273,9 @@ fn be_legacy_step_heuristic_uses_remaining_interval_once() {
 fn be_parameter_rebind_reuses_prepared_symbolic_callbacks() {
     let make_parameterized = |rate: f64| {
         let mut solver = BE::new();
+        solver
+            .try_set_telemetry_mode(BeTelemetryMode::Counters)
+            .unwrap();
         solver
             .try_set_initial(
                 vec![Expr::parse_expression("-rate*y")],
@@ -511,6 +673,9 @@ fn be_accepted_state_continuation_appends_history_and_reuses_backend() {
     let make_parameterized = |t_bound| {
         let mut solver = BE::new();
         solver
+            .try_set_telemetry_mode(BeTelemetryMode::Counters)
+            .unwrap();
+        solver
             .try_set_initial(
                 vec![Expr::parse_expression("-rate*y")],
                 vec!["y".to_string()],
@@ -839,6 +1004,9 @@ fn be_solver_options_expose_step_limit_and_telemetry_mode() {
 #[test]
 fn be_required_prebuilt_failure_is_typed_and_keeps_initial_sample() {
     let mut solver = BE::new();
+    solver
+        .try_set_telemetry_mode(BeTelemetryMode::Counters)
+        .unwrap();
     solver
         .try_set_initial(
             vec![Expr::parse_expression("-7.123456789*y")],

@@ -156,7 +156,7 @@ mod tests {
         assert!(!logging_only.decision_trace.events.is_empty());
         assert_eq!(logging_only.stats.telemetry.counters, Default::default());
         assert!(
-            !logging_only
+            logging_only
                 .stats
                 .telemetry
                 .log_events

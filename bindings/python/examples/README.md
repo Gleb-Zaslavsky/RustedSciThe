@@ -64,6 +64,7 @@ to another frontend, execution route or matrix layout.
 | [`bvp_sci_unknown_parameter_guess.py`](bvp_sci_unknown_parameter_guess.py) | Solve a BVP with an unknown parameter and reuse the prepared system with a revised parameter guess | [EN](../guides/BVP_SCI_GUIDE_EN.md) / [RU](../guides/BVP_SCI_GUIDE_RU.md) |
 | [`bvp_sci_external_parameter_loop.py`](bvp_sci_external_parameter_loop.py) | Ordered fixed-input BVP_sci loop with a typed failed point and recovery from the last successful profile | [EN](../guides/BVP_SCI_GUIDE_EN.md) / [RU](../guides/BVP_SCI_GUIDE_RU.md) |
 | [`bvp_api_solver_selection.py`](bvp_api_solver_selection.py) | Application-level symbolic BVP route through the typed native facade, including route-tagged NumPy values and native telemetry | [EN](../guides/BVP_API_GUIDE_EN.md) / [RU](../guides/BVP_API_GUIDE_RU.md) |
+| [`bvp_api_nonuniform_mesh.py`](bvp_api_nonuniform_mesh.py) | CorrectionNewton BVP with an explicit nonuniform mesh and full-node initial guess | [EN](../guides/BVP_API_GUIDE_EN.md) / [RU](../guides/BVP_API_GUIDE_RU.md) |
 | [`bvp_api_boundary_rebind.py`](bvp_api_boundary_rebind.py) | Reuse a prepared symbolic BVP while changing numeric values in the original boundary-condition slots | [EN](../guides/BVP_API_GUIDE_EN.md) / [RU](../guides/BVP_API_GUIDE_RU.md) |
 | [`bvp_api_correction_newton.py`](bvp_api_correction_newton.py) | Fixed-mesh CorrectionNewton through BVP_api with a typed solve report and telemetry | [EN](../guides/BVP_API_GUIDE_EN.md) / [RU](../guides/BVP_API_GUIDE_RU.md) |
 | [`bvp_api_correction_newton_bratu_continuation.py`](bvp_api_correction_newton_bratu_continuation.py) | Ten-step Bratu parameter sweep using the last successful profile as the next guess | [EN](../guides/BVP_API_GUIDE_EN.md) / [RU](../guides/BVP_API_GUIDE_RU.md) |
@@ -103,6 +104,7 @@ to another frontend, execution route or matrix layout.
 | [`lsode2_lorenz_animation.py`](lsode2_lorenz_animation.py) | Lorenz solve and default 3D animation; optional 2D/both or `--no-animate` | [EN](../guides/TRAJECTORY_ANIMATION_GUIDE_EN.md) / [RU](../guides/TRAJECTORY_ANIMATION_GUIDE_RU.md) |
 | [`lsode2_three_body_animation.py`](lsode2_three_body_animation.py) | Three-body solve and default selected-body XY animation (use `--no-animate` for headless mode) | [EN](../guides/TRAJECTORY_ANIMATION_GUIDE_EN.md) / [RU](../guides/TRAJECTORY_ANIMATION_GUIDE_RU.md) |
 | [`task_batch.py`](task_batch.py) | Failure-tolerant task batch and compact status table | [Overview EN](../guides/PYTHON_SOLVERS_GUIDE_EN.md#text-tasks-and-examples) / [Overview RU](../guides/PYTHON_SOLVERS_GUIDE_RU.md) |
+| [`task_nonlinear_fitting.py`](task_nonlinear_fitting.py) | Parse JSON nonlinear and DSL fitting task documents, inspect typed results, run native batch dispatch and evaluate the fitted model | [Overview EN](../guides/PYTHON_SOLVERS_GUIDE_EN.md#text-tasks-and-examples) / [Overview RU](../guides/PYTHON_SOLVERS_GUIDE_RU.md) |
 
 The examples are intentionally small and deterministic. They demonstrate
 configuration and result inspection; use the Rust crate's story tests and

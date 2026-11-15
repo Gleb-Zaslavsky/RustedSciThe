@@ -361,6 +361,7 @@ native_error_kinds!(rustedscithe_core::numerical::BVP_CorrectionNewton::Correcti
 
 native_error_kinds!(rustedscithe_core::numerical::Radau::api::RadauErrorKind {
     rustedscithe_core::numerical::Radau::api::RadauErrorKind::Configuration => "Configuration",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::Cancelled => "Cancelled",
     rustedscithe_core::numerical::Radau::api::RadauErrorKind::Unsupported => "Unsupported",
     rustedscithe_core::numerical::Radau::api::RadauErrorKind::Aot => "Aot",
     rustedscithe_core::numerical::Radau::api::RadauErrorKind::Workspace => "Workspace",

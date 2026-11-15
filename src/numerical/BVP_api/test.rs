@@ -1,7 +1,7 @@
 use super::{
     BvpApiError, BvpApiTelemetryMode, BvpBoundaryCondition, BvpBoundarySide, BvpNativeSolver,
     BvpProblem, BvpSciFreeParameters, BvpSciSparseFactorization, BvpSettingsError, BvpSolution,
-    BvpSolver, BvpSolverConfig, BvpSolverSettings,
+    BvpSolver, BvpSolverConfig, BvpSolverSettings, BvpSolverTelemetrySnapshot,
 };
 use crate::Utils::postprocessing::{PostprocessError, PostprocessPlan};
 use crate::numerical::BVP_CorrectionNewton::CorrectionNewtonOptions;
@@ -17,6 +17,7 @@ use crate::numerical::BVP_sci::new::{
     BvpSciAssembly, BvpSciExecution, BvpSciMatrixLayout, BvpSciOptions, BvpSciOutputPolicy,
     BvpSciTelemetryMode,
 };
+use crate::numerical::cancellation::CancellationToken;
 use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode;
 use crate::symbolic::bvp::legacy::BvpBackendIntegrationError;
@@ -124,6 +125,113 @@ fn correction_newton_node_aligned_seed_solves_on_explicit_nonuniform_mesh() {
     for (node, &x) in expected_mesh.iter().enumerate() {
         assert!((view.value(node, 0).unwrap() - 0.5 * x * x).abs() < 1e-12);
     }
+}
+
+#[test]
+fn correction_newton_facade_preserves_cancelled_partial_report_without_publishing() {
+    let problem = valid_problem();
+    let settings = BvpSolverSettings::CorrectionNewton(CorrectionNewtonOptions::default())
+        .with_initial_guess(DMatrix::from_row_slice(1, 2, &[0.8, 0.6]));
+    let mut solver = BvpSolver::new(problem, settings)
+        .expect("CorrectionNewton facade should prepare the scalar BVP");
+    let token = CancellationToken::new();
+    token.cancel();
+
+    assert!(matches!(
+        solver.solve_with_cancellation_token(&token),
+        Err(BvpApiError::CorrectionNewton(
+            crate::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::Cancelled { .. }
+        ))
+    ));
+    assert!(solver.solution().is_none());
+    let BvpSolverTelemetrySnapshot::CorrectionNewton(Some(snapshot)) = solver.telemetry_snapshot()
+    else {
+        panic!("facade should retain telemetry from the cancelled attempt");
+    };
+    assert_eq!(snapshot.residual_evaluations, 0);
+}
+
+#[test]
+fn bvp_sci_facade_preserves_cancelled_partial_snapshot_without_publishing() {
+    let mut solver = BvpSolver::new(
+        valid_problem(),
+        BvpSolverSettings::Sci {
+            options: BvpSciOptions::default()
+                .with_execution(BvpSciExecution::Lambdify)
+                .with_assembly(BvpSciAssembly::ExprLegacy),
+            sparse_factorization: BvpSciSparseFactorization::default(),
+            aot_config: None,
+        }
+        .with_initial_guess(DMatrix::from_row_slice(1, 3, &[1.0, 0.8, 0.6])),
+    )
+    .expect("BVP_sci facade should prepare before cancellation capability is queried");
+    let token = CancellationToken::new();
+    token.cancel();
+    assert!(matches!(
+        solver.solve_with_cancellation_token(&token),
+        Err(BvpApiError::Sci(
+            crate::numerical::BVP_sci::new::BvpSciNewError::Cancelled { .. }
+        ))
+    ));
+    assert!(solver.solution().is_none());
+    let BvpSolverTelemetrySnapshot::Sci(snapshot) = solver.telemetry_snapshot() else {
+        panic!("BVP_sci cancellation should preserve its native telemetry snapshot");
+    };
+    assert_eq!(snapshot.mode, BvpSciTelemetryMode::Off);
+}
+
+#[test]
+fn damped_and_frozen_facades_return_partial_snapshots_on_cancellation() {
+    let mut solver = BvpSolver::new(
+        valid_problem(),
+        BvpSolverSettings::Damped(
+            DampedSolverOptions::default()
+                .with_bounds(HashMap::from([("y".to_string(), (-10.0, 10.0))]))
+                .with_rel_tolerance(HashMap::from([("y".to_string(), 1e-6)]))
+                .with_bvp_telemetry_mode(
+                    crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Counters,
+                ),
+        )
+        .with_initial_guess(DMatrix::from_row_slice(1, 2, &[1.0, 0.7])),
+    )
+    .expect("Damped facade should prepare the scalar BVP");
+    let token = CancellationToken::new();
+    token.cancel();
+    let snapshot = match solver.solve_with_cancellation_token(&token) {
+        Err(BvpApiError::Cancelled { snapshot }) => snapshot,
+        other => panic!("Damped cancellation returned unexpected outcome: {other:?}"),
+    };
+    assert_eq!(
+        snapshot.route,
+        crate::numerical::BVP_Damp::telemetry::BvpDampCancellationRoute::Damped
+    );
+    assert_eq!(snapshot.iteration, 0);
+    assert_eq!(snapshot.mesh.len(), 3);
+    assert_eq!(snapshot.telemetry.counters.residual_requests, 0);
+    assert!(solver.solution().is_none());
+
+    let mut frozen = BvpSolver::new(
+        valid_problem(),
+        BvpSolverSettings::Frozen(FrozenSolverOptions::default().with_bvp_telemetry_mode(
+            crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Counters,
+        ))
+        .with_initial_guess(DMatrix::from_row_slice(1, 2, &[1.0, 0.7])),
+    )
+    .expect("Frozen facade should prepare the scalar BVP");
+    let token = CancellationToken::new();
+    token.cancel();
+    let Err(BvpApiError::Cancelled { snapshot }) = frozen.solve_with_cancellation_token(&token)
+    else {
+        panic!("Frozen cancellation must return its native partial snapshot");
+    };
+    assert_eq!(
+        snapshot.route,
+        crate::numerical::BVP_Damp::telemetry::BvpDampCancellationRoute::Frozen
+    );
+    assert_eq!(snapshot.iteration, 0);
+    assert_eq!(snapshot.mesh.len(), 3);
+    assert_eq!(snapshot.telemetry.counters.residual_requests, 0);
+    assert!(frozen.solution().is_none());
 }
 
 #[test]
@@ -802,10 +910,7 @@ fn native_solver_defaults_are_distinct_and_facade_preserves_them() {
         damped_generated.aot_telemetry_mode,
         BvpAotTelemetryMode::Off
     );
-    assert_eq!(
-        damped_generated.bvp_telemetry_mode,
-        BvpTelemetryMode::Counters
-    );
+    assert_eq!(damped_generated.bvp_telemetry_mode, BvpTelemetryMode::Off);
     assert_eq!(damped_generated.bvp_logging_mode, BvpLoggingMode::Off);
     assert_eq!(
         damped_generated.lambdify_execution_policy,

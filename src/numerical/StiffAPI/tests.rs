@@ -58,6 +58,142 @@ fn selected_hybrid_settings_reject_a_different_native_request_family() {
 }
 
 #[test]
+fn stiff_api_forwards_bdf_cancellation_without_erasing_native_snapshot() {
+    let options = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.1,
+        0.01,
+        1e-6,
+        1e-8,
+        None,
+        false,
+        None,
+    );
+    let mut prepared = StiffSolverRequest::Bdf { options }
+        .prepare(None)
+        .expect("valid BDF request should prepare");
+    let cancellation = crate::numerical::CancellationToken::new();
+    cancellation.cancel();
+
+    let error = prepared
+        .try_solve_with_cancellation_token(cancellation)
+        .expect_err("pre-cancelled BDF should return a typed cancellation failure");
+    let StiffCancellationError::Bdf(BdfSolveError::Cancelled { snapshot }) = error else {
+        panic!("expected the native BDF cancellation snapshot to pass through");
+    };
+    assert_eq!(snapshot.current_time, 0.0);
+    assert_eq!(snapshot.current_state, vec![1.0]);
+}
+
+#[test]
+fn stiff_api_forwards_backward_euler_cancellation() {
+    let options = BeSolverOptions::new(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        1e-8,
+        10,
+        Some(0.05),
+        0.0,
+        0.1,
+        DVector::from_element(1, 1.0),
+    );
+    let mut prepared = StiffSolverRequest::BackwardEuler {
+        options,
+        equation_parameters: Vec::new(),
+        parameter_values: Vec::new(),
+    }
+    .prepare(None)
+    .expect("valid BE request should prepare");
+    let token = crate::numerical::CancellationToken::new();
+    token.cancel();
+
+    let error = prepared
+        .try_solve_with_cancellation_token(token)
+        .expect_err("pre-cancelled BE should stop before the first step");
+    let StiffCancellationError::BackwardEuler(BeError::Cancelled { snapshot }) = error else {
+        panic!("expected the native BE cancellation snapshot to pass through");
+    };
+    assert_eq!(snapshot.current_time, 0.0);
+    assert_eq!(snapshot.current_state, vec![1.0]);
+    assert_eq!(snapshot.completed_steps, 0);
+}
+
+#[test]
+fn stiff_api_forwards_radau_cancellation_snapshot() {
+    use crate::numerical::Radau::api::{RadauConfig, RadauProblem, RadauTelemetryMode};
+
+    let problem = RadauProblem::new(vec![Expr::parse_expression("-y")], vec!["y".into()], "t");
+    let config = RadauConfig {
+        t_bound: 1.0,
+        telemetry: RadauTelemetryMode::Detailed,
+        ..RadauConfig::default()
+    };
+    let mut prepared = StiffSolverRequest::Radau {
+        problem,
+        config,
+        initial_state: vec![3.0],
+        parameters: Vec::new(),
+    }
+    .prepare(None)
+    .expect("valid Radau request should prepare");
+    let token = crate::numerical::CancellationToken::new();
+    token.cancel();
+
+    let error = prepared
+        .try_solve_with_cancellation_token(token)
+        .expect_err("pre-cancelled Radau solve must not publish a solution");
+    let StiffCancellationError::Radau(
+        crate::numerical::Radau::api::RadauCancellationError::Cancelled { snapshot },
+    ) = error
+    else {
+        panic!("expected Radau cancellation snapshot to pass through the facade");
+    };
+    assert_eq!(snapshot.t, 0.0);
+    assert_eq!(snapshot.y, vec![3.0]);
+    assert_eq!(snapshot.attempts, 0);
+    assert_eq!(snapshot.telemetry.mode, RadauTelemetryMode::Detailed);
+    assert_eq!(snapshot.telemetry.counters["residual_calls"], 0);
+}
+
+#[test]
+fn stiff_api_forwards_lsode2_cancellation_snapshot() {
+    let config = lsode2_config()
+        .with_native_sparse_faer_backend()
+        .with_faithful_bdf_solve(64, 64);
+    let mut prepared = StiffSolverRequest::Lsode2 {
+        config,
+        logging_level: None,
+    }
+    .prepare(None)
+    .expect("valid LSODE2 request should prepare");
+    let result_before = prepared.as_lsode2().unwrap().get_result();
+    let token = crate::numerical::CancellationToken::new();
+    token.cancel();
+
+    let error = prepared
+        .try_solve_with_cancellation_token(token)
+        .expect_err("pre-cancelled LSODE2 solve must not publish a result");
+    let StiffCancellationError::Lsode2(crate::numerical::LSODE2::solver::Lsode2Error::Cancelled {
+        snapshot,
+    }) = error
+    else {
+        panic!("expected LSODE2 cancellation snapshot through StiffAPI");
+    };
+    assert_eq!(
+        snapshot.route,
+        crate::numerical::LSODE2::solver::Lsode2CancellationRoute::NativeIntegration
+    );
+    assert_eq!(snapshot.current_time, 0.0);
+    assert_eq!(snapshot.accepted_times, vec![0.0]);
+    assert_eq!(prepared.as_lsode2().unwrap().get_result(), result_before);
+}
+
+#[test]
 fn borrowed_trajectory_materializes_row_oriented_dataset_only_when_requested() {
     let axis = DVector::from_vec(vec![0.0, 0.5]);
     let values = DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]);

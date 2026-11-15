@@ -6,6 +6,7 @@
 //! use RustedSciThe::numerical::Nonlinear_systems::prelude::*;
 //! ```
 
+pub use crate::numerical::CancellationToken;
 pub use crate::numerical::SolverTelemetryMode;
 
 // Core engine types
@@ -17,7 +18,9 @@ pub use crate::numerical::Nonlinear_systems::engine::{
 };
 
 // Error types
-pub use crate::numerical::Nonlinear_systems::error::{SolveError, TerminationReason};
+pub use crate::numerical::Nonlinear_systems::error::{
+    CancelledSolveSnapshot, SolveError, TerminationReason,
+};
 
 // Problem definitions and bounds
 pub use crate::numerical::Nonlinear_systems::problem::{
@@ -215,6 +218,27 @@ impl NonlinearSolverMethod {
         P: JacobianProvider,
     {
         self.engine(options).solve(problem, x0)
+    }
+
+    /// Solves a nonlinear system with opt-in cooperative cancellation.
+    ///
+    /// The token is checked at safe solver boundaries, not inside callbacks.
+    /// If cancellation is observed, the returned [`SolveError::Cancelled`]
+    /// contains the last available iterate and telemetry requested by
+    /// `options`.
+    pub fn solve_with_cancellation_token<P>(
+        self,
+        problem: &P,
+        x0: nalgebra::DVector<f64>,
+        options: SolveOptions,
+        cancellation: crate::numerical::CancellationToken,
+    ) -> Result<SolveResult, SolveError>
+    where
+        P: JacobianProvider,
+    {
+        self.engine(options)
+            .with_cancellation_token(cancellation)
+            .solve(problem, x0)
     }
 }
 

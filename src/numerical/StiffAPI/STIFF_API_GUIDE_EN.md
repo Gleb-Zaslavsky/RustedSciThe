@@ -5,6 +5,18 @@ then prepare and run it without maintaining its own dispatch `match` across
 BDF, Radau, Backward Euler and LSODE2. Numerical algorithms, symbolic
 preparation, AOT, logging, telemetry and result ownership remain native.
 
+## Cooperative Cancellation
+
+`PreparedStiffSolver::try_solve_with_cancellation_token(token)` forwards
+cooperative cancellation to BDF, Radau, Backward Euler, and LSODE2. Radau
+finishes an active step attempt before returning its last committed `(t, y)`;
+LSODE2 native integration observes the token between step attempts, while its
+BDF bridge delegates to BDF's safe checkpoint. LSODE2 returns
+`StiffCancellationError::Lsode2(Lsode2Error::Cancelled { snapshot })` with the
+route, last accepted state/history, native and callback statistics, and the
+telemetry snapshot. A cancellation is an error, not a successful partial
+trajectory publication; previously visible result data is preserved.
+
 ## Select a Route and Solve
 
 `StiffSolverRequest` stores a typed configuration for the selected solver. An

@@ -98,7 +98,7 @@ public API from `rustedscithe`; `_native` is an implementation module.
 | Nonlinear systems | `NonlinearSolver` | Prepared square systems with Newton, LM and trust-region method families. |
 | Least squares and fitting | `FittingSolver`, `GavinFittingSolver`, `VarProSolver` | Rectangular symbolic least squares, observation-based fitting and separable-model fitting have distinct contracts. |
 | Signal/data utilities | `spline_resample`, `least_squares_bspline`, `savgol_filter`, `lowess_smooth`, `fit_quality` | Native Rust preprocessing helpers with NumPy float64 inputs/outputs; LSQ B-splines expose explicit DenseQR/Banded routes. See `examples/data_processing_signal.py` and `examples/data_processing_lsq_spline.py`. |
-| Text task documents | `TaskDocument`, `task`, `task_dict`, `run_task_batch` | Parse, inspect as a detached dict, and execute reusable IVP/BVP documents through the native task infrastructure. |
+| Task documents (DSL/JSON) | `TaskDocument`, `task`, `task_dict`, `run_task_batch` | Parse and inspect IVP/BVP, nonlinear-root/least-squares, and fitting documents; run each through its family-specific native route. |
 
 Use `capabilities("solver_name")` to inspect the Python-supported routes.
 The axis lists describe available values, not every valid Cartesian
@@ -171,9 +171,13 @@ the repository's Rust examples are collected separately in the root
 
 ## Text Tasks and Executable
 
-Python users can parse and run text task documents with `TaskDocument` or
-`task(...)`, inspect a detached dictionary with `task_dict(...)`, and batch
-independent documents with `run_task_batch(...)`. Parsing, normalization and
+Python users can parse and run DSL or versioned JSON task documents with `TaskDocument`
+or `task(...)` (`TaskDocument.from_json(...)` for inline JSON), inspect a
+detached dictionary with `task_dict(...)`, and batch
+independent IVP, BVP, nonlinear, or fitting documents with `run_task_batch(...)`.
+Use `run()`, `run_bvp()`, `run_nonlinear()`, or `run_optimization()` according
+to `document.kind`; fitting returns a reusable `UniversalFittingSolution`.
+Parsing, normalization and
 semantic validation are performed by the existing Rust command-interpreter
 parser; Python does not implement a second task DSL. `task_dict(...)` does not
 execute the document. The batch API preserves typed per-task failures and can

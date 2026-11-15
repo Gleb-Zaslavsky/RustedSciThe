@@ -84,3 +84,72 @@ fn native_callback_shapes_and_non_finite_values_are_typed_errors() {
     let non_finite = bad_jacobian.solve(&[1.0]).unwrap_err();
     assert_eq!(non_finite.kind(), RadauErrorKind::NonFiniteCallback);
 }
+
+#[test]
+fn native_pre_cancel_returns_initial_snapshot_without_calling_callbacks() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::clone(&calls);
+    let mut solver = RadauNativeSolver::prepare(
+        config(),
+        move |_t, y: &DVector<f64>| {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+            DVector::from_vec(vec![-y[0]])
+        },
+        Some(|_t: f64, _y: &DVector<f64>| DMatrix::from_vec(1, 1, vec![-1.0])),
+    )
+    .unwrap();
+    let token = crate::numerical::CancellationToken::new();
+    token.cancel();
+
+    let error = solver
+        .solve_with_cancellation_token(&[2.0], &token)
+        .expect_err("pre-cancelled solve must not publish a solution");
+    let super::super::api::RadauCancellationError::Cancelled { snapshot } = error else {
+        panic!("expected typed cancellation with snapshot");
+    };
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(snapshot.t, 0.0);
+    assert_eq!(snapshot.y, vec![2.0]);
+    assert_eq!(snapshot.attempts, 0);
+    assert_eq!(snapshot.accepted_steps, 0);
+    assert_eq!(snapshot.telemetry.counters["residual_calls"], 0);
+}
+
+#[test]
+fn native_cancellation_finishes_active_trial_and_snapshots_only_committed_state() {
+    use std::sync::Arc;
+
+    let token = crate::numerical::CancellationToken::new();
+    let callback_token = Arc::new(token.clone());
+    let config = RadauConfig {
+        first_step: Some(0.05),
+        rtol: 0.1,
+        atol: 0.1,
+        ..config()
+    };
+    let mut solver = RadauNativeSolver::prepare(
+        config,
+        move |_t, y: &DVector<f64>| {
+            callback_token.cancel();
+            DVector::from_vec(vec![-y[0]])
+        },
+        Some(|_t: f64, _y: &DVector<f64>| DMatrix::from_vec(1, 1, vec![-1.0])),
+    )
+    .unwrap();
+
+    let error = solver
+        .solve_with_cancellation_token(&[1.0], &token)
+        .expect_err("callback-requested cancellation must stop after this trial");
+    let super::super::api::RadauCancellationError::Cancelled { snapshot } = error else {
+        panic!("expected typed cancellation with accepted-step snapshot");
+    };
+    assert_eq!(snapshot.attempts, 1);
+    assert_eq!(snapshot.accepted_steps, 1);
+    assert_eq!(snapshot.rejected_steps, 0);
+    assert_eq!(snapshot.t, 0.05);
+    assert!((snapshot.y[0] - (-0.05_f64).exp()).abs() < 1e-3);
+    assert!(snapshot.telemetry.counters["residual_calls"] > 0);
+}

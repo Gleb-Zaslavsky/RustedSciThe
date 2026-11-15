@@ -25,6 +25,12 @@ fn parse_document_for_ivp(input: &str) -> DocumentMap {
 }
 
 #[test]
+fn lsode2_is_advertised_as_cooperatively_cancellable_for_single_solve_tasks() {
+    assert!(IvpMethodSpec::Lsode2.cancellation_supported());
+    assert!(!IvpMethodSpec::Lsoda.cancellation_supported());
+}
+
+#[test]
 fn ivp_task_parser_preserves_symbolic_model_for_continuation() {
     let input = r#"
 task
@@ -1918,6 +1924,39 @@ logging: info
     let roundtrip = parse_hybrid_stiff_settings_from_document(&reparsed)
         .expect("serialized solver fragment should parse again");
     assert_eq!(roundtrip.solver_kind(), StiffSolverKind::Bdf);
+}
+
+#[test]
+fn hybrid_stiff_settings_json_ignores_nested_client_domain_data() {
+    use crate::command_interpreter::task_parser_ivp_hybrid::{
+        HybridStiffSettingsJsonError, parse_hybrid_stiff_settings_from_json,
+    };
+    use crate::numerical::StiffAPI::StiffSolverKind;
+
+    let json = r#"{
+        "format_version": 1,
+        "task": {"solver": "IVP", "method": "BDF"},
+        "solver_options": {
+            "symbolic_frontend": "AtomView",
+            "matrix_layout": "sparse",
+            "telemetry": "counters"
+        },
+        "combustion_model": {
+            "species": [{"name": "A", "enthalpy": [1.0, 2.0]}],
+            "kinetics": {"reaction": "client-owned expression"}
+        }
+    }"#;
+    let settings = parse_hybrid_stiff_settings_from_json(json)
+        .expect("hybrid parser should inspect settings without parsing model data");
+    assert_eq!(settings.solver_kind(), StiffSolverKind::Bdf);
+
+    let missing_version = r#"{"task":{"solver":"IVP","method":"BDF"}}"#;
+    assert!(matches!(
+        parse_hybrid_stiff_settings_from_json(missing_version),
+        Err(HybridStiffSettingsJsonError::Json(
+            crate::command_interpreter::task_json::TaskJsonError::MissingFormatVersion
+        ))
+    ));
 }
 
 #[test]

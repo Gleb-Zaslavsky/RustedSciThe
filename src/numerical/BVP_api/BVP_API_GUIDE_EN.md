@@ -277,6 +277,14 @@ its callback, Newton, mesh-pass and linear-backend counters/timings; timing
 scopes may be inclusive or nested and are not necessarily additive. Consult the
 native `BvpTelemetrySnapshot` and `BvpSciTelemetrySnapshot` docs for
 field-level semantics; the facade does not define a second telemetry schema.
+The opt-in `solve_with_cancellation_token(&CancellationToken)` entry point is
+supported by all four native routes. CorrectionNewton and BVP_sci return their
+route-native last-safe-point report. Damped and Frozen poll between complete
+Newton iterations (and before Damped grid-restart work); `BvpApiError::Cancelled`
+contains the active mesh, packed Newton state, iteration count and native
+telemetry snapshot. The state copy is made only after cancellation is observed.
+No route publishes an incomplete profile; the last previously successful
+facade result remains intact.
 Logging is also configured through
 native options or native solver APIs; the facade installs no second logger and
 does not return text logs as telemetry. An enabled logging level must create

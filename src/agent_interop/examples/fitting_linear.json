@@ -1,0 +1,13 @@
+{
+  "format_version": 1,
+  "data": {
+    "x": [0.0, 1.0, 2.0],
+    "y": [1.0, 3.0, 5.0]
+  },
+  "model": {
+    "method": "lm",
+    "parameters": ["a", "b"],
+    "initial_guess": [0.0, 0.0],
+    "equations": "a*x + b"
+  }
+}

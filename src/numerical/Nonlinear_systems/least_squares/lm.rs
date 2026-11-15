@@ -2,6 +2,7 @@ use super::errors::{LeastSquaresError, LeastSquaresStage};
 use super::problem::LeastSquaresProblem;
 use super::trust_region::{LMParameter, determine_lambda_and_parameter_update_with_count};
 use super::utils::{enorm, epsmch};
+use crate::numerical::CancellationToken;
 use crate::numerical::Nonlinear_systems::engine::{SolveStatistics, StatisticsAvailability};
 use crate::somelinalg::least_squares_qr::{LinearLeastSquaresDiagonalProblem, PivotedQR};
 use nalgebra::{DMatrix, DVector};
@@ -397,6 +398,33 @@ impl LevenbergMarquardt {
     where
         O: LeastSquaresProblem,
     {
+        self.try_minimize_with_optional_cancellation(target, None)
+    }
+
+    /// Fallible least-squares solve with opt-in cooperative cancellation.
+    ///
+    /// Cancellation is checked before the first callback and at safe LM
+    /// iteration/trial boundaries. The error snapshot contains the last
+    /// accepted parameter vector, not a trial point.
+    pub fn try_minimize_with_cancellation_token<O>(
+        &self,
+        target: O,
+        cancellation: CancellationToken,
+    ) -> Result<(O, MinimizationReport), LeastSquaresError>
+    where
+        O: LeastSquaresProblem,
+    {
+        self.try_minimize_with_optional_cancellation(target, Some(&cancellation))
+    }
+
+    fn try_minimize_with_optional_cancellation<O>(
+        &self,
+        target: O,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(O, MinimizationReport), LeastSquaresError>
+    where
+        O: LeastSquaresProblem,
+    {
         for (field, value, valid) in [
             ("ftol", self.ftol, self.ftol.is_finite() && self.ftol >= 0.0),
             ("xtol", self.xtol, self.xtol.is_finite() && self.xtol >= 0.0),
@@ -423,7 +451,7 @@ impl LevenbergMarquardt {
                 value: 0.0,
             });
         }
-        let (target, report) = self.minimize(target);
+        let (target, report) = self.minimize_with_optional_cancellation(target, cancellation);
         if let Some(error) = report.error.clone() {
             return Err(error);
         }
@@ -478,6 +506,67 @@ impl LevenbergMarquardt {
     where
         O: LeastSquaresProblem,
     {
+        self.minimize_with_optional_cancellation(target, None)
+    }
+
+    /// Infallible-report counterpart of [`Self::try_minimize_with_cancellation_token`].
+    /// Cancellation is returned in `MinimizationReport::error` with its partial
+    /// snapshot, matching the existing `minimize` result contract.
+    pub fn minimize_with_cancellation_token<O>(
+        &self,
+        target: O,
+        cancellation: CancellationToken,
+    ) -> (O, MinimizationReport)
+    where
+        O: LeastSquaresProblem,
+    {
+        self.minimize_with_optional_cancellation(target, Some(&cancellation))
+    }
+
+    fn minimize_with_optional_cancellation<O>(
+        &self,
+        target: O,
+        cancellation: Option<&CancellationToken>,
+    ) -> (O, MinimizationReport)
+    where
+        O: LeastSquaresProblem,
+    {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            let mut statistics = SolveStatistics::default();
+            statistics.availability = if self.telemetry_mode.collects_counters() {
+                StatisticsAvailability::Collected
+            } else {
+                StatisticsAvailability::NotCollected
+            };
+            statistics.timings_collected = self.telemetry_mode.collects_timings();
+            let started = self.telemetry_mode.collects_timings().then(Instant::now);
+            let parameters = target.params();
+            let elapsed = started.map(|instant| instant.elapsed());
+            if let Some(elapsed) = elapsed {
+                statistics.total_duration = elapsed;
+            }
+            let snapshot = cancellation_snapshot(
+                0,
+                parameters.as_slice(),
+                None,
+                &statistics,
+                self.telemetry_mode,
+                elapsed,
+            );
+            return (
+                target,
+                MinimizationReport {
+                    termination: TerminationReason::User("cancelled"),
+                    number_of_evaluations: 0,
+                    objective_function: f64::NAN,
+                    rejected_domain_trials: 0,
+                    statistics,
+                    error: Some(LeastSquaresError::Cancelled {
+                        snapshot: Box::new(snapshot),
+                    }),
+                },
+            );
+        }
         let (mut lm, mut residuals) = match LM::new(self, target) {
             Err(report) => return report,
             Ok(res) => res,
@@ -485,6 +574,11 @@ impl LevenbergMarquardt {
         let n = lm.x.nrows();
         let mut iteration = 0usize;
         loop {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                lm.target.set_params(&lm.x);
+                lm.failure_error = Some(lm.cancellation_error(iteration));
+                return lm.into_report(TerminationReason::User("cancelled"));
+            }
             if let Some(limit) = lm.config.max_iterations {
                 if iteration >= limit {
                     return lm.into_report(TerminationReason::MaxIterationsReached { limit });
@@ -529,6 +623,11 @@ impl LevenbergMarquardt {
             };
 
             residuals = loop {
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    lm.target.set_params(&lm.x);
+                    lm.failure_error = Some(lm.cancellation_error(iteration));
+                    return lm.into_report(TerminationReason::User("cancelled"));
+                }
                 if lm.config.telemetry_mode.collects_counters() {
                     lm.statistics.trust_region_trials += 1;
                 }
@@ -751,6 +850,20 @@ where
                 ..self.report
             },
         )
+    }
+
+    fn cancellation_error(&self, completed_iterations: usize) -> LeastSquaresError {
+        let elapsed = self.solve_started.map(|started| started.elapsed());
+        LeastSquaresError::Cancelled {
+            snapshot: Box::new(cancellation_snapshot(
+                completed_iterations,
+                self.x.as_slice(),
+                Some(self.residuals_norm),
+                &self.statistics,
+                self.config.telemetry_mode,
+                elapsed,
+            )),
+        }
     }
 
     fn jacobian(&mut self) -> Result<DMatrix<f64>, TerminationReason> {
@@ -1055,5 +1168,33 @@ where
         if reset {
             self.target.set_params(&self.x);
         }
+    }
+}
+
+fn cancellation_snapshot(
+    completed_iterations: usize,
+    parameters: &[f64],
+    residual_norm: Option<f64>,
+    statistics: &SolveStatistics,
+    telemetry_mode: LeastSquaresTelemetryMode,
+    elapsed: Option<std::time::Duration>,
+) -> super::errors::CancelledLeastSquaresSnapshot {
+    super::errors::CancelledLeastSquaresSnapshot {
+        completed_iterations,
+        parameters: parameters.to_vec(),
+        residual_norm,
+        residual_evaluations: telemetry_mode
+            .collects_counters()
+            .then_some(statistics.residual_evaluations),
+        jacobian_evaluations: telemetry_mode
+            .collects_counters()
+            .then_some(statistics.jacobian_evaluations),
+        linear_solves: telemetry_mode
+            .collects_counters()
+            .then_some(statistics.linear_solves),
+        elapsed: telemetry_mode
+            .collects_timings()
+            .then_some(elapsed)
+            .flatten(),
     }
 }

@@ -13,7 +13,21 @@ This file is the short index for the BVP_Damp story ledger. The detailed entries
 
 Every new or rerun story entry must contain Recorded: YYYY-MM-DD, machine/core-count context, command, result, interpretation, and conclusion. An entry marked Recorded: undated is historical evidence only and is RERUN REQUIRED after the current architecture pass. A rerun supersedes the old block; the old block remains for auditability.
 
-Current date for this ledger pass: 2026-11-10.
+Current date for this ledger pass: 2026-11-15.
+
+## 2026-11-15 Telemetry Default Alignment
+
+Damped and Frozen generated-backend configurations now default to
+`BvpTelemetryMode::Off` instead of implicitly collecting `Counters`. Tests
+that assert work counts opt into `Counters` explicitly. Event logging is an
+independent channel: with telemetry Off, an explicitly enabled bounded logging
+configuration still retains events, while the default Off/Off path retains no
+events. Counter-derived legacy event values are unavailable rather than
+misrepresented as zero when counters were not collected.
+
+Debug verification: `cargo test --lib numerical::BVP_Damp:: -- --test-threads=1`
+passed 367 tests, 0 failed, 69 ignored. The change affects collection defaults
+only; Newton, bounds, refinement and publication behavior are unchanged.
 
 ## Source-Of-Truth Rules
 
@@ -1590,3 +1604,23 @@ high-accuracy CorrectionNewton root within `3.4e-6` max profile distance. The
 original MF-LOW seed still does not converge under Frozen, but is no longer
 misreported as a successful alternate profile; that solver-robustness question
 remains separate.
+
+## Cooperative Cancellation (2026-11-15)
+
+Damped and Frozen/Naive now accept an opt-in `CancellationToken` at native,
+`BVP_api`, and BVP task JSON boundaries. Polling occurs between complete
+Newton iterations (and at Damped's refinement restart boundary), never inside
+residual/Jacobian callbacks. The failure path materializes one partial
+snapshot containing the route, iteration, active mesh, packed reduced state,
+and telemetry collected by the configured mode. A cancelled attempt does not
+publish an incomplete profile or replace the last successful facade result;
+without cancellation, no snapshot state is maintained or copied per iteration.
+
+Debug verification passed: `numerical::BVP_api::tests::` (50 passed, 17
+ignored) and `command_interpreter::task_parser_bvp::` (44 passed). The facade
+test checks both Damped and Frozen with pre-cancelled tokens, including no
+iteration/callback work, route/mesh snapshot identity, and preservation of the
+published-result contract. Task JSON tests separately validate the bounded
+post-stop snapshot envelope. These checks establish opt-in routing and
+pre-cancellation behavior; an asynchronous mid-Newton cancellation timing
+stress test remains intentionally absent to avoid a scheduler-dependent test.

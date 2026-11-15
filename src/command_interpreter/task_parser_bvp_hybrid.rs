@@ -5,6 +5,7 @@
 //! initial guess. The returned `BvpSolverSettings` keeps native family options;
 //! the application attaches its own guess and constructs `BvpProblem`.
 
+use crate::command_interpreter::task_json::{TaskJsonError, settings_document_map_from_json};
 use crate::command_interpreter::task_parser::{DocumentMap, Value};
 use crate::numerical::BVP_CorrectionNewton::{
     CorrectionNewtonMatrixLayout, CorrectionNewtonOptions, CorrectionNewtonSymbolicExecution,
@@ -58,6 +59,8 @@ pub enum HybridBvpSolverFamily {
 /// Errors from parsing hybrid BVP solver settings.
 #[derive(Debug, Error)]
 pub enum HybridBvpSettingsError {
+    #[error(transparent)]
+    Json(#[from] TaskJsonError),
     #[error("missing `solver_settings` section")]
     MissingSettings,
     #[error("invalid field `{path}`: {message}")]
@@ -427,6 +430,26 @@ pub fn parse_hybrid_bvp_solver_settings_from_document(
     } else {
         Ok(parsed)
     }
+}
+
+/// Parse BVP solver settings from a versioned JSON document while leaving
+/// client-owned physical/model fields opaque. Only the known solver-settings
+/// sections are converted and passed to the same native parser as text input.
+pub fn parse_hybrid_bvp_solver_settings_from_json(
+    input: &str,
+) -> Result<BvpSolverSettings, HybridBvpSettingsError> {
+    let document = settings_document_map_from_json(
+        input,
+        &[
+            "solver_settings",
+            "strategy_params",
+            "adaptive_strategy",
+            "grid_refinement",
+            "bounds",
+            "rel_tolerance",
+        ],
+    )?;
+    parse_hybrid_bvp_solver_settings_from_document(&document)
 }
 
 fn parse_correction_newton_settings(
@@ -1648,6 +1671,31 @@ mod tests {
         ]);
         settings.extend(values(entries));
         settings
+    }
+
+    #[test]
+    fn hybrid_bvp_settings_json_ignores_nested_client_domain_data() {
+        let json = r#"{
+            "format_version": 1,
+            "solver_settings": {
+                "solver_family": "sci",
+                "execution": "lambdify",
+                "matrix_layout": "sparse"
+            },
+            "combustion_model": {
+                "species": [{"name": "A", "transport": {"conductivity": 0.2}}],
+                "equations": ["client constructs these symbolically"]
+            }
+        }"#;
+        let parsed = parse_hybrid_bvp_solver_settings_from_json(json)
+            .expect("hybrid parser should leave nested domain model opaque");
+        assert!(matches!(parsed, BvpSolverSettings::Sci { .. }));
+
+        let missing_settings = r#"{"format_version":1,"combustion_model":{"x":1}}"#;
+        assert!(matches!(
+            parse_hybrid_bvp_solver_settings_from_json(missing_settings),
+            Err(HybridBvpSettingsError::MissingSettings)
+        ));
     }
 
     fn parsed_sci(settings: Section) -> (BvpSciOptions, BvpSciSparseFactorization) {

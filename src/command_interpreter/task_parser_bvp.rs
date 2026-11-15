@@ -40,6 +40,7 @@ use crate::numerical::BVP_CorrectionNewton::{
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{
     DampedSolverOptions, NRBVP as DampedBvpSolver, SolverParams,
 };
+use crate::numerical::cancellation::CancellationToken;
 #[path = "task_parser_bvp_correction_newton.rs"]
 mod correction_newton;
 use crate::numerical::BVP_Damp::NR_Damp_solver_frozen::{
@@ -736,6 +737,15 @@ pub enum BvpTaskError {
         solver: String,
     },
     UnsupportedContinuation(String),
+    CancellationUnsupported {
+        solver: &'static str,
+    },
+    CancelledBeforePreparation {
+        solver: &'static str,
+    },
+    Cancelled {
+        snapshot: crate::numerical::BVP_Damp::telemetry::BvpDampCancelledSnapshot,
+    },
     BvpDamp(BvpBackendIntegrationError),
     BvpSci(BvpSciNewError),
     CorrectionNewton(CorrectionNewtonSolverError),
@@ -779,7 +789,11 @@ impl BvpTaskError {
             Self::UnsupportedRoute(_) => "unsupported_route",
             Self::UnsupportedOption { .. } => "unsupported_option",
             Self::UnsupportedContinuation(_) => "continuation",
+            Self::CancellationUnsupported { .. } => "unsupported_route",
+            Self::CancelledBeforePreparation { .. } => "cancelled",
+            Self::Cancelled { .. } => "cancelled",
             Self::BvpSci(error) => bvp_sci_error_category(error),
+            Self::CorrectionNewton(CorrectionNewtonSolverError::Cancelled { .. }) => "cancelled",
             Self::CorrectionNewton(_) => "solver",
             Self::HybridSettings(_) => "configuration",
             Self::BvpDamp(_) | Self::Solver(_) => "solver",
@@ -822,6 +836,17 @@ impl std::fmt::Display for BvpTaskError {
             Self::UnsupportedContinuation(message) => {
                 write!(f, "unsupported BVP continuation: {message}")
             }
+            Self::CancellationUnsupported { solver } => {
+                write!(f, "cooperative cancellation is unsupported for {solver}")
+            }
+            Self::CancelledBeforePreparation { solver } => {
+                write!(f, "{solver} task was cancelled before solver preparation")
+            }
+            Self::Cancelled { snapshot } => write!(
+                f,
+                "BVP_Damp {:?} task cancelled after {} Newton iterations",
+                snapshot.route, snapshot.iteration
+            ),
             Self::BvpSci(error) => write!(f, "BVP_sci failed: {error}"),
             Self::CorrectionNewton(error) => write!(f, "BVP_CorrectionNewton failed: {error}"),
             Self::HybridSettings(error) => write!(f, "BVP settings: {error}"),
@@ -886,6 +911,7 @@ fn bvp_sci_error_category(error: &BvpSciNewError) -> &'static str {
         | BvpSciNewError::LinearFactorization { .. }
         | BvpSciNewError::LinearSolve { .. } => "solver_linear",
         BvpSciNewError::UnsupportedRoute(_) => "unsupported_route",
+        BvpSciNewError::Cancelled { .. } => "cancelled",
         BvpSciNewError::SymbolicPreparation(_) => "symbolic_preparation",
         BvpSciNewError::AotPreparation { kind, .. } => match kind {
             crate::numerical::BVP_sci::new::BvpSciAotFailureKind::Compiler
@@ -1150,6 +1176,26 @@ impl BvpDampTaskSolver {
         }
     }
 
+    pub fn try_solve_with_cancellation_token(
+        &mut self,
+        token: &CancellationToken,
+    ) -> Result<(), BvpBackendIntegrationError> {
+        match self {
+            Self::Damped(solver) => solver.try_solver_with_cancellation_token(token).map(|_| ()),
+            Self::Frozen(solver) => solver.try_solver_with_cancellation_token(token).map(|_| ()),
+        }
+    }
+
+    fn cancelled_snapshot(
+        &self,
+        iteration: usize,
+    ) -> crate::numerical::BVP_Damp::telemetry::BvpDampCancelledSnapshot {
+        match self {
+            Self::Damped(solver) => solver.cancelled_snapshot(iteration),
+            Self::Frozen(solver) => solver.cancelled_snapshot(iteration),
+        }
+    }
+
     pub fn get_result(&self) -> Option<DMatrix<f64>> {
         match self {
             Self::Damped(solver) => solver.get_result(),
@@ -1236,13 +1282,23 @@ impl BvpDampTaskSolver {
         }
     }
 
-    fn try_solve_damped(&mut self, prepared: bool) -> Result<(), BvpBackendIntegrationError> {
+    fn try_solve_damped(
+        &mut self,
+        prepared: bool,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<(), BvpBackendIntegrationError> {
         match self {
             Self::Damped(solver) => {
                 if prepared {
-                    solver.try_solver_prepared()?;
+                    match cancellation {
+                        Some(token) => solver.try_solver_prepared_with_cancellation_token(token)?,
+                        None => solver.try_solver_prepared()?,
+                    };
                 } else {
-                    solver.try_solver()?;
+                    match cancellation {
+                        Some(token) => solver.try_solver_with_cancellation_token(token)?,
+                        None => solver.try_solver()?,
+                    };
                 }
                 Ok(())
             }
@@ -1466,22 +1522,50 @@ pub fn run_bvp_task_from_str(input: &str) -> Result<BvpTaskRunResult, BvpTaskErr
 
 /// Execute a fully parsed BVP task and apply any requested postprocessing.
 pub fn run_bvp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
+    run_bvp_task_internal(spec, None)
+}
+
+/// Execute a BVP task with a cooperative token on routes that support a
+/// solver-defined safe checkpoint. Unsupported families reject before solve.
+pub fn run_bvp_task_with_cancellation_token(
+    spec: BvpTaskSpec,
+    token: &CancellationToken,
+) -> Result<BvpTaskRunResult, BvpTaskError> {
+    if token.is_cancelled() {
+        return Err(BvpTaskError::CancelledBeforePreparation {
+            solver: match spec.solver.family {
+                BvpSolverFamilySpec::Sci => "BVP_sci",
+                BvpSolverFamilySpec::CorrectionNewton => "BVP_CorrectionNewton",
+                BvpSolverFamilySpec::Damp => "BVP_Damp",
+            },
+        });
+    }
+    run_bvp_task_internal(spec, Some(token))
+}
+
+fn run_bvp_task_internal(
+    spec: BvpTaskSpec,
+    cancellation: Option<&CancellationToken>,
+) -> Result<BvpTaskRunResult, BvpTaskError> {
     validate_bvp_task_spec(&spec)?;
     match spec.solver.family {
-        BvpSolverFamilySpec::Damp => run_bvp_damp_task(spec),
-        BvpSolverFamilySpec::Sci => run_bvp_sci_task(spec),
-        BvpSolverFamilySpec::CorrectionNewton => correction_newton::run_task(spec),
+        BvpSolverFamilySpec::Damp => run_bvp_damp_task(spec, cancellation),
+        BvpSolverFamilySpec::Sci => run_bvp_sci_task(spec, cancellation),
+        BvpSolverFamilySpec::CorrectionNewton => correction_newton::run_task(spec, cancellation),
     }
 }
 
-fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
+fn run_bvp_damp_task(
+    spec: BvpTaskSpec,
+    cancellation: Option<&CancellationToken>,
+) -> Result<BvpTaskRunResult, BvpTaskError> {
     if matches!(
         spec.continuation
             .as_ref()
             .map(|continuation| continuation.mode),
         Some(ContinuationMode::Warm | ContinuationMode::Prepared)
     ) {
-        return run_bvp_damp_reused_continuation(spec);
+        return run_bvp_damp_reused_continuation(spec, cancellation);
     }
     let segments = continuation_rows(&spec)?;
     let mut executed = Vec::with_capacity(segments.len());
@@ -1489,7 +1573,18 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
     for (index, values) in segments.iter().enumerate() {
         let segment_spec = bind_continuation_segment(&spec, values)?;
         let mut solver = build_bvp_solver_from_spec(&segment_spec)?;
-        solver.try_solve().map_err(BvpTaskError::BvpDamp)?;
+        let solve_result = match cancellation {
+            Some(token) => solver.try_solve_with_cancellation_token(token),
+            None => solver.try_solve(),
+        };
+        if let Err(error) = solve_result {
+            if let BvpBackendIntegrationError::Cancelled { iteration } = &error {
+                return Err(BvpTaskError::Cancelled {
+                    snapshot: solver.cancelled_snapshot(*iteration),
+                });
+            }
+            return Err(BvpTaskError::BvpDamp(error));
+        }
         let result = solver.get_result().ok_or(BvpTaskError::SolverResult(
             BvpSolverResultFailure::NoResult { solver: "BVP_Damp" },
         ))?;
@@ -1535,7 +1630,10 @@ fn run_bvp_damp_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError
 /// Execute a BVP_Damp continuation while retaining its prepared symbolic and
 /// generated callback bundle. Numeric parameter rebinding invalidates only
 /// numeric Jacobian/factor state; a mesh change explicitly re-prepares layout.
-fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
+fn run_bvp_damp_reused_continuation(
+    spec: BvpTaskSpec,
+    cancellation: Option<&CancellationToken>,
+) -> Result<BvpTaskRunResult, BvpTaskError> {
     let continuation =
         spec.continuation
             .as_ref()
@@ -1652,9 +1750,14 @@ fn run_bvp_damp_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResul
             solver.try_prepare_damped().map_err(BvpTaskError::BvpDamp)?;
             prepared = true;
         }
-        solver
-            .try_solve_damped(prepared)
-            .map_err(BvpTaskError::BvpDamp)?;
+        if let Err(error) = solver.try_solve_damped(prepared, cancellation) {
+            if let BvpBackendIntegrationError::Cancelled { iteration } = &error {
+                return Err(BvpTaskError::Cancelled {
+                    snapshot: solver.cancelled_snapshot(*iteration),
+                });
+            }
+            return Err(BvpTaskError::BvpDamp(error));
+        }
         prepared = true;
         telemetry.segments += 1;
         if index > 0 {
@@ -2171,7 +2274,10 @@ fn validate_bvp_option_compatibility(
     Ok(())
 }
 
-fn run_bvp_sci_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
+fn run_bvp_sci_task(
+    spec: BvpTaskSpec,
+    cancellation: Option<&CancellationToken>,
+) -> Result<BvpTaskRunResult, BvpTaskError> {
     if spec.postprocessing.plot {
         return Err(BvpTaskError::UnsupportedRoute(
             "BVP_sci legacy `plot` is not connected; use the typed postprocessing actions"
@@ -2184,7 +2290,7 @@ fn run_bvp_sci_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError>
             .map(|continuation| continuation.mode),
         Some(ContinuationMode::Warm | ContinuationMode::Prepared)
     ) {
-        return run_bvp_sci_reused_continuation(spec);
+        return run_bvp_sci_reused_continuation(spec, cancellation);
     }
     let segments = continuation_rows(&spec)?;
     let mut executed = Vec::with_capacity(segments.len());
@@ -2192,7 +2298,11 @@ fn run_bvp_sci_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError>
     for (index, values) in segments.iter().enumerate() {
         let segment_spec = bind_continuation_segment(&spec, values)?;
         let mut solver = build_bvp_sci_solver_from_spec(&segment_spec)?;
-        let solution = solver.solve().map_err(BvpTaskError::BvpSci)?;
+        let solution = match cancellation {
+            Some(token) => solver.solve_with_cancellation_token(token),
+            None => solver.solve(),
+        }
+        .map_err(BvpTaskError::BvpSci)?;
         runtime_telemetry.record(&solver.plan().telemetry_snapshot());
         let plan = segment_spec.postprocessing.to_plan("bvp_result.csv");
         if !plan.actions.is_empty() {
@@ -2227,7 +2337,10 @@ fn run_bvp_sci_task(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError>
     })
 }
 
-fn run_bvp_sci_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResult, BvpTaskError> {
+fn run_bvp_sci_reused_continuation(
+    spec: BvpTaskSpec,
+    cancellation: Option<&CancellationToken>,
+) -> Result<BvpTaskRunResult, BvpTaskError> {
     let continuation =
         spec.continuation
             .as_ref()
@@ -2287,7 +2400,11 @@ fn run_bvp_sci_reused_continuation(spec: BvpTaskSpec) -> Result<BvpTaskRunResult
                 .map_err(BvpTaskError::BvpSci)?;
         }
 
-        let solution = solver.solve().map_err(BvpTaskError::BvpSci)?;
+        let solution = match cancellation {
+            Some(token) => solver.solve_with_cancellation_token(token),
+            None => solver.solve(),
+        }
+        .map_err(BvpTaskError::BvpSci)?;
         let plan = spec.postprocessing.to_plan("bvp_result.csv");
         if !plan.actions.is_empty() {
             let dataset = sci_solution_dataset(&solution, &spec.equations.unknowns)?;
@@ -3259,7 +3376,7 @@ fn parse_generated_backend_options(
     })
 }
 
-fn generated_backend_config_from_spec(
+pub(crate) fn generated_backend_config_from_spec(
     spec: &BvpGeneratedBackendSpec,
     task_backend: &BvpLinearBackendSpec,
 ) -> Result<GeneratedBackendConfig, BvpTaskError> {

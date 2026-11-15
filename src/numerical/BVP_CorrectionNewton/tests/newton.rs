@@ -1,4 +1,6 @@
 use super::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug)]
 struct ScalarCorrectionNewtonTrace {
@@ -842,6 +844,81 @@ fn iteration_limit_returns_last_accepted_state_and_partial_report() {
         other => panic!("expected typed iteration-limit error, got {other:?}"),
     }
     assert_eq!(solver.state()[0], 0.875);
+}
+
+#[test]
+fn pre_cancelled_solve_skips_callbacks_and_returns_off_mode_snapshot() {
+    let residual_calls = Arc::new(AtomicUsize::new(0));
+    let jacobian_calls = Arc::new(AtomicUsize::new(0));
+    let residual_counter = Arc::clone(&residual_calls);
+    let jacobian_counter = Arc::clone(&jacobian_calls);
+    let mut solver = CorrectionNewtonSolver::new(
+        DVector::from_element(1, 2.0),
+        move |state| {
+            residual_counter.fetch_add(1, Ordering::Relaxed);
+            Ok(DVector::from_element(1, state[0] - 1.0))
+        },
+        move |_| {
+            jacobian_counter.fetch_add(1, Ordering::Relaxed);
+            Ok(DMatrix::identity(1, 1))
+        },
+        CorrectionNewtonConfig::new(1, 1e-8, 0.0),
+    )
+    .unwrap();
+    let token = CancellationToken::new();
+    token.cancel();
+
+    match solver.solve_with_cancellation_token(&token) {
+        Err(CorrectionNewtonSolverError::Cancelled { report }) => {
+            assert_eq!(report.iterations, 0);
+            assert_eq!(report.state[0], 2.0);
+            assert_eq!(report.telemetry_mode, CorrectionNewtonTelemetryMode::Off);
+            assert_eq!(
+                report.telemetry,
+                CorrectionNewtonTelemetrySnapshot::default()
+            );
+        }
+        other => panic!("expected typed cancellation, got {other:?}"),
+    }
+    assert_eq!(residual_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(jacobian_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn cancellation_is_observed_after_a_complete_newton_iteration() {
+    let token = CancellationToken::new();
+    let callback_token = token.clone();
+    let mut config = CorrectionNewtonConfig::new(1, 1e-8, 0.0);
+    config.telemetry_mode = CorrectionNewtonTelemetryMode::Counters;
+    let mut solver = CorrectionNewtonSolver::new(
+        DVector::from_element(1, 0.0),
+        move |state| {
+            if state[0] > 0.0 {
+                callback_token.cancel();
+            }
+            Ok(DVector::from_element(1, state[0] - 1.0))
+        },
+        |_| Ok(DMatrix::from_element(1, 1, 2.0)),
+        config,
+    )
+    .unwrap();
+
+    match solver.solve_with_cancellation_token(&token) {
+        Err(CorrectionNewtonSolverError::Cancelled { report }) => {
+            assert_eq!(report.iterations, 1);
+            assert_eq!(report.state[0], 0.5);
+            assert_eq!(
+                report.telemetry_mode,
+                CorrectionNewtonTelemetryMode::Counters
+            );
+            assert_eq!(report.telemetry.accepted_steps, 1);
+            assert_eq!(report.telemetry.residual_evaluations, 2);
+            assert_eq!(report.telemetry.jacobian_evaluations, 1);
+            assert_eq!(report.telemetry.linear_solves, 2);
+        }
+        other => panic!("expected cancellation at the next iteration boundary, got {other:?}"),
+    }
+    assert_eq!(solver.state()[0], 0.5);
 }
 
 #[test]

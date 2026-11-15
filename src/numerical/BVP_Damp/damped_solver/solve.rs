@@ -1109,6 +1109,13 @@ impl NRBVP {
     pub fn try_main_loop_damped(
         &mut self,
     ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_main_loop_damped_with_cancellation(None)
+    }
+
+    fn try_main_loop_damped_with_cancellation(
+        &mut self,
+        cancellation: Option<&crate::numerical::cancellation::CancellationToken>,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         ////////////////////////////////////////////////////////////////////////
         info!("\n \n solving system of equations with Newton-Raphson method! \n \n");
         info!("{:?}", self.initial_guess.shape());
@@ -1125,6 +1132,10 @@ impl NRBVP {
         } else {
         }
         self.validate_active_bounds()?;
+        if cancellation.is_some_and(crate::numerical::cancellation::CancellationToken::is_cancelled)
+        {
+            return Err(BvpBackendIntegrationError::Cancelled { iteration: 0 });
+        }
         let initial_residual_started = Instant::now();
         // Keep the legacy initial-residual error ordering, then consume this
         // validated vector as the first Newton step's base residual.
@@ -1141,6 +1152,13 @@ impl NRBVP {
         let mut nJacReeval = 0;
         let mut i = 0;
         while i < self.max_iterations {
+            if cancellation
+                .is_some_and(crate::numerical::cancellation::CancellationToken::is_cancelled)
+            {
+                return Err(BvpBackendIntegrationError::Cancelled {
+                    iteration: i as usize,
+                });
+            }
             let iteration_started = self.telemetry_counters.start_iteration_scope();
             self.jac_recalc = jac_recalc(
                 &self.strategy_params,
@@ -1246,6 +1264,13 @@ impl NRBVP {
                 {
                     self.telemetry_counters
                         .finish_iteration_scope(iteration_started);
+                    if cancellation.is_some_and(
+                        crate::numerical::cancellation::CancellationToken::is_cancelled,
+                    ) {
+                        return Err(BvpBackendIntegrationError::Cancelled {
+                            iteration: i as usize,
+                        });
+                    }
                     info!("solving with new grid!");
                     return self.try_solve_with_new_grid(true);
                 } else {
@@ -1293,6 +1318,13 @@ impl NRBVP {
                 .as_ref()
                 .map_or(false, |p| p.adaptive.is_some())
         {
+            if cancellation
+                .is_some_and(crate::numerical::cancellation::CancellationToken::is_cancelled)
+            {
+                return Err(BvpBackendIntegrationError::Cancelled {
+                    iteration: i as usize,
+                });
+            }
             info!("\n \n iterations unsuccessful, calling solve_with_new_grid \n \n");
             return self.try_solve_with_new_grid(false);
         }
@@ -1560,7 +1592,15 @@ impl NRBVP {
     /// errors. Enabled logging must initialize its persistent file sink before
     /// numerical work begins.
     pub fn try_solver(&mut self) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
-        self.try_solver_with_mesh(None)
+        self.try_solver_with_mesh(None, None)
+    }
+
+    /// Cold solve with cancellation polling between complete Newton iterations.
+    pub fn try_solver_with_cancellation_token(
+        &mut self,
+        token: &crate::numerical::cancellation::CancellationToken,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_solver_with_mesh(None, Some(token))
     }
 
     /// Cold solve starting from an explicit mesh. Unlike a prior manual
@@ -1570,12 +1610,22 @@ impl NRBVP {
         &mut self,
         mesh: Vec<f64>,
     ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
-        self.try_solver_with_mesh(Some(mesh))
+        self.try_solver_with_mesh(Some(mesh), None)
+    }
+
+    /// Cold solve on an explicit mesh with cooperative Newton-boundary cancellation.
+    pub fn try_solver_with_cancellation_token_on_mesh(
+        &mut self,
+        mesh: Vec<f64>,
+        token: &crate::numerical::cancellation::CancellationToken,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_solver_with_mesh(Some(mesh), Some(token))
     }
 
     fn try_solver_with_mesh(
         &mut self,
         mesh: Option<Vec<f64>>,
+        cancellation: Option<&crate::numerical::cancellation::CancellationToken>,
     ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         let _logging_scope = SolverLogGuard::try_enter(self.effective_logging_level()?)
             .map_err(|source| BvpBackendIntegrationError::LogSetupFailed { source })?;
@@ -1586,7 +1636,7 @@ impl NRBVP {
             self.custom_timer.symbolic_operations_tic();
             self.try_eq_generate(mesh, None)?;
             self.custom_timer.symbolic_operations_tac();
-            self.try_main_loop_damped()
+            self.try_main_loop_damped_with_cancellation(cancellation)
         })();
         self.custom_timer.finish();
         self.telemetry_counters.finish_solve(&res);
@@ -1625,6 +1675,21 @@ impl NRBVP {
     pub fn try_solver_prepared(
         &mut self,
     ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_solver_prepared_with_cancellation(None)
+    }
+
+    /// Reuse prepared callbacks while polling cancellation between iterations.
+    pub fn try_solver_prepared_with_cancellation_token(
+        &mut self,
+        token: &crate::numerical::cancellation::CancellationToken,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
+        self.try_solver_prepared_with_cancellation(Some(token))
+    }
+
+    fn try_solver_prepared_with_cancellation(
+        &mut self,
+        cancellation: Option<&crate::numerical::cancellation::CancellationToken>,
+    ) -> Result<Option<DVector<f64>>, BvpBackendIntegrationError> {
         let _logging_scope = SolverLogGuard::try_enter(self.effective_logging_level()?)
             .map_err(|source| BvpBackendIntegrationError::LogSetupFailed { source })?;
         let prepared_fingerprint = self.prepared_plan_fingerprint();
@@ -1642,7 +1707,7 @@ impl NRBVP {
         self.telemetry_counters.begin_solve();
         self.custom_timer.start();
         let begin = Instant::now();
-        let res = self.try_main_loop_damped();
+        let res = self.try_main_loop_damped_with_cancellation(cancellation);
         self.custom_timer.finish();
         self.telemetry_counters.finish_solve(&res);
         self.telemetry_counters.record_termination(
@@ -1665,6 +1730,21 @@ impl NRBVP {
         self.calc_statistics();
         self.custom_timer.get_all();
         Ok(res)
+    }
+
+    /// Materialize the accepted partial state only after cancellation stops the loop.
+    pub fn cancelled_snapshot(
+        &self,
+        iteration: usize,
+    ) -> crate::numerical::BVP_Damp::telemetry::BvpDampCancelledSnapshot {
+        let statistics = self.get_statistics();
+        crate::numerical::BVP_Damp::telemetry::BvpDampCancelledSnapshot {
+            route: crate::numerical::BVP_Damp::telemetry::BvpDampCancellationRoute::Damped,
+            iteration,
+            mesh: self.x_mesh.iter().copied().collect(),
+            packed_state: self.y.to_DVectorType().as_slice().to_vec(),
+            telemetry: statistics.telemetry,
+        }
     }
 
     /// Compatibility-only wrapper over [`NRBVP::try_solver`].

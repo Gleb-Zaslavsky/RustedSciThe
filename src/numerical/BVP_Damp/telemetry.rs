@@ -64,8 +64,8 @@ pub enum BvpLoggingMode {
 /// both. Decision logging is controlled independently by [`BvpLoggingConfig`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BvpTelemetryMode {
-    Off,
     #[default]
+    Off,
     Counters,
     Timings,
     Detailed,
@@ -681,6 +681,11 @@ impl BvpTelemetryRecorder {
         self.telemetry_mode.get().collects_timings()
     }
 
+    #[inline]
+    fn event_sink_enabled(&self) -> bool {
+        self.counters_enabled() || self.logging_config.get().mode != BvpLoggingMode::Off
+    }
+
     /// Configures event retention without changing numerical behaviour.
     pub(crate) fn set_logging_mode(&self, mode: BvpLoggingMode) {
         self.set_logging_config(BvpLoggingConfig {
@@ -1028,10 +1033,12 @@ impl BvpTelemetryRecorder {
         damping_coefficient: f64,
         residual_norm: f64,
     ) {
-        if !self.counters_enabled() {
+        if !self.event_sink_enabled() {
             return;
         }
-        self.damping_trials.set(self.damping_trials.get() + 1);
+        if self.counters_enabled() {
+            self.damping_trials.set(self.damping_trials.get() + 1);
+        }
         self.record_log_event(
             BvpLogLevel::Debug,
             BvpLogEventKind::DampingTrial,
@@ -1054,11 +1061,13 @@ impl BvpTelemetryRecorder {
         damping_coefficient: f64,
         residual_norm: f64,
     ) {
-        if !self.counters_enabled() {
+        if !self.event_sink_enabled() {
             return;
         }
-        self.damping_rejections
-            .set(self.damping_rejections.get() + 1);
+        if self.counters_enabled() {
+            self.damping_rejections
+                .set(self.damping_rejections.get() + 1);
+        }
         self.record_log_event(
             BvpLogLevel::Warn,
             BvpLogEventKind::DampingRejected,
@@ -1136,19 +1145,25 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_jacobian_recalculation(&self) {
-        if !self.counters_enabled() {
+        if !self.event_sink_enabled() {
             return;
         }
-        self.jacobian_recalculations
-            .set(self.jacobian_recalculations.get() + 1);
-        self.jacobian_requests.set(self.jacobian_requests.get() + 1);
+        if self.counters_enabled() {
+            self.jacobian_recalculations
+                .set(self.jacobian_recalculations.get() + 1);
+            self.jacobian_requests.set(self.jacobian_requests.get() + 1);
+        }
         self.record_log_event(
             BvpLogLevel::Info,
             BvpLogEventKind::JacobianRefresh,
             self.iterations.get(),
             0,
             0,
-            self.jacobian_recalculations.get() as f64,
+            if self.counters_enabled() {
+                self.jacobian_recalculations.get() as f64
+            } else {
+                f64::NAN
+            },
             f64::NAN,
         );
     }
@@ -1163,53 +1178,71 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_factorization(&self) {
-        if !self.counters_enabled() {
+        if !self.event_sink_enabled() {
             return;
         }
-        self.factorizations.set(self.factorizations.get() + 1);
+        if self.counters_enabled() {
+            self.factorizations.set(self.factorizations.get() + 1);
+        }
         self.record_log_event(
             BvpLogLevel::Debug,
             BvpLogEventKind::Factorization,
             self.iterations.get(),
             0,
             0,
-            self.factorizations.get() as f64,
+            if self.counters_enabled() {
+                self.factorizations.get() as f64
+            } else {
+                f64::NAN
+            },
             f64::NAN,
         );
     }
 
     #[inline]
     pub(crate) fn record_factorization_cache_hit(&self) {
-        if !self.counters_enabled() {
+        if !self.event_sink_enabled() {
             return;
         }
-        self.factorization_cache_hits
-            .set(self.factorization_cache_hits.get() + 1);
+        if self.counters_enabled() {
+            self.factorization_cache_hits
+                .set(self.factorization_cache_hits.get() + 1);
+        }
         self.record_log_event(
             BvpLogLevel::Debug,
             BvpLogEventKind::FactorizationCacheHit,
             self.iterations.get(),
             0,
             0,
-            self.factorization_cache_hits.get() as f64,
+            if self.counters_enabled() {
+                self.factorization_cache_hits.get() as f64
+            } else {
+                f64::NAN
+            },
             f64::NAN,
         );
     }
 
     #[inline]
     pub(crate) fn record_factorization_invalidation(&self) {
-        if !self.counters_enabled() {
+        if !self.event_sink_enabled() {
             return;
         }
-        self.factorization_invalidations
-            .set(self.factorization_invalidations.get() + 1);
+        if self.counters_enabled() {
+            self.factorization_invalidations
+                .set(self.factorization_invalidations.get() + 1);
+        }
         self.record_log_event(
             BvpLogLevel::Info,
             BvpLogEventKind::FactorizationInvalidated,
             self.iterations.get(),
             0,
             0,
-            self.factorization_invalidations.get() as f64,
+            if self.counters_enabled() {
+                self.factorization_invalidations.get() as f64
+            } else {
+                f64::NAN
+            },
             f64::NAN,
         );
     }
@@ -1224,17 +1257,23 @@ impl BvpTelemetryRecorder {
 
     #[inline]
     pub(crate) fn record_grid_refinement(&self) {
-        if !self.counters_enabled() {
+        if !self.event_sink_enabled() {
             return;
         }
-        self.grid_refinements.set(self.grid_refinements.get() + 1);
+        if self.counters_enabled() {
+            self.grid_refinements.set(self.grid_refinements.get() + 1);
+        }
         self.record_log_event(
             BvpLogLevel::Info,
             BvpLogEventKind::MeshRevision,
             self.iterations.get(),
             0,
             self.grid_refinements.get(),
-            self.grid_refinements.get() as f64,
+            if self.counters_enabled() {
+                self.grid_refinements.get() as f64
+            } else {
+                f64::NAN
+            },
             f64::NAN,
         );
     }
@@ -1383,6 +1422,23 @@ pub struct BvpTelemetrySnapshot {
     /// direct Banded callback.
     pub direct_banded_jacobian:
         Option<crate::symbolic::bvp::telemetry::BvpDirectJacobianTelemetrySnapshot>,
+}
+
+/// State copied only after a Damped/Frozen solver observes cancellation.
+/// `packed_state` is the native reduced Newton vector, not a published profile.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BvpDampCancelledSnapshot {
+    pub route: BvpDampCancellationRoute,
+    pub iteration: usize,
+    pub mesh: Vec<f64>,
+    pub packed_state: Vec<f64>,
+    pub telemetry: BvpTelemetrySnapshot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BvpDampCancellationRoute {
+    Damped,
+    Frozen,
 }
 
 #[cfg(test)]
@@ -1640,6 +1696,7 @@ mod tests {
     #[test]
     fn bound_limited_step_event_uses_current_mesh_revision() {
         let recorder = BvpTelemetryRecorder::default();
+        recorder.set_telemetry_mode(BvpTelemetryMode::Counters);
         recorder.set_logging_mode(BvpLoggingMode::Detailed);
         recorder.begin_solve();
         recorder.record_grid_refinement();
@@ -1669,8 +1726,10 @@ mod tests {
 
         assert_eq!(recorder.snapshot(), BvpTelemetryCounters::default());
         let events = recorder.log_events_snapshot();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, BvpLogEventKind::Termination);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, BvpLogEventKind::JacobianRefresh);
+        assert!(events[0].value_a.is_nan());
+        assert_eq!(events[1].kind, BvpLogEventKind::Termination);
         assert_eq!(recorder.telemetry_mode(), BvpTelemetryMode::Off);
     }
 

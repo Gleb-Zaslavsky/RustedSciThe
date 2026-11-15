@@ -174,13 +174,18 @@ Detached solutions expose structured mappings and compact report-file methods.
 
 ## Text tasks and examples
 
-`TaskDocument.parse(...)`, `task(...)` and `run_task_batch(...)` reuse the Rust
-task parser. Batch execution continues after failures and can be rendered with
-`render_table(...)`. The runnable examples in `bindings/python/examples/`
-cover Radau, BDF time-segment continuation, BVP_sci, nonlinear/fitting and task batches.
-Use `task_dict(source_or_path)` when application code needs plain Python data:
-it serializes the already parsed native specification, including equations,
-solver options, continuation and output settings, without executing the task.
+`TaskDocument.parse(...)`, `TaskDocument.from_json(...)`, `task(...)` and
+`run_task_batch(...)` reuse the Rust task parser for IVP, BVP, nonlinear
+root/least-squares, and fitting documents. A `.json` path is detected by
+`TaskDocument.from_file(...)` and `task(...)` automatically.
+Inspect the selected family with `document.kind`; execute it with `run()`,
+`run_bvp()`, `run_nonlinear()`, or `run_optimization()`. Nonlinear execution
+returns a detached `NonlinearTaskResult`; fitting returns the reusable
+`UniversalFittingSolution`. Batch execution dispatches by family, continues
+after failures, and can be rendered with `render_table(...)`. The runnable
+examples in `bindings/python/examples/` cover these routes.
+`task_dict(source_or_path)` returns plain Python data from the parsed native
+specification without executing the task.
 `check_dependencies()` returns structured PATH-tool and optional SuperLU
 loadability results without printing.
 

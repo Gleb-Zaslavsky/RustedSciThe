@@ -4,6 +4,7 @@
 //! while all numerical iterations go through the canonical least-squares solver
 //! selected by [`crate::numerical::Nonlinear_systems::solver::NonlinearSolver`].
 
+use crate::numerical::CancellationToken;
 use crate::numerical::Nonlinear_systems::engine::SolveStatistics;
 use crate::numerical::Nonlinear_systems::least_squares::{
     LeastSquaresError, LeastSquaresProblem, LeastSquaresTelemetryMode, LevenbergMarquardt,
@@ -563,6 +564,29 @@ impl SymbolicLeastSquaresSolver {
         crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
         LeastSquaresError,
     > {
+        self.try_solve_with_optional_cancellation(None)
+    }
+
+    /// Fallible symbolic least-squares solve with cooperative cancellation.
+    /// The token is checked by the native LM engine at safe iteration/trial
+    /// boundaries; cancellation preserves its last accepted parameter vector.
+    pub fn try_solve_with_cancellation_token(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> Result<
+        crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
+        LeastSquaresError,
+    > {
+        self.try_solve_with_optional_cancellation(Some(&cancellation))
+    }
+
+    fn try_solve_with_optional_cancellation(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<
+        crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
+        LeastSquaresError,
+    > {
         let _logging_scope = self.logging_scope();
         self.result = None;
         self.map_of_solutions = None;
@@ -576,7 +600,10 @@ impl SymbolicLeastSquaresSolver {
         let problem =
             prepared.bind_initial_with_guess(DVector::from_vec(self.initial_guess.clone()))?;
         let solver = self.try_configured_solver()?;
-        let (problem, report) = solver.try_minimize(problem)?;
+        let (problem, report) = match cancellation {
+            Some(token) => solver.try_minimize_with_cancellation_token(problem, token.clone())?,
+            None => solver.try_minimize(problem)?,
+        };
         self.last_statistics = Some(report.statistics.clone());
         if report.termination.was_successful() {
             let solution = problem.params();
@@ -610,6 +637,32 @@ impl SymbolicLeastSquaresSolver {
         crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
         LeastSquaresError,
     > {
+        self.try_solve_with_parameter_values_and_optional_cancellation(equation_parameters, None)
+    }
+
+    /// Bind external parameter values and solve with cooperative cancellation.
+    pub fn try_solve_with_parameter_values_and_cancellation_token(
+        &mut self,
+        equation_parameters: Vec<f64>,
+        cancellation: CancellationToken,
+    ) -> Result<
+        crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
+        LeastSquaresError,
+    > {
+        self.try_solve_with_parameter_values_and_optional_cancellation(
+            equation_parameters,
+            Some(&cancellation),
+        )
+    }
+
+    fn try_solve_with_parameter_values_and_optional_cancellation(
+        &mut self,
+        equation_parameters: Vec<f64>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<
+        crate::numerical::Nonlinear_systems::least_squares::MinimizationReport,
+        LeastSquaresError,
+    > {
         let _logging_scope = self.logging_scope();
         self.result = None;
         self.map_of_solutions = None;
@@ -625,7 +678,10 @@ impl SymbolicLeastSquaresSolver {
             DVector::from_vec(self.initial_guess.clone()),
         )?;
         let solver = self.try_configured_solver()?;
-        let (problem, report) = solver.try_minimize(problem)?;
+        let (problem, report) = match cancellation {
+            Some(token) => solver.try_minimize_with_cancellation_token(problem, token.clone())?,
+            None => solver.try_minimize(problem)?,
+        };
         self.last_statistics = Some(report.statistics.clone());
         if report.termination.was_successful() {
             let solution = problem.params();

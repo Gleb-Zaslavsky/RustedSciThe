@@ -1,0 +1,21 @@
+{
+  "format_version": 1,
+  "solver_settings": {
+    "solver_family": "sci",
+    "execution": "lambdify",
+    "assembly": "expr",
+    "matrix_layout": "sparse",
+    "tolerance": 1e-6,
+    "telemetry": "counters"
+  },
+  "combustion_model": {
+    "species": [
+      { "name": "A", "transport": { "conductivity": 0.2 } },
+      { "name": "B", "transport": { "conductivity": 0.7 } }
+    ],
+    "boundary_data": {
+      "left": "client-owned condition",
+      "right": "client-owned condition"
+    }
+  }
+}

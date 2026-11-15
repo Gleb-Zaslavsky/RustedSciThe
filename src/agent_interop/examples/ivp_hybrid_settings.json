@@ -1,0 +1,24 @@
+{
+  "format_version": 1,
+  "task": {
+    "solver": "IVP",
+    "method": "BDF"
+  },
+  "solver_options": {
+    "symbolic_frontend": "AtomView",
+    "symbolic_execution": "Lambdify",
+    "matrix_layout": "sparse",
+    "rtol": 1e-6,
+    "atol": 1e-9,
+    "telemetry": "counters"
+  },
+  "combustion_model": {
+    "species": [
+      { "name": "A", "enthalpy_coefficients": [1.0, 2.0, 3.0] },
+      { "name": "B", "enthalpy_coefficients": [4.0, 5.0, 6.0] }
+    ],
+    "kinetics": {
+      "reactions": ["client-defined reaction data"]
+    }
+  }
+}

@@ -61,6 +61,13 @@ collects both counters and durations. A failed numerical solve retains the
 partial report in its typed error. Preparation telemetry belongs to the
 symbolic/AOT lifecycle and is not folded into native solve timings.
 
+`solve_with_cancellation_token(&CancellationToken)` checks cancellation only
+between complete Newton iterations. An in-progress iteration, including its
+damping trials, finishes atomically. Cancellation returns the last accepted
+packed state and telemetry in `CorrectionNewtonSolverError::Cancelled`; it is
+not a converged solution. The report records its telemetry mode, so Off is
+distinguishable from a collected all-zero counter snapshot.
+
 See `examples/bvp_api_correction_newton.rs` for the facade entry point. The focused
 correctness/report matrix is `scripts/bvp_correction_newton_release_matrix.ps1`; the
 large workload regression groups are `bvp-correction-newton-matrix` and the separately

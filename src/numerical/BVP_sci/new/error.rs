@@ -1,6 +1,23 @@
 //! Typed failure taxonomy for the new BVP lifecycle.
 
+use super::telemetry::BvpSciTelemetrySnapshot;
 use thiserror::Error;
+
+/// Current accepted solver state retained when a BVP_sci solve is cancelled.
+/// Before the first Newton update, this is the caller-provided initial guess.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BvpSciCancelledSnapshot {
+    pub mesh: Vec<f64>,
+    /// Node-major state values, flattened as node rows.
+    pub values: Vec<f64>,
+    pub parameters: Vec<f64>,
+    /// Completed mesh-level Newton solves; defect estimation may not have run
+    /// for the current mesh when cancellation is observed.
+    pub completed_mesh_passes: usize,
+    /// Total complete Newton iterations across mesh passes.
+    pub completed_newton_iterations: usize,
+    pub telemetry: BvpSciTelemetrySnapshot,
+}
 
 /// Machine-readable lifecycle stage used by all currently implemented
 /// preparation and callback failures.
@@ -87,6 +104,8 @@ pub enum BvpSciNewError {
     NonFinite { stage: BvpSciStage },
     #[error("Newton iteration failed after {iterations} iterations")]
     NewtonFailure { iterations: usize },
+    #[error("BVP_sci solve was cancelled")]
+    Cancelled { snapshot: BvpSciCancelledSnapshot },
     #[error("collocation Jacobian is singular")]
     SingularJacobian,
     #[error("boundary residual did not satisfy tolerance {tolerance:e}")]

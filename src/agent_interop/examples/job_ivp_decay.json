@@ -1,0 +1,30 @@
+{
+  "job_contract_version": 1,
+  "job_id": "example-decay-001",
+  "task": {
+    "format_version": 1,
+    "task": {
+      "solver": "IVP",
+      "method": "RK45"
+    },
+    "equations": {
+      "arg": "t",
+      "y": "-y"
+    },
+    "initial_conditions": {
+      "t0": 0.0,
+      "t_end": 0.1,
+      "y0": 1.0
+    }
+  },
+  "acceptance": {
+    "checks": ["solver_converged", "finite_result"]
+  },
+  "resource_budget": {
+    "wall_time_ms": 30000,
+    "cpu_threads": 1
+  },
+  "output_policy": {
+    "large_result": "omit"
+  }
+}

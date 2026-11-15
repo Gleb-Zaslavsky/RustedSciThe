@@ -7,12 +7,12 @@ use crate::command_interpreter::ivp_dialogue::{
     run_ivp_template_dialogue, write_ivp_task_template,
 };
 use crate::command_interpreter::task_runner::{
-    anchor_task_paths, parse_task_spec_from_file, render_task_check, render_task_preview,
-    requested_output_paths, run_task_batch, run_task_from_spec, ParsedTaskSpec, TaskDocumentKind,
-    TaskRunResult, TaskRunnerError,
+    ParsedTaskSpec, TaskDocumentKind, TaskRunResult, TaskRunnerError, anchor_task_paths,
+    parse_task_spec_from_file, render_task_check, render_task_preview, requested_output_paths,
+    run_task_batch, run_task_from_spec,
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use dialoguer::{theme::ColorfulTheme, Select};
+use dialoguer::{Select, theme::ColorfulTheme};
 use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,7 @@ use std::process::Command;
 const EXIT_TASK_FAILURE: i32 = 3;
 const EXIT_BATCH_FAILURE: i32 = 4;
 const EXIT_OUTPUT_FAILURE: i32 = 5;
+const EXIT_WORKER_IO_FAILURE: i32 = 7;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -57,6 +58,16 @@ enum Commands {
         format: BatchFormat,
         #[arg(long, help = "Allow replacing an existing report file")]
         force: bool,
+    },
+    /// Serve sequential JSONL jobs; optional loopback control enables cancellation.
+    Worker {
+        #[arg(long, help = "Enable authenticated local cancellation control channel")]
+        control: bool,
+    },
+    /// Print machine-readable agent capability or schema documents.
+    Capabilities {
+        #[arg(long, value_enum, default_value_t = CapabilitiesFormat::Catalog)]
+        format: CapabilitiesFormat,
     },
     /// Convert DOCX to a task document.
     Convert { docx_file: PathBuf },
@@ -104,6 +115,13 @@ enum RunFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CapabilitiesFormat {
+    Catalog,
+    TaskSchema,
+    ResultSchema,
+}
+
 fn normalize_legacy_cli_args(args: Vec<OsString>) -> Vec<OsString> {
     if args.len() <= 1 {
         return args;
@@ -125,6 +143,8 @@ fn normalize_legacy_cli_args(args: Vec<OsString>) -> Vec<OsString> {
         "run"
         | "check"
         | "batch"
+        | "worker"
+        | "capabilities"
         | "convert"
         | "convert-check"
         | "template"
@@ -252,6 +272,10 @@ fn print_showcase() {
     println!("Task-shell commands:");
     println!("  rustedscithe run <task-file> [--format table|json] [--force]");
     println!("  rustedscithe check <task-file>");
+    println!(
+        "  rustedscithe worker [--control]  # sequential JSONL; optional local cancel control"
+    );
+    println!("  rustedscithe capabilities [--format catalog|task-schema|result-schema]");
     println!(
         "  rustedscithe batch <task-file>... [--format table|json] [--report summary.md] [--force]"
     );
@@ -428,6 +452,32 @@ fn print_run_summary(result: &TaskRunResult) {
             );
             print_bvp_artifact_summary(&bvp.specification.postprocessing);
         }
+        TaskRunResult::Nonlinear(nonlinear) => match nonlinear {
+            crate::command_interpreter::task_parser_nonlinear::NonlinearTaskRunResult::Root(
+                result,
+            ) => {
+                println!("Task kind : Nonlinear root");
+                println!("Termination: {:?}", result.termination);
+                println!("Iterations : {}", result.iterations);
+                println!("Residual norm: {:.6e}", result.residual_norm);
+                println!("Solution  : {:?}", result.x.as_slice());
+            }
+            crate::command_interpreter::task_parser_nonlinear::NonlinearTaskRunResult::LeastSquares {
+                report,
+                solution,
+            } => {
+                println!("Task kind : Nonlinear least-squares");
+                println!("Termination: {:?}", report.termination);
+                println!("Evaluations: {}", report.number_of_evaluations);
+                println!("Objective : {:.6e}", report.objective_function);
+                println!("Solution  : {:?}", solution.as_ref().map(|value| value.as_slice()));
+            }
+        },
+        TaskRunResult::Optimization(fit) => {
+            println!("Task kind : Optimization/Fitting");
+            println!("Parameters: {:?}", fit.solution_map());
+            println!("R-squared : {:?}", fit.r_squared());
+        }
     }
 }
 
@@ -482,7 +532,8 @@ fn render_run_summary_json(result: &TaskRunResult) -> String {
                 )
             });
             format!(
-                "{{\"status\":\"passed\",\"kind\":\"IVP\",\"solver\":{},\"solver_status\":{},\"status_code\":{},\"grid_rows\":{},\"state_dim\":{},\"continuation\":{}}}\n",
+                "{{\"status\":{},\"kind\":\"IVP\",\"solver\":{},\"solver_status\":{},\"status_code\":{},\"grid_rows\":{},\"state_dim\":{},\"continuation\":{}}}\n",
+                json_quote(if result.is_successful() { "passed" } else { "failed" }),
                 json_quote(&format!("{:?}", ivp.specification.solver.method)),
                 json_quote(status),
                 ivp.status_code
@@ -529,7 +580,8 @@ fn render_run_summary_json(result: &TaskRunResult) -> String {
                 )
             });
             format!(
-                "{{\"status\":\"passed\",\"kind\":\"BVP\",\"solver\":{},\"frontend\":{},\"execution\":{},\"layout\":{},\"result_rows\":{},\"state_dim\":{},\"telemetry\":{},\"continuation_segments\":{}}}\n",
+                "{{\"status\":{},\"kind\":\"BVP\",\"solver\":{},\"frontend\":{},\"execution\":{},\"layout\":{},\"result_rows\":{},\"state_dim\":{},\"telemetry\":{},\"continuation_segments\":{}}}\n",
+                json_quote(if result.is_successful() { "passed" } else { "failed" }),
                 json_quote(family),
                 frontend.as_deref().map(json_quote).unwrap_or_else(|| "null".to_string()),
                 execution.as_deref().map(json_quote).unwrap_or_else(|| "null".to_string()),
@@ -540,6 +592,59 @@ fn render_run_summary_json(result: &TaskRunResult) -> String {
                 bvp.continuation_segments.len()
             )
         }
+        TaskRunResult::Nonlinear(nonlinear) => match nonlinear {
+            crate::command_interpreter::task_parser_nonlinear::NonlinearTaskRunResult::Root(
+                result,
+            ) => format!(
+                "{{\"status\":{},\"kind\":\"nonlinear\",\"formulation\":\"root\",\"termination\":{},\"iterations\":{},\"residual_norm\":{},\"solution\":[{}]}}\n",
+                json_quote(if matches!(&result.termination, crate::numerical::Nonlinear_systems::error::TerminationReason::Converged) { "passed" } else { "not_converged" }),
+                json_quote(&format!("{:?}", result.termination)),
+                result.iterations,
+                json_number(result.residual_norm),
+                result.x.iter().map(|value| json_number(*value)).collect::<Vec<_>>().join(",")
+            ),
+            crate::command_interpreter::task_parser_nonlinear::NonlinearTaskRunResult::LeastSquares {
+                report,
+                solution,
+            } => format!(
+                "{{\"status\":{},\"kind\":\"nonlinear\",\"formulation\":\"least_squares\",\"termination\":{},\"evaluations\":{},\"objective\":{},\"solution\":{}}}\n",
+                json_quote(if report.termination.was_successful() { "passed" } else { "not_converged" }),
+                json_quote(&format!("{:?}", report.termination)),
+                report.number_of_evaluations,
+                json_number(report.objective_function),
+                solution.as_ref().map(|values| format!("[{}]", values.iter().map(|value| json_number(*value)).collect::<Vec<_>>().join(","))).unwrap_or_else(|| "null".into())
+            ),
+        },
+        TaskRunResult::Optimization(fit) => {
+            let parameters = fit
+                .solution_map()
+                .map(|values| {
+                    let mut pairs = values.into_iter().collect::<Vec<_>>();
+                    pairs.sort_by(|left, right| left.0.cmp(&right.0));
+                    format!(
+                        "{{{}}}",
+                        pairs
+                            .into_iter()
+                            .map(|(name, value)| format!("{}:{}", json_quote(&name), json_number(value)))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    )
+                })
+                .unwrap_or_else(|| "null".into());
+            format!(
+                "{{\"status\":\"passed\",\"kind\":\"optimization\",\"parameters\":{},\"r_squared\":{}}}\n",
+                parameters,
+                fit.r_squared().map(json_number).unwrap_or_else(|| "null".into())
+            )
+        }
+    }
+}
+
+fn json_number(value: f64) -> String {
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        "null".to_string()
     }
 }
 
@@ -797,6 +902,14 @@ fn print_task_dependency_requirements(task: &Path) {
                 );
             }
         }
+        Ok(ParsedTaskSpec::Nonlinear(_)) => {
+            println!("task preflight: valid; family=nonlinear");
+            println!("task requirement: native symbolic callbacks; no external compiler requested");
+        }
+        Ok(ParsedTaskSpec::Optimization(_)) => {
+            println!("task preflight: valid; family=optimization");
+            println!("task requirement: selected native fitting backend");
+        }
     }
 }
 
@@ -943,6 +1056,8 @@ pub fn run() -> Result<(), i32> {
                 let kind = match spec.kind() {
                     TaskDocumentKind::Ivp => "IVP",
                     TaskDocumentKind::Bvp => "BVP",
+                    TaskDocumentKind::Nonlinear => "Nonlinear",
+                    TaskDocumentKind::Optimization => "Optimization",
                 };
                 if matches!(format, RunFormat::Table) {
                     println!("Task file : {}", task_file.display());
@@ -956,7 +1071,17 @@ pub fn run() -> Result<(), i32> {
                             RunFormat::Table => print_run_summary(&result),
                             RunFormat::Json => print!("{}", render_run_summary_json(&result)),
                         }
-                        Ok(())
+                        if result.is_successful() {
+                            Ok(())
+                        } else {
+                            eprintln!(
+                                "Task completed without convergence: {}",
+                                result
+                                    .unsuccessful_reason()
+                                    .unwrap_or_else(|| "unknown solver result".into())
+                            );
+                            Err(EXIT_TASK_FAILURE)
+                        }
                     }
                     Err(err) => {
                         if matches!(format, RunFormat::Json) {
@@ -1022,12 +1147,69 @@ pub fn run() -> Result<(), i32> {
                 Ok(())
             }
         }
+        Commands::Worker { control } => {
+            let stdin = std::io::stdin();
+            let stdout = std::io::stdout();
+            let result = if control {
+                match crate::command_interpreter::agent_worker_control::WorkerControlServer::
+                    bind_loopback()
+                {
+                    Ok(control_server) => {
+                        eprintln!(
+                            "RST_WORKER_CONTROL_READY address={} token={}",
+                            control_server.address(),
+                            control_server.capability_token()
+                        );
+                        crate::command_interpreter::agent_worker::serve_jsonl_with_control(
+                            &mut stdin.lock(),
+                            &mut stdout.lock(),
+                            &control_server,
+                        )
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                crate::command_interpreter::agent_worker::serve_jsonl(
+                    &mut stdin.lock(),
+                    &mut stdout.lock(),
+                )
+            };
+            match result {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    eprintln!("JSONL worker I/O failed: {error}");
+                    Err(EXIT_WORKER_IO_FAILURE)
+                }
+            }
+        }
+        Commands::Capabilities { format } => {
+            let json = match format {
+                CapabilitiesFormat::Catalog => {
+                    crate::command_interpreter::task_contract::task_capabilities_json()
+                }
+                CapabilitiesFormat::TaskSchema => serde_json::from_str(
+                    crate::command_interpreter::task_json::TASK_DOCUMENT_JSON_SCHEMA,
+                )
+                .expect("embedded task schema must remain valid JSON"),
+                CapabilitiesFormat::ResultSchema => serde_json::from_str(
+                    crate::command_interpreter::task_contract::TASK_RESULT_JSON_SCHEMA,
+                )
+                .expect("embedded task-result schema must remain valid JSON"),
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json).expect("JSON value serializes")
+            );
+            Ok(())
+        }
         Commands::Check { task_file } => match parse_task_spec_from_file(&task_file) {
             Ok(mut spec) => {
                 anchor_task_paths(&mut spec, &task_file);
                 let kind = match spec.kind() {
                     TaskDocumentKind::Ivp => "IVP",
                     TaskDocumentKind::Bvp => "BVP",
+                    TaskDocumentKind::Nonlinear => "Nonlinear",
+                    TaskDocumentKind::Optimization => "Optimization",
                 };
                 println!("Task file : {}", task_file.display());
                 println!("Detected  : {kind}");
@@ -1101,7 +1283,10 @@ pub fn run() -> Result<(), i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{superlu_library_configuration, Cli, Commands, TemplateKind};
+    use super::{
+        CapabilitiesFormat, Cli, Commands, TemplateKind, render_run_summary_json,
+        superlu_library_configuration,
+    };
     use clap::Parser;
     use std::path::Path;
 
@@ -1158,11 +1343,64 @@ mod tests {
     }
 
     #[test]
+    fn cli_exposes_persistent_agent_worker_command() {
+        let cli = Cli::try_parse_from(["rustedscithe", "worker"])
+            .expect("worker command should parse without extra arguments");
+        assert!(matches!(cli.command, Commands::Worker { control: false }));
+    }
+
+    #[test]
+    fn cli_can_enable_worker_cancellation_control_channel() {
+        let cli = Cli::try_parse_from(["rustedscithe", "worker", "--control"])
+            .expect("worker control flag should parse");
+        assert!(matches!(cli.command, Commands::Worker { control: true }));
+    }
+
+    #[test]
+    fn cli_exposes_capability_catalog_and_schema_formats() {
+        let catalog = Cli::try_parse_from(["rustedscithe", "capabilities"])
+            .expect("capability catalog should be the default format");
+        assert!(matches!(
+            catalog.command,
+            Commands::Capabilities {
+                format: CapabilitiesFormat::Catalog
+            }
+        ));
+        let schema =
+            Cli::try_parse_from(["rustedscithe", "capabilities", "--format", "task-schema"])
+                .expect("task schema format should parse");
+        assert!(matches!(
+            schema.command,
+            Commands::Capabilities {
+                format: CapabilitiesFormat::TaskSchema
+            }
+        ));
+    }
+
+    #[test]
     fn superlu_preflight_distinguishes_feature_and_bridge_path() {
         assert_eq!(superlu_library_configuration(None).0, "missing");
         assert_eq!(
             superlu_library_configuration(Some(Path::new("missing-superlu-bridge"))).0,
             "invalid"
         );
+    }
+
+    #[test]
+    fn task_runner_json_summaries_cover_nonlinear_and_optimization() {
+        let nonlinear = "problem\nformulation: root\nvariables: x\nequations: x - 2\ninitial_guess: 0.0\nsolver\nmethod: newton\n";
+        let fitting = "data\nx: 0.0, 1.0, 2.0\ny: 1.0, 3.0, 5.0\nmodel\nmethod: lm\nparameters: a, b\ninitial_guess: 0.0, 0.0\nequations: a*x + b\n";
+        let nonlinear_result =
+            crate::command_interpreter::task_runner::run_task_from_str(nonlinear)
+                .expect("nonlinear task runs");
+        let nonlinear_json = render_run_summary_json(&nonlinear_result);
+        assert!(nonlinear_json.contains("\"kind\":\"nonlinear\""));
+        assert!(nonlinear_json.contains("\"status\":\"passed\""));
+
+        let fitting_result = crate::command_interpreter::task_runner::run_task_from_str(fitting)
+            .expect("fitting task runs");
+        let fitting_json = render_run_summary_json(&fitting_result);
+        assert!(fitting_json.contains("\"kind\":\"optimization\""));
+        assert!(fitting_json.contains("\"parameters\""));
     }
 }

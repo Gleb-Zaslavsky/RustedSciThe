@@ -55,6 +55,7 @@ mod tests {
                 Self::Banded => DampedSolverOptions::banded_damped().with_banded_lambdify(),
             };
             base.with_generated_backend_config(generated)
+                .with_bvp_telemetry_mode(crate::numerical::BVP_Damp::BvpTelemetryMode::Counters)
                 .with_strategy_params(Some(SolverParams::default()))
                 .with_abs_tolerance(1e-10)
                 .with_rel_tolerance(HashMap::from([

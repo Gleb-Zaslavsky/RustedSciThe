@@ -84,10 +84,10 @@ neighborhood. They do not interpolate a crossing or localize an event.
 `BeTelemetryMode` provides four independent collection policies: `Off` disables
 instrumentation, `Counters` records discrete work counts without reading the
 clock, `Timings` records elapsed durations without discrete counts, and
-`Detailed` records both. The compatibility default remains `Detailed`, matching
-the previous default behavior. Timers can perturb short solves, so use the same
-mode when comparing measurements. `statistics_report()` and typed statistics
-expose solver and backend work.
+`Detailed` records both. Telemetry defaults to `Off`; request a collection mode
+explicitly when you need measurements. Timers can perturb short solves, so use
+the same mode when comparing measurements. `statistics_report()` and typed
+statistics expose solver and backend work.
 
 ## Validation and Limitations
 

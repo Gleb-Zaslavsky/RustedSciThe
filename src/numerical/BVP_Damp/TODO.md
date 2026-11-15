@@ -1,5 +1,19 @@
 # BVP_Damp Architecture Review And Migration TODO
 
+## Telemetry Default Alignment (2026-11-15)
+
+- [x] Change Damped/Frozen generated-backend telemetry defaults from implicit
+  `Counters` to `Off` across default and `with_parts` configurations. Existing
+  counter-sensitive tests now request `Counters` explicitly.
+- [x] Decouple typed event retention from counter collection. With counters
+  `Off`, explicit BVP logging still retains configured events; with both
+  telemetry and logging `Off`, event emitters return without retaining events.
+  Event fields derived from uncollected counter totals are marked unavailable
+  in the legacy event representation rather than reported as zero.
+- [x] Debug suite: `cargo test --lib numerical::BVP_Damp:: -- --test-threads=1`
+  passed 367 tests, 0 failed, 69 ignored. No solver algorithm or acceptance
+  rule changed.
+
 ## Explicit Nonuniform Mesh And Node-Aligned Seed (2026-11-11)
 
 - [x] Preserve the existing uniform-grid constructor/configuration and reduced

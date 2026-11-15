@@ -140,8 +140,13 @@ Facade принимает NumPy-векторы и преобразует их п
 `stage`, `solver`, `route`; текст сообщения не следует разбирать программно.
 
 `TaskDocument.parse(...)`, `task(...)` и `run_task_batch(...)` используют
-общий Rust task parser. Batch продолжает выполнение после ошибки и может
-вывести компактную таблицу через `render_table(...)`.
+общий Rust task parser для IVP, BVP, nonlinear root/least-squares и fitting.
+Проверяйте семейство через `document.kind`; запускайте его методами `run()`,
+`run_bvp()`, `run_nonlinear()` или `run_optimization()`. Нелинейный маршрут
+возвращает detached `NonlinearTaskResult`, fitting — переиспользуемый
+`UniversalFittingSolution`. Batch выбирает маршрут по семейству, продолжает
+работу после отдельных ошибок и может вывести компактную таблицу через
+`render_table(...)`.
 Если приложению нужны обычные Python-данные, используйте
 `task_dict(source_or_path)`: функция сериализует уже разобранную native-
 спецификацию, включая уравнения, настройки солвера, continuation и output,

@@ -7,6 +7,7 @@
 use super::*;
 use crate::numerical::BVP_Damp::NR_Damp_solver_damped::{DampedSolverOptions, NRBVP, SolverParams};
 use crate::numerical::BVP_Damp::generated_solver_handoff::GeneratedBackendConfig;
+use crate::numerical::cancellation::CancellationToken;
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
 use crate::symbolic::codegen::codegen_provider_api::MatrixBackend;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
@@ -558,6 +559,118 @@ fn build_solver_with_sparse_factorization(
 
 fn logistic_exact_state(parameter: f64, x: f64) -> f64 {
     1.0 / (1.0 + 4.0 * (-parameter * x).exp())
+}
+
+#[test]
+fn cancellation_after_residual_keeps_last_complete_mesh_state_and_telemetry() {
+    let cancellation = CancellationToken::new();
+    let cancellation_from_boundary = cancellation.clone();
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &[Expr::parse_expression("p*(y + 1)")],
+        &["y".into()],
+        &["p".into()],
+        "x",
+        BvpSciTelemetry::detailed(),
+    )
+    .expect("symbolic plan should prepare");
+    let boundary = BvpSciBoundaryCallbacks::new(
+        2,
+        move |ya, yb, _, output| {
+            cancellation_from_boundary.cancel();
+            output[0] = ya[0];
+            output[1] = yb[0] - (0.3_f64.exp() - 1.0);
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh = vec![0.0, 0.5, 1.0];
+    let values = vec![0.0, (0.15_f64).exp() - 1.0, (0.3_f64).exp() - 1.0];
+    let mut solver = BvpSciSolver::new(
+        plan,
+        boundary,
+        mesh.clone(),
+        values.clone(),
+        vec![0.3],
+        BvpSciOptions::default(),
+    )
+    .expect("solver should construct");
+
+    let error = solver
+        .solve_with_cancellation_token(&cancellation)
+        .expect_err("cancellation raised by the complete residual callback is observed");
+    let BvpSciNewError::Cancelled { snapshot } = error else {
+        panic!("expected typed cancellation, got {error:?}");
+    };
+    assert_eq!(snapshot.mesh, mesh);
+    assert_eq!(snapshot.values, values);
+    assert_eq!(snapshot.parameters, vec![0.3]);
+    assert_eq!(snapshot.completed_mesh_passes, 1);
+    assert_eq!(snapshot.completed_newton_iterations, 0);
+    assert_eq!(snapshot.telemetry.mode, BvpSciTelemetryMode::Detailed);
+    assert!(snapshot.telemetry.rhs_calls > 0);
+    assert!(snapshot.telemetry.boundary_calls > 0);
+    assert_eq!(snapshot.telemetry.newton_iterations, 0);
+    assert!(snapshot.telemetry.full_solve_ms.is_some());
+    assert!(snapshot.telemetry.newton_ms.is_some());
+}
+
+#[test]
+fn cancellation_during_jacobian_finishes_the_current_newton_iteration() {
+    let cancellation = CancellationToken::new();
+    let cancellation_from_jacobian = cancellation.clone();
+    let plan = BvpSciLambdifyPlan::prepare(
+        BvpSciAssembly::ExprLegacy,
+        &[Expr::parse_expression("-y")],
+        &["y".into()],
+        &[],
+        "x",
+        BvpSciTelemetry::detailed(),
+    )
+    .expect("symbolic plan should prepare");
+    let boundary = BvpSciBoundaryCallbacks::new_with_jacobian(
+        1,
+        |_ya, _yb, _, output| {
+            output[0] = 0.0;
+            Ok(())
+        },
+        move |_ya, _yb, _, dya, dyb, _dp| {
+            cancellation_from_jacobian.cancel();
+            dya[0] = 1.0;
+            dyb[0] = 0.0;
+            Ok(())
+        },
+        BvpSciTelemetry::disabled(),
+    );
+    let mesh = vec![0.0, 0.5, 1.0];
+    let initial_values = vec![0.8, 0.6, 0.4];
+    let mut solver = BvpSciSolver::new(
+        plan,
+        boundary,
+        mesh.clone(),
+        initial_values.clone(),
+        vec![],
+        BvpSciOptions::default(),
+    )
+    .expect("solver should construct");
+
+    let error = solver
+        .solve_with_cancellation_token(&cancellation)
+        .expect_err("cancellation requested in Jacobian is observed after the full iteration");
+    let BvpSciNewError::Cancelled { snapshot } = error else {
+        panic!("expected typed cancellation, got {error:?}");
+    };
+    assert_eq!(snapshot.mesh, mesh);
+    assert_ne!(
+        snapshot.values, initial_values,
+        "accepted Newton update is retained"
+    );
+    assert_eq!(snapshot.completed_mesh_passes, 1);
+    assert_eq!(snapshot.completed_newton_iterations, 1);
+    assert_eq!(snapshot.telemetry.newton_iterations, 1);
+    assert_eq!(snapshot.telemetry.mode, BvpSciTelemetryMode::Detailed);
+    assert!(snapshot.telemetry.full_solve_ms.is_some());
+    assert!(snapshot.telemetry.newton_ms.is_some());
 }
 
 fn build_large_logistic_sparse_solver(

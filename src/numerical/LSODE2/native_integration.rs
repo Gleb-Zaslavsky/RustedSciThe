@@ -13,6 +13,7 @@ use super::native_step_engine::{
     PreparedNativeCallbacks,
 };
 use super::statistics::Lsode2NativeStatistics;
+use crate::numerical::CancellationToken;
 use crate::symbolic::ivp_telemetry::IvpWarmStage;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
 
@@ -72,7 +73,21 @@ impl Lsode2NativeTerminationKind {
 #[derive(Debug, Clone)]
 pub struct Lsode2NativeIntegrationOutcome {
     pub summary: Option<Lsode2NativeIntegrationSummary>,
+    pub cancelled_state: Option<Lsode2NativePartialState>,
     pub statistics: Lsode2NativeStatistics,
+}
+
+#[derive(Debug, Clone)]
+pub struct Lsode2NativePartialState {
+    pub final_t: f64,
+    pub final_h: f64,
+    pub final_y: Vec<f64>,
+    pub accepted_t_history: Vec<f64>,
+    pub accepted_y_history: Vec<Vec<f64>>,
+    pub attempted_steps: usize,
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
+    pub total_iterations: usize,
 }
 
 pub fn run_native_integration(
@@ -108,6 +123,7 @@ where
         method,
         None,
         next_method_policy,
+        None,
     )
 }
 
@@ -117,6 +133,7 @@ pub(crate) fn run_native_integration_for_method_with_policy_and_optional_callbac
     method: Lsode2NativeStepMethod,
     callbacks: Option<&PreparedNativeCallbacks>,
     next_method_policy: F,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<Lsode2NativeIntegrationOutcome, IvpBackendError>
 where
     F: FnMut(
@@ -130,6 +147,7 @@ where
         method,
         callbacks,
         next_method_policy,
+        cancellation,
     )
 }
 
@@ -145,6 +163,7 @@ pub(crate) fn run_native_integration_for_method_with_prepared_callbacks(
         method,
         Some(callbacks),
         |_, _| None,
+        None,
     )
 }
 
@@ -154,6 +173,7 @@ fn run_native_integration_for_method_with_policy_and_callbacks<F>(
     method: Lsode2NativeStepMethod,
     callbacks: Option<&PreparedNativeCallbacks>,
     mut next_method_policy: F,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<Lsode2NativeIntegrationOutcome, IvpBackendError>
 where
     F: FnMut(
@@ -176,6 +196,7 @@ where
             Ok(None) => {
                 return Ok(Lsode2NativeIntegrationOutcome {
                     summary: None,
+                    cancelled_state: None,
                     statistics: Lsode2NativeStatistics::default(),
                 });
             }
@@ -200,6 +221,7 @@ where
     let mut accepted_y_history = vec![engine.current_solution()];
     let stop_conditions = resolve_stop_conditions(config);
     let mut current_method = method;
+    let mut cancelled_state = None;
 
     while attempted_steps < limits.max_step_attempts
         && accepted_steps < limits.max_accepted_steps
@@ -210,6 +232,21 @@ where
             engine.state_snapshot().h,
         )
     {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            let state = engine.state_snapshot();
+            cancelled_state = Some(Lsode2NativePartialState {
+                final_t: state.t,
+                final_h: state.h,
+                final_y: engine.current_solution(),
+                accepted_t_history: std::mem::take(&mut accepted_t_history),
+                accepted_y_history: std::mem::take(&mut accepted_y_history),
+                attempted_steps,
+                accepted_steps,
+                rejected_steps,
+                total_iterations,
+            });
+            break;
+        }
         engine.clamp_step_to_t_bound(config.t_bound)?;
         let report = match engine.step_once() {
             Ok(report) => report,
@@ -269,6 +306,14 @@ where
         last_report = Some(report);
     }
 
+    if let Some(cancelled_state) = cancelled_state {
+        return Ok(Lsode2NativeIntegrationOutcome {
+            summary: None,
+            cancelled_state: Some(cancelled_state),
+            statistics: engine.statistics().clone(),
+        });
+    }
+
     let summary = match (first_report, last_report) {
         (Some(first_report), Some(last_report)) => {
             let final_state = engine.state_snapshot();
@@ -308,6 +353,7 @@ where
 
     Ok(Lsode2NativeIntegrationOutcome {
         summary,
+        cancelled_state: None,
         statistics: engine.statistics().clone(),
     })
 }

@@ -1,3 +1,9 @@
+"""Solve a fixed-mesh BVP on irregular coordinates with a full-node seed.
+
+This example demonstrates the CorrectionNewton task contract for a nonuniform
+mesh; the initial profile uses one row per state and one value per mesh node.
+"""
+
 from rustedscithe import BvpSolverRequest, Expr, SolverOptions
 
 

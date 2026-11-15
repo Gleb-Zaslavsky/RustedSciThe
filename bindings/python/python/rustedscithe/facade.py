@@ -654,13 +654,13 @@ def create_fit(
 
 
 def task(source_or_path: str | Path) -> TaskDocument:
-    """Parse a native task document from inline text or a file path.
+    """Parse a native DSL/JSON task document from text or a file path.
 
-    A string containing a newline is always treated as document text. A
-    newline-free string is treated as a path only when it names an existing
-    file; otherwise it is parsed as inline input. ``Path`` objects are checked
-    as files first. Parsing does not execute the task; call ``preview()``,
-    ``check()`` or the matching run method on the returned document.
+    A JSON object string is parsed as JSON; other inline strings are parsed as
+    the task DSL. A newline-free string is treated as a path only when it names
+    an existing file; otherwise it is parsed as inline input. ``Path`` objects
+    are checked as files first. Parsing does not execute the task; call ``preview()``,
+    ``check()`` or the family-specific run method on the returned document.
 
     Raises
     ------
@@ -669,6 +669,8 @@ def task(source_or_path: str | Path) -> TaskDocument:
     """
 
     raw = str(source_or_path)
+    if raw.lstrip().startswith("{"):
+        return TaskDocument.from_json(raw)
     if isinstance(source_or_path, Path) or ("\n" not in raw and "\r" not in raw):
         candidate = Path(source_or_path)
         if candidate.exists() and candidate.is_file():
@@ -766,7 +768,8 @@ def run_task_batch(
 
     A failed task never prevents later tasks when ``continue_on_error`` is
     true. The returned row preserves the Python exception class so callers can
-    route parser, BVP and solver failures without matching message text.
+    route parser, nonlinear, fitting, BVP and solver failures without matching
+    message text.
 
     Returns
     -------
@@ -785,13 +788,19 @@ def run_task_batch(
         # stable label; the caller still has the original source object.
         source_label = (
             f"<inline:{index}>"
-            if "\n" in raw_source or "\r" in raw_source
+            if "\n" in raw_source or "\r" in raw_source or raw_source.lstrip().startswith("{")
             else raw_source
         )
         row: dict[str, Any] = {"source": source_label}
         try:
             document = task(source)
-            result = document.run_bvp() if document.kind == "bvp" else document.run()
+            runner = {
+                "ivp": document.run,
+                "bvp": document.run_bvp,
+                "nonlinear": document.run_nonlinear,
+                "optimization": document.run_optimization,
+            }[document.kind]
+            result = runner()
             route = document.route()
             row.update(
                 {

@@ -303,7 +303,9 @@ mod tests {
     use std::collections::HashMap;
 
     fn parameterized_frozen_solver() -> NRBVP {
-        let mut options = FrozenSolverOptions::sparse_frozen().with_tolerance(1e-9);
+        let mut options = FrozenSolverOptions::sparse_frozen()
+            .with_tolerance(1e-9)
+            .with_bvp_telemetry_mode(BvpTelemetryMode::Counters);
         let backend = options
             .generated_backend_config
             .clone()

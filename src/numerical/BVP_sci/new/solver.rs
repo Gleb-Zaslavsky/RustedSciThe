@@ -1,5 +1,6 @@
 //! Public solve boundary for the new BVP architecture.
 
+use crate::numerical::cancellation::CancellationToken;
 use crate::numerical::logging::{SolverLogGuard, solver_debug, solver_info};
 use std::sync::Arc;
 
@@ -73,6 +74,20 @@ enum NewtonMeshOutcome {
     /// The last finite Newton iterate is available, but the inner budget was
     /// exhausted.  The outer controller must still inspect its defect.
     BudgetExhausted { norm: f64, iterations: usize },
+}
+
+enum NewtonMeshError {
+    Solver(BvpSciNewError),
+    Cancelled {
+        completed_mesh_passes: usize,
+        completed_newton_iterations: usize,
+    },
+}
+
+impl From<BvpSciNewError> for NewtonMeshError {
+    fn from(error: BvpSciNewError) -> Self {
+        Self::Solver(error)
+    }
 }
 
 impl BvpSciSolver {
@@ -530,6 +545,23 @@ impl BvpSciSolver {
     /// defect away from collocation points.  Refinement only replaces numeric
     /// storage; the prepared symbolic plan and its evaluators remain intact.
     pub fn solve(&mut self) -> Result<BvpSciSolution, BvpSciNewError> {
+        self.solve_internal(None)
+    }
+
+    /// Solve with cooperative cancellation at safe mesh-pass and Newton
+    /// iteration boundaries. A collocation Newton iteration, including all
+    /// backtracking trials, is completed atomically before cancellation.
+    pub fn solve_with_cancellation_token(
+        &mut self,
+        token: &CancellationToken,
+    ) -> Result<BvpSciSolution, BvpSciNewError> {
+        self.solve_internal(Some(token))
+    }
+
+    fn solve_internal(
+        &mut self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<BvpSciSolution, BvpSciNewError> {
         let _logging_scope = SolverLogGuard::try_enter(self.options.logging_level)?;
         solver_info!(
             "BVP_sci solve started: states={}, mesh_nodes={}, execution={:?}, layout={:?}",
@@ -539,6 +571,10 @@ impl BvpSciSolver {
             self.options.matrix_layout
         );
         let _full_solve_timer = self.plan.telemetry().start_full_solve();
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            drop(_full_solve_timer);
+            return Err(self.cancelled_error(0, 0));
+        }
         if self.continuation_pending {
             self.plan.telemetry().record_continuation_solve();
             self.continuation_pending = false;
@@ -551,6 +587,10 @@ impl BvpSciSolver {
         let mut outer_solve_attempts = 0usize;
 
         for refinement in 0..=self.options.max_mesh_refinements {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                drop(_full_solve_timer);
+                return Err(self.cancelled_error(refinement, total_iterations));
+            }
             solver_debug!(
                 "BVP_sci mesh pass {} started with {} nodes",
                 refinement,
@@ -573,8 +613,28 @@ impl BvpSciSolver {
                 self.x.len(),
                 linear_system_dimension,
             );
-            let (newton_outcome, iterations) =
-                self.solve_current_mesh(boundary_tolerance, refinement, linear_system_dimension)?;
+            let mesh_solve = self.solve_current_mesh(
+                boundary_tolerance,
+                refinement,
+                linear_system_dimension,
+                cancellation,
+                refinement,
+                total_iterations,
+            );
+            let (newton_outcome, iterations) = match mesh_solve {
+                Ok(result) => result,
+                Err(NewtonMeshError::Solver(error)) => return Err(error),
+                Err(NewtonMeshError::Cancelled {
+                    completed_mesh_passes,
+                    completed_newton_iterations,
+                }) => {
+                    drop(_mesh_pass);
+                    drop(_full_solve_timer);
+                    return Err(
+                        self.cancelled_error(completed_mesh_passes, completed_newton_iterations)
+                    );
+                }
+            };
             outer_solve_attempts += 1;
             let norm = match newton_outcome {
                 NewtonMeshOutcome::Converged { norm, .. }
@@ -585,6 +645,11 @@ impl BvpSciSolver {
                     "BVP total iteration count overflows usize".into(),
                 )
             })?;
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                drop(_mesh_pass);
+                drop(_full_solve_timer);
+                return Err(self.cancelled_error(refinement + 1, total_iterations));
+            }
             let interval_errors = self.estimate_interval_defects()?;
             let max_error = interval_errors.iter().copied().fold(0.0, f64::max);
             let boundary_error = max_abs(&self.workspace.boundary_residual);
@@ -643,6 +708,23 @@ impl BvpSciSolver {
         })
     }
 
+    fn cancelled_error(
+        &self,
+        completed_mesh_passes: usize,
+        completed_newton_iterations: usize,
+    ) -> BvpSciNewError {
+        BvpSciNewError::Cancelled {
+            snapshot: super::error::BvpSciCancelledSnapshot {
+                mesh: self.x.clone(),
+                values: self.y.clone(),
+                parameters: self.parameters.clone(),
+                completed_mesh_passes,
+                completed_newton_iterations,
+                telemetry: self.plan.telemetry().snapshot(),
+            },
+        }
+    }
+
     /// Solve the nonlinear collocation equations on the current mesh.
     ///
     /// This is a bounded modified-Newton controller.  A factorized Jacobian
@@ -655,16 +737,25 @@ impl BvpSciSolver {
         boundary_tolerance: f64,
         mesh_pass: usize,
         linear_system_dimension: usize,
-    ) -> Result<(NewtonMeshOutcome, usize), BvpSciNewError> {
+        cancellation: Option<&CancellationToken>,
+        completed_mesh_passes: usize,
+        completed_newton_iterations: usize,
+    ) -> Result<(NewtonMeshOutcome, usize), NewtonMeshError> {
         let _newton_timer = self
             .plan
             .telemetry()
             .start_stage(BvpSciTelemetryStage::Newton);
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(NewtonMeshError::Cancelled {
+                completed_mesh_passes,
+                completed_newton_iterations,
+            });
+        }
         let mut norm = self.evaluate_residual()?;
         if !norm.is_finite() {
-            return Err(BvpSciNewError::NonFinite {
+            return Err(NewtonMeshError::Solver(BvpSciNewError::NonFinite {
                 stage: BvpSciStage::NumericalCore,
-            });
+            }));
         }
         let mut jacobian_ready = false;
         let mut correction_ready = false;
@@ -680,6 +771,12 @@ impl BvpSciSolver {
         }
 
         for iteration in 0..self.options.max_newton_iterations {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                return Err(NewtonMeshError::Cancelled {
+                    completed_mesh_passes,
+                    completed_newton_iterations: completed_newton_iterations + iteration,
+                });
+            }
             self.plan.telemetry().record_newton_iteration();
             let mut jacobian_refreshed = false;
             if !jacobian_ready {
@@ -909,9 +1006,9 @@ impl BvpSciSolver {
                 // the restored state with the rejected trial buffers.
                 norm = self.evaluate_residual()?;
                 if !norm.is_finite() {
-                    return Err(BvpSciNewError::NonFinite {
+                    return Err(NewtonMeshError::Solver(BvpSciNewError::NonFinite {
                         stage: BvpSciStage::NumericalCore,
-                    });
+                    }));
                 }
                 jacobian_ready = false;
                 correction_ready = false;

@@ -4,6 +4,34 @@ This document is the planned evidence index for `BVP_sci::new`. It is not a
 release result yet. The old `BVP_SCI_STORY_TESTS.md` remains the historical
 reference for the legacy implementation.
 
+## 2026-11-15 Cooperative Cancellation Contract
+
+`BvpSciSolver::solve_with_cancellation_token` checks cancellation before
+starting a mesh pass and between complete Newton iterations. It does not poll
+inside a callback or interrupt backtracking. The typed
+`BvpSciNewError::Cancelled` retains the current mesh, accepted node-major state,
+free parameters, completed mesh/Newton work and telemetry in the requested
+mode. At task level, a token already cancelled before BVP preparation returns
+`bvp.task.cancelled_before_preparation` with no result or solver telemetry;
+mid-solve cancellation remains a solver-specific typed error. BVP_api forwards
+to BVP_sci and CorrectionNewton and rejects Damped/Frozen explicitly.
+
+Regression evidence:
+
+- `cancellation_after_residual_keeps_last_complete_mesh_state_and_telemetry`
+  verifies the pre-Newton safe boundary and that callback work already done is
+  reflected in Detailed telemetry.
+- `cancellation_during_jacobian_finishes_the_current_newton_iteration`
+  requests cancellation from the analytic boundary-Jacobian callback and
+  verifies that the complete Newton update is retained before cancellation is
+  returned.
+- `json_bvp_sci_pre_cancel_stops_before_preparation` verifies the task-level
+  pre-preparation path, explicit cancellation category, and absent result.
+
+The telemetry mode remains `Off` by default. No residual/Jacobian work is
+added for diagnostics, and no unsuccessful candidate is published as a
+successful BVP solution.
+
 ## 2026-11-08 Classic `-z^3` SciPy/Rust Diagnostic
 
 The matched fixture is `z' = y - z`, `y' = -z^3`, with `z(0)=1`,

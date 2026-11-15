@@ -249,6 +249,34 @@ y0: 1.0
     assert report_path.read_text(encoding="utf-8") == report
 
 
+def test_facade_batch_dispatches_nonlinear_and_optimization_tasks():
+    nonlinear = """problem
+formulation: root
+variables: x
+equations: x - 2
+initial_guess: 0.0
+solver
+method: newton
+"""
+    fitting = """data
+x: 0.0, 1.0, 2.0
+y: 1.0, 3.0, 5.0
+model
+method: lm
+parameters: a, b
+initial_guess: 0.0, 0.0
+equations: a*x + b
+"""
+    rows = run_task_batch([nonlinear, fitting])
+    assert [row["status"] for row in rows] == ["ok", "ok"]
+    assert [row["kind"] for row in rows] == ["nonlinear", "optimization"]
+    assert rows[0]["result"].successful
+    assert rows[1]["result"].solution_map()["a"] == pytest.approx(2.0, rel=1e-5)
+    report = run_task_batch_report([nonlinear, fitting])
+    assert "nonlinear" in report
+    assert "optimization" in report
+
+
 def test_facade_dispatches_bvp_families_without_losing_native_options():
     y = Expr.variable("y")
     sci = create_bvp(
