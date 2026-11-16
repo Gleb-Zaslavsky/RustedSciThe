@@ -22,6 +22,12 @@ boundary_conditions
 z_left: 1.0
 y_right: 1.0
 
+# Explicit physical bounds keep the zero initial profile inside a useful
+# Newton basin instead of allowing unconstrained large intermediate values.
+bounds
+z: -50.0, 50.0
+y: -35.0, 35.0
+
 # This is the initial mesh. Refinement, if enabled by solver options, may add
 # points later; `n_steps` is not a Newton iteration limit.
 mesh

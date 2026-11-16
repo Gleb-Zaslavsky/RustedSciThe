@@ -3,6 +3,17 @@ use RustedSciThe::command_interpreter::task_runner::{
 };
 
 fn main() {
+    let worker = std::thread::Builder::new()
+        .name("task-dispatcher-example".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(run_examples)
+        .expect("example worker thread should start");
+    worker
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+fn run_examples() {
     let ivp_path = "examples/task_docs/ivp_decay_task.txt";
     let bvp_path = "examples/task_docs/bvp_reference_task.txt";
 
@@ -25,6 +36,8 @@ fn main() {
                 let cols = run.result.as_ref().map(|m| m.ncols()).unwrap_or(0);
                 println!("BVP done, grid={}x{}", rows, cols);
             }
+            TaskRunResult::Nonlinear(_) => println!("Nonlinear task done"),
+            TaskRunResult::Optimization(_) => println!("Optimization task done"),
         }
     }
 }
