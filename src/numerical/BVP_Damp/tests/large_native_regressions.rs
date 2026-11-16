@@ -898,7 +898,9 @@ fn rst_native_damped_fixed_grid_converges_with_correct_trapezoid_jacobian() {
             .with_backend_policy_override(Some(BackendSelectionPolicy::LambdifyOnly))
             .with_symbolic_assembly_backend(assembly);
         let mut options =
-            damped_options(None, true).with_generated_backend_config(generated_backend);
+            damped_options(None, true)
+                .with_generated_backend_config(generated_backend)
+                .with_bvp_telemetry_mode(BvpTelemetryMode::Detailed);
         options = options.with_scheme_name("trapezoid");
         let mut solver = BvpSolver::new(
             problem(DAMPED_INTERVALS + 1),

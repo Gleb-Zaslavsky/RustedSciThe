@@ -46,7 +46,7 @@ use crate::numerical::Radau::{
 };
 use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
-use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
+use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetryMode};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 use crate::symbolic::symbolic_ivp_generated::{
@@ -208,6 +208,15 @@ impl IvpTelemetryModeSpec {
 
     pub(crate) const fn collects_timings(self) -> bool {
         matches!(self, Self::Timings | Self::Detailed)
+    }
+
+    const fn native_mode(self) -> IvpTelemetryMode {
+        match self {
+            Self::Off => IvpTelemetryMode::Off,
+            Self::Counters => IvpTelemetryMode::Counters,
+            Self::Timings => IvpTelemetryMode::Timings,
+            Self::Detailed => IvpTelemetryMode::Detailed,
+        }
     }
 }
 
@@ -434,8 +443,17 @@ impl IvpTaskSolver {
 
         match self {
             Self::Universal(solver) => {
+                if let Some(callbacks) = solver.nonstiff_symbolic_telemetry() {
+                    snapshot.residual_evaluations = Some(callbacks.residual_evaluations);
+                    if mode == IvpTelemetryModeSpec::Detailed {
+                        snapshot.symbolic_callback_telemetry = Some(callbacks);
+                    }
+                }
                 if let Some(stats) = solver.get_statistics() {
-                    snapshot.residual_evaluations = Some(stats.residual_calls as u64);
+                    // The nonstiff statistics API returns a value only for
+                    // DOP853 when its native counters or timings were enabled.
+                    // Thus measured zeros remain distinguishable from routes
+                    // that do not expose adaptive-step counters.
                     snapshot.accepted_time_steps = Some(stats.accepted_steps_total as u64);
                     snapshot.rejected_time_steps = Some(stats.rejected_step_attempts_total as u64);
                 }
@@ -966,6 +984,9 @@ pub struct IvpTaskRunResult {
 pub struct IvpTaskTelemetrySnapshot {
     pub mode: Option<IvpTelemetryModeSpec>,
     pub solve_elapsed_ms: Option<f64>,
+    /// Native symbolic callback snapshot retained only for the explicit
+    /// Detailed mode; compact task telemetry remains solver-family neutral.
+    pub symbolic_callback_telemetry: Option<crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot>,
     pub nonlinear_iterations: Option<u64>,
     pub residual_evaluations: Option<u64>,
     pub jacobian_evaluations: Option<u64>,
@@ -1513,7 +1534,7 @@ pub fn parse_ivp_solver_settings_from_document(
     document: &DocumentMap,
 ) -> Result<IvpSolverSettingsSpec, IvpTaskError> {
     let solver = parse_solver_selection(document)?;
-    let solver_options = parse_solver_options(document)?;
+    let solver_options = parse_solver_options(document, &solver.method)?;
     validate_solver_options(&solver.method, &solver_options)?;
     Ok(IvpSolverSettingsSpec {
         solver,
@@ -1534,7 +1555,6 @@ fn validate_solver_options(
             (options.symbolic_execution.is_some(), "symbolic_execution"),
             (options.matrix_layout.is_some(), "matrix_layout"),
             (options.execution_policy.is_some(), "execution_policy"),
-            (options.telemetry.is_some(), "telemetry"),
             (options.logging.is_some(), "logging"),
         ]
         .into_iter()
@@ -1958,6 +1978,12 @@ fn build_ivp_solver_from_spec_impl(spec: &IvpTaskSpec) -> Result<IvpTaskSolver, 
             if let Some(value) = spec.solver_options.neighborhood_check {
                 solver.set_neighborhood_check(value);
             }
+            let telemetry = spec
+                .solver_options
+                .telemetry
+                .unwrap_or(IvpTelemetryModeSpec::Off);
+            solver = solver
+                .with_nonstiff_symbolic_telemetry(IvpTelemetry::with_mode(telemetry.native_mode()));
             Ok(IvpTaskSolver::Universal(solver))
         }
         IvpMethodSpec::Bdf => {
@@ -3084,11 +3110,15 @@ fn parse_initial_conditions(
 
 /// Parse optional solver controls shared by the nonstiff facade and native
 /// stiff adapters. Each adapter consumes only the options it supports.
-fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, IvpTaskError> {
+fn parse_solver_options(
+    document: &DocumentMap,
+    method: &IvpMethodSpec,
+) -> Result<IvpSolverOptionsSpec, IvpTaskError> {
     let section = match document.get("solver_options") {
         Some(section) => section,
         None => return Ok(IvpSolverOptionsSpec::default()),
     };
+    validate_ivp_option_dependencies(method, section)?;
     let common_symbolic_assembly = parse_common_symbolic_assembly(section)?;
     let common_symbolic_execution = parse_common_symbolic_execution(section)?;
     let common_matrix_layout = parse_common_matrix_layout(section)?;
@@ -3137,6 +3167,153 @@ fn parse_solver_options(document: &DocumentMap) -> Result<IvpSolverOptionsSpec, 
         logging: common_logging,
         lsode2,
     })
+}
+
+fn validate_ivp_option_dependencies(
+    method: &IvpMethodSpec,
+    section: &GenericSectionMap,
+) -> Result<(), IvpTaskError> {
+    let field_error = |field: &str, required: &str| IvpTaskError::InvalidField {
+        section: "solver_options".to_string(),
+        field: field.to_string(),
+        message: format!("requires {required}; this option would otherwise have no effect"),
+    };
+
+    let common_execution = get_optional_string(section, "symbolic_execution", "solver_options")?;
+    let common_is_aot = common_execution
+        .as_deref()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("aot"));
+    for field in ["aot_toolchain", "aot_profile", "aot_output_dir"] {
+        if section.contains_key(field) && !common_is_aot {
+            return Err(field_error(
+                field,
+                "solver_options.symbolic_execution = AOT",
+            ));
+        }
+    }
+
+    let lsode_execution =
+        get_optional_string(section, "lsode2_symbolic_execution", "solver_options")?;
+    let lsode_is_aot = lsode_execution
+        .as_deref()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("aot"));
+    for field in [
+        "lsode2_aot_toolchain",
+        "lsode2_aot_profile",
+        "lsode2_aot_output_dir",
+    ] {
+        if section.contains_key(field) && !lsode_is_aot {
+            return Err(field_error(
+                field,
+                "solver_options.lsode2_symbolic_execution = AOT",
+            ));
+        }
+    }
+
+    let common_widths = ["banded_lower", "banded_upper", "banded_kl", "banded_ku"];
+    if common_widths
+        .iter()
+        .any(|field| section.contains_key(*field))
+    {
+        let layout = get_optional_string(section, "matrix_layout", "solver_options")?.or(
+            get_optional_string(section, "linear_structure", "solver_options")?,
+        );
+        if !layout
+            .as_deref()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("banded"))
+        {
+            let field = common_widths
+                .iter()
+                .find(|field| section.contains_key(**field))
+                .copied()
+                .unwrap_or("banded_lower");
+            return Err(field_error(field, "a banded matrix_layout"));
+        }
+    }
+
+    let lsode_widths = ["lsode2_banded_kl", "lsode2_banded_ku"];
+    if lsode_widths
+        .iter()
+        .any(|field| section.contains_key(*field))
+    {
+        let layout = get_optional_string(section, "lsode2_linear_structure", "solver_options")?;
+        if !layout
+            .as_deref()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("banded"))
+        {
+            let field = lsode_widths
+                .iter()
+                .find(|field| section.contains_key(**field))
+                .copied()
+                .unwrap_or("lsode2_banded_kl");
+            return Err(field_error(
+                field,
+                "solver_options.lsode2_linear_structure = banded",
+            ));
+        }
+    }
+
+    if section.contains_key("parallel_min_work") {
+        let policy = get_optional_string(section, "execution_policy", "solver_options")?;
+        if !policy.as_deref().is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "parallel" | "auto"
+            )
+        }) {
+            return Err(field_error(
+                "parallel_min_work",
+                "execution_policy = Parallel or Auto",
+            ));
+        }
+    }
+
+    let native_limits = [
+        "lsode2_native_max_step_attempts",
+        "lsode2_native_max_accepted_steps",
+    ];
+    if native_limits
+        .iter()
+        .any(|field| section.contains_key(*field))
+        && !section.contains_key("lsode2_native_execution")
+    {
+        let field = native_limits
+            .iter()
+            .find(|field| section.contains_key(**field))
+            .copied()
+            .unwrap_or("lsode2_native_max_step_attempts");
+        return Err(field_error(field, "solver_options.lsode2_native_execution"));
+    }
+
+    if !matches!(
+        method,
+        IvpMethodSpec::Lsode | IvpMethodSpec::Lsoda | IvpMethodSpec::Lsode2
+    ) {
+        for field in [
+            "lsode2_method_family",
+            "lsode2_controller",
+            "lsode2_symbolic_assembly",
+            "lsode2_symbolic_execution",
+            "lsode2_linear_structure",
+            "lsode2_linear_solver_policy",
+            "lsode2_native_execution",
+            "lsode2_native_max_step_attempts",
+            "lsode2_native_max_accepted_steps",
+            "lsode2_stop_variable",
+            "lsode2_stop_comparator",
+            "lsode2_stop_target",
+            "lsode2_stop_tolerance",
+        ] {
+            if section.contains_key(field) {
+                return Err(IvpTaskError::UnsupportedOption {
+                    method: ivp_method_name(method).to_string(),
+                    option: field.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_common_logging(

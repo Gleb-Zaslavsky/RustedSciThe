@@ -794,6 +794,7 @@ y: 1.0
 solver_options
 tolerance: 1e-2
 max_iterations: 20
+telemetry: counters
 
 continuation
 parameter: p
@@ -808,6 +809,14 @@ mode: warm
             .iter()
             .all(|segment| segment.result.iter().all(|value| value.is_finite()))
     );
+    let runtime = run
+        .runtime_telemetry
+        .as_ref()
+        .expect("BVP_sci continuation should retain compact telemetry");
+    assert!(runtime.nonlinear_iterations.unwrap_or_default() > 0);
+    assert!(runtime.residual_evaluations.unwrap_or_default() > 0);
+    assert!(runtime.jacobian_evaluations.unwrap_or_default() > 0);
+    assert!(runtime.mesh_refinements.is_some());
 }
 
 #[test]

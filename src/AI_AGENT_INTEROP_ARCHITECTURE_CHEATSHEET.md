@@ -252,10 +252,12 @@ by the numerical crate.
   nonlinear/optimization use their existing strict validators.
 - A Draft 2020-12 JSON Schema is checked in at
   `command_interpreter/task_document.schema.json` and included in the crate
-  source. Fixed IVP/BVP solver-option fields are tested against runtime
-  allowlists; full accepted field/type and conditional-method parity remains
-  stabilization work. The root crate directly depends on `serde` and
-  `serde_json` for this adapter.
+  source. Capabilities publishes solver-option names from this schema for all
+  four families. Typed parser checks enforce conditional route compatibility;
+  IVP dependency validation rejects orphan AOT, band-width, callback-threshold,
+  and LSODE2 execution controls instead of silently dropping them. Regression
+  tests cover schema/catalog drift and these conditional settings. The root
+  crate directly depends on `serde` and `serde_json` for this adapter.
   Python bindings remain optional direct clients, not a transport requirement.
 - Rust `command_interpreter::task_contract::inspect_task_json()` is a
   non-executing typed preflight: it parses expressions and checks family
@@ -265,16 +267,29 @@ by the numerical crate.
 - `task_contract::task_capabilities_json()` provides a versioned initial
   method/route catalog. Its axes are descriptive and intentionally not a
   Cartesian-product promise; per-request validation remains authoritative.
-  The catalog includes method-level rules and defaults; full conditional
-  compatibility parity for all BVP/native settings remains open. Concrete
-  advertised defaults are checked against inspection/native defaults, including
-  the input-dependent BVP_sci node-limit formula.
+  The catalog includes method-level rules, schema-derived option inventories,
+  and concrete effective defaults; defaults are checked against typed
+  inspection for every advertised method/route, including the input-dependent
+  BVP_sci node-limit formula. Not every native Rust builder control is part of
+  the agent task schema; the capability inventory describes only controls the
+  task contract can express.
 - `TaskInspection::effective_defaults` reports adapter-resolved values after
   applying the task route. `native_default` means the native solver still owns
   the value; unbounded numeric limits use the explicit string `unbounded`,
   avoiding accidental JSON `null` for infinity.
 
 ### Gaps or Items Requiring a Dedicated Follow-Up Audit
+
+- **Worker retry semantics:** deterministic JSON/protocol, task-validation,
+  and policy rejections report `retryable: false`. Worker-local compiler
+  identity, AOT-cache-open, and control-activation failures are typed as
+  `worker_infrastructure_error` with `retryable: null`: the worker does not
+  assert that replay is safe. No current error is automatically retryable.
+  A supervisor may retry only after it independently establishes idempotency
+  and that no numerical work or externally visible side effect began. A panic,
+  hard kill, or broken stdout pipe may leave execution status ambiguous; these
+  are process-level supervisor concerns and must not be synthesized as a
+  completed task response.
 
 - The versioned JSON task format, typed preflight, and compact result envelope
   are wrapped by a separate outer job contract. Its strict schema and parser

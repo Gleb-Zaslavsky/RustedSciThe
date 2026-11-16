@@ -1915,6 +1915,21 @@ impl NRBVP {
         }
     }
 
+    /// Materialize the last accepted state after a native solve failure.
+    /// Call only after solve has returned and when telemetry was requested.
+    pub fn failure_snapshot(
+        &self,
+    ) -> crate::numerical::BVP_Damp::telemetry::BvpDampFailureSnapshot {
+        let statistics = self.get_statistics();
+        crate::numerical::BVP_Damp::telemetry::BvpDampFailureSnapshot {
+            route: crate::numerical::BVP_Damp::telemetry::BvpDampCancellationRoute::Damped,
+            iteration: statistics.telemetry.counters.iterations as usize,
+            mesh: self.x_mesh.iter().copied().collect(),
+            packed_state: self.y.to_DVectorType().as_slice().to_vec(),
+            telemetry: statistics.telemetry,
+        }
+    }
+
     /// Returns the bounded Damped Newton iteration/trial trace when detailed
     /// BVP logging was enabled. This accessor does not trigger solver work.
     pub fn damped_decision_trace_snapshot(

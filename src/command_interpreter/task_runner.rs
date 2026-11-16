@@ -267,8 +267,16 @@ pub enum TaskRunnerError {
     Bvp(BvpTaskError),
     NonlinearParse(NonlinearTaskError),
     NonlinearRun(NonlinearTaskRunError),
+    NonlinearRunTelemetryUnavailable {
+        source: NonlinearTaskRunError,
+        requested_mode: crate::command_interpreter::task_parser::TaskTelemetryMode,
+    },
     OptimizationParse(OptimizationTaskError),
     OptimizationRun(OptimizationTaskRunError),
+    OptimizationRunTelemetryUnavailable {
+        source: OptimizationTaskRunError,
+        requested_mode: crate::command_interpreter::task_parser::TaskTelemetryMode,
+    },
 }
 
 impl std::fmt::Display for TaskRunnerError {
@@ -299,8 +307,10 @@ impl std::fmt::Display for TaskRunnerError {
             Self::Bvp(err) => write!(f, "{err}"),
             Self::NonlinearParse(err) => write!(f, "{err}"),
             Self::NonlinearRun(err) => write!(f, "{err}"),
+            Self::NonlinearRunTelemetryUnavailable { source, .. } => write!(f, "{source}"),
             Self::OptimizationParse(err) => write!(f, "{err}"),
             Self::OptimizationRun(err) => write!(f, "{err}"),
+            Self::OptimizationRunTelemetryUnavailable { source, .. } => write!(f, "{source}"),
         }
     }
 }
@@ -314,8 +324,10 @@ impl std::error::Error for TaskRunnerError {
             Self::Bvp(err) => Some(err),
             Self::NonlinearParse(err) => Some(err),
             Self::NonlinearRun(err) => Some(err),
+            Self::NonlinearRunTelemetryUnavailable { source, .. } => Some(source),
             Self::OptimizationParse(err) => Some(err),
             Self::OptimizationRun(err) => Some(err),
+            Self::OptimizationRunTelemetryUnavailable { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -358,7 +370,10 @@ impl TaskRunnerError {
                     ),
                 ),
             ) => "cancelled",
-            Self::NonlinearRun(_) | Self::OptimizationRun(_) => "solver",
+            Self::NonlinearRunTelemetryUnavailable { .. }
+            | Self::OptimizationRunTelemetryUnavailable { .. }
+            | Self::NonlinearRun(_)
+            | Self::OptimizationRun(_) => "solver",
         }
     }
 
@@ -2175,9 +2190,24 @@ pub fn run_task_from_spec_with_cancellation_token(
         ParsedTaskSpec::Ivp(spec) => run_ivp_task_with_cancellation_token(spec, token)
             .map(TaskRunResult::Ivp)
             .map_err(TaskRunnerError::Ivp),
-        ParsedTaskSpec::Nonlinear(spec) => run_nonlinear_task_with_cancellation_token(spec, token)
-            .map(TaskRunResult::Nonlinear)
-            .map_err(TaskRunnerError::NonlinearRun),
+        ParsedTaskSpec::Nonlinear(spec) => {
+            let requested_mode = spec.solver_options.telemetry.unwrap_or_default();
+            run_nonlinear_task_with_cancellation_token(spec, token)
+                .map(TaskRunResult::Nonlinear)
+                .map_err(|source| {
+                    if requested_mode
+                        != crate::command_interpreter::task_parser::TaskTelemetryMode::Off
+                        && !nonlinear_error_is_cancellation(&source)
+                    {
+                        TaskRunnerError::NonlinearRunTelemetryUnavailable {
+                            source,
+                            requested_mode,
+                        }
+                    } else {
+                        TaskRunnerError::NonlinearRun(source)
+                    }
+                })
+        }
         ParsedTaskSpec::Optimization(spec)
             if matches!(
                 spec.method,
@@ -2186,9 +2216,22 @@ pub fn run_task_from_spec_with_cancellation_token(
                     | OptimizationMethodSpec::Gavin
             ) =>
         {
+            let requested_mode = spec.solver_options.telemetry.unwrap_or_default();
             run_optimization_task_with_cancellation_token(spec, token)
                 .map(TaskRunResult::Optimization)
-                .map_err(TaskRunnerError::OptimizationRun)
+                .map_err(|source| {
+                    if requested_mode
+                        != crate::command_interpreter::task_parser::TaskTelemetryMode::Off
+                        && !optimization_error_is_cancellation(&source)
+                    {
+                        TaskRunnerError::OptimizationRunTelemetryUnavailable {
+                            source,
+                            requested_mode,
+                        }
+                    } else {
+                        TaskRunnerError::OptimizationRun(source)
+                    }
+                })
         }
         ParsedTaskSpec::Optimization(spec) => Err(TaskRunnerError::CancellationUnsupported {
             family: match spec.method {
@@ -2208,12 +2251,77 @@ pub fn run_task_from_spec(spec: ParsedTaskSpec) -> Result<TaskRunResult, TaskRun
         ParsedTaskSpec::Bvp(spec) => run_bvp_task(spec)
             .map(TaskRunResult::Bvp)
             .map_err(TaskRunnerError::Bvp),
-        ParsedTaskSpec::Nonlinear(spec) => run_nonlinear_task(spec)
-            .map(TaskRunResult::Nonlinear)
-            .map_err(TaskRunnerError::NonlinearRun),
-        ParsedTaskSpec::Optimization(spec) => run_optimization_task(spec)
-            .map(TaskRunResult::Optimization)
-            .map_err(TaskRunnerError::OptimizationRun),
+        ParsedTaskSpec::Nonlinear(spec) => {
+            let requested_mode = spec.solver_options.telemetry.unwrap_or_default();
+            run_nonlinear_task(spec)
+                .map(TaskRunResult::Nonlinear)
+                .map_err(|source| {
+                    if requested_mode
+                        != crate::command_interpreter::task_parser::TaskTelemetryMode::Off
+                        && !nonlinear_error_is_cancellation(&source)
+                    {
+                        TaskRunnerError::NonlinearRunTelemetryUnavailable {
+                            source,
+                            requested_mode,
+                        }
+                    } else {
+                        TaskRunnerError::NonlinearRun(source)
+                    }
+                })
+        }
+        ParsedTaskSpec::Optimization(spec) => {
+            let requested_mode = spec.solver_options.telemetry.unwrap_or_default();
+            run_optimization_task(spec)
+                .map(TaskRunResult::Optimization)
+                .map_err(|source| {
+                    if requested_mode
+                        != crate::command_interpreter::task_parser::TaskTelemetryMode::Off
+                        && !optimization_error_is_cancellation(&source)
+                    {
+                        TaskRunnerError::OptimizationRunTelemetryUnavailable {
+                            source,
+                            requested_mode,
+                        }
+                    } else {
+                        TaskRunnerError::OptimizationRun(source)
+                    }
+                })
+        }
+    }
+}
+
+fn nonlinear_error_is_cancellation(error: &NonlinearTaskRunError) -> bool {
+    matches!(
+        error,
+        NonlinearTaskRunError::Root(
+            crate::numerical::Nonlinear_systems::error::SolveError::Cancelled { .. }
+        ) | NonlinearTaskRunError::LeastSquares(
+            crate::numerical::Nonlinear_systems::least_squares::LeastSquaresError::Cancelled { .. }
+        )
+    )
+}
+
+fn optimization_error_is_cancellation(error: &OptimizationTaskRunError) -> bool {
+    use crate::numerical::Nonlinear_systems::least_squares::LeastSquaresError;
+    use crate::numerical::optimization::lm_gavin::GavinLmError;
+    use crate::numerical::optimization::sym_fitting::FittingError;
+    use crate::numerical::optimization::universal_fitting::UniversalFittingError;
+    use crate::numerical::optimization::varpro::symbolic::SymbolicVarProError;
+
+    match &error.0 {
+        UniversalFittingError::Fitting(FittingError::Solver(LeastSquaresError::Cancelled {
+            ..
+        }))
+        | UniversalFittingError::Fitting(FittingError::Preparation(
+            LeastSquaresError::Cancelled { .. },
+        ))
+        | UniversalFittingError::SolverConfiguration(LeastSquaresError::Cancelled { .. })
+        | UniversalFittingError::Gavin(GavinLmError::Cancelled { .. }) => true,
+        UniversalFittingError::VarPro(SymbolicVarProError::SolverFailed {
+            source: Some(LeastSquaresError::Cancelled { .. }),
+            ..
+        }) => true,
+        _ => false,
     }
 }
 
@@ -2892,6 +3000,22 @@ mod tests {
         let fitting_spec = parse_task_spec_from_str(fitting).unwrap();
         assert!(render_task_preview(&fitting_spec).contains("Optimization"));
         assert!(render_task_check(&fitting_spec).contains("preflight=valid"));
+    }
+
+    #[test]
+    fn requested_telemetry_is_explicit_when_native_nonlinear_error_has_no_snapshot() {
+        let document = "problem\nformulation: root\nvariables: x\nequations: x^2 + 1\ninitial_guess: 0.0\nsolver\nmethod: newton\ntelemetry: detailed\n";
+        let error = run_task_from_str(document).expect_err("the scalar Jacobian is singular");
+        assert!(matches!(
+            error,
+            TaskRunnerError::NonlinearRunTelemetryUnavailable {
+                requested_mode:
+                    crate::command_interpreter::task_parser::TaskTelemetryMode::Detailed,
+                ..
+            }
+        ));
+        assert_eq!(error.category(), "solver");
+        assert!(std::error::Error::source(&error).is_some());
     }
 
     #[test]

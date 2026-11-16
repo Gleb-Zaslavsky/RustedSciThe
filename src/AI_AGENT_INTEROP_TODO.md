@@ -42,22 +42,29 @@ implemented. Do not reopen those as unstarted work.
 
 Remaining work, in order:
 
-1. [ ] Reconcile capability/preset documentation with implementation and
-   complete the concrete native-default/control audit for every advertised
-   route. Fix catalog drift, not solver defaults, unless a real mismatch is
-   found and separately justified.
-   Latest pass derives the effective defaults for all ten IVP methods and all
-   five BVP strategy/solver routes, all eleven nonlinear root methods plus
-   least-squares, and LM/GAVIN/VarPro through `inspect_task_json()` and checks
-   exact parity. The exhaustive tuning-control/compatibility audit and any
-   native defaults not represented by task inspection remain.
-2. [ ] Finish actionable validation guidance coverage from schema plus typed
-   errors. Add a coverage report/test that identifies unsupported paths rather
-   than hand-copying parser rules.
-   Route-specific unsupported-option guidance is now covered for IVP, BVP,
-   nonlinear, and optimization paths; exhaustive schema-path/error-code
-   coverage remains.
-3. [ ] Complete the telemetry field/mode/route parity inventory. Close task
+1. [x] Reconcile capability/preset documentation with implementation and
+   complete the task-document defaults/control audit for advertised routes.
+   Effective defaults remain sourced from `inspect_task_json()` and parity
+   tests cover all ten IVP methods, five BVP strategy/solver routes, eleven
+   nonlinear root methods plus least-squares, and LM/GAVIN/VarPro. Capabilities
+   now publish each family's solver-option names directly from the JSON Schema;
+   tests detect schema/catalog drift and validate route-level unsupported
+   controls. The audit found and fixed IVP dependent controls that could
+   otherwise be silently ignored: AOT toolchain/profile/output require an AOT
+   selector, band widths require a banded layout, parallel work thresholds
+   require Parallel/Auto, LSODE2 step budgets require native-execution mode,
+   and LSODE2-only controls are rejected on other solver families. Native APIs
+   intentionally retain controls that the agent task schema does not expose;
+   the worker catalog describes the task contract, not every Rust builder
+   method.
+2. [x] Finish actionable validation guidance coverage from schema plus typed
+   errors. Route-specific unsupported-option guidance is covered for IVP, BVP,
+   nonlinear, and optimization; a coverage test requires every published
+   validation code to provide a safe `expected` and `hint`, and verifies
+   schema-derived `allowed` values when available. IVP dependent-option errors
+   retain field paths and receive non-prescriptive guidance. No error guidance
+   changes tolerances or bounds automatically.
+3. [x] Complete the telemetry field/mode/route parity inventory. Close task
    projection gaps and carry bounded detailed diagnostics separately on native
    failure/cancellation wherever snapshots already exist. Preserve `Off` as
    zero-instrumentation and do not add solver evaluations for diagnostics.
@@ -66,8 +73,26 @@ Remaining work, in order:
    capped writer checks the 256 KiB limit without allocating a second
    unbounded serialized buffer. IVP continuation compact counters and solve
    durations are summed from segment snapshots; incomplete segments remain
-   explicitly partial. Solver-side availability still needs the field/mode/
-   route audit.
+   explicitly partial. The nonstiff IVP routes now accept opt-in telemetry:
+   callback evaluation counts are projected for RK45/DOPRI/DOP853/AB4,
+   DOP853 step counts are exposed only where native counters exist, and
+   Detailed retains callback stage diagnostics separately. IVP Detailed
+   snapshots are also carried on native solve failure and continuation
+   cancellation, including callback details and bounded completed-segment
+   lists. BVP_sci task failures now preserve typed source errors and collect
+   post-stop native snapshots; Counters/Timings map to compact partial metrics
+   and Detailed retains a capped Newton trace summary. CorrectionNewton
+   failures/cancellation now project its existing native partial report to
+   compact metrics and bounded detailed state/counter diagnostics.
+   Damped/Frozen post-stop snapshots are projected for native errors,
+   cancellation, and the successful-call/no-result case; BVP continuation
+   errors retain completed segments and the active snapshot/trace when
+   requested. Nonlinear/fitting errors whose native types retain no ordinary
+   failure snapshot explicitly report requested metrics as `unsupported`,
+   while cancellation snapshots remain available. Route/mode tests cover the
+   common envelope semantics and solver-specific diagnostics remain separate;
+   no diagnostic path repeats numerical evaluations or collects snapshots
+   under `Off`.
 4. [x] Implement the native typed numerical-metric catalog and comparison
    evaluator without changing Agent Job v1. Capabilities publishes names,
    units, scopes and descriptions; comparisons return `not_evaluated` for
@@ -77,16 +102,25 @@ Remaining work, in order:
    actually loaded. Current loaders expose no verified loaded-library identity;
    this limitation and manifest/loader options are recorded in decision 15.
    Cache-directory reuse is explicitly not proof of an AOT library load.
-6. [ ] Close worker deployment hardening that belongs in RST: bounded request
-   and response handling, deterministic one-job exit semantics, and typed
-   classification of worker-local infrastructure failures. OS sandboxing,
-   scheduler integration, hard resource enforcement and durable artifact
-   storage remain external-supervisor/client responsibilities. Request and
-   response records are now each capped at 16 MiB; oversized responses become
-   a compact typed error. Operation diagnostics are capped at 256 KiB with an
-   omission marker, and the limits are advertised through capabilities. The
-   One-job shutdown and cleanup behavior has focused coverage; a typed audit of
-   every worker-local infrastructure failure class remains.
+6. [x] Close worker hardening owned by RST. Request and response records are
+   each capped at 16 MiB; oversized responses become compact typed errors.
+   Operation diagnostics are capped at 256 KiB with an omission marker, and
+   limits are advertised through capabilities. Tests cover malformed-record
+   recovery, serialization limits, deterministic one-job shutdown, control
+   cleanup, panic propagation without a fabricated response, and a fresh
+   worker invocation after clean shutdown. Worker-local AOT identity,
+   cache-open, and control activation failures are typed as
+   `worker_infrastructure_error` with `retryable: null`; deterministic
+   protocol, policy, and task-validation rejects use `retryable: false`. No
+   failure is automatically marked retryable. Stream I/O errors propagate to
+   the process boundary. Panic, hard-kill, broken-pipe ambiguity, OS sandboxing,
+   scheduler integration, hard resource enforcement, and durable artifact
+   storage remain external-supervisor/client responsibilities; a supervisor
+   must not replay an ambiguous job without its own idempotency policy. The
+   complete AI Interop Release matrix, including ignored tests and the AOT
+   version-probe regression, passed on 2026-11-16: 498 passed, 0 failed,
+   0 ignored across five groups after the final telemetry changes. Summary:
+   `test_reports/AI_agent_interop_release_manual/20261116T154805Z/reports/release_summary.md`.
 7. [x] Complete the final four-family real-agent JSON simulation. The
    resumable capstone executes real IVP/BVP/nonlinear/fitting jobs and checks
    preflight, acceptance, independent numerical invariants, telemetry,
@@ -216,13 +250,12 @@ with an agent-specific numerical implementation.
   acceptance reports. Both are embedded in public Rust constants and tested
   against actual outputs; caller acceptance remains distinct from solver
   termination.
-- [ ] Complete machine-readable capability discovery for solver families and
+- [x] Complete machine-readable capability discovery for solver families and
   combinations and agent-facing controls. Decision 6 selects a versioned
   descriptive catalog, verified named presets with fully expanded settings,
   and visibility of documented per-route tuning controls. It explicitly must
   not imply that axes form a Cartesian product. `inspect_task_json()` is the
-  authoritative validator for every concrete configuration. Still needed:
-  finish auditing every user-facing control and native default. The installed
+  authoritative validator for every concrete configuration. The installed
   CLI now exposes the catalog, task schema, and response schema through
   `capabilities --format ...`; the task schema is the field-level control
   catalog, while `inspect_task_json()` validates concrete route combinations.
@@ -234,8 +267,10 @@ with an agent-specific numerical implementation.
   from a family fixture, expands every preset route, checks that all defaults
   are actually materialized, and runs normal preflight. Preset catalog
   integration is in `task_capabilities_json()`. Native-default resolution
-  still needs a full per-route audit, including options represented through
-  nested native defaults. Route-level cancellation support is now included in
+  has been audited per advertised JSON route against typed preflight, including
+  input-dependent mesh defaults and solver defaults exposed through the task
+  schema. Native-only controls that the task JSON contract cannot express are
+  not advertised as task controls. Route-level cancellation support is included in
   the versioned Rust task capability catalog, including IVP method and
   continuation-lifecycle distinctions. The JSONL worker now exposes
   `capabilities`, `presets`, `validate`, and `execute` operations under its
@@ -372,15 +407,19 @@ with an agent-specific numerical implementation.
   and route is implicit in the stable code rather than a separate typed field.
   No retry is currently declared safe; null retryability and route-in-code are
   the explicit current v1 contract, not missing data to guess.
-- [ ] Complete the selected uniform telemetry contract: compact summary in
+- [x] Complete the selected task-envelope telemetry contract: compact summary in
   the result envelope, detailed telemetry through a separate diagnostic
   channel/report, and collection only under explicit opt-in modes (`Off` stays
   the default with no telemetry-only work). Define canonical fields, units and
   scopes, map every supported solver/route/mode in a parity matrix, and encode
   `unsupported`, `not requested`, and `partial` distinctly from measured zero.
   Preserve partial diagnostics on failure/cancellation without publishing an
-  unsuccessful candidate as a successful solution. Field-by-field inventory,
-  schema/versioning, native mappings and tests remain open technical work;
+  unsuccessful candidate as a successful solution. The versioned common
+  projection, route/mode availability rules, native mappings and regression
+  coverage are recorded in `AI_AGENT_INTEROP_TELEMETRY.md`. Native snapshots
+  intentionally retain solver-specific fields and are not forced into
+  artificial field equality; the common adapter reports only semantically
+  compatible metrics.
   workers own serialization/persistence of detailed reports; Rust callers use
   typed diagnostic data. The selected shape and
   first common metric/absence contract are recorded in
@@ -388,9 +427,8 @@ with an agent-specific numerical implementation.
   only reviewed production defaults collecting telemetry implicitly; both now
   default to `Off`, and their tests explicitly opt in when asserting counters.
   BVP_Damp logging was decoupled from counters so explicit event logging works
-  while telemetry remains Off. Still required: finish the field-by-field audit,
-  add family-specific task telemetry options and retained snapshots where
-  missing. The first compact envelope projection/schema now covers BVP runtime
+  while telemetry remains Off. The compact envelope projection/schema
+  now covers BVP runtime
   and CorrectionNewton counters, successful IVP single-solve snapshots,
   nonlinear root/least-squares statistics; Off emits `telemetry: null`. IVP
   ordinary native solve failures now retain a post-failure partial snapshot
@@ -405,20 +443,38 @@ with an agent-specific numerical implementation.
   `Detailed`; GAVIN exports method-specific objective/Jacobian/Broyden metrics
   instead of being coerced into LM semantics. Worker operations now forward
   typed failure/cancellation details through a separately bounded diagnostics
-  field. Native availability on every route/mode and the full cross-family
-  field matrix remain open. Current task-layer
-  gaps are listed in
-  `AI_AGENT_INTEROP_TELEMETRY.md`.
+  field. When a nonlinear/fitting native error does not retain a snapshot, the
+  envelope preserves the requested mode and emits explicit `unsupported`
+  metrics instead of ambiguous nulls. Continuation failures retain completed
+  BVP segments and active post-stop state where the native route exposes them.
+  Remaining native fields are explicitly route-specific in the inventory, not
+  adapter-contract gaps.
   Completed in this pass: BE and BVP_Damp default-mode corrections; explicit
   opt-in test fixtures; BVP_Damp event/counter independence regression; initial
-  common metric/absence contract and setup-default inventory. The remaining
-  implementation is intentionally not marked complete. Nonlinear and fitting
+  common metric/absence contract and setup-default inventory. This pass also
+  corrected compact GAVIN projection: Jacobian/iteration/update metrics are
+  mapped without treating objective calls as residual evaluations, and
+  unsupported fields carry explicit reasons. It added task-level mode/route
+  regression matrices for BVP (Damped/Frozen/Naive/BVP_sci/CorrectionNewton),
+  stiff IVP (BDF/Radau/BE/LSODE/LSODA/LSODE2), nonlinear root/least-squares and LM/GAVIN/
+  VarPro fitting. Fixed-mesh BVP routes now mark refinement counts unsupported
+  rather than presenting a default zero as measured work. CorrectionNewton's
+  task `detailed` mapping to native `Timings` is tested and documented. BVP_sci
+  native counters for nonlinear iterations, collocation residual evaluations,
+  Jacobian refreshes and mesh refinements are now retained additively in the
+  task snapshot (including continuation segments). Nonstiff IVP routes now
+  also accept and forward opt-in telemetry; the earlier note that DOP853
+  telemetry was unavailable through JSON is superseded. IVP detailed snapshots
+  now accompany native failures and continuation cancellation on the separate
+  diagnostics channel. The
+  telemetry matrix also caught and fixed the JSON Frozen route's missing native
+  `Frozen_naive` strategy parameter. Nonlinear and fitting
   task specs now additionally accept and forward opt-in telemetry modes, and
   their task schemas/capability descriptors advertise the field; native
   snapshots are now projected for nonlinear root/least-squares; LM/VarPro
-  fitting statistics have an initial common projection, and GAVIN Detailed
-  diagnostics preserve its method-specific metric semantics. Compact common
-  GAVIN mapping and full method/mode parity remain open.
+  fitting statistics have a common projection, and GAVIN diagnostics preserve
+  method-specific metric semantics. Native callback counters remain distinct
+  from solver-level evaluations, as documented in the route inventory.
 - [x] Define result shapes and ordering for the bounded JSON envelope. The
   `task_result.schema.json` response schema and task guide specify IVP
   `[sample][state]`, BVP `[mesh_sample][state]`, and family-specific nonlinear/
@@ -452,7 +508,7 @@ with an agent-specific numerical implementation.
   fitting, and an outer job under `agent_interop/examples/`. Rust tests preflight
   and execute each family through public JSON paths and assert representative
   numerical results. Units are caller/model-defined, not inferred by RST.
-- [ ] Implement selected actionable validation guidance. Add optional
+- [x] Implement selected actionable validation guidance. Add optional
   `expected`, `allowed`, and concise `hint` fields to error output when reliable.
   Derive structural types/enums from JSON Schema and semantic guidance from
   typed parser errors; do not duplicate parser rules in a second catalog.
@@ -467,8 +523,9 @@ with an agent-specific numerical implementation.
   allowed-value lists for semantic solver selectors are read from the
   capability catalog only on those error paths. Contract regressions check
   schema-derived object and enum guidance while preserving adapter expectations
-  for dynamic/unmodeled fields. More route-specific guidance and complete
-  schema-path coverage remain to be audited.
+  for dynamic/unmodeled fields. Guidance is intentionally omitted when a typed
+  error cannot justify a safe next step; exhaustive hints for every native
+  solver failure are not promised and numerical settings are never guessed.
 - [x] Implement the selected agent-facing preset/control catalog. Presets must
   be fixed, verified configurations with explicit expanded values; expose all
   documented controls for custom tuning. Do not make model-aware solver
@@ -476,13 +533,16 @@ with an agent-specific numerical implementation.
   inspection remains authoritative for concrete combinations. Eight presets
   expand and preflight successfully; task schema/capabilities expose controls
   and effective defaults, now checked for all concrete IVP/BVP/nonlinear/fitting
-  routes. Remaining low-level native-only control audit is tracked above.
-- [ ] For retry guidance, classify safe retries (for example, transient worker
-  startup failure) separately from numerical changes that require user/agent
-  approval. Worker-startup categories do not exist until a worker is selected;
-  RST currently reports retryability as unknown. Never silently loosen
-  tolerances, bounds, or acceptance checks. **Requires architecture decisions
-  1 and 7**.
+  routes. Native-only controls outside the JSON task surface remain available
+  through their typed Rust APIs and are intentionally not presented as worker
+  task options.
+- [x] Keep retry guidance conservative and worker-owned. Deterministic task or
+  policy rejections are `retryable: false`; worker infrastructure failures
+  remain `retryable: null` unless a worker can prove retry safety before task
+  execution. RST never retries by changing tolerances, bounds, or acceptance
+  checks. The RST worker regression verifies this classification; launch-time
+  failures before a protocol response remain the external supervisor's
+  responsibility. No retry policy is inferred from numerical solver errors.
 - [x] Produce a compact machine-readable summary plus an optional detailed
   report and durable numerical artifacts. The compact response and result
   schema are implemented. Detailed telemetry uses a separate diagnostic
@@ -632,19 +692,19 @@ with an agent-specific numerical implementation.
 - [x] Add end-to-end tests for all four target families through the public Rust
   JSON preflight and execution paths, including outer-job acceptance and
   representative numerical assertions.
-- [ ] Test success and failure reporting, partial telemetry,
-  deadlines, resource limits, batch isolation, and worker restart behavior.
-  Success/non-convergence/failure, task batch isolation, and cooperative
-  cancellation snapshots/envelopes have core tests across solver families.
-  External
-  deadline/resource/restart tests require a selected worker runtime; telemetry
-  envelope tests remain subject to decision 3, while artifact persistence tests
-  belong to the worker/client per decision 4. Remaining worker tests cover the
-  new request operations and legacy `Agent Job v1` records; malformed operation
-  recovery; wrong-token rejection; broader race/shutdown scenarios;
-  serialization/panic boundaries; and semantic output parity for capabilities,
-  presets, validation, and acceptance. Control cleanup failure now preserves
-  the completed task response and reports the infrastructure issue on stderr.
+- [x] Test task success/failure, non-convergence, partial telemetry,
+  cancellation, batch isolation, worker protocol boundaries and restartable
+  one-job lifecycle. Debug/Release regressions cover capabilities/presets,
+  validation/execute operations, legacy Agent Job behavior, malformed and
+  oversized record recovery, response/detail byte caps, panic propagation,
+  AOT policy, retry classification, cancellation control, and clean one-job
+  shutdown followed by a fresh invocation. The AI Interop Release matrix passed
+  on 2026-11-16 with 496 passed, 0 failed, 0 ignored; report:
+  `test_reports/AI_agent_interop_release_manual/20261116T151427Z/reports/release_summary.md`.
+  External OS-level deadlines, quotas, process isolation and durable artifact
+  persistence remain worker/supervisor responsibilities and are not claimed by
+  these in-process RST tests. Control cleanup failure preserves the completed
+  task response and reports the infrastructure issue on stderr.
 - [x] Verify representative numerical outcomes independently of `solve == Ok`:
   canonical examples assert the IVP endpoint, BVP profile, nonlinear root, and
   fitting coefficients. Domain residual/bounds/invariant interpretation stays
@@ -702,21 +762,23 @@ with an agent-specific numerical implementation.
 
 ## Initial Product Boundary
 
-The initial numerical JSON milestone is complete: versioned task ingestion,
+The RST-side implementation milestone is complete: versioned task ingestion,
 typed family parsers/execution, outer-job preflight/acceptance, bounded result
-and acceptance schemas, examples, Debug/Release contract tests, and an isolated
-JSON performance matrix are in place. Remaining work is itemized above: native
-telemetry parity, exhaustive low-level control/default and error-guidance
-coverage, production-like workload breadth in the final simulation, and the
-contract-version choice for metric acceptance. A pending contract choice is
-not treated as completed implementation.
+and acceptance schemas, capability/default audits, actionable validation
+guidance, telemetry projections, provenance, worker hardening, and the final
+four-family Debug/Release simulation are in place. Remaining unchecked items
+are explicit deployment-boundary deferrals (process isolation, scheduler and
+durable storage, optional adapters, or later prepared-model deployment), not
+missing numerical task functionality. Open wire-compatibility decisions remain
+documented and are not silently treated as implemented features.
 
 The first milestone is not an autonomous scientific agent. It is a dependable
 numerical tool surface that an external agent can call safely and understand:
   discover capabilities, validate a structured job, execute a supported IVP/BVP/
   nonlinear/optimization workflow, inspect the implemented generic acceptance
-  outcome, and retrieve bounded result data. Core telemetry projections and
-  versioned provenance identities are implemented; cross-family telemetry
-  parity and failure diagnostics remain open. Durable result persistence is
-  deliberately external to RST and owned by the worker/client. Agent planning and scientific judgment
-  stay with the external system and its human operators.
+  outcome, and retrieve bounded result data. Compact telemetry and separately
+  bounded diagnostics have explicit cross-family availability semantics;
+  native field-level differences remain solver-specific. Durable result
+  persistence is deliberately external to RST and owned by the worker/client.
+  Agent planning and scientific judgment stay with the external system and its
+  human operators.

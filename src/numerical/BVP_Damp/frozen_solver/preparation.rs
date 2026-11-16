@@ -1539,6 +1539,21 @@ impl NRBVP {
         }
     }
 
+    /// Materialize the last accepted state after a native solve failure.
+    /// Call only after solve has returned and when telemetry was requested.
+    pub fn failure_snapshot(
+        &self,
+    ) -> crate::numerical::BVP_Damp::telemetry::BvpDampFailureSnapshot {
+        let statistics = self.get_statistics();
+        crate::numerical::BVP_Damp::telemetry::BvpDampFailureSnapshot {
+            route: crate::numerical::BVP_Damp::telemetry::BvpDampCancellationRoute::Frozen,
+            iteration: statistics.telemetry.counters.iterations as usize,
+            mesh: self.x_mesh.iter().copied().collect(),
+            packed_state: self.y.to_DVectorType().as_slice().to_vec(),
+            telemetry: statistics.telemetry,
+        }
+    }
+
     /// Returns the bounded opt-in trace of successful Frozen Newton updates.
     /// The trace is empty unless `BvpLoggingMode::Detailed` was selected.
     pub fn frozen_iteration_trace_snapshot(

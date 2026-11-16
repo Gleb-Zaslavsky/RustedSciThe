@@ -1436,6 +1436,20 @@ pub struct BvpDampCancelledSnapshot {
     pub telemetry: BvpTelemetrySnapshot,
 }
 
+/// Post-stop state and telemetry retained for a non-cancellation solver error.
+///
+/// This is materialized only by an adapter after native `solve()` returns an
+/// error and only when telemetry was requested. It is not updated on the
+/// iteration path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BvpDampFailureSnapshot {
+    pub route: BvpDampCancellationRoute,
+    pub iteration: usize,
+    pub mesh: Vec<f64>,
+    pub packed_state: Vec<f64>,
+    pub telemetry: BvpTelemetrySnapshot,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BvpDampCancellationRoute {
     Damped,

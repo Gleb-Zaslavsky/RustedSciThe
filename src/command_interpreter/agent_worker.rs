@@ -831,7 +831,7 @@ fn operation_error(operation: &str, code: &str, message: &str, details: Value) -
             "details": details,
             "message": message,
             "source_chain": [],
-            "retryable": Value::Null,
+            "retryable": false,
         }
     })
 }
@@ -1103,12 +1103,18 @@ fn job_error(error: &AgentJobError) -> Value {
             "details": details,
             "message": error.to_string(),
             "source_chain": source_chain,
-            "retryable": Value::Null,
+            "retryable": false,
         }
     })
 }
 
 fn job_rejected(job_id: Option<&str>, code: &str, message: &str) -> Value {
+    let infrastructure_failure = matches!(
+        code,
+        "worker.aot_policy.compiler_identity_unavailable"
+            | "worker.aot_cache.open_failed"
+            | "worker.control.unavailable"
+    );
     json!({
         "worker_protocol_version": WORKER_PROTOCOL_VERSION,
         "job_contract_version": 1,
@@ -1118,12 +1124,15 @@ fn job_rejected(job_id: Option<&str>, code: &str, message: &str) -> Value {
         "acceptance": Value::Null,
         "error": {
             "code": code,
-            "error_type": "worker_policy_rejection",
+            "error_type": if infrastructure_failure { "worker_infrastructure_error" } else { "worker_policy_rejection" },
             "field_path": Value::Null,
             "details": Value::Null,
             "message": message,
             "source_chain": [],
-            "retryable": Value::Null,
+            // Infrastructure failures do not prove whether an external retry
+            // is safe. The supervisor must account for job idempotency and
+            // whether numerical execution could have started.
+            "retryable": if infrastructure_failure { Value::Null } else { Value::from(false) },
         }
     })
 }
@@ -1143,7 +1152,7 @@ fn protocol_error(code: &str, message: String) -> Value {
             "details": Value::Null,
             "message": message,
             "source_chain": [],
-            "retryable": Value::Null,
+            "retryable": false,
         }
     })
 }
@@ -1156,8 +1165,8 @@ mod tests {
         MAX_WORKER_RECORD_BYTES, MAX_WORKER_RESPONSE_BYTES, WorkerAotPolicy, aot_policy_rejection,
         aot_version_argument, assign_worker_aot_root, bounded_operation_diagnostics,
         encode_worker_response, inject_bvp_sci_aot_output_path, is_bvp_sci_aot_without_output_path,
-        process_record, serialize_bounded_json, serve_jsonl, serve_jsonl_with_control,
-        serve_one_jsonl_with_policy, task_error_diagnostics,
+        job_rejected, process_record, serialize_bounded_json, serve_jsonl,
+        serve_jsonl_with_control, serve_one_jsonl_with_policy, task_error_diagnostics,
     };
     use crate::command_interpreter::agent_worker_control::WorkerControlServer;
     use crate::command_interpreter::task_runner::{
@@ -1168,6 +1177,87 @@ mod tests {
     use std::net::TcpStream;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn worker_retry_classification_is_conservative_and_typed() {
+        let deterministic = job_rejected(
+            Some("job-1"),
+            "worker.task.validation_failed",
+            "invalid task",
+        );
+        assert_eq!(
+            deterministic["error"]["error_type"],
+            "worker_policy_rejection"
+        );
+        assert_eq!(deterministic["error"]["retryable"], false);
+        assert_response_matches_schema(&deterministic);
+
+        for code in [
+            "worker.aot_policy.compiler_identity_unavailable",
+            "worker.aot_cache.open_failed",
+            "worker.control.unavailable",
+        ] {
+            let infrastructure = job_rejected(Some("job-2"), code, "worker failure");
+            assert_eq!(
+                infrastructure["error"]["error_type"], "worker_infrastructure_error",
+                "{code}"
+            );
+            assert!(
+                infrastructure["error"]["retryable"].is_null(),
+                "uncertain worker failures must not be automatically marked retryable: {code}"
+            );
+            assert_response_matches_schema(&infrastructure);
+        }
+    }
+
+    #[test]
+    fn worker_panic_propagates_without_fabricating_a_response() {
+        struct PanickingReader;
+        impl std::io::Read for PanickingReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                panic!("injected worker input panic");
+            }
+        }
+        impl BufRead for PanickingReader {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                panic!("injected worker input panic");
+            }
+
+            fn consume(&mut self, _amount: usize) {}
+        }
+
+        let mut reader = PanickingReader;
+        let mut output = Vec::new();
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = serve_jsonl(&mut reader, &mut output);
+        }));
+        assert!(
+            panic.is_err(),
+            "worker panics remain process/supervisor visible"
+        );
+        assert!(
+            output.is_empty(),
+            "panic must not be turned into a fake task response"
+        );
+    }
+
+    #[test]
+    fn clean_one_job_shutdown_allows_a_fresh_worker_invocation() {
+        for _ in 0..2 {
+            let mut reader = Cursor::new(format!("{}\n", job_without_budget()).into_bytes());
+            let mut output = Vec::new();
+            serve_one_jsonl_with_policy(&mut reader, &mut output, &WorkerAotPolicy::deny_all())
+                .unwrap();
+            let response: Value = serde_json::from_slice(
+                output
+                    .strip_suffix(b"\n")
+                    .expect("one-job worker emits one newline-terminated response"),
+            )
+            .unwrap();
+            assert_response_matches_schema(&response);
+            assert_eq!(response["status"], "succeeded");
+        }
+    }
 
     const JOB: &str = include_str!("../agent_interop/examples/job_ivp_decay.json");
     const BVP: &str = include_str!("../agent_interop/examples/bvp_constant.json");

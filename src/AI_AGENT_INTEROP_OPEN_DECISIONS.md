@@ -126,7 +126,7 @@ solver-specific durable checkpointing (including algorithm/controller state,
 and potentially prepared callback/AOT lifecycle); that capability is not part
 of the initial contract and must not be implied by cancellation.
 
-### 3. Telemetry in Agent Results — Shape Selected, Parity Work Open
+### 3. Telemetry in Agent Results — Task Contract Implemented
 
 **Decision:** Put a compact telemetry summary in the main result envelope and
 provide detailed telemetry through a separate diagnostic channel/report. Both
@@ -142,16 +142,19 @@ form, but may not redefine shared fields. A parity matrix must document which
 solvers/routes can provide each field. `unsupported`, `not requested`, and
 `partial` must be distinguishable from a measured zero.
 
-**Implementation status:** The compact result envelope has a versioned metric
-shape and projections for IVP, BVP runtime/CorrectionNewton, nonlinear
-root/least-squares, and LM/VarPro fitting. Ordinary native IVP failures retain
-a partial snapshot; IVP continuation retains per-segment snapshots. Detailed
-diagnostics have a separate worker-operation channel for the implemented
-routes, including Damped/Frozen successful decision traces, method-specific
-GAVIN metrics, and bounded typed task-error details on failure/cancellation.
-`Off` remains null. The worker caps inline diagnostics and complete response
-records. Remaining work: complete native route/mode parity and cross-family
-tests. Durable persistence/references remain worker/client-owned by decision 4.
+**Implementation status:** The versioned task-envelope metric set, units,
+scopes and availability states are implemented and tested across supported JSON
+routes. The route inventory and native-to-common mappings are in
+`AI_AGENT_INTEROP_TELEMETRY.md`; native reports remain solver-specific rather
+than being flattened into false parity. Ordinary native IVP and BVP_sci errors
+retain post-stop snapshots; Damped/Frozen failures and BVP continuation preserve
+bounded active/completed state when enabled. Nonlinear/fitting cancellations
+retain native snapshots. If an ordinary nonlinear/fitting error has no native
+snapshot, a requested mode is preserved and common measurements are explicitly
+`unsupported`, never zero or ambiguous null. Detailed diagnostics use a
+separately bounded worker-operation channel. `Off` remains telemetry-null and
+does no snapshot copying. Durable persistence/references remain worker/client-
+owned by decision 4.
 
 ### 4. Durable Large-Result Artifacts
 
