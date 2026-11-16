@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rustedscithe:agent-worker-protocol-response:v1",
+  "title": "RustedSciThe Agent Worker Protocol Response v1",
+  "type": "object",
+  "required": ["worker_protocol_version", "operation", "status", "result", "error"],
+  "properties": {
+    "worker_protocol_version": { "const": 1 },
+    "operation": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["succeeded", "not_converged", "failed", "rejected"] },
+    "result": { "type": ["object", "null"] },
+    "diagnostics": { "type": ["object", "null"] },
+    "provenance": {
+      "oneOf": [
+        { "$ref": "#/$defs/provenance" },
+        { "type": "null" }
+      ]
+    },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["code", "error_type", "field_path", "details", "message", "source_chain", "retryable"],
+          "properties": {
+            "code": { "type": "string" },
+            "error_type": { "type": "string" },
+            "field_path": { "type": ["string", "null"] },
+            "details": {},
+            "message": { "type": "string" },
+            "source_chain": { "type": "array", "items": { "type": "string" } },
+            "retryable": { "type": ["boolean", "null"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "provenance": {
+      "type": "object",
+      "required": ["schema_version", "digest_algorithm", "model_digest", "run_identity", "runtime"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "digest_algorithm": { "const": "blake3-256" },
+        "model_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "run_identity": {
+          "type": "object",
+          "required": ["availability", "digest"],
+          "properties": {
+            "availability": { "enum": ["included", "not_requested"] },
+            "digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+          },
+          "additionalProperties": false
+        },
+        "runtime": {
+          "type": "object",
+          "required": ["rst_version", "target_os", "target_arch", "target_pointer_width", "target_endian", "target_env", "debug_assertions", "cargo_lock_digest", "aot_compiler"],
+          "properties": {
+            "rst_version": { "type": "string" },
+            "target_os": { "type": "string" },
+            "target_arch": { "type": "string" },
+            "target_pointer_width": { "type": "integer" },
+            "target_endian": { "enum": ["little", "big"] },
+            "target_env": { "type": "string" },
+            "debug_assertions": { "type": "boolean" },
+            "cargo_lock_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "aot_compiler": {
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "required": ["toolchain", "version"],
+                  "properties": { "toolchain": { "type": "string" }, "version": { "type": "string" } },
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "artifact_cache": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

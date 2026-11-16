@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rustedscithe:agent-worker-request:v1",
+  "title": "RustedSciThe Agent Worker Request v1",
+  "type": "object",
+  "required": ["worker_protocol_version", "operation", "payload"],
+  "properties": {
+    "worker_protocol_version": { "const": 1 },
+    "operation": { "enum": ["capabilities", "presets", "validate", "execute"] },
+    "payload": { "type": "object" }
+  },
+  "oneOf": [
+    { "properties": { "operation": { "const": "capabilities" }, "payload": { "type": "object", "maxProperties": 0 } } },
+    { "properties": { "operation": { "const": "presets" }, "payload": { "type": "object", "maxProperties": 0 } } },
+    {
+      "properties": {
+        "operation": { "const": "validate" },
+        "payload": {
+          "type": "object", "required": ["task"],
+          "properties": { "task": { "$ref": "urn:rustedscithe:task-document:v1" } },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": { "const": "execute" },
+        "payload": {
+          "type": "object", "required": ["job"],
+          "properties": {
+            "job": { "$ref": "urn:rustedscithe:agent-job:v1" },
+            "include_run_digest": { "type": "boolean", "default": false }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "additionalProperties": false
+}

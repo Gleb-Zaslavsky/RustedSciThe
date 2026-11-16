@@ -63,6 +63,32 @@ enum Commands {
     Worker {
         #[arg(long, help = "Enable authenticated local cancellation control channel")]
         control: bool,
+        #[arg(
+            long,
+            help = "Process one JSONL record and exit; intended for process supervisors"
+        )]
+        once: bool,
+        #[arg(
+            long,
+            requires = "once",
+            help = "Trust the external supervisor to enforce resource_budget for this one-job process"
+        )]
+        supervisor_enforces_resource_budgets: bool,
+        #[arg(
+            long,
+            value_enum,
+            value_delimiter = ',',
+            help = "Administrator-approved AOT toolchains (rust, zig, gcc, tcc); omitted means deny all"
+        )]
+        allow_aot_toolchains: Vec<WorkerAotToolchainArg>,
+        #[arg(long, help = "Administrator-owned directory for AOT artifacts/cache")]
+        aot_cache_dir: Option<PathBuf>,
+        #[arg(
+            long,
+            default_value_t = crate::command_interpreter::agent_worker::DEFAULT_WORKER_AOT_CACHE_MAX_BYTES,
+            help = "Maximum worker-managed AOT cache size in bytes"
+        )]
+        aot_cache_max_bytes: u64,
     },
     /// Print machine-readable agent capability or schema documents.
     Capabilities {
@@ -120,6 +146,26 @@ enum CapabilitiesFormat {
     Catalog,
     TaskSchema,
     ResultSchema,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum WorkerAotToolchainArg {
+    Rust,
+    Zig,
+    Gcc,
+    Tcc,
+}
+
+impl From<WorkerAotToolchainArg> for crate::command_interpreter::task_runner::TaskAotToolchain {
+    fn from(value: WorkerAotToolchainArg) -> Self {
+        use crate::command_interpreter::task_runner::TaskAotToolchain;
+        match value {
+            WorkerAotToolchainArg::Rust => TaskAotToolchain::Rust,
+            WorkerAotToolchainArg::Zig => TaskAotToolchain::Zig,
+            WorkerAotToolchainArg::Gcc => TaskAotToolchain::Gcc,
+            WorkerAotToolchainArg::Tcc => TaskAotToolchain::Tcc,
+        }
+    }
 }
 
 fn normalize_legacy_cli_args(args: Vec<OsString>) -> Vec<OsString> {
@@ -1147,9 +1193,27 @@ pub fn run() -> Result<(), i32> {
                 Ok(())
             }
         }
-        Commands::Worker { control } => {
+        Commands::Worker {
+            control,
+            allow_aot_toolchains,
+            aot_cache_dir,
+            aot_cache_max_bytes,
+            once,
+            supervisor_enforces_resource_budgets,
+        } => {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
+            let mut aot_policy =
+                crate::command_interpreter::agent_worker::WorkerAotPolicy::allow_toolchains(
+                    allow_aot_toolchains.into_iter().map(Into::into),
+                );
+            if let Some(path) = aot_cache_dir {
+                aot_policy = aot_policy.with_artifact_root(path);
+            }
+            aot_policy = aot_policy.with_max_artifact_cache_bytes(aot_cache_max_bytes);
+            if supervisor_enforces_resource_budgets {
+                aot_policy = aot_policy.with_supervisor_enforced_resource_budgets();
+            }
             let result = if control {
                 match crate::command_interpreter::agent_worker_control::WorkerControlServer::
                     bind_loopback()
@@ -1160,19 +1224,32 @@ pub fn run() -> Result<(), i32> {
                             control_server.address(),
                             control_server.capability_token()
                         );
-                        crate::command_interpreter::agent_worker::serve_jsonl_with_control(
-                            &mut stdin.lock(),
-                            &mut stdout.lock(),
-                            &control_server,
-                        )
+                        if once {
+                            crate::command_interpreter::agent_worker::serve_one_jsonl_with_control_and_policy(
+                                &mut stdin.lock(), &mut stdout.lock(), &control_server, &aot_policy,
+                            )
+                        } else {
+                            crate::command_interpreter::agent_worker::serve_jsonl_with_control_and_aot_policy(
+                                &mut stdin.lock(), &mut stdout.lock(), &control_server, &aot_policy,
+                            )
+                        }
                     }
                     Err(error) => Err(error),
                 }
             } else {
-                crate::command_interpreter::agent_worker::serve_jsonl(
-                    &mut stdin.lock(),
-                    &mut stdout.lock(),
-                )
+                if once {
+                    crate::command_interpreter::agent_worker::serve_one_jsonl_with_policy(
+                        &mut stdin.lock(),
+                        &mut stdout.lock(),
+                        &aot_policy,
+                    )
+                } else {
+                    crate::command_interpreter::agent_worker::serve_jsonl_with_aot_policy(
+                        &mut stdin.lock(),
+                        &mut stdout.lock(),
+                        &aot_policy,
+                    )
+                }
             };
             match result {
                 Ok(()) => Ok(()),
@@ -1288,7 +1365,7 @@ mod tests {
         superlu_library_configuration,
     };
     use clap::Parser;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn cli_exposes_noninteractive_bvp_sci_template_command() {
@@ -1346,14 +1423,66 @@ mod tests {
     fn cli_exposes_persistent_agent_worker_command() {
         let cli = Cli::try_parse_from(["rustedscithe", "worker"])
             .expect("worker command should parse without extra arguments");
-        assert!(matches!(cli.command, Commands::Worker { control: false }));
+        assert!(matches!(
+            cli.command,
+            Commands::Worker { control: false, .. }
+        ));
     }
 
     #[test]
     fn cli_can_enable_worker_cancellation_control_channel() {
         let cli = Cli::try_parse_from(["rustedscithe", "worker", "--control"])
             .expect("worker control flag should parse");
-        assert!(matches!(cli.command, Commands::Worker { control: true }));
+        assert!(matches!(
+            cli.command,
+            Commands::Worker { control: true, .. }
+        ));
+    }
+
+    #[test]
+    fn worker_supervisor_budget_mode_requires_one_shot_process() {
+        assert!(
+            Cli::try_parse_from([
+                "rustedscithe",
+                "worker",
+                "--supervisor-enforces-resource-budgets",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rustedscithe",
+                "worker",
+                "--once",
+                "--supervisor-enforces-resource-budgets",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn cli_aot_allowlist_is_explicit_and_accepts_multiple_named_toolchains() {
+        let cli = Cli::try_parse_from([
+            "rustedscithe",
+            "worker",
+            "--allow-aot-toolchains",
+            "gcc,tcc",
+            "--aot-cache-dir",
+            "target/aot-cache",
+        ])
+        .expect("named AOT toolchain allowlist should parse");
+        let Commands::Worker {
+            control,
+            allow_aot_toolchains,
+            aot_cache_dir,
+            ..
+        } = cli.command
+        else {
+            panic!("expected worker command");
+        };
+        assert!(!control);
+        assert_eq!(allow_aot_toolchains.len(), 2);
+        assert_eq!(aot_cache_dir, Some(PathBuf::from("target/aot-cache")));
     }
 
     #[test]

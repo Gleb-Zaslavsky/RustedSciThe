@@ -74,8 +74,8 @@ pub fn run_optimization_task(
     run_optimization_task_inner(spec, None)
 }
 
-/// Execute an LM or VarPro fitting task with cooperative cancellation.
-/// Gavin retains its explicit native unsupported-option error.
+/// Execute a fitting task with cooperative cancellation at native solver
+/// safe points.
 pub fn run_optimization_task_with_cancellation_token(
     spec: OptimizationTaskSpec,
     cancellation: &CancellationToken,

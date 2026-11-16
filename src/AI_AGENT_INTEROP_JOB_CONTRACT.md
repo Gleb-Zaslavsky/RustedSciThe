@@ -167,11 +167,13 @@ Agent jobs may request an AOT-capable route only when the worker administrator
 has allowlisted the compiler/toolchain. Jobs cannot select executable paths,
 environment variables, or build/cache output paths. A request denied by worker
 policy must fail explicitly; the worker must not silently replace AOT with a
-different execution backend. The worker owns the compiler environment, build
-resources, temporary directories/cache, and checks that a loaded library
-matches platform, ABI, RST, and toolchain identity. This policy is a selected
-design, not an implemented worker guarantee; contract v1 alone does not enforce
-it.
+different execution backend. The JSONL worker enforces the named-toolchain
+allowlist, requires an administrator-owned `--aot-cache-dir`, canonicalizes
+that root, injects it into IVP/BVP AOT settings (including BVP_sci's explicit
+output directory), and rejects job-owned compiler/output paths. The root is
+not yet a bounded/evicting cache, and artifact identity/provenance checks are
+not implemented. Hard process/resource limits remain the external
+supervisor/scheduler's responsibility; the allowlist is not process isolation.
 
 For independent schema validation, register or bundle
 `command_interpreter/task_document.schema.json` under the referenced URI

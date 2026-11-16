@@ -273,5 +273,6 @@ pub(super) fn run_task(
         continuation_telemetry,
         runtime_telemetry: None,
         correction_newton_report: Some(report),
+        native_diagnostics: None,
     })
 }

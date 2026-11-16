@@ -1,6 +1,12 @@
 /// Versioned outer job metadata and generic result-acceptance checks for external agents.
 pub mod agent_job;
+/// Typed catalog and comparisons for reported native numerical metrics.
+pub mod agent_metrics;
+/// Stable model/run identities used by the optional agent worker.
+pub mod agent_provenance;
 pub mod agent_worker;
+/// Bounded worker-owned AOT artifact cache lifecycle.
+pub mod agent_worker_cache;
 pub mod agent_worker_control;
 pub mod bvp_dialogue;
 pub mod docx_parser;

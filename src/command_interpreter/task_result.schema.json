@@ -11,6 +11,18 @@
     "task_family": { "enum": ["ivp", "bvp", "nonlinear", "optimization", null] },
     "solver": { "type": ["string", "null"] },
     "termination_message": { "type": "string" },
+    "telemetry": {
+      "oneOf": [
+        { "$ref": "#/$defs/compactTelemetry" },
+        { "type": "null" }
+      ]
+    },
+    "diagnostics": {
+      "oneOf": [
+        { "$ref": "#/$defs/detailedDiagnostics" },
+        { "type": "null" }
+      ]
+    },
     "result": {
       "oneOf": [
         { "$ref": "#/$defs/ivpResult" },
@@ -48,6 +60,71 @@
   ],
   "$defs": {
     "finiteOrNull": { "type": ["number", "null"] },
+    "telemetryMetric": {
+      "type": "object",
+      "required": ["availability", "value", "unit", "scope", "reason"],
+      "properties": {
+        "availability": { "enum": ["measured", "not_requested", "unsupported", "partial"] },
+        "value": { "type": ["number", "integer", "null"], "minimum": 0 },
+        "unit": { "type": "string" },
+        "scope": { "type": "string" },
+        "reason": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "compactTelemetry": {
+      "type": "object",
+      "required": ["schema_version", "mode", "outcome", "metrics"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "mode": { "enum": ["counters", "timings", "detailed"] },
+        "outcome": { "enum": ["complete", "partial"] },
+        "metrics": {
+          "type": "object",
+          "required": [
+            "solve_elapsed", "nonlinear_iterations", "residual_evaluations",
+            "jacobian_evaluations", "linear_solves", "factorizations",
+            "accepted_time_steps", "rejected_time_steps", "accepted_nonlinear_updates",
+            "rejected_nonlinear_trials", "mesh_refinements"
+          ],
+          "properties": {
+            "solve_elapsed": { "$ref": "#/$defs/telemetryMetric" },
+            "nonlinear_iterations": { "$ref": "#/$defs/telemetryMetric" },
+            "residual_evaluations": { "$ref": "#/$defs/telemetryMetric" },
+            "jacobian_evaluations": { "$ref": "#/$defs/telemetryMetric" },
+            "linear_solves": { "$ref": "#/$defs/telemetryMetric" },
+            "factorizations": { "$ref": "#/$defs/telemetryMetric" },
+            "accepted_time_steps": { "$ref": "#/$defs/telemetryMetric" },
+            "rejected_time_steps": { "$ref": "#/$defs/telemetryMetric" },
+            "accepted_nonlinear_updates": { "$ref": "#/$defs/telemetryMetric" },
+            "rejected_nonlinear_trials": { "$ref": "#/$defs/telemetryMetric" },
+            "mesh_refinements": { "$ref": "#/$defs/telemetryMetric" }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "detailedDiagnostics": {
+      "type": "object",
+      "required": ["schema_version", "kind", "source", "outcome"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "kind": { "type": "string" },
+        "source": { "type": "string" },
+        "outcome": { "enum": ["complete", "partial"] },
+        "route": { "type": "string" },
+        "telemetry": { "type": "object" },
+        "segments": { "type": ["array", "null"] },
+        "segments_omitted": { "type": "boolean" },
+        "iterations": { "type": "integer", "minimum": 0 },
+        "correction_norm": { "$ref": "#/$defs/finiteOrNull" },
+        "residual_norm": { "$ref": "#/$defs/finiteOrNull" },
+        "last_bound_factor": { "$ref": "#/$defs/finiteOrNull" },
+        "last_damping_factor": { "$ref": "#/$defs/finiteOrNull" },
+        "telemetry_mode": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
     "numberArray": {
       "type": "array",
       "items": { "$ref": "#/$defs/finiteOrNull" }
@@ -58,7 +135,7 @@
     },
     "ivpResult": {
       "type": "object",
-      "required": ["solver", "solver_status", "sample_count", "state_count", "numeric_value_count", "non_finite_values_encoded_as_null", "data", "data_omitted", "omission_reason"],
+      "required": ["solver", "solver_status", "sample_count", "state_count", "numeric_value_count", "non_finite_values_encoded_as_null", "data", "data_omitted", "omission_reason", "continuation"],
       "properties": {
         "solver": { "type": "string" },
         "solver_status": { "type": ["string", "null"] },
@@ -80,8 +157,29 @@
           ]
         },
         "data_omitted": { "type": "boolean" },
-        "omission_reason": { "type": ["string", "null"] }
+        "omission_reason": { "type": ["string", "null"] },
+        "continuation": {
+          "oneOf": [
+            { "$ref": "#/$defs/ivpContinuation" },
+            { "type": "null" }
+          ]
+        }
       }
+    },
+    "ivpContinuation": {
+      "type": "object",
+      "required": ["parameter_names", "mode", "restart_each", "segment_count", "fresh_preparations", "prepared_reuses", "segments", "segments_omitted"],
+      "properties": {
+        "parameter_names": { "type": "array", "items": { "type": "string" } },
+        "mode": { "type": "string" },
+        "restart_each": { "type": "boolean" },
+        "segment_count": { "type": "integer", "minimum": 0 },
+        "fresh_preparations": { "type": "integer", "minimum": 0 },
+        "prepared_reuses": { "type": "integer", "minimum": 0 },
+        "segments": { "type": ["array", "null"] },
+        "segments_omitted": { "type": "boolean" }
+      },
+      "additionalProperties": true
     },
     "bvpResult": {
       "type": "object",

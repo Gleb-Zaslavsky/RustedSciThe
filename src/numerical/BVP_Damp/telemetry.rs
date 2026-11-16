@@ -12,6 +12,7 @@ use crate::numerical::BVP_Damp::resolved_plan::BvpResolvedPlan;
 use crate::symbolic::bvp::telemetry::BvpAtomDiscretizationTelemetrySnapshot;
 use crate::symbolic::bvp::telemetry::BvpGenerationTelemetrySnapshot;
 use crate::symbolic::bvp::telemetry::BvpLambdifyTelemetrySnapshot;
+use serde::Serialize;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -72,7 +73,7 @@ pub enum BvpTelemetryMode {
 }
 
 /// Outcome of the most recent native solve attempt represented by a snapshot.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub enum BvpSolveStatus {
     /// No solve attempt has started on this solver instance.
     #[default]
@@ -185,7 +186,7 @@ pub struct BvpLogEvent {
 }
 
 /// Why a Damped Newton iteration or trial ended, without changing solver policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum BvpDampedDecisionReason {
     AcceptedStep,
     Converged,
@@ -199,7 +200,7 @@ pub enum BvpDampedDecisionReason {
 }
 
 /// Outcome code for one completed Damped Newton step attempt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum BvpDampedIterationStatus {
     AcceptedContinue,
     Converged,
@@ -209,7 +210,7 @@ pub enum BvpDampedIterationStatus {
 }
 
 /// Classification of the enclosing native solve result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum BvpDampedSolveTerminationReason {
     Converged,
     NoResult,
@@ -220,7 +221,7 @@ pub enum BvpDampedSolveTerminationReason {
 }
 
 /// Correction metric used by the active Damped Newton acceptance rule.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum BvpDampedCorrectionMetric {
     LegacyEuclidean,
     CorrectionNewtonWeightedRms,
@@ -232,7 +233,7 @@ pub enum BvpDampedCorrectionMetric {
 /// `s1 < convergence_threshold || s1 < s0`; these correction norms are not
 /// residual norms. Trial alpha fields record the attempted value and, on
 /// rejection, the already-computed next value after the unchanged backtrack.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum BvpDampedDecisionEvent {
     IterationDecision {
         iteration: u64,
@@ -277,7 +278,7 @@ pub enum BvpDampedDecisionEvent {
 }
 
 /// Bounded, opt-in trace for Damped Newton acceptance decisions.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct BvpDampedDecisionTrace {
     pub solve_id: u64,
     pub events: Vec<BvpDampedDecisionEvent>,
@@ -288,7 +289,7 @@ pub struct BvpDampedDecisionTrace {
 ///
 /// Norms are measured from values already computed by the iteration. The
 /// packed index follows the callback's node-major unknown ordering.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct BvpFrozenIterationEvent {
     pub iteration: u64,
     pub residual_l2: f64,
@@ -304,21 +305,21 @@ pub struct BvpFrozenIterationEvent {
 }
 
 /// Stage where a Frozen Newton iteration failed before producing an update.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum BvpFrozenFailureStage {
     ResidualCallback,
     JacobianCallback,
 }
 
 /// Terminal callback failure associated with the next attempted iteration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct BvpFrozenFailureEvent {
     pub iteration: u64,
     pub stage: BvpFrozenFailureStage,
 }
 
 /// Bounded, opt-in record of successful Frozen Newton updates.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct BvpFrozenIterationTrace {
     pub solve_id: u64,
     pub events: Vec<BvpFrozenIterationEvent>,

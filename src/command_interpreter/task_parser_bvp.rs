@@ -524,6 +524,9 @@ pub struct BvpTaskRunResult {
     pub runtime_telemetry: Option<BvpTaskRuntimeTelemetry>,
     /// Complete native fixed-mesh Newton report, including opt-in telemetry.
     pub correction_newton_report: Option<CorrectionNewtonSolveReport>,
+    /// Solver-specific bounded native trace, retained only when explicitly
+    /// requested through Detailed task telemetry.
+    pub native_diagnostics: Option<serde_json::Value>,
 }
 
 /// Runtime facts retained for task-shell summaries without storing the full
@@ -538,6 +541,10 @@ pub struct BvpTaskRuntimeTelemetry {
     pub superlu_factorizations: Option<u64>,
     pub linear_factorizations: Option<u64>,
     pub linear_solves: Option<u64>,
+    pub nonlinear_iterations: Option<u64>,
+    pub residual_evaluations: Option<u64>,
+    pub jacobian_evaluations: Option<u64>,
+    pub mesh_refinements: Option<u64>,
     pub timings: Option<BvpTaskRuntimeTimings>,
 }
 
@@ -600,6 +607,10 @@ impl BvpTaskRuntimeTelemetry {
             superlu_factorizations: counters_enabled.then_some(0),
             linear_factorizations: counters_enabled.then_some(0),
             linear_solves: counters_enabled.then_some(0),
+            nonlinear_iterations: None,
+            residual_evaluations: None,
+            jacobian_evaluations: None,
+            mesh_refinements: None,
             timings: None,
         }
     }
@@ -651,6 +662,61 @@ impl BvpTaskRuntimeTelemetry {
             }
             Some(_) => BvpTaskSparseBackendOutcome::NotObserved,
         };
+    }
+
+    fn record_damped(
+        &mut self,
+        snapshot: &crate::numerical::BVP_Damp::telemetry::BvpTelemetrySnapshot,
+    ) {
+        use crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode;
+
+        self.mode = match snapshot.telemetry_mode {
+            BvpTelemetryMode::Off => BvpSciTelemetryMode::Off,
+            BvpTelemetryMode::Counters => BvpSciTelemetryMode::Counters,
+            BvpTelemetryMode::Timings => BvpSciTelemetryMode::Timings,
+            BvpTelemetryMode::Detailed => BvpSciTelemetryMode::Detailed,
+        };
+        self.requested_sparse_factorization = None;
+        self.sparse_backend_outcome = BvpTaskSparseBackendOutcome::NotApplicable;
+        self.superlu_fallbacks = None;
+        self.superlu_factorizations = None;
+        if snapshot.telemetry_mode.collects_counters() {
+            let accumulate = |slot: &mut Option<u64>, value: u64| {
+                *slot = Some(slot.unwrap_or_default().saturating_add(value));
+            };
+            accumulate(&mut self.nonlinear_iterations, snapshot.counters.iterations);
+            accumulate(
+                &mut self.residual_evaluations,
+                snapshot.counters.residual_calls,
+            );
+            accumulate(
+                &mut self.jacobian_evaluations,
+                snapshot.counters.jacobian_recalculations,
+            );
+            accumulate(
+                &mut self.mesh_refinements,
+                snapshot.counters.grid_refinements,
+            );
+        }
+        if let Some(total) = &mut self.linear_factorizations {
+            *total += snapshot.counters.factorizations;
+        }
+        if let Some(total) = &mut self.linear_solves {
+            *total += snapshot.counters.linear_solves;
+        }
+        if snapshot.telemetry_mode.collects_timings() {
+            let millis = |duration: std::time::Duration| duration.as_secs_f64() * 1000.0;
+            self.timings = Some(BvpTaskRuntimeTimings {
+                residual_evaluation_ms: Some(millis(snapshot.timings.residual)),
+                jacobian_evaluation_ms: Some(millis(snapshot.timings.jacobian)),
+                factorization_ms: Some(millis(snapshot.timings.factorization)),
+                linear_solve_ms: Some(millis(snapshot.timings.linear_system)),
+                mesh_refinement_ms: Some(millis(snapshot.timings.grid_refinement)),
+                full_solve_ms: Some(millis(snapshot.timings.total)),
+                full_solve_total_ms: Some(millis(snapshot.timings.total)),
+                ..Default::default()
+            });
+        }
     }
 }
 
@@ -1203,6 +1269,30 @@ impl BvpDampTaskSolver {
         }
     }
 
+    fn telemetry_snapshot(&self) -> crate::numerical::BVP_Damp::telemetry::BvpTelemetrySnapshot {
+        match self {
+            Self::Damped(solver) => solver.get_statistics().telemetry,
+            Self::Frozen(solver) => solver.get_statistics().telemetry,
+        }
+    }
+
+    /// Return the solver's actual mesh, including restored endpoints/refinement.
+    pub fn mesh(&self) -> Vec<f64> {
+        match self {
+            Self::Damped(solver) => solver.x_mesh.iter().copied().collect(),
+            Self::Frozen(solver) => solver.x_mesh.iter().copied().collect(),
+        }
+    }
+
+    fn detailed_trace_json(&self) -> serde_json::Value {
+        match self {
+            Self::Damped(solver) => serde_json::to_value(solver.damped_decision_trace_snapshot())
+                .expect("typed Damped decision trace serializes"),
+            Self::Frozen(solver) => serde_json::to_value(solver.frozen_iteration_trace_snapshot())
+                .expect("typed Frozen iteration trace serializes"),
+        }
+    }
+
     fn execute_postprocessing(
         &self,
         plan: &PostprocessPlan,
@@ -1376,6 +1466,55 @@ fn build_bvp_solver_core(
         &solver_options.generated_backend,
         &solver_selection.backend,
     )?;
+    if let Some(mode) = solver_options.telemetry {
+        generated_config.bvp_telemetry_mode = match mode {
+            BvpSciTelemetryMode::Off => {
+                crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Off
+            }
+            BvpSciTelemetryMode::Counters => {
+                crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Counters
+            }
+            BvpSciTelemetryMode::Timings => {
+                crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Timings
+            }
+            BvpSciTelemetryMode::Detailed => {
+                crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Detailed
+            }
+        };
+        generated_config.lambdify_telemetry_mode = match mode {
+            BvpSciTelemetryMode::Off => {
+                crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Off
+            }
+            BvpSciTelemetryMode::Counters => {
+                crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Counters
+            }
+            BvpSciTelemetryMode::Timings => {
+                crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Timings
+            }
+            BvpSciTelemetryMode::Detailed => {
+                crate::symbolic::bvp::telemetry::BvpLambdifyTelemetryMode::Detailed
+            }
+        };
+        generated_config.aot_telemetry_mode = match mode {
+            BvpSciTelemetryMode::Off | BvpSciTelemetryMode::Timings => {
+                crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Off
+            }
+            BvpSciTelemetryMode::Counters => {
+                crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Counters
+            }
+            BvpSciTelemetryMode::Detailed => {
+                crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Detailed
+            }
+        };
+        if mode == BvpSciTelemetryMode::Detailed {
+            generated_config = generated_config.with_bvp_logging_config(
+                crate::numerical::BVP_Damp::telemetry::BvpLoggingConfig::new(
+                    crate::numerical::BVP_Damp::telemetry::BvpLoggingMode::Detailed,
+                )
+                .with_max_events(512),
+            );
+        }
+    }
     if let Some(frontend) = solver_selection.frontend {
         let symbolic_backend = match frontend {
             BvpFrontendSpec::ExprLegacy => BvpSymbolicAssemblyBackend::ExprLegacy,
@@ -1514,6 +1653,19 @@ fn build_bvp_solver_core(
     }
 }
 
+fn bvp_damped_diagnostics(segments: Vec<serde_json::Value>) -> Option<serde_json::Value> {
+    (!segments.is_empty()).then(|| {
+        serde_json::json!({
+            "schema_version": 1,
+            "kind": "bvp_damped_newton_diagnostics",
+            "source": "native_bounded_decision_trace",
+            "outcome": "complete",
+            "segments": segments,
+            "segments_omitted": false,
+        })
+    })
+}
+
 /// Parse and run a full BVP task document in one step.
 pub fn run_bvp_task_from_str(input: &str) -> Result<BvpTaskRunResult, BvpTaskError> {
     let spec = parse_bvp_task_from_str(input)?;
@@ -1570,6 +1722,8 @@ fn run_bvp_damp_task(
     let segments = continuation_rows(&spec)?;
     let mut executed = Vec::with_capacity(segments.len());
     let mut continuation_telemetry = BvpTaskContinuationTelemetry::default();
+    let mut runtime_telemetry = BvpTaskRuntimeTelemetry::for_spec(&spec);
+    let mut diagnostic_segments = Vec::new();
     for (index, values) in segments.iter().enumerate() {
         let segment_spec = bind_continuation_segment(&spec, values)?;
         let mut solver = build_bvp_solver_from_spec(&segment_spec)?;
@@ -1585,9 +1739,19 @@ fn run_bvp_damp_task(
             }
             return Err(BvpTaskError::BvpDamp(error));
         }
+        runtime_telemetry.record_damped(&solver.telemetry_snapshot());
+        if segment_spec.solver_options.telemetry == Some(BvpSciTelemetryMode::Detailed) {
+            diagnostic_segments.push(serde_json::json!({
+                "index": index,
+                "parameter_values": values,
+                "trace": solver.detailed_trace_json(),
+            }));
+        }
         let result = solver.get_result().ok_or(BvpTaskError::SolverResult(
             BvpSolverResultFailure::NoResult { solver: "BVP_Damp" },
         ))?;
+        let mesh = solver.mesh();
+        validate_damped_result_shape(&result, &mesh, &segment_spec.equations.unknowns)?;
         let plan = segment_spec.postprocessing.to_plan("bvp_result.csv");
         if !plan.actions.is_empty() {
             solver
@@ -1597,11 +1761,6 @@ fn run_bvp_damp_task(
         if segment_spec.postprocessing.plot {
             solver.plot_result();
         }
-        let mesh = uniform_bvp_mesh(
-            segment_spec.mesh.t0,
-            segment_spec.mesh.t_end,
-            segment_spec.mesh.n_steps,
-        );
         continuation_telemetry.segments += 1;
         continuation_telemetry.fresh_preparations += 1;
         continuation_telemetry.peak_result_elements = continuation_telemetry
@@ -1622,8 +1781,9 @@ fn run_bvp_damp_task(
         mesh,
         continuation_segments: executed,
         continuation_telemetry,
-        runtime_telemetry: None,
+        runtime_telemetry: Some(runtime_telemetry),
         correction_newton_report: None,
+        native_diagnostics: bvp_damped_diagnostics(diagnostic_segments),
     })
 }
 
@@ -1662,8 +1822,10 @@ fn run_bvp_damp_reused_continuation(
     }
     let mut executed = Vec::with_capacity(rows.len());
     let mut telemetry = BvpTaskContinuationTelemetry::default();
+    let mut runtime_telemetry = BvpTaskRuntimeTelemetry::for_spec(&spec);
     let mut prepared = false;
     let mut previous_result: Option<DMatrix<f64>> = None;
+    let mut diagnostic_segments = Vec::new();
 
     for (index, row) in rows.iter().enumerate() {
         let parameters = bvp_parameter_values(&spec, continuation, row)?;
@@ -1758,6 +1920,13 @@ fn run_bvp_damp_reused_continuation(
             }
             return Err(BvpTaskError::BvpDamp(error));
         }
+        if spec.solver_options.telemetry == Some(BvpSciTelemetryMode::Detailed) {
+            diagnostic_segments.push(serde_json::json!({
+                "index": index,
+                "parameter_values": row,
+                "trace": solver.detailed_trace_json(),
+            }));
+        }
         prepared = true;
         telemetry.segments += 1;
         if index > 0 {
@@ -1769,7 +1938,8 @@ fn run_bvp_damp_reused_continuation(
         let result = solver.get_result().ok_or(BvpTaskError::SolverResult(
             BvpSolverResultFailure::NoResult { solver: "BVP_Damp" },
         ))?;
-        let mesh = uniform_bvp_mesh(spec.mesh.t0, spec.mesh.t_end, spec.mesh.n_steps);
+        let mesh = solver.mesh();
+        validate_damped_result_shape(&result, &mesh, &spec.equations.unknowns)?;
         telemetry.peak_result_elements = telemetry.peak_result_elements.max(result.len());
         let plan = spec.postprocessing.to_plan("bvp_result.csv");
         if !plan.actions.is_empty() {
@@ -1789,6 +1959,7 @@ fn run_bvp_damp_reused_continuation(
         });
     }
 
+    runtime_telemetry.record_damped(&solver.telemetry_snapshot());
     let result = executed.last().map(|segment| segment.result.clone());
     let mesh = executed.last().map(|segment| segment.mesh.clone());
     Ok(BvpTaskRunResult {
@@ -1797,8 +1968,9 @@ fn run_bvp_damp_reused_continuation(
         mesh,
         continuation_segments: executed,
         continuation_telemetry: telemetry,
-        runtime_telemetry: None,
+        runtime_telemetry: Some(runtime_telemetry),
         correction_newton_report: None,
+        native_diagnostics: bvp_damped_diagnostics(diagnostic_segments),
     })
 }
 
@@ -2172,7 +2344,6 @@ fn validate_bvp_option_compatibility(
             ),
             ("execution_policy", options.execution_policy.is_some()),
             ("execution_min_work", options.execution_min_work.is_some()),
-            ("telemetry", options.telemetry.is_some()),
             ("output_policy", options.output_policy.is_some()),
             ("singular_term_a", options.singular_term_a.is_some()),
             (
@@ -2334,6 +2505,7 @@ fn run_bvp_sci_task(
         continuation_telemetry,
         runtime_telemetry: Some(runtime_telemetry),
         correction_newton_report: None,
+        native_diagnostics: None,
     })
 }
 
@@ -2438,6 +2610,7 @@ fn run_bvp_sci_reused_continuation(
         continuation_telemetry,
         runtime_telemetry: Some(runtime_telemetry),
         correction_newton_report: None,
+        native_diagnostics: None,
     })
 }
 
@@ -2474,6 +2647,28 @@ fn bvp_parameter_values(
         values[index] = value;
     }
     Ok(values)
+}
+
+fn validate_damped_result_shape(
+    result: &DMatrix<f64>,
+    mesh: &[f64],
+    unknowns: &[String],
+) -> Result<(), BvpTaskError> {
+    if result.nrows() != mesh.len() || result.ncols() != unknowns.len() {
+        return Err(BvpTaskError::SolverResult(
+            BvpSolverResultFailure::InvalidShape {
+                solver: "BVP_Damp",
+                message: format!(
+                    "returned {} node rows x {} state columns for mesh length {} and {} declared states",
+                    result.nrows(),
+                    result.ncols(),
+                    mesh.len(),
+                    unknowns.len(),
+                ),
+            },
+        ));
+    }
+    Ok(())
 }
 
 fn uniform_bvp_mesh(t0: f64, t_end: f64, n_steps: usize) -> Vec<f64> {

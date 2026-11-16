@@ -81,6 +81,28 @@ pub fn inspect_task_json(input: &str) -> Result<TaskInspection, TaskRunnerError>
     inspection_from_spec(spec)
 }
 
+/// Inspect a JSON task and return a compact machine-readable validation
+/// result without preparing callbacks or starting numerical execution.
+pub fn inspect_task_json_envelope(input: &str) -> Value {
+    match inspect_task_json(input) {
+        Ok(inspection) => json!({
+            "contract_version": 1,
+            "status": "valid",
+            "inspection": inspection.to_json(),
+            "error": Value::Null,
+        }),
+        Err(error) => {
+            let envelope = error_envelope(&error);
+            json!({
+                "contract_version": 1,
+                "status": "invalid",
+                "inspection": Value::Null,
+                "error": envelope["error"],
+            })
+        }
+    }
+}
+
 /// Execute a JSON task and return a versioned, bounded machine-readable
 /// response. Full large trajectories remain available through the typed Rust
 /// API; this transport includes numeric arrays only when they fit inline.
@@ -121,9 +143,13 @@ pub fn run_parsed_task_envelope(
 }
 
 const MAX_INLINE_NUMERIC_VALUES: usize = 4096;
+const MAX_INLINE_CONTINUATION_SEGMENTS: usize = 128;
+const MAX_INLINE_DIAGNOSTIC_ATTEMPTS: usize = 1024;
 
 fn result_envelope(result: TaskRunResult) -> Value {
     let successful = result.is_successful();
+    let telemetry = compact_task_telemetry(&result, successful);
+    let diagnostics = detailed_task_diagnostics(&result, successful);
     let termination_message = result.unsuccessful_reason();
     let status = if successful {
         "succeeded"
@@ -169,6 +195,7 @@ fn result_envelope(result: TaskRunResult) -> Value {
                 "data": data,
                 "data_omitted": data_omitted,
                 "omission_reason": omission_reason,
+                "continuation": ivp_continuation_summary(result.continuation.as_ref()),
             })
         }
         TaskRunResult::Bvp(result) => {
@@ -292,12 +319,895 @@ fn result_envelope(result: TaskRunResult) -> Value {
         "status": status,
         "task_family": task_family,
         "result": result_payload,
+        "telemetry": telemetry,
+        "diagnostics": diagnostics,
         "error": Value::Null,
     });
     if !successful {
         response["termination_message"] = json!(termination_message);
     }
     response
+}
+
+fn ivp_continuation_summary(
+    continuation: Option<&crate::command_interpreter::task_parser_ivp::IvpContinuationRunResult>,
+) -> Value {
+    let Some(continuation) = continuation else {
+        return Value::Null;
+    };
+    let omitted = continuation.segments.len() > MAX_INLINE_CONTINUATION_SEGMENTS;
+    let segments = if omitted {
+        Value::Null
+    } else {
+        json!(continuation.segments.iter().map(|segment| json!({
+            "parameter_values": segment.parameter_values,
+            "status": segment.status,
+            "sample_count": segment.t_result.as_ref().map_or(0, |values| values.len()),
+            "state_count": segment.y_result.as_ref().map_or(0, |values| values.ncols()),
+            "prepare_ms": json_f64(segment.prepare_ms),
+            "solve_ms": json_f64(segment.solve_ms),
+            "telemetry": segment.telemetry.as_ref().map(|snapshot| compact_ivp_snapshot_telemetry(snapshot, true)),
+        })).collect::<Vec<_>>())
+    };
+    json!({
+        "parameter_names": continuation.parameters,
+        "mode": format!("{:?}", continuation.mode).to_ascii_lowercase(),
+        "restart_each": continuation.restart_each,
+        "segment_count": continuation.segments.len(),
+        "fresh_preparations": continuation.fresh_preparations,
+        "prepared_reuses": continuation.prepared_reuses,
+        "segments": segments,
+        "segments_omitted": omitted,
+    })
+}
+
+/// Separate opt-in diagnostic channel. It only serializes snapshots already
+/// collected by a Detailed task; it never asks a solver to evaluate again.
+fn detailed_task_diagnostics(result: &TaskRunResult, successful: bool) -> Value {
+    match result {
+        TaskRunResult::Ivp(result) => {
+            let detailed_mode = result.telemetry.as_ref().is_some_and(|snapshot| {
+                snapshot.mode
+                    == Some(
+                        crate::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Detailed,
+                    )
+            });
+            if let Some(continuation) = &result.continuation {
+                let has_detailed_segment = continuation.segments.iter().any(|segment| {
+                    segment.telemetry.as_ref().is_some_and(|snapshot| {
+                        snapshot.mode == Some(crate::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Detailed)
+                    })
+                });
+                if !has_detailed_segment {
+                    return Value::Null;
+                }
+                let omitted = continuation.segments.len() > MAX_INLINE_CONTINUATION_SEGMENTS;
+                let segments = if omitted {
+                    Value::Null
+                } else {
+                    json!(continuation.segments.iter().enumerate().map(|(index, segment)| json!({
+                        "index": index,
+                        "parameter_values": segment.parameter_values,
+                        "outcome": if segment.status.as_deref() == Some("finished") { "complete" } else { "partial" },
+                        "telemetry": segment.telemetry.as_ref().map(|snapshot| compact_ivp_snapshot_telemetry(snapshot, successful)),
+                    })).collect::<Vec<_>>())
+                };
+                json!({
+                    "schema_version": 1,
+                    "kind": "ivp_continuation_diagnostics",
+                    "source": "native_snapshots_collected_per_segment",
+                    "outcome": if successful { "complete" } else { "partial" },
+                    "segments": segments,
+                    "segments_omitted": omitted,
+                })
+            } else if detailed_mode {
+                json!({
+                    "schema_version": 1,
+                    "kind": "ivp_solve_diagnostics",
+                    "source": "native_snapshot",
+                    "outcome": if successful { "complete" } else { "partial" },
+                    "telemetry": result.telemetry.as_ref().map(|snapshot| compact_ivp_snapshot_telemetry(snapshot, successful)),
+                })
+            } else {
+                Value::Null
+            }
+        }
+        TaskRunResult::Bvp(result) => {
+            if let Some(diagnostics) = &result.native_diagnostics {
+                return diagnostics.clone();
+            }
+            let detailed_sci = result.runtime_telemetry.as_ref().filter(|snapshot| {
+                snapshot.mode
+                    == crate::numerical::BVP_sci::new::telemetry::BvpSciTelemetryMode::Detailed
+            });
+            if let Some(snapshot) = detailed_sci {
+                json!({
+                    "schema_version": 1,
+                    "kind": "bvp_runtime_diagnostics",
+                    "source": "native_snapshot_projection",
+                    "outcome": if successful { "complete" } else { "partial" },
+                    "route": "bvp_sci",
+                    "telemetry": {
+                        "requested_sparse_factorization": snapshot.requested_sparse_factorization.map(|value| format!("{value:?}")),
+                        "sparse_backend_outcome": format!("{:?}", snapshot.sparse_backend_outcome),
+                        "superlu_fallbacks": snapshot.superlu_fallbacks,
+                        "superlu_factorizations": snapshot.superlu_factorizations,
+                        "linear_factorizations": snapshot.linear_factorizations,
+                        "linear_solves": snapshot.linear_solves,
+                        "timings": snapshot.timings.as_ref().map(|timing| json!({
+                            "full_solve_ms": timing.full_solve_ms.map(json_f64),
+                            "preparation_ms": timing.preparation_ms.map(json_f64),
+                            "residual_evaluation_ms": timing.residual_evaluation_ms.map(json_f64),
+                            "jacobian_evaluation_ms": timing.jacobian_evaluation_ms.map(json_f64),
+                        })),
+                    }
+                })
+            } else if let Some(report) = result
+                .correction_newton_report
+                .as_ref()
+                .filter(|report| report.telemetry_mode != crate::numerical::BVP_CorrectionNewton::CorrectionNewtonTelemetryMode::Off)
+            {
+                json!({
+                    "schema_version": 1,
+                    "kind": "bvp_correction_newton_diagnostics",
+                    "source": "native_solve_report",
+                    "outcome": if successful { "complete" } else { "partial" },
+                    "route": "correction_newton",
+                    "iterations": report.iterations,
+                    "correction_norm": report.correction_norm.map(json_f64),
+                    "residual_norm": report.residual_norm.map(json_f64),
+                    "last_bound_factor": report.last_bound_factor.map(json_f64),
+                    "last_damping_factor": report.last_damping_factor.map(json_f64),
+                    "telemetry_mode": format!("{:?}", report.telemetry_mode).to_ascii_lowercase(),
+                })
+            } else {
+                Value::Null
+            }
+        }
+        TaskRunResult::Nonlinear(result) => {
+            let statistics = match result {
+                NonlinearTaskRunResult::Root(result) => &result.statistics,
+                NonlinearTaskRunResult::LeastSquares { report, .. } => &report.statistics,
+            };
+            if statistics.availability
+                != crate::numerical::Nonlinear_systems::engine::StatisticsAvailability::Collected
+                || !statistics.timings_collected
+            {
+                return Value::Null;
+            }
+            solver_iteration_diagnostics("nonlinear_iteration_diagnostics", statistics, successful)
+        }
+        TaskRunResult::Optimization(result) => {
+            if let UniversalFittingResult::GAVIN(fit) = result {
+                let Some(telemetry) = fit.backend().telemetry.as_ref().filter(|telemetry| {
+                    telemetry.telemetry_mode == crate::numerical::SolverTelemetryMode::Detailed
+                }) else {
+                    return Value::Null;
+                };
+                return json!({
+                    "schema_version": 1,
+                    "kind": "gavin_fitting_diagnostics",
+                    "source": "native_gavin_telemetry",
+                    "outcome": if successful { "complete" } else { "partial" },
+                    "metrics": {
+                        "iterations": telemetry.iterations,
+                        "termination": telemetry.termination.map(|value| format!("{value:?}")),
+                        "jacobian_source": telemetry.jacobian_source.map(|value| format!("{value:?}")),
+                        "objective_evaluations": telemetry.objective_evaluations,
+                        "finite_difference_jacobians": telemetry.finite_difference_jacobians,
+                        "analytic_jacobian_evaluations": telemetry.analytic_jacobian_evaluations,
+                        "broyden_updates": telemetry.broyden_updates,
+                        "accepted_steps": telemetry.accepted_steps,
+                        "rejected_steps": telemetry.rejected_steps,
+                        "linear_solves": telemetry.linear_solves,
+                        "objective_ms": telemetry.objective_time.as_secs_f64() * 1000.0,
+                        "linearization_ms": telemetry.linearization_time.as_secs_f64() * 1000.0,
+                        "analytic_jacobian_ms": telemetry.analytic_jacobian_time.as_secs_f64() * 1000.0,
+                        "linear_solve_ms": telemetry.linear_solve_time.as_secs_f64() * 1000.0,
+                        "total_ms": telemetry.total_time.as_secs_f64() * 1000.0,
+                    }
+                });
+            }
+            let statistics = match result {
+                UniversalFittingResult::LM(fit) => fit.backend().last_statistics.as_ref(),
+                UniversalFittingResult::VARPRO(fit) => {
+                    Some(&fit.backend().minimization_report.statistics)
+                }
+                UniversalFittingResult::GAVIN(_) => None,
+            };
+            let Some(statistics) = statistics else {
+                return Value::Null;
+            };
+            if statistics.availability
+                != crate::numerical::Nonlinear_systems::engine::StatisticsAvailability::Collected
+                || !statistics.timings_collected
+            {
+                return Value::Null;
+            }
+            solver_iteration_diagnostics("fitting_iteration_diagnostics", statistics, successful)
+        }
+    }
+}
+
+fn solver_iteration_diagnostics(
+    kind: &str,
+    statistics: &crate::numerical::Nonlinear_systems::engine::SolveStatistics,
+    successful: bool,
+) -> Value {
+    let omitted = statistics.attempts.len() > MAX_INLINE_DIAGNOSTIC_ATTEMPTS;
+    let attempts = if omitted {
+        Value::Null
+    } else {
+        json!(statistics.attempts.iter().map(|attempt| json!({
+            "iteration": attempt.iteration,
+            "residual_evaluations": attempt.residual_evaluations,
+            "state_residual_evaluations": attempt.state_residual_evaluations,
+            "trial_residual_evaluations": attempt.trial_residual_evaluations,
+            "jacobian_evaluations": attempt.jacobian_evaluations,
+            "state_jacobian_evaluations": attempt.state_jacobian_evaluations,
+            "trial_jacobian_evaluations": attempt.trial_jacobian_evaluations,
+            "jacobian_refreshes": attempt.jacobian_refreshes,
+            "jacobian_reuses": attempt.jacobian_reuses,
+            "linear_factorizations": attempt.linear_factorizations,
+            "linear_solves": attempt.linear_solves,
+            "accepted_steps": attempt.accepted_steps,
+            "rejected_steps": attempt.rejected_steps,
+            "termination_retries": attempt.termination_retries,
+            "residual_ms": attempt.residual_duration.as_secs_f64() * 1000.0,
+            "jacobian_ms": attempt.jacobian_duration.as_secs_f64() * 1000.0,
+            "linear_solve_ms": attempt.linear_solve_duration.as_secs_f64() * 1000.0,
+            "factorization_ms": attempt.linear_factorization_duration.as_secs_f64() * 1000.0,
+            "linear_system_solve_ms": attempt.linear_system_solve_duration.as_secs_f64() * 1000.0,
+        })).collect::<Vec<_>>())
+    };
+    json!({
+        "schema_version": 1,
+        "kind": kind,
+        "source": "native_solver_attempt_snapshots",
+        "outcome": if successful { "complete" } else { "partial" },
+        "aggregate": {
+            "iterations": statistics.iterations,
+            "residual_evaluations": statistics.residual_evaluations,
+            "state_residual_evaluations": statistics.state_residual_evaluations,
+            "trial_residual_evaluations": statistics.trial_residual_evaluations,
+            "jacobian_evaluations": statistics.jacobian_evaluations,
+            "state_jacobian_evaluations": statistics.state_jacobian_evaluations,
+            "trial_jacobian_evaluations": statistics.trial_jacobian_evaluations,
+            "linear_solves": statistics.linear_solves,
+            "linear_factorizations": statistics.linear_factorizations,
+            "trust_region_trials": statistics.trust_region_trials,
+            "accepted_steps": statistics.accepted_steps,
+            "rejected_steps": statistics.rejected_steps,
+            "domain_rejections": statistics.domain_rejections,
+            "residual_ms": statistics.residual_duration.as_secs_f64() * 1000.0,
+            "jacobian_ms": statistics.jacobian_duration.as_secs_f64() * 1000.0,
+            "linear_solve_ms": statistics.linear_solve_duration.as_secs_f64() * 1000.0,
+            "factorization_ms": statistics.linear_factorization_duration.as_secs_f64() * 1000.0,
+            "linear_system_solve_ms": statistics.linear_system_solve_duration.as_secs_f64() * 1000.0,
+            "trust_region_subproblem_ms": statistics.trust_region_subproblem_duration.as_secs_f64() * 1000.0,
+            "total_ms": statistics.total_duration.as_secs_f64() * 1000.0,
+        },
+        "attempts": attempts,
+        "attempts_omitted": omitted,
+        "attempt_count": statistics.attempts.len(),
+    })
+}
+
+fn compact_task_telemetry(result: &TaskRunResult, successful: bool) -> Value {
+    use crate::numerical::BVP_sci::new::telemetry::BvpSciTelemetryMode;
+
+    if let TaskRunResult::Ivp(result) = result {
+        return compact_ivp_telemetry(result, successful);
+    }
+
+    let (mode, counters, timings) = match result {
+        TaskRunResult::Ivp(_) => unreachable!("handled above"),
+        TaskRunResult::Bvp(result) => {
+            let mode = if let Some(report) = &result.correction_newton_report {
+                match report.telemetry_mode {
+                    crate::numerical::BVP_CorrectionNewton::CorrectionNewtonTelemetryMode::Off => {
+                        BvpSciTelemetryMode::Off
+                    }
+                    crate::numerical::BVP_CorrectionNewton::CorrectionNewtonTelemetryMode::Counters => {
+                        BvpSciTelemetryMode::Counters
+                    }
+                    crate::numerical::BVP_CorrectionNewton::CorrectionNewtonTelemetryMode::Timings => {
+                        BvpSciTelemetryMode::Timings
+                    }
+                }
+            } else {
+                result
+                    .runtime_telemetry
+                    .as_ref()
+                    .map(|telemetry| telemetry.mode)
+                    .unwrap_or(BvpSciTelemetryMode::Off)
+            };
+            match mode {
+                BvpSciTelemetryMode::Off => return Value::Null,
+                BvpSciTelemetryMode::Counters => ("counters", true, false),
+                BvpSciTelemetryMode::Timings => ("timings", false, true),
+                BvpSciTelemetryMode::Detailed => ("detailed", true, true),
+            }
+        }
+        TaskRunResult::Nonlinear(result) => {
+            let statistics = match result {
+                NonlinearTaskRunResult::Root(result) => &result.statistics,
+                NonlinearTaskRunResult::LeastSquares { report, .. } => &report.statistics,
+            };
+            return compact_statistics_telemetry(statistics, successful, "nonlinear_solver");
+        }
+        TaskRunResult::Optimization(result) => {
+            use crate::numerical::optimization::universal_fitting::UniversalFittingResult;
+            let statistics = match result {
+                UniversalFittingResult::LM(fit) => fit.backend().last_statistics.as_ref(),
+                UniversalFittingResult::VARPRO(fit) => {
+                    Some(&fit.backend().minimization_report.statistics)
+                }
+                UniversalFittingResult::GAVIN(fit) => {
+                    if let Some(telemetry) = &fit.backend().telemetry {
+                        let mode = match telemetry.telemetry_mode {
+                            crate::numerical::SolverTelemetryMode::Off => return Value::Null,
+                            crate::numerical::SolverTelemetryMode::Counters => "counters",
+                            crate::numerical::SolverTelemetryMode::Timings => "timings",
+                            crate::numerical::SolverTelemetryMode::Detailed => "detailed",
+                        };
+                        return unsupported_compact_telemetry(
+                            mode,
+                            successful,
+                            "gavin_metrics_have_distinct_objective_semantics_not_yet_projected",
+                        );
+                    }
+                    return Value::Null;
+                }
+            };
+            if let Some(statistics) = statistics {
+                return compact_statistics_telemetry(statistics, successful, "nonlinear_solver");
+            }
+            return Value::Null;
+        }
+    };
+
+    let mut metrics = serde_json::Map::new();
+    for (name, unit, scope, counter_metric) in [
+        ("solve_elapsed", "ms", "solver_solve_call", false),
+        ("nonlinear_iterations", "count", "nonlinear_solver", true),
+        ("residual_evaluations", "count", "native_solver", true),
+        ("jacobian_evaluations", "count", "native_solver", true),
+        ("linear_solves", "count", "native_solver", true),
+        ("factorizations", "count", "native_solver", true),
+        ("accepted_time_steps", "count", "ivp_solver", true),
+        ("rejected_time_steps", "count", "ivp_solver", true),
+        (
+            "accepted_nonlinear_updates",
+            "count",
+            "nonlinear_solver",
+            true,
+        ),
+        (
+            "rejected_nonlinear_trials",
+            "count",
+            "nonlinear_solver",
+            true,
+        ),
+        ("mesh_refinements", "count", "bvp_solver", true),
+    ] {
+        let was_requested = if counter_metric { counters } else { timings };
+        metrics.insert(
+            name.to_string(),
+            availability_metric(
+                if was_requested {
+                    "unsupported"
+                } else {
+                    "not_requested"
+                },
+                Value::Null,
+                unit,
+                scope,
+                was_requested.then_some("task_adapter_does_not_retain_this_native_metric"),
+            ),
+        );
+    }
+
+    if let TaskRunResult::Bvp(result) = result {
+        if let Some(runtime) = &result.runtime_telemetry {
+            if let Some(value) = runtime
+                .timings
+                .as_ref()
+                .and_then(|timing| timing.full_solve_ms)
+            {
+                metrics.insert(
+                    "solve_elapsed".into(),
+                    availability_metric(
+                        if successful { "measured" } else { "partial" },
+                        json_f64(value),
+                        "ms",
+                        "solver_solve_call",
+                        None,
+                    ),
+                );
+            }
+            if let Some(value) = runtime.linear_solves {
+                metrics.insert(
+                    "linear_solves".into(),
+                    availability_metric(
+                        if successful { "measured" } else { "partial" },
+                        json!(value),
+                        "count",
+                        "native_solver",
+                        None,
+                    ),
+                );
+            }
+            if let Some(value) = runtime.linear_factorizations {
+                metrics.insert(
+                    "factorizations".into(),
+                    availability_metric(
+                        if successful { "measured" } else { "partial" },
+                        json!(value),
+                        "count",
+                        "native_solver",
+                        None,
+                    ),
+                );
+            }
+            if runtime.mode.collects_counters() {
+                for (name, value) in [
+                    ("nonlinear_iterations", runtime.nonlinear_iterations),
+                    ("residual_evaluations", runtime.residual_evaluations),
+                    ("jacobian_evaluations", runtime.jacobian_evaluations),
+                    ("mesh_refinements", runtime.mesh_refinements),
+                ] {
+                    if let Some(value) = value {
+                        metrics.insert(
+                            name.into(),
+                            availability_metric(
+                                if successful { "measured" } else { "partial" },
+                                json!(value),
+                                "count",
+                                "bvp_solver",
+                                None,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(report) = &result.correction_newton_report {
+            let telemetry = &report.telemetry;
+            for (name, value, unit, scope) in [
+                (
+                    "nonlinear_iterations",
+                    Some(report.iterations as u64),
+                    "count",
+                    "nonlinear_solver",
+                ),
+                (
+                    "residual_evaluations",
+                    Some(telemetry.residual_evaluations as u64),
+                    "count",
+                    "native_solver",
+                ),
+                (
+                    "jacobian_evaluations",
+                    Some(telemetry.jacobian_evaluations as u64),
+                    "count",
+                    "native_solver",
+                ),
+                (
+                    "linear_solves",
+                    Some(telemetry.linear_solves as u64),
+                    "count",
+                    "native_solver",
+                ),
+                (
+                    "factorizations",
+                    Some(telemetry.factorizations as u64),
+                    "count",
+                    "native_solver",
+                ),
+                (
+                    "accepted_nonlinear_updates",
+                    Some(telemetry.accepted_steps as u64),
+                    "count",
+                    "nonlinear_solver",
+                ),
+                (
+                    "rejected_nonlinear_trials",
+                    Some(telemetry.damping_rejections as u64),
+                    "count",
+                    "nonlinear_solver",
+                ),
+            ] {
+                if let Some(value) = value {
+                    metrics.insert(
+                        name.into(),
+                        availability_metric(
+                            if successful { "measured" } else { "partial" },
+                            json!(value),
+                            unit,
+                            scope,
+                            None,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    json!({
+        "schema_version": 1,
+        "mode": mode,
+        "outcome": if successful { "complete" } else { "partial" },
+        "metrics": metrics,
+    })
+}
+
+fn compact_ivp_telemetry(
+    result: &crate::command_interpreter::task_parser_ivp::IvpTaskRunResult,
+    successful: bool,
+) -> Value {
+    if let Some(snapshot) = result.telemetry.as_ref() {
+        return compact_ivp_snapshot_telemetry(snapshot, successful);
+    }
+    let Some(continuation) = result.continuation.as_ref() else {
+        return Value::Null;
+    };
+    compact_ivp_continuation_telemetry(continuation)
+}
+
+fn compact_ivp_continuation_telemetry(
+    continuation: &crate::command_interpreter::task_parser_ivp::IvpContinuationRunResult,
+) -> Value {
+    let snapshots = continuation
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            segment.telemetry.as_ref().map(|snapshot| {
+                (
+                    segment,
+                    compact_ivp_snapshot_telemetry(
+                        snapshot,
+                        segment.status.as_deref() == Some("finished"),
+                    ),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let Some((_, first)) = snapshots.first() else {
+        return Value::Null;
+    };
+
+    let mut metrics = serde_json::Map::new();
+    let metric_names = first["metrics"]
+        .as_object()
+        .map(|metrics| metrics.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    for name in metric_names {
+        let entries = snapshots
+            .iter()
+            .filter_map(|(_, report)| report["metrics"].get(&name))
+            .collect::<Vec<_>>();
+        let states = entries
+            .iter()
+            .filter_map(|metric| metric["availability"].as_str())
+            .collect::<Vec<_>>();
+        let values = entries
+            .iter()
+            .filter_map(|metric| metric["value"].as_f64())
+            .collect::<Vec<_>>();
+        let all_segments_reported = entries.len() == continuation.segments.len();
+        let availability = if states.is_empty() {
+            "unsupported"
+        } else if states.iter().all(|state| *state == "not_requested") {
+            "not_requested"
+        } else if states.iter().all(|state| *state == "unsupported") {
+            "unsupported"
+        } else if states.iter().all(|state| *state == "measured") && all_segments_reported {
+            "measured"
+        } else if states.iter().all(|state| *state == "partial") && all_segments_reported {
+            "partial"
+        } else {
+            "partial"
+        };
+        let value = if values.len() == states.len() && !values.is_empty() {
+            json!(values.iter().sum::<f64>())
+        } else {
+            Value::Null
+        };
+        let mut metric = entries.first().cloned().cloned().unwrap_or(Value::Null);
+        if let Some(object) = metric.as_object_mut() {
+            object.insert("availability".into(), json!(availability));
+            object.insert("value".into(), value);
+            if availability == "partial" {
+                object.insert(
+                    "reason".into(),
+                    json!("one_or_more_continuation_segments_incomplete"),
+                );
+            }
+        }
+        metrics.insert(name, metric);
+    }
+
+    let all_segments_complete = continuation
+        .segments
+        .iter()
+        .all(|segment| segment.status.as_deref() == Some("finished"));
+    json!({
+        "schema_version": 1,
+        "mode": first["mode"],
+        "outcome": if all_segments_complete { "complete" } else { "partial" },
+        "metrics": metrics,
+    })
+}
+
+fn compact_ivp_snapshot_telemetry(
+    snapshot: &crate::command_interpreter::task_parser_ivp::IvpTaskTelemetrySnapshot,
+    successful: bool,
+) -> Value {
+    use crate::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec;
+
+    let Some(mode) = snapshot.mode else {
+        return Value::Null;
+    };
+    let mode_name = match mode {
+        IvpTelemetryModeSpec::Off => return Value::Null,
+        IvpTelemetryModeSpec::Counters => "counters",
+        IvpTelemetryModeSpec::Timings => "timings",
+        IvpTelemetryModeSpec::Detailed => "detailed",
+    };
+    let counters_requested = mode.collects_counters();
+    let timings_requested = mode.collects_timings();
+    let mut metrics = serde_json::Map::new();
+
+    for (name, value, unit, scope, requested) in [
+        (
+            "solve_elapsed",
+            snapshot.solve_elapsed_ms.map(json_f64),
+            "ms",
+            "solver_solve_call",
+            timings_requested,
+        ),
+        (
+            "nonlinear_iterations",
+            snapshot.nonlinear_iterations.map(Into::into),
+            "count",
+            "nonlinear_solver",
+            counters_requested,
+        ),
+        (
+            "residual_evaluations",
+            snapshot.residual_evaluations.map(Into::into),
+            "count",
+            "native_solver",
+            counters_requested,
+        ),
+        (
+            "jacobian_evaluations",
+            snapshot.jacobian_evaluations.map(Into::into),
+            "count",
+            "native_solver",
+            counters_requested,
+        ),
+        (
+            "linear_solves",
+            snapshot.linear_solves.map(Into::into),
+            "count",
+            "native_solver",
+            counters_requested,
+        ),
+        (
+            "factorizations",
+            snapshot.factorizations.map(Into::into),
+            "count",
+            "native_solver",
+            counters_requested,
+        ),
+        (
+            "accepted_time_steps",
+            snapshot.accepted_time_steps.map(Into::into),
+            "count",
+            "ivp_solver",
+            counters_requested,
+        ),
+        (
+            "rejected_time_steps",
+            snapshot.rejected_time_steps.map(Into::into),
+            "count",
+            "ivp_solver",
+            counters_requested,
+        ),
+    ] {
+        let (availability, value, reason) = if !requested {
+            ("not_requested", Value::Null, None)
+        } else if let Some(value) = value {
+            (if successful { "measured" } else { "partial" }, value, None)
+        } else {
+            (
+                "unsupported",
+                Value::Null,
+                Some("native_route_does_not_expose_metric"),
+            )
+        };
+        metrics.insert(
+            name.to_string(),
+            availability_metric(availability, value, unit, scope, reason),
+        );
+    }
+    for (name, unit, scope) in [
+        ("accepted_nonlinear_updates", "count", "nonlinear_solver"),
+        ("rejected_nonlinear_trials", "count", "nonlinear_solver"),
+        ("mesh_refinements", "count", "bvp_solver"),
+    ] {
+        metrics.insert(
+            name.to_string(),
+            availability_metric("not_requested", Value::Null, unit, scope, None),
+        );
+    }
+    json!({
+        "schema_version": 1,
+        "mode": mode_name,
+        "outcome": if successful { "complete" } else { "partial" },
+        "metrics": metrics,
+    })
+}
+
+fn unsupported_compact_telemetry(mode: &str, successful: bool, reason: &str) -> Value {
+    let mut metrics = serde_json::Map::new();
+    for (name, unit, scope) in [
+        ("solve_elapsed", "ms", "solver_solve_call"),
+        ("nonlinear_iterations", "count", "nonlinear_solver"),
+        ("residual_evaluations", "count", "native_solver"),
+        ("jacobian_evaluations", "count", "native_solver"),
+        ("linear_solves", "count", "native_solver"),
+        ("factorizations", "count", "native_solver"),
+        ("accepted_time_steps", "count", "ivp_solver"),
+        ("rejected_time_steps", "count", "ivp_solver"),
+        ("accepted_nonlinear_updates", "count", "nonlinear_solver"),
+        ("rejected_nonlinear_trials", "count", "nonlinear_solver"),
+        ("mesh_refinements", "count", "bvp_solver"),
+    ] {
+        metrics.insert(
+            name.into(),
+            availability_metric("unsupported", Value::Null, unit, scope, Some(reason)),
+        );
+    }
+    json!({
+        "schema_version": 1,
+        "mode": mode,
+        "outcome": if successful { "complete" } else { "partial" },
+        "metrics": metrics,
+    })
+}
+
+fn compact_statistics_telemetry(
+    statistics: &crate::numerical::Nonlinear_systems::engine::SolveStatistics,
+    successful: bool,
+    scope: &str,
+) -> Value {
+    use crate::numerical::Nonlinear_systems::engine::StatisticsAvailability;
+
+    let counters = statistics.availability == StatisticsAvailability::Collected;
+    let timings = statistics.timings_collected;
+    if !counters && !timings {
+        return Value::Null;
+    }
+    let mode = match (counters, timings, statistics.attempts.is_empty()) {
+        (true, true, false) => "detailed",
+        (true, true, true) => "detailed",
+        (true, false, _) => "counters",
+        (false, true, _) => "timings",
+        (false, false, _) => return Value::Null,
+    };
+    let mut metrics = serde_json::Map::new();
+    let mut push = |name: &str,
+                    availability: &str,
+                    value: Value,
+                    unit: &str,
+                    metric_scope: &str,
+                    reason: Option<&str>| {
+        metrics.insert(
+            name.into(),
+            availability_metric(availability, value, unit, metric_scope, reason),
+        );
+    };
+    push(
+        "solve_elapsed",
+        if timings && successful {
+            "measured"
+        } else if timings {
+            "partial"
+        } else {
+            "not_requested"
+        },
+        if timings {
+            json_f64(statistics.total_duration.as_secs_f64() * 1000.0)
+        } else {
+            Value::Null
+        },
+        "ms",
+        "solver_solve_call",
+        None,
+    );
+    for (name, value, metric_scope) in [
+        ("nonlinear_iterations", statistics.iterations, scope),
+        (
+            "residual_evaluations",
+            statistics.residual_evaluations,
+            "native_solver",
+        ),
+        (
+            "jacobian_evaluations",
+            statistics.jacobian_evaluations,
+            "native_solver",
+        ),
+        ("linear_solves", statistics.linear_solves, "native_solver"),
+        (
+            "factorizations",
+            statistics.linear_factorizations,
+            "native_solver",
+        ),
+        (
+            "accepted_nonlinear_updates",
+            statistics.accepted_steps,
+            scope,
+        ),
+        (
+            "rejected_nonlinear_trials",
+            statistics.rejected_steps,
+            scope,
+        ),
+    ] {
+        push(
+            name,
+            if counters && successful {
+                "measured"
+            } else if counters {
+                "partial"
+            } else {
+                "not_requested"
+            },
+            if counters { json!(value) } else { Value::Null },
+            "count",
+            metric_scope,
+            None,
+        );
+    }
+    for (name, metric_scope) in [
+        ("accepted_time_steps", "ivp_solver"),
+        ("rejected_time_steps", "ivp_solver"),
+        ("mesh_refinements", "bvp_solver"),
+    ] {
+        push(
+            name,
+            "unsupported",
+            Value::Null,
+            "count",
+            metric_scope,
+            Some("not_applicable_to_nonlinear_root_or_least_squares"),
+        );
+    }
+    json!({
+        "schema_version": 1,
+        "mode": mode,
+        "outcome": if successful { "complete" } else { "partial" },
+        "metrics": metrics,
+    })
+}
+
+fn availability_metric(
+    availability: &str,
+    value: Value,
+    unit: &str,
+    scope: &str,
+    reason: Option<&str>,
+) -> Value {
+    json!({
+        "availability": availability,
+        "value": value,
+        "unit": unit,
+        "scope": scope,
+        "reason": reason,
+    })
 }
 
 fn error_envelope(error: &TaskRunnerError) -> Value {
@@ -346,14 +1256,25 @@ fn error_envelope(error: &TaskRunnerError) -> Value {
             target.insert(key.clone(), value.clone());
         }
     }
-    json!({
+    let mut envelope = json!({
         "contract_version": 1,
         "status": "failed",
         "task_family": task_family,
         "solver": solver,
         "result": Value::Null,
+        "telemetry": Value::Null,
         "error": error_payload,
-    })
+    });
+    if let TaskRunnerError::Ivp(
+        crate::command_interpreter::task_parser_ivp::IvpTaskError::NativeWithTelemetry {
+            telemetry,
+            ..
+        },
+    ) = error
+    {
+        envelope["telemetry"] = compact_ivp_snapshot_telemetry(telemetry, false);
+    }
+    envelope
 }
 
 fn validation_guidance(code: &str, details: &Value, field_path: Option<&str>) -> Option<Value> {
@@ -384,14 +1305,25 @@ fn validation_guidance(code: &str, details: &Value, field_path: Option<&str>) ->
             guidance
         }
         "task.json.shape_invalid" => {
-            let expected = details
+            let adapter_expected = details
                 .get("expected")
                 .and_then(Value::as_str)
                 .unwrap_or("a value matching the task JSON Schema");
-            json!({
+            let schema_guidance = field_path.and_then(schema_value_guidance);
+            let expected = schema_guidance
+                .as_ref()
+                .map(|(expected, _)| expected.as_str())
+                .unwrap_or(adapter_expected);
+            let mut guidance = json!({
                 "expected": expected,
                 "hint": "Check the field path and its declared JSON shape in task_document.schema.json."
-            })
+            });
+            if let (Some((_, allowed)), Some(object)) = (schema_guidance, guidance.as_object_mut())
+                && !allowed.is_empty()
+            {
+                object.insert("allowed".into(), json!(allowed));
+            }
+            guidance
         }
         "task.json.value_unsupported" => json!({
             "expected": "a scalar or one-dimensional homogeneous array supported at this task field",
@@ -419,6 +1351,18 @@ fn validation_guidance(code: &str, details: &Value, field_path: Option<&str>) ->
             "expected": "a supported IVP method",
             "allowed": capability_values(0, "methods"),
             "hint": "Choose a listed method and use inspect_task_json to validate its route-specific options."
+        }),
+        "ivp.option.unsupported" => json!({
+            "expected": "an option supported by the selected IVP method",
+            "hint": "The selected method does not consume this option. Check its route in capabilities, remove the option, or choose a method that supports it; inspect_task_json validates the concrete combination."
+        }),
+        "bvp.option.unsupported" => json!({
+            "expected": "an option supported by the selected BVP solver route",
+            "hint": "The selected BVP route does not consume this option. Check the solver's documented controls, remove the option, or select a route that supports it; inspect_task_json validates the concrete combination."
+        }),
+        "optimization.option.unsupported" | "optimization.method.field_unsupported" => json!({
+            "expected": "an option supported by the selected fitting method",
+            "hint": "The selected method does not consume this option. Remove it or use the method-specific control documented by capabilities; inspect_task_json validates the concrete model and method."
         }),
         "nonlinear.formulation.unknown" => json!({
             "expected": "a supported nonlinear formulation",
@@ -472,6 +1416,78 @@ fn schema_sibling_fields(field_path: &str) -> Option<Vec<String>> {
     (!fields.is_empty()).then(|| fields.into_iter().collect())
 }
 
+/// Return a concise structural expectation and declared enum values for a
+/// JSON field path. Parser-specific expectations remain the fallback when the
+/// path is dynamic or not represented by a finite schema property.
+fn schema_value_guidance(field_path: &str) -> Option<(String, Vec<Value>)> {
+    let schema: Value =
+        serde_json::from_str(crate::command_interpreter::task_json::TASK_DOCUMENT_JSON_SCHEMA)
+            .ok()?;
+    let mut nodes = vec![&schema];
+    let path = field_path.strip_prefix("$")?;
+    for segment in path
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(|part| part.split('[').next().unwrap_or(part))
+    {
+        let mut next = Vec::new();
+        for node in expand_schema_nodes(nodes, &schema) {
+            if let Some(property) = node.get("properties").and_then(|value| value.get(segment)) {
+                next.push(property);
+            }
+        }
+        if next.is_empty() {
+            return None;
+        }
+        nodes = next;
+    }
+
+    let nodes = expand_schema_nodes(nodes, &schema);
+    let mut descriptions = std::collections::BTreeSet::new();
+    let mut allowed = Vec::new();
+    for node in nodes {
+        if let Some(constant) = node.get("const") {
+            descriptions.insert(format!("the literal `{constant}`"));
+            allowed.push(constant.clone());
+        }
+        if let Some(values) = node.get("enum").and_then(Value::as_array) {
+            allowed.extend(values.iter().cloned());
+        }
+        if let Some(types) = node.get("type") {
+            let types = types
+                .as_array()
+                .cloned()
+                .unwrap_or_else(|| vec![types.clone()]);
+            for kind in types.iter().filter_map(Value::as_str) {
+                descriptions.insert(
+                    match kind {
+                        "array" => "an array",
+                        "boolean" => "a boolean",
+                        "integer" => "an integer",
+                        "number" => "a number",
+                        "object" => "an object",
+                        "string" => "a string",
+                        "null" => "null",
+                        _ => continue,
+                    }
+                    .to_string(),
+                );
+            }
+        }
+    }
+    if !allowed.is_empty() {
+        descriptions.clear();
+        descriptions.insert("one of the declared values".to_string());
+    }
+    if descriptions.is_empty() {
+        return None;
+    }
+    let expected = descriptions.into_iter().collect::<Vec<_>>().join(" or ");
+    allowed.sort_by_key(Value::to_string);
+    allowed.dedup();
+    Some((expected, allowed))
+}
+
 fn expand_schema_nodes<'a>(nodes: Vec<&'a Value>, root: &'a Value) -> Vec<&'a Value> {
     let mut expanded = Vec::new();
     let mut pending = nodes;
@@ -482,16 +1498,20 @@ fn expand_schema_nodes<'a>(nodes: Vec<&'a Value>, root: &'a Value) -> Vec<&'a Va
             }
             continue;
         }
-        let mut had_composition = false;
-        for composition in ["oneOf", "anyOf", "allOf"] {
+        let mut had_choice = false;
+        for composition in ["oneOf", "anyOf"] {
             if let Some(variants) = node.get(composition).and_then(Value::as_array) {
                 pending.extend(variants.iter());
-                had_composition = true;
+                had_choice = true;
             }
         }
-        if !had_composition {
-            expanded.push(node);
+        if had_choice {
+            continue;
         }
+        if let Some(constraints) = node.get("allOf").and_then(Value::as_array) {
+            pending.extend(constraints.iter());
+        }
+        expanded.push(node);
     }
     expanded
 }
@@ -756,6 +1776,73 @@ fn classify_ivp_error(error: &IvpTaskError) -> ErrorClassification {
             None,
             json!({"solver": solver, "preparation_started": false}),
         ),
+        ContinuationCancelled { method, partial } => {
+            let active_segment = partial.source.as_deref().map(classify_ivp_error);
+            let completed_numeric_values =
+                partial
+                    .completed_segments
+                    .iter()
+                    .fold(0usize, |count, segment| {
+                        count
+                            .saturating_add(segment.parameter_values.len())
+                            .saturating_add(segment.t_result.as_ref().map_or(0, |time| time.len()))
+                            .saturating_add(
+                                segment.y_result.as_ref().map_or(0, |states| {
+                                    states.nrows().saturating_mul(states.ncols())
+                                }),
+                            )
+                    });
+            let completed_segments_omitted = partial.completed_segments.len()
+                > MAX_INLINE_CONTINUATION_SEGMENTS
+                || completed_numeric_values > MAX_INLINE_NUMERIC_VALUES;
+            let completed_segments = if completed_segments_omitted {
+                Value::Null
+            } else {
+                json!(partial.completed_segments.iter().map(|segment| {
+                    let data = match (&segment.t_result, &segment.y_result) {
+                        (Some(time), Some(states)) => Some(json!({
+                            "time": time.iter().copied().map(json_f64).collect::<Vec<_>>(),
+                            "states": matrix_rows(states),
+                        })),
+                        _ => None,
+                    };
+                    json!({
+                        "parameter_values": segment.parameter_values,
+                        "status": segment.status,
+                        "prepare_ms": json_f64(segment.prepare_ms),
+                        "solve_ms": json_f64(segment.solve_ms),
+                        "sample_count": segment.t_result.as_ref().map_or(0, |time| time.len()),
+                        "state_count": segment.y_result.as_ref().map_or(0, |states| states.ncols()),
+                        "data": data,
+                        "telemetry": segment.telemetry.as_ref().map(|snapshot| {
+                            compact_ivp_snapshot_telemetry(snapshot, true)
+                        }),
+                    })
+                }).collect::<Vec<_>>())
+            };
+            error_class(
+                "ivp.continuation.cancelled",
+                "ivp_continuation_cancelled",
+                "cancellation",
+                Some("$.continuation".into()),
+                json!({
+                    "method": method,
+                    "cancelled_segment_index": partial.cancelled_segment_index,
+                    "completed_segment_count": partial.completed_segments.len(),
+                    "completed_segments": completed_segments,
+                    "completed_segments_omitted": completed_segments_omitted,
+                    "completed_numeric_value_count": completed_numeric_values,
+                    "active_segment_telemetry": partial.active_segment_telemetry.as_ref().map(
+                        |snapshot| compact_ivp_snapshot_telemetry(snapshot, false),
+                    ),
+                    "active_segment_error": active_segment.map(|classification| json!({
+                        "code": classification.code,
+                        "error_type": classification.error_type,
+                        "details": classification.details,
+                    })),
+                }),
+            )
+        }
         UnsupportedContinuation { method, mode } => error_class(
             "ivp.continuation.unsupported",
             "ivp_unsupported_continuation",
@@ -797,6 +1884,7 @@ fn classify_ivp_error(error: &IvpTaskError) -> ErrorClassification {
             json!({"reason": message}),
         ),
         Native(native) => classify_ivp_native_error(native),
+        NativeWithTelemetry { source, .. } => classify_ivp_native_error(source),
         Postprocess(_) => error_class(
             "ivp.postprocess.failed",
             "ivp_postprocess_error",
@@ -2794,6 +3882,21 @@ fn classify_gavin_error(
 ) -> ErrorClassification {
     use crate::numerical::optimization::lm_gavin::GavinLmError::*;
     let (suffix, error_type, stage, details) = match error {
+        Cancelled { snapshot } => (
+            "cancelled",
+            "gavin_cancelled",
+            "cancellation",
+            json!({
+                "completed_iterations": snapshot.completed_iterations,
+                "parameters": bounded_vector(&snapshot.parameters).0,
+                "parameters_omitted": snapshot.parameters.len() > MAX_INLINE_NUMERIC_VALUES,
+                "telemetry_mode": snapshot.telemetry.as_ref().map(|telemetry| format!("{:?}", telemetry.telemetry_mode)),
+                "objective_evaluations": snapshot.telemetry.as_ref().map(|telemetry| telemetry.objective_evaluations),
+                "linear_solves": snapshot.telemetry.as_ref().map(|telemetry| telemetry.linear_solves),
+                "accepted_steps": snapshot.telemetry.as_ref().map(|telemetry| telemetry.accepted_steps),
+                "rejected_steps": snapshot.telemetry.as_ref().map(|telemetry| telemetry.rejected_steps),
+            }),
+        ),
         ModelTargetLengthMismatch { expected, actual } => (
             "data.dimension_mismatch",
             "gavin_dimension_mismatch",
@@ -3625,11 +4728,213 @@ fn correction_execution_name(
     }
 }
 
+/// Derive advertised IVP defaults from the same typed preflight path used by
+/// clients instead of maintaining a second value table.
+fn ivp_effective_defaults_by_method() -> Value {
+    static DEFAULTS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    DEFAULTS
+        .get_or_init(build_ivp_effective_defaults_by_method)
+        .clone()
+}
+
+fn build_ivp_effective_defaults_by_method() -> Value {
+    let methods = [
+        ("rk45", "RK45"),
+        ("dopri", "DOPRI"),
+        ("dop853", "DOP853"),
+        ("ab4", "AB4"),
+        ("bdf", "BDF"),
+        ("backward_euler", "BackwardEuler"),
+        ("radau5", "Radau5"),
+        ("lsode", "LSODE"),
+        ("lsoda", "LSODA"),
+        ("lsode2", "LSODE2"),
+    ];
+    let mut defaults = serde_json::Map::new();
+    for (key, method) in methods {
+        let effective_defaults = match inspect_task_json(&default_ivp_task_document(method)) {
+            Ok(inspection) => inspection.to_json()["effective_defaults"].clone(),
+            Err(error) => json!({"preflight_error": error.to_string()}),
+        };
+        defaults.insert(key.to_owned(), effective_defaults);
+    }
+    Value::Object(defaults)
+}
+
+fn default_ivp_task_document(method: &str) -> String {
+    json!({
+        "format_version": 1,
+        "task": {"solver": "IVP", "method": method},
+        "equations": {"arg": "t", "y": "-y"},
+        "initial_conditions": {"t0": 0.0, "t_end": 1.0, "y0": 1.0}
+    })
+    .to_string()
+}
+
+/// Resolve the advertised BVP defaults through the typed inspection path for
+/// each concrete solver/strategy route, without preparing callbacks or solving.
+fn bvp_effective_defaults_by_route() -> Value {
+    static DEFAULTS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    DEFAULTS
+        .get_or_init(build_bvp_effective_defaults_by_route)
+        .clone()
+}
+
+fn build_bvp_effective_defaults_by_route() -> Value {
+    let routes = [
+        ("damped", "BVP_Damp", Some("Damped"), "Sparse"),
+        ("frozen", "BVP_Damp", Some("Frozen"), "Sparse"),
+        ("naive", "BVP_Damp", Some("Naive"), "Sparse"),
+        ("sci", "BVP_sci", None, "Sparse"),
+        ("correction_newton", "BVP_CorrectionNewton", None, "Dense"),
+    ];
+    let mut defaults = serde_json::Map::new();
+    for (key, solver, strategy, method) in routes {
+        let document = default_bvp_task_document(solver, strategy, method);
+        let effective_defaults = match inspect_task_json(&document) {
+            Ok(inspection) => inspection.to_json()["effective_defaults"].clone(),
+            Err(error) => json!({"preflight_error": error.to_string()}),
+        };
+        defaults.insert(key.to_owned(), effective_defaults);
+    }
+    Value::Object(defaults)
+}
+
+fn default_bvp_task_document(solver: &str, strategy: Option<&str>, method: &str) -> String {
+    let mut task = serde_json::Map::new();
+    task.insert("solver".to_owned(), json!(solver));
+    task.insert("method".to_owned(), json!(method));
+    if let Some(strategy) = strategy {
+        task.insert("strategy".to_owned(), json!(strategy));
+    }
+    json!({
+        "format_version": 1,
+        "task": task,
+        "equations": {"arg": "x", "unknowns": "y", "rhs": "0"},
+        "boundary_conditions": {"y_left": 1.0},
+        "mesh": {"t0": 0.0, "t_end": 1.0, "n_steps": 4},
+        "initial_guess": {"y": 1.0}
+    })
+    .to_string()
+}
+
+fn nonlinear_effective_defaults_by_route() -> Value {
+    static DEFAULTS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    DEFAULTS
+        .get_or_init(|| {
+            let root_methods = [
+                "newton",
+                "damped_newton",
+                "damped_newton_advanced",
+                "levenberg_marquardt",
+                "backtracking_levenberg_marquardt",
+                "levenberg_marquardt_minpack",
+                "nielsen_levenberg_marquardt",
+                "nielsen_levenberg_marquardt_advanced",
+                "trust_region",
+                "powell_dogleg",
+                "trust_region_lm",
+            ];
+            let mut defaults = serde_json::Map::new();
+            for method in root_methods {
+                defaults.insert(
+                    method.to_owned(),
+                    inspect_effective_defaults(&default_nonlinear_task_document("root", method)),
+                );
+            }
+            defaults.insert(
+                "least_squares/levenberg_marquardt".to_owned(),
+                inspect_effective_defaults(&default_nonlinear_task_document(
+                    "least_squares",
+                    "levenberg_marquardt",
+                )),
+            );
+            Value::Object(defaults)
+        })
+        .clone()
+}
+
+fn optimization_effective_defaults_by_method() -> Value {
+    static DEFAULTS: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    DEFAULTS
+        .get_or_init(|| {
+            let mut defaults = serde_json::Map::new();
+            for method in ["lm", "gavin", "varpro"] {
+                defaults.insert(
+                    method.to_owned(),
+                    inspect_effective_defaults(&default_optimization_task_document(method)),
+                );
+            }
+            Value::Object(defaults)
+        })
+        .clone()
+}
+
+fn inspect_effective_defaults(document: &str) -> Value {
+    match inspect_task_json(document) {
+        Ok(inspection) => inspection.to_json()["effective_defaults"].clone(),
+        Err(error) => json!({"preflight_error": error.to_string()}),
+    }
+}
+
+fn default_nonlinear_task_document(formulation: &str, method: &str) -> String {
+    let equation = if formulation == "least_squares" {
+        "x^2 - 2"
+    } else {
+        "x - 2"
+    };
+    let initial_guess = if formulation == "least_squares" {
+        json!(1.0)
+    } else {
+        json!(0.0)
+    };
+    json!({
+        "format_version": 1,
+        "problem": {
+            "formulation": formulation,
+            "variables": "x",
+            "equations": equation,
+            "initial_guess": initial_guess
+        },
+        "solver": {"method": method}
+    })
+    .to_string()
+}
+
+fn default_optimization_task_document(method: &str) -> String {
+    let model = if method == "varpro" {
+        json!({
+            "method": method,
+            "parameters": ["a"],
+            "initial_guess": [1.0],
+            "basis_parameters": ["a"],
+            "basis_equations": ["x"]
+        })
+    } else {
+        json!({
+            "method": method,
+            "parameters": ["a", "b"],
+            "initial_guess": [1.0, 0.0],
+            "equations": ["a*x + b"]
+        })
+    };
+    json!({
+        "format_version": 1,
+        "data": {"x": [0.0, 1.0, 2.0], "y": [0.0, 1.0, 2.0]},
+        "model": model
+    })
+    .to_string()
+}
+
 /// Machine-readable capability inventory for the task-document interface.
 ///
 /// Axes are descriptive, not a Cartesian-product guarantee. The typed
 /// validator remains authoritative for method-specific compatibility.
 pub fn task_capabilities_json() -> Value {
+    let ivp_effective_defaults = ivp_effective_defaults_by_method();
+    let bvp_effective_defaults = bvp_effective_defaults_by_route();
+    let nonlinear_effective_defaults = nonlinear_effective_defaults_by_route();
+    let optimization_effective_defaults = optimization_effective_defaults_by_method();
     let bvp = [
         BvpSolverFamilySpec::Damp,
         BvpSolverFamilySpec::Sci,
@@ -3669,40 +4974,48 @@ pub fn task_capabilities_json() -> Value {
             {
                 "name": "ivp",
                 "methods": [
-                    {"name":"rk45", "route":"nonstiff", "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "telemetry", "logging"]},
-                    {"name":"dopri", "route":"nonstiff", "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "telemetry", "logging"]},
-                    {"name":"dop853", "route":"nonstiff_adaptive", "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "telemetry", "logging"]},
-                    {"name":"ab4", "route":"nonstiff", "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "telemetry", "logging"]},
-                    {"name":"bdf", "route":"native_bdf", "unsupported_options":["step_size", "tolerance", "parallel", "neighborhood_check"]},
-                    {"name":"backward_euler", "route":"native_backward_euler", "unsupported_options":["rtol", "atol", "max_step", "first_step", "vectorized", "parallel", "sparse_or_banded_matrix_layout", "parallel_or_auto_callback_policy"]},
-                    {"name":"radau5", "route":"native_radau", "unsupported_options":["step_size", "vectorized", "parallel", "neighborhood_check"]},
-                    {"name":"lsode", "route":"lsode2_bdf_compatibility", "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"]},
-                    {"name":"lsoda", "route":"lsode2_auto_adams_bdf", "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"]},
-                    {"name":"lsode2", "route":"lsode2_native", "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"]}
+                    {"name":"rk45", "route":"nonstiff", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "telemetry", "logging"]},
+                    {"name":"dopri", "route":"nonstiff", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "telemetry", "logging"]},
+                    {"name":"dop853", "route":"nonstiff_adaptive", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "telemetry", "logging"]},
+                    {"name":"ab4", "route":"nonstiff", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "telemetry", "logging"]},
+                    {"name":"bdf", "route":"native_bdf", "supports_single_solve_cancellation":true, "unsupported_options":["step_size", "tolerance", "parallel", "neighborhood_check"]},
+                    {"name":"backward_euler", "route":"native_backward_euler", "supports_single_solve_cancellation":true, "unsupported_options":["rtol", "atol", "max_step", "first_step", "vectorized", "parallel", "sparse_or_banded_matrix_layout", "parallel_or_auto_callback_policy"]},
+                    {"name":"radau5", "route":"native_radau", "supports_single_solve_cancellation":true, "unsupported_options":["step_size", "vectorized", "parallel", "neighborhood_check"]},
+                    {"name":"lsode", "route":"lsode2_bdf_compatibility", "supports_single_solve_cancellation":false, "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"]},
+                    {"name":"lsoda", "route":"lsode2_auto_adams_bdf", "supports_single_solve_cancellation":false, "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"]},
+                    {"name":"lsode2", "route":"lsode2_native", "supports_single_solve_cancellation":true, "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"]}
                 ],
+                "continuation_cancellation": {"fresh_segments":"supported when the selected method supports single-solve cancellation", "explicit_restart_segments":"supported for BDF, Backward Euler, Radau5, and LSODE2", "stateful_continue":false},
                 "route_axes": {"symbolic_frontends":["ExprLegacy", "AtomView"], "symbolic_executions":["Lambdify", "AOT"], "linear_layouts":["Dense", "Sparse", "Banded"], "callback_policies":["Sequential", "Parallel", "Auto"], "telemetry_modes":["Off", "Counters", "Timings", "Detailed"]},
                 "route_axes_apply_to": ["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"],
+                "effective_defaults_by_method": ivp_effective_defaults,
                 "defaults": {"bdf":{"rtol":1e-3,"atol":1e-6,"max_steps":1000000,"matrix_layout":"Dense"}, "backward_euler":{"tolerance":1e-6,"max_iterations":100}, "radau5":{"rtol":1e-6,"atol":1e-6,"max_newton_iterations":6}, "lsode_family":{"max_step":1e-3,"rtol":1e-5,"atol":1e-8,"controller":"method-dependent"}, "other_fields":"reported by inspect_task_json or delegated to native defaults"}
             },
             {
                 "name": "bvp",
                 "solvers": bvp,
+                "effective_defaults_by_route": bvp_effective_defaults,
+                "supports_task_cancellation": true,
                 "task_level_restrictions": {"correction_newton":"fixed-mesh trapezoid route; no task-document continuation", "sci":"supports mesh refinement and singular term", "damped":"Damped/Frozen/Naive strategy selection"},
                 "defaults": "Solver-specific defaults are listed per family; input-dependent and explicit values are returned by inspect_task_json."
             },
             {
                 "name": "nonlinear",
+                "supports_task_cancellation": true,
                 "formulations": ["root", "least_squares"],
                 "methods": ["newton", "damped_newton", "damped_newton_advanced", "levenberg_marquardt", "backtracking_levenberg_marquardt", "levenberg_marquardt_minpack", "nielsen_levenberg_marquardt", "nielsen_levenberg_marquardt_advanced", "trust_region", "powell_dogleg", "trust_region_lm"],
                 "method_formulation_rules": [{"formulation":"root", "methods":"all listed root methods"}, {"formulation":"least_squares", "methods":["levenberg_marquardt"]}],
                 "telemetry_modes": ["off", "counters", "timings", "detailed"],
+                "effective_defaults_by_route": nonlinear_effective_defaults,
                 "defaults": {"root":{"tolerance":1e-6,"max_iterations":100,"telemetry":"Off"}, "least_squares":"unspecified tolerances and limits use native defaults; telemetry defaults to Off"}
             },
             {
                 "name": "optimization",
+                "supports_task_cancellation": true,
                 "methods": ["lm", "gavin", "varpro"],
                 "method_model_rules": [{"method":"lm", "model":"equation_model"}, {"method":"gavin", "model":"equation_model"}, {"method":"varpro", "model":"basis_and_invariants"}],
                 "telemetry_modes": ["off", "counters", "timings", "detailed"],
+                "effective_defaults_by_method": optimization_effective_defaults,
                 "defaults": "Unspecified tolerances and iteration limits use native fitting defaults; telemetry defaults to Off. inspect_task_json returns explicit values and this adapter's normalized options."
             }
         ]
@@ -3759,7 +5072,8 @@ fn optimization_method_name(method: OptimizationMethodSpec) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        TASK_RESULT_JSON_SCHEMA, inspect_task_json, run_task_json_envelope, task_capabilities_json,
+        TASK_RESULT_JSON_SCHEMA, default_ivp_task_document, inspect_task_json,
+        run_task_json_envelope, task_capabilities_json,
     };
     use serde_json::Value;
 
@@ -3859,6 +5173,211 @@ mod tests {
         assert_eq!(times.len(), states.len());
         assert!(states.iter().all(|row| row.as_array().unwrap().len() == 1));
         assert!(response["error"].is_null());
+        assert!(
+            response["telemetry"].is_null(),
+            "Off must not add telemetry"
+        );
+        assert!(response["diagnostics"].is_null());
+        assert!(response["result"]["continuation"].is_null());
+    }
+
+    #[test]
+    fn detailed_ivp_continuation_exports_each_segment_snapshot_separately() {
+        let input = r#"{
+            "format_version": 1,
+            "task": {"solver":"IVP", "method":"BDF"},
+            "equations": {"arg":"t", "parameters":["rate"], "parameter_values":[1.0], "y":"-rate*y"},
+            "initial_conditions": {"t0":0.0, "t_end":0.1, "y0":[1.0]},
+            "solver_options": {"rtol":1e-5, "atol":1e-7, "max_step":0.02, "telemetry":"detailed"},
+            "continuation": {"parameter":"rate", "values":[0.5, 1.0], "mode":"prepared", "restart_each":false}
+        }"#;
+        let response = run_task_json_envelope(input);
+        assert_eq!(response["status"], "succeeded", "{response}");
+        assert_eq!(response["result"]["continuation"]["segment_count"], 2);
+        assert_eq!(
+            response["result"]["continuation"]["segments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(response["diagnostics"]["schema_version"], 1);
+        assert_eq!(
+            response["diagnostics"]["kind"],
+            "ivp_continuation_diagnostics"
+        );
+        assert_eq!(
+            response["diagnostics"]["segments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            response["diagnostics"]["segments"][0]["telemetry"]["mode"],
+            "detailed"
+        );
+
+        let schema: Value = serde_json::from_str(TASK_RESULT_JSON_SCHEMA).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&response), "schema rejected {response}");
+    }
+
+    #[test]
+    fn detailed_nonlinear_attempts_use_the_separate_diagnostics_channel() {
+        let input = r#"{"format_version":1,"problem":{"formulation":"root","variables":"x","equations":"x^2 - 2","initial_guess":1.0},"solver":{"method":"newton","telemetry":"detailed"}}"#;
+        let response = run_task_json_envelope(input);
+        assert_eq!(response["status"], "succeeded", "{response}");
+        assert_eq!(response["telemetry"]["mode"], "detailed");
+        assert_eq!(
+            response["diagnostics"]["kind"],
+            "nonlinear_iteration_diagnostics"
+        );
+        assert!(response["diagnostics"]["aggregate"]["jacobian_evaluations"].is_u64());
+        assert!(response["diagnostics"]["attempts"].as_array().is_some());
+        let schema: Value = serde_json::from_str(TASK_RESULT_JSON_SCHEMA).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&response), "schema rejected {response}");
+    }
+
+    #[test]
+    fn detailed_gavin_telemetry_uses_method_specific_diagnostics() {
+        let input = r#"{"format_version":1,"data":{"x":[0.0,1.0,2.0,3.0],"y":[1.0,3.0,5.0,7.0]},"model":{"method":"gavin","parameters":["a","b"],"initial_guess":[0.0,0.0],"equations":"a*x+b"},"solver":{"telemetry":"detailed"}}"#;
+        let response = run_task_json_envelope(input);
+        assert_eq!(response["status"], "succeeded", "{response}");
+        assert_eq!(response["telemetry"]["mode"], "detailed");
+        assert_eq!(response["diagnostics"]["kind"], "gavin_fitting_diagnostics");
+        assert!(response["diagnostics"]["metrics"]["objective_evaluations"].is_u64());
+        assert!(response["diagnostics"]["metrics"]["linear_solves"].is_u64());
+        let schema: Value = serde_json::from_str(TASK_RESULT_JSON_SCHEMA).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&response), "schema rejected {response}");
+    }
+
+    #[test]
+    fn detailed_damped_bvp_decisions_use_the_separate_diagnostics_channel() {
+        let input = r#"{
+            "format_version":1,
+            "task":{"solver":"BVP_Damp","strategy":"Damped","method":"Sparse"},
+            "equations":{"arg":"x","unknowns":"y","rhs":"0"},
+            "boundary_conditions":{"y_left":1.0},
+            "mesh":{"t0":0.0,"t_end":1.0,"n_steps":8},
+            "initial_guess":{"y":0.5},
+            "solver_options":{"tolerance":1e-7,"telemetry":"detailed"}
+        }"#;
+        let response = run_task_json_envelope(input);
+        assert_eq!(response["status"], "succeeded", "{response}");
+        assert_eq!(
+            response["diagnostics"]["kind"],
+            "bvp_damped_newton_diagnostics"
+        );
+        assert_eq!(
+            response["diagnostics"]["segments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            response["diagnostics"]["segments"][0]["trace"]["events"]
+                .as_array()
+                .is_some_and(|events| !events.is_empty())
+        );
+        let schema: Value = serde_json::from_str(TASK_RESULT_JSON_SCHEMA).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&response), "schema rejected {response}");
+    }
+
+    #[test]
+    fn compact_telemetry_distinguishes_measured_counters_from_unrequested_values() {
+        let input = r#"{"format_version":1,"problem":{"formulation":"root","variables":"x","equations":"x^2 - 2","initial_guess":1.0},"solver":{"method":"newton","telemetry":"counters"}}"#;
+        let response = run_task_json_envelope(input);
+        assert_eq!(response["status"], "succeeded");
+        assert_eq!(response["telemetry"]["schema_version"], 1);
+        assert_eq!(response["telemetry"]["mode"], "counters", "{response}");
+        assert_eq!(
+            response["telemetry"]["metrics"]["residual_evaluations"]["availability"],
+            "measured"
+        );
+        assert!(response["telemetry"]["metrics"]["residual_evaluations"]["value"].is_u64());
+        assert_eq!(
+            response["telemetry"]["metrics"]["nonlinear_iterations"]["scope"],
+            "nonlinear_solver"
+        );
+        assert_eq!(
+            response["telemetry"]["metrics"]["solve_elapsed"]["availability"],
+            "not_requested"
+        );
+        let schema: Value = serde_json::from_str(TASK_RESULT_JSON_SCHEMA).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&response), "schema rejected {response}");
+        let mut unknown_metric = response.clone();
+        unknown_metric["telemetry"]["metrics"]["unversioned_metric"] = serde_json::json!({
+            "availability": "measured",
+            "value": 1,
+            "unit": "count",
+            "scope": "unknown",
+            "reason": null
+        });
+        assert!(
+            !validator.is_valid(&unknown_metric),
+            "schema accepted an unversioned telemetry metric"
+        );
+
+        let telemetry_off = serde_json::from_str::<Value>(
+            r#"{"format_version":1,"problem":{"formulation":"root","variables":"x","equations":"x - 1","initial_guess":0.0},"solver":{"method":"newton","telemetry":"off"}}"#,
+        )
+        .unwrap();
+        let off_response = run_task_json_envelope(&telemetry_off.to_string());
+        assert!(off_response["telemetry"].is_null());
+
+        let mut ivp: Value = serde_json::from_str(IVP).unwrap();
+        ivp["task"]["method"] = serde_json::json!("BDF");
+        ivp["solver_options"] = serde_json::json!({"telemetry": "counters"});
+        let ivp_response = run_task_json_envelope(&ivp.to_string());
+        assert_eq!(ivp_response["status"], "succeeded", "{ivp_response}");
+        assert_eq!(
+            ivp_response["telemetry"]["mode"], "counters",
+            "{ivp_response}"
+        );
+        assert_eq!(
+            ivp_response["telemetry"]["metrics"]["residual_evaluations"]["availability"],
+            "measured"
+        );
+        assert!(ivp_response["telemetry"]["metrics"]["residual_evaluations"]["value"].is_u64());
+        assert!(
+            validator.is_valid(&ivp_response),
+            "schema rejected {ivp_response}"
+        );
+
+        ivp["solver_options"] = serde_json::json!({"telemetry": "timings"});
+        let timed_ivp_response = run_task_json_envelope(&ivp.to_string());
+        assert_eq!(timed_ivp_response["status"], "succeeded");
+        assert_eq!(timed_ivp_response["telemetry"]["mode"], "timings");
+        assert_eq!(
+            timed_ivp_response["telemetry"]["metrics"]["solve_elapsed"]["availability"],
+            "measured"
+        );
+        assert!(timed_ivp_response["telemetry"]["metrics"]["solve_elapsed"]["value"].is_number());
+        assert_eq!(
+            timed_ivp_response["telemetry"]["metrics"]["residual_evaluations"]["availability"],
+            "not_requested"
+        );
+
+        let fitting = r#"{"format_version":1,"data":{"x":[0.0,1.0,2.0,3.0],"y":[1.0,3.0,5.0,7.0]},"model":{"method":"lm","parameters":["a","b"],"initial_guess":[0.0,0.0],"equations":"a*x+b"},"solver":{"telemetry":"counters"}}"#;
+        let fitting_response = run_task_json_envelope(fitting);
+        assert_eq!(
+            fitting_response["status"], "succeeded",
+            "{fitting_response}"
+        );
+        assert_eq!(
+            fitting_response["telemetry"]["metrics"]["nonlinear_iterations"]["scope"],
+            "nonlinear_solver"
+        );
+        assert!(
+            validator.is_valid(&fitting_response),
+            "schema rejected {fitting_response}"
+        );
     }
 
     #[test]
@@ -3929,12 +5448,65 @@ mod tests {
         );
         assert!(invalid_shape["error"]["hint"].is_string());
 
+        let invalid_section = run_task_json_envelope(r#"{"format_version":1,"task":42}"#);
+        assert_eq!(invalid_section["error"]["code"], "task.json.shape_invalid");
+        assert_eq!(invalid_section["error"]["field_path"], "$.task");
+        assert_eq!(invalid_section["error"]["expected"], "an object");
+
+        let invalid_enum_shape = run_task_json_envelope(
+            r#"{"format_version":1,"problem":{"formulation":"root","variables":"x","equations":"x-1","initial_guess":0.0},"solver":{"method":"newton","telemetry":[1,"detailed"]}}"#,
+        );
+        assert_eq!(
+            invalid_enum_shape["error"]["code"],
+            "task.json.shape_invalid"
+        );
+        assert_eq!(
+            invalid_enum_shape["error"]["expected"],
+            "one of the declared values"
+        );
+        for value in ["off", "counters", "timings", "detailed"] {
+            assert!(
+                invalid_enum_shape["error"]["allowed"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|allowed| allowed == value),
+                "missing {value}: {invalid_enum_shape}"
+            );
+        }
+
         let nested_value = run_task_json_envelope(
             r#"{"format_version":1,"task":{"solver":"IVP","method":"RK45","extra":{"nested":1}},"equations":{"arg":"t","y":"-y"},"initial_conditions":{"t0":0.0,"t_end":1.0,"y0":1.0}}"#,
         );
         assert_eq!(nested_value["error"]["code"], "task.json.value_unsupported");
         assert!(nested_value["error"]["expected"].is_string());
         assert!(nested_value["error"]["hint"].is_string());
+    }
+
+    #[test]
+    fn route_specific_unsupported_options_receive_safe_guidance() {
+        let cases = [
+            (
+                r#"{"format_version":1,"task":{"solver":"IVP","method":"RK45"},"equations":{"arg":"t","y":"-y"},"initial_conditions":{"t0":0.0,"t_end":1.0,"y0":1.0},"solver_options":{"telemetry":"detailed"}}"#,
+                "ivp.option.unsupported",
+            ),
+            (
+                r#"{"format_version":1,"task":{"solver":"BVP_Damp","strategy":"Damped","method":"Sparse"},"equations":{"arg":"x","unknowns":"y","rhs":"0"},"boundary_conditions":{"y_left":1.0},"mesh":{"t0":0.0,"t_end":1.0,"n_steps":8},"initial_guess":{"y":1.0},"solver_options":{"max_nodes":128}}"#,
+                "bvp.option.unsupported",
+            ),
+            (
+                r#"{"format_version":1,"data":{"x":[0.0,1.0,2.0],"y":[1.0,3.0,5.0]},"model":{"method":"lm","parameters":["a","b"],"initial_guess":[0.0,0.0],"equations":"a*x+b"},"solver":{"gavin_weights":[1.0,1.0]}}"#,
+                "optimization.method.field_unsupported",
+            ),
+        ];
+
+        for (input, expected_code) in cases {
+            let response = run_task_json_envelope(input);
+            assert_eq!(response["error"]["code"], expected_code, "{response}");
+            assert!(response["error"]["expected"].is_string(), "{response}");
+            assert!(response["error"]["hint"].is_string(), "{response}");
+            assert!(response["error"]["field_path"].is_string(), "{response}");
+        }
     }
 
     #[test]
@@ -3992,6 +5564,48 @@ mod tests {
         assert!(response["error"]["message"].is_string());
         assert!(response["error"]["source_chain"].is_array());
         assert!(response["error"]["retryable"].is_null());
+    }
+
+    #[test]
+    fn ivp_native_failure_keeps_typed_error_and_partial_compact_telemetry() {
+        use crate::command_interpreter::task_parser_ivp::{
+            IvpNativeSolverError, IvpTaskError, IvpTaskTelemetrySnapshot, IvpTelemetryModeSpec,
+        };
+        use crate::command_interpreter::task_runner::TaskRunnerError;
+
+        let failure = TaskRunnerError::Ivp(IvpTaskError::NativeWithTelemetry {
+            source: IvpNativeSolverError::Bdf(
+                crate::numerical::BDF::BDF_api::BdfSolveError::MaxStepsExceeded { max_steps: 4 },
+            ),
+            telemetry: IvpTaskTelemetrySnapshot {
+                mode: Some(IvpTelemetryModeSpec::Counters),
+                nonlinear_iterations: Some(3),
+                residual_evaluations: Some(7),
+                jacobian_evaluations: Some(2),
+                linear_solves: Some(3),
+                factorizations: Some(1),
+                accepted_time_steps: Some(2),
+                rejected_time_steps: Some(1),
+                ..IvpTaskTelemetrySnapshot::default()
+            },
+        });
+        let response = super::error_envelope(&failure);
+        assert_eq!(response["status"], "failed");
+        assert!(response["result"].is_null());
+        assert_eq!(response["error"]["code"], "ivp.bdf.step_budget_exhausted");
+        assert_eq!(response["error"]["details"]["limit"], 4);
+        assert_eq!(response["telemetry"]["outcome"], "partial");
+        assert_eq!(
+            response["telemetry"]["metrics"]["residual_evaluations"]["availability"],
+            "partial"
+        );
+        assert_eq!(
+            response["telemetry"]["metrics"]["residual_evaluations"]["value"],
+            7
+        );
+        let schema: Value = serde_json::from_str(TASK_RESULT_JSON_SCHEMA).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&response), "schema rejected {response}");
     }
 
     #[test]
@@ -4579,6 +6193,27 @@ mod tests {
     }
 
     #[test]
+    fn json_gavin_cancellation_preserves_coefficients_and_opt_in_telemetry() {
+        let input = r#"{"format_version":1,"data":{"x":[0.0,1.0,2.0,3.0],"y":[1.0,3.0,5.0,7.0]},"model":{"method":"gavin","parameters":["a","b"],"initial_guess":[1.0,1.0],"equations":"a*x+b"},"solver":{"telemetry":"counters"}}"#;
+        let token = crate::numerical::CancellationToken::new();
+        token.cancel();
+        let response = super::run_task_json_envelope_with_cancellation_token(input, &token);
+
+        assert_eq!(response["status"], "failed");
+        assert!(response["result"].is_null());
+        assert_eq!(response["task_family"], "optimization");
+        assert_eq!(response["error"]["code"], "optimization.gavin.cancelled");
+        assert_eq!(response["error"]["category"], "cancelled");
+        assert_eq!(response["error"]["stage"], "cancellation");
+        assert_eq!(response["error"]["details"]["completed_iterations"], 0);
+        assert_eq!(
+            response["error"]["details"]["parameters"],
+            serde_json::json!([1.0, 1.0])
+        );
+        assert_eq!(response["error"]["details"]["objective_evaluations"], 0);
+    }
+
+    #[test]
     fn json_radau_cancellation_envelope_keeps_native_snapshot() {
         use crate::command_interpreter::task_parser_ivp::{IvpNativeSolverError, IvpTaskError};
         use crate::numerical::Radau::api::{
@@ -4624,6 +6259,29 @@ mod tests {
             0.25
         );
         assert!(response["result"].is_null());
+    }
+
+    #[test]
+    fn json_ivp_legacy_lsode_routes_reject_cancellation_explicitly() {
+        use crate::numerical::CancellationToken;
+
+        for method in ["LSODE", "LSODA"] {
+            let task = format!(
+                r#"{{"format_version":1,"task":{{"solver":"IVP","method":"{method}"}},"equations":{{"arg":"t","y":"-y"}},"initial_conditions":{{"t0":0.0,"t_end":1.0,"y0":1.0}}}}"#
+            );
+            let response = super::run_task_json_envelope_with_cancellation_token(
+                &task,
+                &CancellationToken::new(),
+            );
+            assert_eq!(response["status"], "failed");
+            assert_eq!(
+                response["error"]["code"],
+                "ivp.route.cancellation_unsupported"
+            );
+            assert_eq!(response["error"]["category"], "cancelled");
+            assert_eq!(response["error"]["stage"], "cancellation");
+            assert!(response["result"].is_null());
+        }
     }
 
     #[test]
@@ -4723,9 +6381,94 @@ mod tests {
         );
         assert_eq!(caps["families"][0]["methods"][1]["route"], "nonstiff");
         assert_eq!(
+            caps["families"][0]["methods"][8]["supports_single_solve_cancellation"],
+            false
+        );
+        assert_eq!(
+            caps["families"][0]["methods"][9]["supports_single_solve_cancellation"],
+            true
+        );
+        assert_eq!(
+            caps["families"][0]["continuation_cancellation"]["stateful_continue"],
+            false
+        );
+        assert_eq!(
+            caps["families"][0]["continuation_cancellation"]["explicit_restart_segments"],
+            "supported for BDF, Backward Euler, Radau5, and LSODE2"
+        );
+        assert_eq!(
             caps["families"][2]["method_formulation_rules"][1]["methods"][0],
             "levenberg_marquardt"
         );
+    }
+
+    #[test]
+    fn ivp_continuation_cancellation_envelope_keeps_partial_segment_context() {
+        use crate::command_interpreter::task_parser_ivp::{
+            IvpContinuationCancelled, IvpContinuationSegment, IvpTaskError,
+        };
+        use crate::command_interpreter::task_runner::TaskRunnerError;
+
+        let error = TaskRunnerError::Ivp(IvpTaskError::ContinuationCancelled {
+            method: "BDF".to_owned(),
+            partial: Box::new(IvpContinuationCancelled {
+                cancelled_segment_index: 3,
+                completed_segments: vec![IvpContinuationSegment {
+                    parameter_value: 2.0,
+                    parameter_values: vec![2.0],
+                    t_result: Some(nalgebra::DVector::from_vec(vec![0.0, 1.0])),
+                    y_result: Some(nalgebra::DMatrix::from_row_slice(1, 2, &[1.0, 0.5])),
+                    status: Some("finished".to_owned()),
+                    status_code: None,
+                    trajectory: None,
+                    prepare_ms: 0.25,
+                    solve_ms: 1.5,
+                    telemetry: Some(crate::command_interpreter::task_parser_ivp::IvpTaskTelemetrySnapshot {
+                        mode: Some(crate::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Counters),
+                        residual_evaluations: Some(3),
+                        ..Default::default()
+                    }),
+                }],
+                source: None,
+                active_segment_telemetry: Some(
+                    crate::command_interpreter::task_parser_ivp::IvpTaskTelemetrySnapshot {
+                        mode: Some(crate::command_interpreter::task_parser_ivp::IvpTelemetryModeSpec::Counters),
+                        residual_evaluations: Some(2),
+                        ..Default::default()
+                    },
+                ),
+            }),
+        });
+        let response = super::error_envelope(&error);
+        assert_eq!(response["status"], "failed");
+        assert_eq!(response["error"]["code"], "ivp.continuation.cancelled");
+        assert_eq!(
+            response["error"]["error_type"],
+            "ivp_continuation_cancelled"
+        );
+        assert_eq!(response["error"]["category"], "cancelled");
+        assert_eq!(response["error"]["stage"], "cancellation");
+        assert_eq!(response["error"]["details"]["cancelled_segment_index"], 3);
+        assert_eq!(response["error"]["details"]["completed_segment_count"], 1);
+        assert_eq!(
+            response["error"]["details"]["completed_segments_omitted"],
+            false
+        );
+        assert_eq!(
+            response["error"]["details"]["completed_segments"][0]["data"]["states"][0][1],
+            0.5
+        );
+        assert_eq!(
+            response["error"]["details"]["completed_segments"][0]["telemetry"]["metrics"]["residual_evaluations"]
+                ["value"],
+            3
+        );
+        assert_eq!(
+            response["error"]["details"]["active_segment_telemetry"]["metrics"]["residual_evaluations"]
+                ["value"],
+            2
+        );
+        assert!(response["result"].is_null());
     }
 
     #[test]
@@ -4943,6 +6686,122 @@ mod tests {
                 nonlinear_caps["root"][key], nonlinear[key],
                 "nonlinear root default {key}"
             );
+        }
+    }
+
+    #[test]
+    fn capability_catalog_exposes_preflight_defaults_for_every_ivp_route() {
+        let methods = [
+            ("rk45", "RK45"),
+            ("dopri", "DOPRI"),
+            ("dop853", "DOP853"),
+            ("ab4", "AB4"),
+            ("bdf", "BDF"),
+            ("backward_euler", "BackwardEuler"),
+            ("radau5", "Radau5"),
+            ("lsode", "LSODE"),
+            ("lsoda", "LSODA"),
+            ("lsode2", "LSODE2"),
+        ];
+        let advertised =
+            task_capabilities_json()["families"][0]["effective_defaults_by_method"].clone();
+        assert_eq!(advertised.as_object().unwrap().len(), methods.len());
+
+        for (key, method) in methods {
+            let inspected = inspect_task_json(&default_ivp_task_document(method))
+                .unwrap()
+                .to_json();
+            assert_eq!(
+                advertised[key], inspected["effective_defaults"],
+                "advertised {method} defaults must be sourced from typed preflight"
+            );
+            assert!(
+                advertised[key].get("preflight_error").is_none(),
+                "{method} fixture must remain valid"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_catalog_exposes_preflight_defaults_for_every_bvp_route() {
+        let routes = [
+            ("damped", "BVP_Damp", Some("Damped"), "Sparse"),
+            ("frozen", "BVP_Damp", Some("Frozen"), "Sparse"),
+            ("naive", "BVP_Damp", Some("Naive"), "Sparse"),
+            ("sci", "BVP_sci", None, "Sparse"),
+            ("correction_newton", "BVP_CorrectionNewton", None, "Dense"),
+        ];
+        let advertised =
+            task_capabilities_json()["families"][1]["effective_defaults_by_route"].clone();
+        assert_eq!(advertised.as_object().unwrap().len(), routes.len());
+
+        for (key, solver, strategy, method) in routes {
+            let inspected =
+                inspect_task_json(&super::default_bvp_task_document(solver, strategy, method))
+                    .unwrap()
+                    .to_json();
+            assert_eq!(
+                advertised[key], inspected["effective_defaults"],
+                "advertised {solver}/{strategy:?} defaults must come from typed preflight"
+            );
+            assert!(
+                advertised[key].get("preflight_error").is_none(),
+                "{solver}/{strategy:?} fixture must remain valid"
+            );
+        }
+    }
+
+    #[test]
+    fn capability_catalog_exposes_preflight_defaults_for_nonlinear_and_fitting_routes() {
+        let nonlinear =
+            task_capabilities_json()["families"][2]["effective_defaults_by_route"].clone();
+        let root_methods = [
+            "newton",
+            "damped_newton",
+            "damped_newton_advanced",
+            "levenberg_marquardt",
+            "backtracking_levenberg_marquardt",
+            "levenberg_marquardt_minpack",
+            "nielsen_levenberg_marquardt",
+            "nielsen_levenberg_marquardt_advanced",
+            "trust_region",
+            "powell_dogleg",
+            "trust_region_lm",
+        ];
+        assert_eq!(nonlinear.as_object().unwrap().len(), root_methods.len() + 1);
+        for method in root_methods {
+            let inspected =
+                inspect_task_json(&super::default_nonlinear_task_document("root", method))
+                    .unwrap()
+                    .to_json();
+            assert_eq!(
+                nonlinear[method], inspected["effective_defaults"],
+                "{method}"
+            );
+            assert!(nonlinear[method].get("preflight_error").is_none());
+        }
+        let least_squares = inspect_task_json(&super::default_nonlinear_task_document(
+            "least_squares",
+            "levenberg_marquardt",
+        ))
+        .unwrap()
+        .to_json();
+        assert_eq!(
+            nonlinear["least_squares/levenberg_marquardt"],
+            least_squares["effective_defaults"]
+        );
+
+        let optimization =
+            task_capabilities_json()["families"][3]["effective_defaults_by_method"].clone();
+        for method in ["lm", "gavin", "varpro"] {
+            let inspected = inspect_task_json(&super::default_optimization_task_document(method))
+                .unwrap()
+                .to_json();
+            assert_eq!(
+                optimization[method], inspected["effective_defaults"],
+                "{method}"
+            );
+            assert!(optimization[method].get("preflight_error").is_none());
         }
     }
 }

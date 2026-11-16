@@ -12,6 +12,7 @@ dependencies = [
  "arrayfire_fork",
  "assert_matches",
  "bevy",
+ "blake3",
  "bspline",
  "byteorder",
  "bytes",

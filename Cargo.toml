@@ -23,6 +23,8 @@ include = [
     "src/command_interpreter/task_document.schema.json",
     "src/command_interpreter/agent_job.schema.json",
     "src/command_interpreter/agent_worker_response.schema.json",
+    "src/command_interpreter/agent_worker_protocol_request.schema.json",
+    "src/command_interpreter/agent_worker_protocol_response.schema.json",
     "src/command_interpreter/task_result.schema.json",
     "src/command_interpreter/acceptance_report.schema.json",
     "src/agent_interop/examples/ivp_decay.json",
@@ -33,6 +35,7 @@ include = [
     "src/agent_interop/examples/**",
     "src/AI_AGENT_INTEROP_JOB_CONTRACT.md",
     "src/AI_AGENT_INTEROP_WORKER.md",
+    "src/AI_AGENT_INTEROP_SUPERVISOR.md",
     "src/AI_AGENT_INTEROP_OPEN_DECISIONS.md",
     "src/AI_AGENT_INTEROP_PERFORMANCE.md",
     "src/numerical/BVP_sci/BVP_SOLVER_USER_GUIDE.md",
@@ -309,6 +312,7 @@ incremental = false
 panic = "abort"
 
 [dependencies]
+blake3 = "1.8"
 dyn-stack = "0.13.2"
 arrayfire = { version = "3.8.0", package = "arrayfire_fork", optional = true }
 itertools = "0.15.0"

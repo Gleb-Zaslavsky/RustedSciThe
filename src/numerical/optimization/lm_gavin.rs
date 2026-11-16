@@ -1,5 +1,6 @@
 // Port based on the Gavin implementation in `PY/levenberg_marquardt.py`.
 
+use crate::numerical::CancellationToken;
 use crate::numerical::SolverTelemetryMode;
 use crate::numerical::logging::{SolverLogGuard, SolverLogLevel};
 use nalgebra::{DMatrix, DVector};
@@ -46,6 +47,12 @@ pub enum GavinLmNumericalStage {
 /// Failure categories returned by the Gavin Levenberg-Marquardt solver.
 #[derive(Debug, thiserror::Error)]
 pub enum GavinLmError {
+    /// Cooperative cancellation at a safe controller boundary.
+    #[error("Gavin LM solve cancelled")]
+    Cancelled {
+        /// Last accepted coefficients and telemetry collected up to the stop.
+        snapshot: Box<GavinLmCancelledSnapshot>,
+    },
     /// The model's output count does not match the supplied target vector.
     #[error("model/target length mismatch: expected {expected}, got {actual}")]
     ModelTargetLengthMismatch { expected: usize, actual: usize },
@@ -162,6 +169,14 @@ pub enum GavinLmError {
     /// A computed intermediate became non-finite.
     #[error("numerical breakdown during {stage:?}")]
     NumericalBreakdown { stage: GavinLmNumericalStage },
+}
+
+/// Partial state retained when a Gavin LM run is cancelled.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GavinLmCancelledSnapshot {
+    pub completed_iterations: usize,
+    pub parameters: Vec<f64>,
+    pub telemetry: Option<GavinLmTelemetry>,
 }
 
 /// Damping update formula used by Gavin's controller.
@@ -653,6 +668,27 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         self.telemetry.as_ref()
     }
 
+    fn cancelled_error(
+        &self,
+        parameters: &DVector<f64>,
+        solve_started: Option<Instant>,
+    ) -> GavinLmError {
+        let telemetry = self.telemetry.clone().map(|mut telemetry| {
+            if telemetry.telemetry_mode.collects_timings() {
+                telemetry.total_time =
+                    solve_started.map_or(Duration::ZERO, |started| started.elapsed());
+            }
+            telemetry
+        });
+        GavinLmError::Cancelled {
+            snapshot: Box::new(GavinLmCancelledSnapshot {
+                completed_iterations: self.iteration,
+                parameters: parameters.as_slice().to_vec(),
+                telemetry,
+            }),
+        }
+    }
+
     fn evaluate_objective(
         &mut self,
         t: &DVector<f64>,
@@ -934,7 +970,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         ),
         GavinLmError,
     > {
-        self.lm_impl(p, t, y_dat, None)
+        self.lm_impl(p, t, y_dat, None, None)
             .map(GavinLmResult::into_legacy_tuple)
     }
 
@@ -945,7 +981,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         t: &DVector<f64>,
         y_dat: &DVector<f64>,
     ) -> Result<GavinLmResult, GavinLmError> {
-        self.lm_impl(p, t, y_dat, None)
+        self.lm_impl(p, t, y_dat, None, None)
     }
 
     /// Solves a least-squares problem with caller-supplied nonnegative weights.
@@ -968,7 +1004,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         ),
         GavinLmError,
     > {
-        self.lm_impl(p, t, y_dat, Some(weights))
+        self.lm_impl(p, t, y_dat, Some(weights), None)
             .map(GavinLmResult::into_legacy_tuple)
     }
 
@@ -980,7 +1016,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         y_dat: &DVector<f64>,
         weights: &DVector<f64>,
     ) -> Result<GavinLmResult, GavinLmError> {
-        self.lm_impl(p, t, y_dat, Some(weights))
+        self.lm_impl(p, t, y_dat, Some(weights), None)
     }
 
     /// Minimizes residuals directly with unit weights and no observation-norm
@@ -1007,7 +1043,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
             .ok_or(GavinLmError::OutputCountOverflow { samples: t.len() })?;
         let zero_target = DVector::zeros(output_count);
         let unit_weights = DVector::from_element(output_count, 1.0);
-        self.lm_impl(p, t, &zero_target, Some(&unit_weights))
+        self.lm_impl(p, t, &zero_target, Some(&unit_weights), None)
             .map(GavinLmResult::into_legacy_tuple)
     }
 
@@ -1016,6 +1052,26 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         &mut self,
         p: DVector<f64>,
         t: &DVector<f64>,
+    ) -> Result<GavinLmResult, GavinLmError> {
+        self.lm_residuals_detailed_with_optional_cancellation(p, t, None)
+    }
+
+    /// Direct residual solve with opt-in cancellation between complete LM
+    /// iterations.
+    pub fn lm_residuals_detailed_with_cancellation_token(
+        &mut self,
+        p: DVector<f64>,
+        t: &DVector<f64>,
+        cancellation: &CancellationToken,
+    ) -> Result<GavinLmResult, GavinLmError> {
+        self.lm_residuals_detailed_with_optional_cancellation(p, t, Some(cancellation))
+    }
+
+    fn lm_residuals_detailed_with_optional_cancellation(
+        &mut self,
+        p: DVector<f64>,
+        t: &DVector<f64>,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<GavinLmResult, GavinLmError> {
         let output_count = self
             .objective_fn
@@ -1026,6 +1082,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
             t,
             &DVector::zeros(output_count),
             Some(&DVector::from_element(output_count, 1.0)),
+            cancellation,
         )
     }
 
@@ -1040,7 +1097,29 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
             .objective_fn
             .output_count(t.len())
             .ok_or(GavinLmError::OutputCountOverflow { samples: t.len() })?;
-        self.lm_impl(p, t, &DVector::zeros(output_count), Some(weights))
+        self.lm_impl(p, t, &DVector::zeros(output_count), Some(weights), None)
+    }
+
+    /// Direct weighted residual solve with opt-in cancellation at safe LM
+    /// checkpoints.
+    pub fn lm_residuals_with_weights_detailed_and_cancellation_token(
+        &mut self,
+        p: DVector<f64>,
+        t: &DVector<f64>,
+        weights: &DVector<f64>,
+        cancellation: &CancellationToken,
+    ) -> Result<GavinLmResult, GavinLmError> {
+        let output_count = self
+            .objective_fn
+            .output_count(t.len())
+            .ok_or(GavinLmError::OutputCountOverflow { samples: t.len() })?;
+        self.lm_impl(
+            p,
+            t,
+            &DVector::zeros(output_count),
+            Some(weights),
+            Some(cancellation),
+        )
     }
 
     /// Minimizes direct residuals using explicit nonnegative weights.
@@ -1066,7 +1145,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
             .output_count(t.len())
             .ok_or(GavinLmError::OutputCountOverflow { samples: t.len() })?;
         let zero_target = DVector::zeros(output_count);
-        self.lm_impl(p, t, &zero_target, Some(weights))
+        self.lm_impl(p, t, &zero_target, Some(weights), None)
             .map(GavinLmResult::into_legacy_tuple)
     }
 
@@ -1076,6 +1155,7 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         t: &DVector<f64>,
         y_dat: &DVector<f64>,
         explicit_weights: Option<&DVector<f64>>,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<GavinLmResult, GavinLmError> {
         let log_level = if self.logging_enabled {
             SolverLogLevel::Info
@@ -1240,6 +1320,9 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
         let update_policy = self.update_policy;
 
         let idx: Vec<usize> = (0..npar).collect();
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err(self.cancelled_error(&p, solve_started));
+        }
         let (mut jtw_j, mut jtw_dy, mut x2_val, mut y_hat, mut j_mat) =
             self.lm_matx(t, &p_old, &y_old, 1.0, &j, &p, y_dat, &weight, &dp)?;
 
@@ -1266,6 +1349,9 @@ impl<F: ObjectiveFunction> LevenbergMarquardt<F> {
 
         let mut termination = GavinLmTermination::MaxIterations;
         while self.iteration < max_iter {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                return Err(self.cancelled_error(&p, solve_started));
+            }
             self.iteration += 1;
             if self.telemetry_mode.collects_counters() {
                 if let Some(stats) = &mut self.telemetry {
@@ -1866,6 +1952,55 @@ mod tests {
         fn parameter_count(&self) -> usize {
             1
         }
+    }
+
+    struct CancellingLinearModel {
+        cancellation: CancellationToken,
+    }
+
+    impl ObjectiveFunction for CancellingLinearModel {
+        fn evaluate(
+            &self,
+            t: &DVector<f64>,
+            p: &DVector<f64>,
+        ) -> Result<DVector<f64>, GavinLmCallbackError> {
+            self.cancellation.cancel();
+            Ok(t.map(|sample| p[0] * sample))
+        }
+
+        fn parameter_count(&self) -> usize {
+            1
+        }
+    }
+
+    #[test]
+    fn cancellation_during_linearization_returns_last_accepted_state_and_work() {
+        let cancellation = CancellationToken::new();
+        let model = CancellingLinearModel {
+            cancellation: cancellation.clone(),
+        };
+        let mut solver =
+            LevenbergMarquardt::new(model).with_telemetry(SolverTelemetryMode::Detailed);
+        let initial_parameters = dvector![0.7];
+        let samples = dvector![1.0, 2.0, 3.0];
+
+        let error = solver
+            .lm_residuals_detailed_with_cancellation_token(
+                initial_parameters.clone(),
+                &samples,
+                &cancellation,
+            )
+            .expect_err("cancellation should be observed at the next safe point");
+
+        let GavinLmError::Cancelled { snapshot } = error else {
+            panic!("expected typed Gavin cancellation");
+        };
+        assert_eq!(snapshot.completed_iterations, 0);
+        assert_eq!(snapshot.parameters, initial_parameters.as_slice());
+        let telemetry = snapshot.telemetry.expect("Detailed telemetry is retained");
+        assert!(telemetry.objective_evaluations > 0);
+        assert_eq!(telemetry.accepted_steps, 0);
+        assert_eq!(telemetry.iterations, 0);
     }
 
     #[test]

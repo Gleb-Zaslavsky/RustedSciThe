@@ -773,15 +773,17 @@ This sequence keeps debugging local and avoids mixing model errors with backend 
 
 ## Cooperative Cancellation
 
-`run_task_from_json_with_cancellation_token` forwards cancellation for single
-IVP tasks using BDF, Backward Euler, Radau, LSODE2, DOP853, RK45, DOPRI, or
-AB4; BVP routes; nonlinear root and symbolic least-squares tasks; and classic
-LM/VarPro fitting tasks. Supported native routes return typed partial
-snapshots; the JSON error envelope keeps `result: null` and places available
-diagnostics under `error.details`. IVP parameter-continuation task documents
-and Gavin fitting return an explicit unsupported-route error; they do not
-silently ignore the token. For
-nonlinear root, the symbolic problem object is constructed before the native
-engine observes a pre-cancelled token, but no residual/Jacobian evaluation is
-performed and the snapshot retains the initial guess with zero completed
-iterations.
+`run_task_from_json_with_cancellation_token` forwards cancellation for
+supported IVP methods, BVP routes, nonlinear root/least-squares tasks, and
+LM/VarPro/Gavin fitting. IVP continuation supports Fresh segments and explicit
+restart segments for BDF, Backward Euler, Radau, and LSODE2. Stateful
+`restart_policy: "continue"` is explicitly unsupported because it carries
+native solver history across parameter values. The task capability inventory
+reports these distinctions; unsupported routes reject the token rather than
+silently dropping it. Cancellation errors preserve completed IVP segments and
+the active native partial snapshot when available. The JSON error envelope
+keeps `result: null` and places bounded diagnostics under `error.details`.
+For nonlinear root, the symbolic problem object is constructed before the
+native engine observes a pre-cancelled token, but no residual/Jacobian
+evaluation is performed and the snapshot retains the initial guess with zero
+completed iterations.

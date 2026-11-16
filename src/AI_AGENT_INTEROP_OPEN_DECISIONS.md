@@ -40,20 +40,29 @@ keeps stdout protocol-only, bounds records, returns one typed response per
 record, continues after malformed/oversized records, and shuts down on EOF.
 The published response schema is `agent_worker_response.schema.json`. This
 initial worker does not isolate execution or enforce resource budgets; it
-rejects jobs that request budgets. It also rejects AOT until an administrator-
+rejects jobs that request budgets. The initial build rejected AOT until an administrator-
 approved toolchain policy exists. It must not be described as a sandbox or as
 providing resource enforcement.
 
-**Still open:** Cache key/invalidation and eviction policy, and deployment
-guarantees. The cache must be bounded and must
-distinguish artifacts by the effective model/solver configuration and relevant
-build identity; exact key contents are technical work. Cancellation signaling
-is implemented as the authenticated loopback control channel in decision 12.
+The AOT sentence above records the initial worker state and is superseded by
+decision 8's current implementation: AOT is deny-all by default and can be
+enabled only for named administrator-allowlisted toolchains. Jobs cannot
+provide compiler or AOT artifact paths. Resource enforcement, artifact
+provenance, and process isolation remain open.
+
+**Still open:** Backend-specific identity of the dynamic library actually
+loaded by a solver, and deployment guarantees that depend on an OS supervisor.
+Cache identity/invalidation and eviction are implemented in the worker cache:
+the key includes normalized effective model/solver configuration and the
+runtime/build fingerprint, while allowlisted compiler identity is included for
+AOT. Entries use process-safe leases and bounded LRU eviction. Cancellation
+signaling is implemented as the authenticated loopback control channel in
+decision 12.
 The Rust API token contract and external hard-timeout boundary remain as
 selected. Persistence ownership is resolved by decision 4 and stays with the
 worker/client.
 
-### 2. Cancellation and Deadline Semantics — Token Shape Selected, Solver Work Open
+### 2. Cancellation and Deadline Semantics — Contract Selected, Route Matrix Closed
 
 **Decision:** The initial worker-level wall-time limit is a hard process-level
 timeout enforced by an external supervisor. Separately, every supported solver
@@ -76,49 +85,34 @@ iteration; once cancellation is observed, construct the snapshot by copying
 the current/last-accepted state and selected telemetry directly from native
 solver structures.
 
-**Implementation status:** The public `numerical::CancellationToken` and
-typed partial snapshots are implemented for nonlinear root `SolverEngine`,
-rectangular LM, classic symbolic `Fitting` / `UniversalFitting` LM, standalone
-BDF, Backward Euler, DOP853, and fixed-mesh BVP_CorrectionNewton. They observe pre-cancellation before numerical
-callbacks or backend preparation and cancellation at safe
-iteration/trial/accepted-step boundaries. BDF and Backward Euler let an
-in-progress step finish and retain the partial trajectory and mode-available
-telemetry. DOP853 similarly finishes its active RK tableau and retains accepted
-history/counters. The JSON task error envelope maps cancellation to distinct
-nonlinear codes, fitting LM, BDF, Backward Euler, DOP853, and
-BVP_CorrectionNewton codes with
-`category=cancelled`, keeps the result null, bounds inline diagnostic arrays,
-and includes available partial state and telemetry. BVP_sci cancellation
-captures the accepted mesh/state/parameters and completed mesh/Newton work.
-Radau checks before per-solve workspace setup and between complete adaptive
-attempts; it snapshots only the last committed `(t, y)`, step counters, and
-mode-selected telemetry.
-The
-fitting facade explicitly rejects the option on VarPro/Gavin. The built-in
-worker still relies on external process supervision and does not accept an
-in-band cancellation signal. BDF, Radau, and Backward Euler are forwarded
-through StiffAPI; BDF, Backward Euler, and DOP853 are forwarded through ODE_api2, with
-unsupported routes explicitly rejected. BVP_api forwards cancellation to
-CorrectionNewton and BVP_sci; Damped and Frozen reject it before solving.
-Remaining BVP routes Damped/Frozen and VarPro/Gavin still need
-either token threading or an explicit unsupported-route contract. Standalone
-nonstiff RK45, DOPRI, AB4, and DOP853 now support safe-boundary cancellation.
-Single-solve IVP task JSON supports BDF, Backward Euler, Radau, DOP853, RK45,
-DOPRI, AB4, and LSODE2; nonlinear task JSON supports root and
-symbolic least-squares formulations. Optimization task
-JSON supports classic LM fitting and symbolic nonlinear root/least-squares
-tasks; Gavin/VarPro fitting and parameter-continuation
-remain unsupported. The task runner rejects unsupported routes rather than
-dropping the token. Root, nonlinear least-squares, and LM fitting cancellation
-have regression coverage preserving native partial snapshots and keeping
-`result` null. Per-route snapshots may
-differ; unavailable values remain absent rather than fabricated as zero.
+**Implementation status:** Cooperative cancellation is threaded through the
+native solver routes, facades, task JSON, and the optional authenticated worker
+control plane. Supported methods poll only at their documented safe points;
+in-flight steps/iterations finish before cancellation is observed. Without a
+token, routes do not poll or allocate cancellation snapshots. After cancellation
+is observed, typed errors copy the latest solver-owned safe state and only the
+telemetry selected by the caller. The task envelope keeps `result: null`, uses
+`category=cancelled`, bounds inline diagnostics, and preserves native error
+source chains where present.
 
-**Remaining implementation work:** Extend the token through each solver's
-native API/facade and task execution entry point where appropriate, define the
-last-safe-point data each route can guarantee, and test that cancellation
-preserves it without publishing a partial solution. Keep callback hot loops
-free of cancellation polling.
+The route matrix is explicit: BVP routes, nonlinear task routes, LM/VarPro/Gavin
+fitting, and supported IVP routes provide cooperative cancellation. IVP
+single-solve support includes RK45, DOPRI, AB4, DOP853, BDF, Backward Euler,
+Radau5, and LSODE2; historical LSODE and LSODA task routes report unsupported.
+IVP continuation supports Fresh segments on cancellable methods and explicit
+restart segments for BDF, Backward Euler, Radau5, and LSODE2. Stateful
+`restart_policy: "continue"` is intentionally unsupported because it carries
+native history across parameter values. This limitation is discoverable in
+`task_capabilities_json()` and rejected before solver execution, not silently
+ignored. Cancellation during a supported continuation retains completed
+segments and the active native partial snapshot when available.
+
+The external supervisor remains responsible for hard process deadlines.
+Unsupported methods return an explicit unsupported-route error rather than
+dropping the token. Per-route snapshots differ; unavailable values remain
+absent rather than fabricated as zero. Regression coverage exercises native
+partial snapshots, task envelopes, capability reporting, and null result
+publication.
 
 **Checkpoint/resume decision:** Durable solver checkpoint/resume is excluded
 from the initial AI-agent interoperability contract. This is a deferral, not
@@ -148,14 +142,16 @@ form, but may not redefine shared fields. A parity matrix must document which
 solvers/routes can provide each field. `unsupported`, `not requested`, and
 `partial` must be distinguishable from a measured zero.
 
-**Still open:** Native telemetry is not yet serialized consistently. The
-first common metric and absence-state contract is drafted in
-`AI_AGENT_INTEROP_TELEMETRY.md`; BE and BVP_Damp defaults were corrected to
-`Off`, and BVP_Damp event logging is independent of counters. Native
-field-by-field parity, canonical schema/versioning, mapping from native modes
-to compact versus detailed output, and delivery of typed diagnostics to a
-worker/client remain implementation work. Persistence and external references
-are worker/client-owned by decision 4.
+**Implementation status:** The compact result envelope has a versioned metric
+shape and projections for IVP, BVP runtime/CorrectionNewton, nonlinear
+root/least-squares, and LM/VarPro fitting. Ordinary native IVP failures retain
+a partial snapshot; IVP continuation retains per-segment snapshots. Detailed
+diagnostics have a separate worker-operation channel for the implemented
+routes, including Damped/Frozen successful decision traces, method-specific
+GAVIN metrics, and bounded typed task-error details on failure/cancellation.
+`Off` remains null. The worker caps inline diagnostics and complete response
+records. Remaining work: complete native route/mode parity and cross-family
+tests. Durable persistence/references remain worker/client-owned by decision 4.
 
 ### 4. Durable Large-Result Artifacts
 
@@ -215,11 +211,15 @@ and other numerical inputs. Callers may disable the run digest when those
 inputs are sensitive; omission must be explicit and must not look like a
 measured/available digest.
 
-**Implementation details still open:** Define and version the canonical typed
-encoding and stable digest algorithm, plus the exact reproducible build/runtime
-fields available in library use and their redaction rules. Do not use Rust's
-unstable `DefaultHasher` as a durable identity. Until implemented, current
-envelopes do not claim provenance or reproducibility identity.
+**Implementation:** Versioned canonical JSON uses BLAKE3-256 with domain
+separation for model and run digests. Model identity retains effective solver
+configuration while normalizing per-run numeric values; run identity binds the
+full canonical task and is omitted by default. Runtime provenance reports RST
+version, Cargo.lock digest, OS/architecture/pointer width/endian/environment,
+debug-assertion mode and successful AOT compiler version when selected. The
+worker response schema validates this record. Rust's unstable `DefaultHasher`
+is not used. Backend-specific inspection of loaded-library embedded metadata
+remains an implementation follow-up where a backend exposes no identity API.
 
 ### 8. AOT Trust Policy
 
@@ -230,12 +230,21 @@ environment variables, or output/cache paths. If the requested route is not
 permitted by worker policy, validation/execution must fail explicitly rather
 than silently falling back to Lambdify or another backend.
 
-The worker owns compiler environment, temporary build directories, resource
-limits, and AOT cache. Loaded libraries must be attributable to an allowlisted
+The worker owns compiler environment, temporary build directories and the
+administrator-selected AOT output/cache root. Scheduler/supervisor owns hard
+process resource limits. Loaded libraries must be attributable to an allowlisted
 build and checked against platform, ABI, RST and toolchain identity. A signed
 prebuilt-artifact registry is not required in the initial policy and can be
-added later. Worker-side enforcement remains unimplemented; library callers
-that bypass a worker remain responsible for their own trust boundary.
+added later. The JSONL worker now has an administrator-owned named toolchain
+allowlist; its legacy entry points remain deny-all and job-owned compiler or
+output/handoff paths are rejected; the administrator root is injected into
+BVP_sci AOT tasks that require an output directory. The worker cache now has
+provenance-bound manifests, process-safe per-key leases, bounded LRU eviction
+and response observability. A one-record `--once` lifecycle allows an external
+supervisor to own hard deadlines and OS resource enforcement; resource budgets
+are trusted only when the supervisor explicitly asserts enforcement. This
+policy gate is not process isolation; library callers that bypass a worker
+remain responsible for their own trust boundary.
 
 ### 9. Agent Presets and Route Recommendations
 
@@ -281,10 +290,10 @@ solver/worker boundary and avoids multiplying top-level status variants.
 
 **Selected boundary:** The Rust API owns solver-level cooperative cancellation
 through `CancellationToken`; an external supervisor owns hard process deadlines
-and resource limits. The current optional CLI worker is sequential JSONL and
-does not accept an in-band cancellation signal. Killing the worker process is
-not equivalent to cooperative cancellation and cannot return the solver's
-partial snapshot.
+and resource limits. The optional CLI worker is sequential JSONL; its separate
+authenticated loopback control channel can request cooperative cancellation.
+Killing the worker process is not equivalent to cooperative cancellation and
+cannot return the solver's partial snapshot.
 
 **Decision:** Keep request/response JSONL sequential and expose an optional
 authenticated local control channel. The CLI binds an ephemeral IPv4 loopback
@@ -295,9 +304,36 @@ cooperative cancellation; `cancel` names the active `job_id` and flips its
 existing `CancellationToken`. A control-enabled job must provide `job_id`.
 Solver routes without cancellation support execute normally, report
 `cancellable=false`, and reject cancellation requests explicitly. The channel
-does not alter the JSONL request/response ordering. Protect worker stderr and
-the capability token as local credentials; bind is loopback-only. The external
-supervisor remains responsible for hard deadlines and process/resource limits.
+does not alter the JSONL request/response ordering. The listener bounds each
+control connection's read/write time to 250 ms and rejects overlapping active
+job activation. Protect worker stderr and the capability token as local
+credentials; bind is loopback-only. The external supervisor remains
+responsible for hard deadlines and process/resource limits.
+
+### 13. Worker JSONL Request Envelope — Resolved
+
+The current worker accepts a direct `Agent Job v1` JSON record and returns
+one task-result envelope. A richer worker interface needs `capabilities`,
+`presets`, `validate`, and `execute` operations without adding worker controls
+to `TaskDocument v1` or changing the legacy job shape.
+
+**Question:** Should the worker accept a new explicitly versioned request
+envelope (for example, `protocol_version` plus `operation` and an operation-
+specific payload), while continuing to recognize direct Agent Job v1 records
+as legacy execute requests? If so, should responses be operation-tagged for
+all request kinds or should `execute` preserve the exact existing result
+envelope? The choice also determines how an older client discovers supported
+protocol versions and how unknown versions/operations are answered.
+
+**Resolution:** Use a strict envelope with `worker_protocol_version`,
+`operation`, and operation-specific `payload`; v1 supports `capabilities`,
+`presets`, `validate`, and `execute`. New requests receive uniform tagged
+responses; execute nests the unchanged Agent Job response. Direct Agent Job v1
+records remain legacy execute requests with their existing response shape.
+Capabilities is version discovery, and unsupported versions/operations return
+typed protocol errors. The control channel remains independent. Schemas:
+`agent_worker_protocol_request.schema.json` and
+`agent_worker_protocol_response.schema.json`.
 
 ## Non-Blocking Technical Work
 
@@ -305,3 +341,39 @@ These decisions do not block schema conformance tests, reference examples,
 typed preflight improvements, result-shape documentation, and measurement of
 serialization overhead. Keep those tasks moving without implying answers to
 the decisions above.
+
+### 14. Numerical-Metric Acceptance Contract Version — Owner Review Needed
+
+Decision 5 selects a typed metric catalog and simple comparisons, but the
+wire-level compatibility mechanism is not selected. Agent Job v1 currently
+has a fixed acceptance vocabulary (`solver_converged`, `finite_result`). A
+metric comparison request adds new fields and result semantics.
+
+**Question:** Should metric acceptance require `contract_version: 2` with a
+separate v2 schema, or can it be introduced as an optional, strictly versioned
+extension that v1 clients are required to ignore/reject? The conservative
+recommendation is a new contract version so old validators cannot silently
+misinterpret acceptance rules. Until decided, implement/test the native typed
+metric catalog independently, but do not change Agent Job v1 acceptance wire
+semantics.
+
+### 15. Identity of the AOT Library Actually Loaded — Backend Interface Follow-up
+
+**Finding:** Worker provenance identifies the task, effective route, build
+runtime, and allowlisted compiler; the worker cache leases and accounts for the
+owned artifact directory. Current solver/AOT loader APIs do not return a
+verified identity for the exact dynamic library loaded by the solve. A cache
+directory digest or compiler version is not proof of that loaded file.
+
+**Options:** (a) extend generated AOT artifacts with a manifest containing a
+content digest and ABI/build identity, and make the loader expose the verified
+loaded identity; (b) hash a configured library path before/after loading,
+which may still not prove which path the backend resolved; or (c) retain the
+current honest `identity_unavailable` boundary until an artifact loader can
+verify the mapping.
+
+**Recommendation:** Keep the current conservative behavior and report the
+limitation. If deployment requires artifact attestation, pursue (a) as a
+separate backend-interface change; do not label cache provenance as loaded
+artifact provenance. This does not block ordinary non-AOT jobs or the current
+worker's administrator-owned AOT policy.

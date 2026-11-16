@@ -26,6 +26,7 @@
 use super::lm_gavin::{
     GavinLmError, GavinLmResult, GavinLmTelemetry, LevenbergMarquardt, SymbolicGavinObjective,
 };
+use crate::numerical::CancellationToken;
 use crate::numerical::Nonlinear_systems::least_squares::{
     LeastSquaresProblem, PreparedSymbolicLeastSquaresProblem,
 };
@@ -265,6 +266,23 @@ impl GavinSymbolicFitting {
 
     /// Prepares, binds, and solves the configured symbolic fit in one call.
     pub fn try_solve(self) -> Result<GavinSymbolicFitResult, GavinLmError> {
+        self.try_solve_with_optional_cancellation(None)
+    }
+
+    /// Prepares and solves with cancellation between complete Gavin LM
+    /// iterations. The cancellation error retains accepted coefficients and
+    /// telemetry selected on this builder.
+    pub fn try_solve_with_cancellation_token(
+        self,
+        cancellation: CancellationToken,
+    ) -> Result<GavinSymbolicFitResult, GavinLmError> {
+        self.try_solve_with_optional_cancellation(Some(&cancellation))
+    }
+
+    fn try_solve_with_optional_cancellation(
+        self,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<GavinSymbolicFitResult, GavinLmError> {
         if self.equations.is_empty() {
             return Err(GavinLmError::InvalidFitConfiguration { field: "equations" });
         }
@@ -335,13 +353,29 @@ impl GavinSymbolicFitting {
         let initial = bound.params().clone();
         let sample_locations = DVector::from_vec(self.x_data.clone());
         let fit = if let Some(weights) = &self.weights {
-            solver.lm_residuals_with_weights_detailed(
-                initial,
-                &sample_locations,
-                &DVector::from_vec(weights.clone()),
-            )?
+            let weights = DVector::from_vec(weights.clone());
+            match cancellation {
+                Some(token) => solver.lm_residuals_with_weights_detailed_and_cancellation_token(
+                    initial,
+                    &sample_locations,
+                    &weights,
+                    token,
+                )?,
+                None => solver.lm_residuals_with_weights_detailed(
+                    initial,
+                    &sample_locations,
+                    &weights,
+                )?,
+            }
         } else {
-            solver.lm_residuals_detailed(initial, &sample_locations)?
+            match cancellation {
+                Some(token) => solver.lm_residuals_detailed_with_cancellation_token(
+                    initial,
+                    &sample_locations,
+                    token,
+                )?,
+                None => solver.lm_residuals_detailed(initial, &sample_locations)?,
+            }
         };
         let telemetry = solver.telemetry().cloned();
 

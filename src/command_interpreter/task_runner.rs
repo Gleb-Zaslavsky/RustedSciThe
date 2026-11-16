@@ -56,17 +56,190 @@ pub enum ParsedTaskSpec {
 pub fn task_supports_cooperative_cancellation(spec: &ParsedTaskSpec) -> bool {
     match spec {
         ParsedTaskSpec::Ivp(spec) => {
-            spec.continuation.is_none() && spec.solver.method.cancellation_supported()
+            crate::command_interpreter::task_parser_ivp::ivp_task_cancellation_supported(spec)
         }
         ParsedTaskSpec::Bvp(_) => true,
         ParsedTaskSpec::Nonlinear(_) => true,
         ParsedTaskSpec::Optimization(spec) => {
             matches!(
                 spec.method,
-                OptimizationMethodSpec::LevenbergMarquardt | OptimizationMethodSpec::VarPro
+                OptimizationMethodSpec::LevenbergMarquardt
+                    | OptimizationMethodSpec::VarPro
+                    | OptimizationMethodSpec::Gavin
             )
         }
     }
+}
+
+/// Report whether a validated task selects or configures an AOT route.
+///
+/// Worker policy must inspect normalized task fields, not recursively search
+/// user expressions/metadata for key names that happen to contain "aot".
+pub fn task_requests_aot(spec: &ParsedTaskSpec) -> bool {
+    match spec {
+        ParsedTaskSpec::Ivp(spec) => {
+            let is_aot = |execution: Option<&Lsode2TaskExecutionSpec>| {
+                matches!(execution, Some(Lsode2TaskExecutionSpec::Aot { .. }))
+            };
+            is_aot(spec.solver_options.symbolic_execution.as_ref())
+                || spec
+                    .solver_options
+                    .lsode2
+                    .as_ref()
+                    .is_some_and(|options| is_aot(options.symbolic_execution.as_ref()))
+        }
+        ParsedTaskSpec::Bvp(spec) => {
+            let backend = &spec.solver_options.generated_backend;
+            matches!(
+                spec.solver.execution,
+                Some(crate::command_interpreter::task_parser_bvp::BvpExecutionSpec::Aot)
+            ) || backend
+                .preset
+                .as_deref()
+                .is_some_and(bvp_preset_requests_aot)
+                || backend
+                    .backend_policy
+                    .as_deref()
+                    .is_some_and(|value| value.to_ascii_lowercase().contains("aot"))
+                || backend.aot_codegen_backend.is_some()
+                || backend.aot_c_compiler.is_some()
+                || backend.aot_build_policy.is_some()
+                || backend.aot_build_profile.is_some()
+                || backend.aot_compile_preset.is_some()
+                || backend.aot_execution_policy.is_some()
+                || backend.aot_output_dir.is_some()
+                || backend.aot_handoff_path.is_some()
+        }
+        ParsedTaskSpec::Nonlinear(_) | ParsedTaskSpec::Optimization(_) => false,
+    }
+}
+
+/// AOT compiler identity selected by a validated task route.
+///
+/// This is intentionally a small policy-facing enum: task documents may pick
+/// among worker-approved toolchains, but cannot provide arbitrary executables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TaskAotToolchain {
+    Rust,
+    Zig,
+    Gcc,
+    Tcc,
+}
+
+/// Resolve the selected AOT toolchain for worker allowlist enforcement.
+///
+/// `None` means the task does not request AOT. Unsafe path/compiler overrides
+/// are rejected separately by the worker before this value is trusted.
+pub fn task_aot_toolchain(spec: &ParsedTaskSpec) -> Option<TaskAotToolchain> {
+    use crate::command_interpreter::task_parser_bvp::BvpExecutionSpec;
+    use crate::numerical::LSODE2::Lsode2AotToolchain;
+
+    match spec {
+        ParsedTaskSpec::Ivp(spec) => {
+            let execution = if matches!(spec.solver.method, IvpMethodSpec::Lsode2) {
+                spec.solver_options
+                    .lsode2
+                    .as_ref()
+                    .and_then(|options| options.symbolic_execution.as_ref())
+                    .or(spec.solver_options.symbolic_execution.as_ref())
+            } else {
+                spec.solver_options.symbolic_execution.as_ref()
+            }?;
+            match execution {
+                Lsode2TaskExecutionSpec::LambdifyExpr => None,
+                Lsode2TaskExecutionSpec::Aot { toolchain, .. } => Some(match toolchain {
+                    Lsode2AotToolchain::Rust => TaskAotToolchain::Rust,
+                    Lsode2AotToolchain::Zig => TaskAotToolchain::Zig,
+                    Lsode2AotToolchain::CGcc => TaskAotToolchain::Gcc,
+                    Lsode2AotToolchain::CTcc => TaskAotToolchain::Tcc,
+                }),
+            }
+        }
+        ParsedTaskSpec::Bvp(spec) => {
+            let backend = &spec.solver_options.generated_backend;
+            let preset = backend
+                .preset
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .replace(['-', ' '], "_");
+            let requests_aot = matches!(spec.solver.execution, Some(BvpExecutionSpec::Aot))
+                || bvp_preset_requests_aot(&preset)
+                || backend
+                    .backend_policy
+                    .as_deref()
+                    .is_some_and(|value| value.to_ascii_lowercase().contains("aot"))
+                || backend.aot_codegen_backend.is_some()
+                || backend.aot_c_compiler.is_some()
+                || backend.aot_build_policy.is_some()
+                || backend.aot_build_profile.is_some()
+                || backend.aot_compile_preset.is_some()
+                || backend.aot_execution_policy.is_some()
+                || backend.aot_output_dir.is_some()
+                || backend.aot_handoff_path.is_some();
+            if !requests_aot {
+                return None;
+            }
+
+            if let Some(compiler) = backend.aot_c_compiler.as_deref() {
+                return match compiler.trim().to_ascii_lowercase().as_str() {
+                    "gcc" => Some(TaskAotToolchain::Gcc),
+                    "tcc" => Some(TaskAotToolchain::Tcc),
+                    _ => None,
+                };
+            }
+            if preset.ends_with("_gcc") {
+                return Some(TaskAotToolchain::Gcc);
+            }
+            if preset.ends_with("_tcc")
+                || preset == "sparse_repeated"
+                || preset == "banded_repeated"
+            {
+                return Some(TaskAotToolchain::Tcc);
+            }
+            if preset.ends_with("_zig") {
+                return Some(TaskAotToolchain::Zig);
+            }
+            match backend
+                .aot_codegen_backend
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+            {
+                Some(value) if value == "rust" => Some(TaskAotToolchain::Rust),
+                Some(value) if value == "zig" => Some(TaskAotToolchain::Zig),
+                Some(value) if value == "c" => Some(TaskAotToolchain::Tcc),
+                Some(_) => None,
+                None => Some(TaskAotToolchain::Tcc),
+            }
+        }
+        ParsedTaskSpec::Nonlinear(_) | ParsedTaskSpec::Optimization(_) => None,
+    }
+}
+
+fn bvp_preset_requests_aot(preset: &str) -> bool {
+    let normalized = preset.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    matches!(
+        normalized.as_str(),
+        "sparse_aot"
+            | "sparse_build_if_missing"
+            | "sparse_aot_gcc"
+            | "sparse_atomview_gcc"
+            | "sparse_aot_tcc"
+            | "sparse_atomview_tcc"
+            | "sparse_repeated"
+            | "sparse_aot_zig"
+            | "sparse_atomview_zig"
+            | "banded_aot"
+            | "banded_build_if_missing"
+            | "banded_aot_gcc"
+            | "banded_atomview_gcc"
+            | "banded_aot_tcc"
+            | "banded_atomview_tcc"
+            | "banded_repeated"
+            | "banded_aot_zig"
+            | "banded_atomview_zig"
+    )
 }
 
 pub enum TaskRunResult {
@@ -1976,9 +2149,9 @@ pub fn run_task_from_json(input: &str) -> Result<TaskRunResult, TaskRunnerError>
 }
 
 /// Parse and execute a JSON task with cooperative cancellation on supported
-/// task routes. Single-solve IVP, all BVP routes, nonlinear root/least-squares,
-/// and optimization LM/VarPro are supported. IVP continuation and optimization
-/// Gavin reject explicitly until their native lifecycle is wired through.
+/// task routes. Single-solve IVP and supported Fresh/explicit-restart IVP
+/// continuation routes forward cancellation to native safe points. Stateful
+/// IVP `Continue` remains explicitly unsupported.
 pub fn run_task_from_json_with_cancellation_token(
     input: &str,
     token: &CancellationToken,
@@ -2008,7 +2181,9 @@ pub fn run_task_from_spec_with_cancellation_token(
         ParsedTaskSpec::Optimization(spec)
             if matches!(
                 spec.method,
-                OptimizationMethodSpec::LevenbergMarquardt | OptimizationMethodSpec::VarPro
+                OptimizationMethodSpec::LevenbergMarquardt
+                    | OptimizationMethodSpec::VarPro
+                    | OptimizationMethodSpec::Gavin
             ) =>
         {
             run_optimization_task_with_cancellation_token(spec, token)
@@ -2767,14 +2942,44 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_capabilities_match_varpro_and_gavin_native_routes() {
+    fn cancellation_capabilities_match_all_fitting_native_routes() {
         let varpro = r#"{"format_version":1,"data":{"x":[0.0,1.0,2.0,3.0],"y":[2.0,1.5,1.0,0.8]},"model":{"method":"varpro","parameters":["tau"],"initial_guess":[1.2],"basis_parameters":["tau"],"basis_equations":["exp(-x/tau)"],"invariants":["1"]}}"#;
         let gavin = r#"{"format_version":1,"data":{"x":[0.0,1.0],"y":[1.0,3.0]},"model":{"method":"gavin","parameters":["a","b"],"initial_guess":[1.0,1.0],"equations":"a*x+b"}}"#;
 
         let varpro = parse_task_spec_from_json(varpro).expect("VarPro task parses");
         let gavin = parse_task_spec_from_json(gavin).expect("Gavin task parses");
         assert!(task_supports_cooperative_cancellation(&varpro));
-        assert!(!task_supports_cooperative_cancellation(&gavin));
+        assert!(task_supports_cooperative_cancellation(&gavin));
+    }
+
+    #[test]
+    fn ivp_continuation_cancellation_capability_tracks_lifecycle_policy() {
+        let base = r#"{"format_version":1,"task":{"solver":"IVP","method":"BDF"},"equations":{"unknowns":"y","rhs":"-k*y","parameters":"k","parameter_values":1.0},"initial_conditions":{"t0":0.0,"t_end":1.0,"y0":1.0}"#;
+        let fresh = format!(
+            "{base},\"continuation\":{{\"parameter\":\"k\",\"values\":[1.0,2.0],\"mode\":\"fresh\"}}}}"
+        );
+        let explicit_restart = format!(
+            "{base},\"continuation\":{{\"parameter\":\"k\",\"values\":[1.0,2.0],\"restart_policy\":\"restart_each\"}}}}"
+        );
+        let stateful_continue = format!(
+            "{base},\"continuation\":{{\"parameter\":\"k\",\"values\":[1.0,2.0],\"restart_policy\":\"continue\"}}}}"
+        );
+
+        for input in [fresh, explicit_restart] {
+            let task = parse_task_spec_from_json(&input).expect("supported loop parses");
+            assert!(task_supports_cooperative_cancellation(&task));
+        }
+        let task = parse_task_spec_from_json(&stateful_continue)
+            .expect("stateful loop parses but has a narrower capability");
+        assert!(!task_supports_cooperative_cancellation(&task));
+
+        for method in ["LSODE", "LSODA"] {
+            let input = format!(
+                r#"{{"format_version":1,"task":{{"solver":"IVP","method":"{method}"}},"equations":{{"arg":"t","y":"-y"}},"initial_conditions":{{"t0":0.0,"t_end":1.0,"y0":1.0}}}}"#
+            );
+            let task = parse_task_spec_from_json(&input).expect("legacy route parses");
+            assert!(!task_supports_cooperative_cancellation(&task));
+        }
     }
 
     #[test]

@@ -34,6 +34,9 @@
 !/src/**
 !/scripts/
 !/scripts/**
+!/tests/
+/tests/*
+!/tests/ai_agent_interop_capstone.rs
 !/benches/
 !/benches/**
 !/examples/
@@ -78,6 +81,7 @@
 
 # Ordinary Markdown remains ignored, as in the previous policy.
 *.md
+!src/AI_AGENT_INTEROP_WORKER.md
 !README.md
 !/performance/TODO.md
 !/performance/METRIC_CONTRACTS.md

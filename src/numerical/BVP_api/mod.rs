@@ -526,6 +526,17 @@ impl BvpSolverSettings {
                 options.generated_backend_config.bvp_telemetry_mode = native;
                 options.generated_backend_config.lambdify_telemetry_mode = callbacks;
                 options.generated_backend_config.aot_telemetry_mode = aot;
+                if mode == BvpApiTelemetryMode::Detailed {
+                    options.generated_backend_config = options
+                        .generated_backend_config
+                        .clone()
+                        .with_bvp_logging_config(
+                            crate::numerical::BVP_Damp::telemetry::BvpLoggingConfig::new(
+                                crate::numerical::BVP_Damp::telemetry::BvpLoggingMode::Detailed,
+                            )
+                            .with_max_events(512),
+                        );
+                }
             }
             Self::Frozen(options) => {
                 if mode == BvpApiTelemetryMode::Timings
@@ -580,6 +591,17 @@ impl BvpSolverSettings {
                         crate::symbolic::bvp::aot_telemetry::BvpAotTelemetryMode::Detailed
                     }
                 };
+                if mode == BvpApiTelemetryMode::Detailed {
+                    options.generated_backend_config = options
+                        .generated_backend_config
+                        .clone()
+                        .with_bvp_logging_config(
+                            crate::numerical::BVP_Damp::telemetry::BvpLoggingConfig::new(
+                                crate::numerical::BVP_Damp::telemetry::BvpLoggingMode::Detailed,
+                            )
+                            .with_max_events(512),
+                        );
+                }
             }
             Self::Sci { options, .. } => {
                 options.telemetry = match mode {

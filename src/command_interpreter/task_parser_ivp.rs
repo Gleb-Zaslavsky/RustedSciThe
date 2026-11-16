@@ -201,6 +201,16 @@ pub enum IvpTelemetryModeSpec {
     Detailed,
 }
 
+impl IvpTelemetryModeSpec {
+    pub(crate) const fn collects_counters(self) -> bool {
+        matches!(self, Self::Counters | Self::Detailed)
+    }
+
+    pub(crate) const fn collects_timings(self) -> bool {
+        matches!(self, Self::Timings | Self::Detailed)
+    }
+}
+
 /// LSODE2-specific options parsed from `solver_options`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Lsode2TaskOptionsSpec {
@@ -394,6 +404,110 @@ pub enum IvpTaskSolver {
 }
 
 impl IvpTaskSolver {
+    fn telemetry_snapshot(
+        &self,
+        mode: IvpTelemetryModeSpec,
+        solve_elapsed_ms: Option<f64>,
+    ) -> IvpTaskTelemetrySnapshot {
+        use crate::symbolic::symbolic_ivp_generated::IvpBackendStatistics;
+
+        let mut snapshot = IvpTaskTelemetrySnapshot {
+            mode: Some(mode),
+            solve_elapsed_ms,
+            ..IvpTaskTelemetrySnapshot::default()
+        };
+        if !mode.collects_counters() {
+            return snapshot;
+        }
+
+        let mut set_backend_counters = |stats: &IvpBackendStatistics| {
+            snapshot.nonlinear_iterations = Some(stats.nonlinear_iterations_total as u64);
+            snapshot.residual_evaluations = Some(stats.residual_calls as u64);
+            snapshot.jacobian_evaluations = Some(stats.jacobian_calls as u64);
+            snapshot.linear_solves = Some(stats.linear_solve_attempts_total as u64);
+            snapshot.accepted_time_steps = Some(stats.accepted_steps_total as u64);
+            snapshot.rejected_time_steps = Some(stats.rejected_step_attempts_total as u64);
+            if stats.bdf_nlu_total > 0 {
+                snapshot.factorizations = Some(stats.bdf_nlu_total as u64);
+            }
+        };
+
+        match self {
+            Self::Universal(solver) => {
+                if let Some(stats) = solver.get_statistics() {
+                    snapshot.residual_evaluations = Some(stats.residual_calls as u64);
+                    snapshot.accepted_time_steps = Some(stats.accepted_steps_total as u64);
+                    snapshot.rejected_time_steps = Some(stats.rejected_step_attempts_total as u64);
+                }
+            }
+            Self::Bdf(solver) => {
+                let stats = solver.get_statistics();
+                set_backend_counters(&stats);
+                snapshot.factorizations = Some(stats.bdf_nlu_total as u64);
+            }
+            Self::BackwardEuler(solver) => {
+                let stats = solver.get_statistics();
+                set_backend_counters(&stats);
+                let detailed = solver.detailed_statistics();
+                snapshot.factorizations = Some(detailed.factorization_calls as u64);
+                snapshot.linear_solves = Some(detailed.linear_solve_calls as u64);
+                snapshot.accepted_time_steps = Some(detailed.accepted_steps as u64);
+                snapshot.rejected_time_steps = Some(detailed.failed_steps as u64);
+            }
+            Self::Lsode2(solver) => {
+                let native = solver.native_statistics();
+                let native_route_has_counters = native.native_step_attempts > 0
+                    || native.native_residual_calls > 0
+                    || native.native_linear_solve_calls > 0;
+                if native_route_has_counters {
+                    snapshot.residual_evaluations = Some(native.native_residual_calls as u64);
+                    snapshot.jacobian_evaluations = Some(native.native_jacobian_calls as u64);
+                    snapshot.linear_solves = Some(native.native_linear_solve_calls as u64);
+                    snapshot.accepted_time_steps = Some(native.native_step_accepts as u64);
+                    snapshot.rejected_time_steps = Some(
+                        native
+                            .native_step_rejects_error_test
+                            .saturating_add(native.native_step_rejects_nonlinear)
+                            as u64,
+                    );
+                } else if let Some(stats) = solver.get_statistics() {
+                    set_backend_counters(&stats);
+                }
+            }
+            Self::Radau {
+                solver,
+                last_solution,
+                ..
+            } => {
+                let report = last_solution
+                    .as_ref()
+                    .map(|solution| solution.telemetry())
+                    .or_else(|| solver.last_solve_telemetry());
+                if let Some(report) = report {
+                    Self::set_radau_telemetry_counters(&mut snapshot, report);
+                }
+            }
+            Self::RadauSolution(solution) => {
+                Self::set_radau_telemetry_counters(&mut snapshot, solution.telemetry());
+            }
+        }
+        snapshot
+    }
+
+    fn set_radau_telemetry_counters(
+        snapshot: &mut IvpTaskTelemetrySnapshot,
+        report: &crate::numerical::Radau::RadauTelemetryReport,
+    ) {
+        let counters = &report.counters;
+        snapshot.nonlinear_iterations = counters.get("newton_iterations").copied();
+        snapshot.residual_evaluations = counters.get("residual_evaluations").copied();
+        snapshot.jacobian_evaluations = counters.get("jacobian_evaluations").copied();
+        snapshot.linear_solves = counters.get("linear_solves").copied();
+        snapshot.factorizations = counters.get("factorizations").copied();
+        snapshot.accepted_time_steps = counters.get("accepted_steps").copied();
+        snapshot.rejected_time_steps = counters.get("rejected_steps").copied();
+    }
+
     /// Rebind a prepared symbolic model without reparsing its expressions.
     fn try_set_parameter_values(&mut self, values: &[f64]) -> Result<(), IvpTaskError> {
         match self {
@@ -494,6 +608,7 @@ impl IvpTaskSolver {
         values: &[f64],
         restart_each: bool,
         initial: &InitialConditionSpec,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<(), IvpTaskError> {
         match self {
             Self::Bdf(solver) => {
@@ -516,9 +631,11 @@ impl IvpTaskSolver {
                         .try_continue_in_time_with_parameter_values(values, initial.t_end)
                         .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Bdf(error)))?;
                 }
-                solver
-                    .try_solve()
-                    .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Bdf(error)))
+                match cancellation {
+                    Some(token) => solver.try_solve_with_cancellation_token(token.clone()),
+                    None => solver.try_solve(),
+                }
+                .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Bdf(error)))
             }
             Self::BackwardEuler(solver) => {
                 solver
@@ -536,10 +653,19 @@ impl IvpTaskSolver {
                         .map_err(|error| {
                             IvpTaskError::Native(IvpNativeSolverError::BackwardEuler(error))
                         })?;
-                    solver.try_solve().map_err(|error| {
+                    match cancellation {
+                        Some(token) => solver.try_solve_with_cancellation_token(token.clone()),
+                        None => solver.try_solve(),
+                    }
+                    .map_err(|error| {
                         IvpTaskError::Native(IvpNativeSolverError::BackwardEuler(error))
                     })
                 } else {
+                    if cancellation.is_some() {
+                        return Err(IvpTaskError::CancellationUnsupported {
+                            solver: "BackwardEuler stateful continuation".to_owned(),
+                        });
+                    }
                     solver.try_continue_to(initial.t_end).map_err(|error| {
                         IvpTaskError::Native(IvpNativeSolverError::BackwardEuler(error))
                     })
@@ -556,9 +682,25 @@ impl IvpTaskSolver {
                 solver
                     .restart(initial.t0, initial.t_end)
                     .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Radau(error)))?;
-                let solution = solver
-                    .try_solve_with_parameter_values(y0.as_slice(), parameters)
-                    .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Radau(error)))?;
+                let solution = match cancellation {
+                    Some(token) => solver
+                        .try_solve_with_cancellation_token(y0.as_slice(), parameters, token)
+                        .map_err(|error| match error {
+                            RadauCancellationError::Cancelled { snapshot } => {
+                                IvpTaskError::Native(IvpNativeSolverError::RadauCancelled {
+                                    snapshot,
+                                })
+                            }
+                            RadauCancellationError::Solver(error) => {
+                                IvpTaskError::Native(IvpNativeSolverError::Radau(error))
+                            }
+                        })?,
+                    None => solver
+                        .try_solve_with_parameter_values(y0.as_slice(), parameters)
+                        .map_err(|error| {
+                            IvpTaskError::Native(IvpNativeSolverError::Radau(error))
+                        })?,
+                };
                 *last_solution = Some(solution);
                 Ok(())
             }
@@ -573,9 +715,18 @@ impl IvpTaskSolver {
                         initial.t_end,
                     )
                     .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Lsode2(error)))?;
-                solver
-                    .solve()
-                    .map_err(|error| IvpTaskError::Native(IvpNativeSolverError::Lsode2(error)))
+                match cancellation {
+                    Some(token) => solver.solve_with_cancellation_token(token),
+                    None => solver.solve(),
+                }
+                .map_err(|error| match error {
+                    Lsode2Error::Cancelled { snapshot } => {
+                        IvpTaskError::Native(IvpNativeSolverError::Lsode2Cancelled {
+                            snapshot: *snapshot,
+                        })
+                    }
+                    other => IvpTaskError::Native(IvpNativeSolverError::Lsode2(other)),
+                })
             }
             Self::Lsode2(_) => Err(IvpTaskError::Continuation {
                 method: "LSODE2".to_string(),
@@ -806,6 +957,22 @@ pub struct IvpTaskRunResult {
     pub status_code: Option<IvpRunStatus>,
     pub trajectory: Option<IvpTrajectory>,
     pub continuation: Option<IvpContinuationRunResult>,
+    /// Common solve-level view built only from native telemetry already
+    /// collected by the selected route. Missing fields remain unavailable.
+    pub telemetry: Option<IvpTaskTelemetrySnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct IvpTaskTelemetrySnapshot {
+    pub mode: Option<IvpTelemetryModeSpec>,
+    pub solve_elapsed_ms: Option<f64>,
+    pub nonlinear_iterations: Option<u64>,
+    pub residual_evaluations: Option<u64>,
+    pub jacobian_evaluations: Option<u64>,
+    pub linear_solves: Option<u64>,
+    pub factorizations: Option<u64>,
+    pub accepted_time_steps: Option<u64>,
+    pub rejected_time_steps: Option<u64>,
 }
 
 /// One completed segment of a parameter-continuation run.
@@ -824,6 +991,9 @@ pub struct IvpContinuationSegment {
     pub prepare_ms: f64,
     /// Time spent inside the solver after preparation/rebinding.
     pub solve_ms: f64,
+    /// Snapshot collected by the selected telemetry mode for this segment.
+    /// `None` means telemetry was not requested or this route provides none.
+    pub telemetry: Option<IvpTaskTelemetrySnapshot>,
 }
 
 /// Typed result for repeated parameter values. The final segment is also
@@ -842,6 +1012,19 @@ pub struct IvpContinuationRunResult {
     /// rebuilding the symbolic callbacks.
     pub prepared_reuses: usize,
     pub segments: Vec<IvpContinuationSegment>,
+}
+
+/// Partial continuation data retained when a later IVP segment is cancelled.
+#[derive(Debug)]
+pub struct IvpContinuationCancelled {
+    /// Zero-based index of the segment that was interrupted or not started.
+    pub cancelled_segment_index: usize,
+    /// Fully completed segments, moved out without copying their trajectories.
+    pub completed_segments: Vec<IvpContinuationSegment>,
+    /// Native cancellation snapshot for an in-flight segment, when available.
+    pub source: Option<Box<IvpTaskError>>,
+    /// Adapter-level telemetry copied from the active solver after cancellation.
+    pub active_segment_telemetry: Option<IvpTaskTelemetrySnapshot>,
 }
 
 /// Typed native solver failure preserved by the text-task adapter.
@@ -951,6 +1134,12 @@ pub enum IvpTaskError {
     CancelledBeforePreparation {
         solver: String,
     },
+    /// Continuation cancellation preserves completed segments and the native
+    /// partial snapshot for the interrupted segment when one exists.
+    ContinuationCancelled {
+        method: String,
+        partial: Box<IvpContinuationCancelled>,
+    },
     Continuation {
         method: String,
         message: String,
@@ -969,6 +1158,13 @@ pub enum IvpTaskError {
     Semantic(String),
     /// Failure returned by the selected solver, retaining its native type.
     Native(IvpNativeSolverError),
+    /// Native solve failure with a post-failure snapshot of already collected
+    /// telemetry. The native error remains the source and no failed solution
+    /// is promoted to a task result.
+    NativeWithTelemetry {
+        source: IvpNativeSolverError,
+        telemetry: IvpTaskTelemetrySnapshot,
+    },
     /// Failure while constructing or writing a postprocessing dataset.
     Postprocess(PostprocessError),
 }
@@ -990,11 +1186,28 @@ impl IvpTaskError {
             Self::UnsupportedOption { .. } => "unsupported_option",
             Self::CancellationUnsupported { .. } => "unsupported_route",
             Self::CancelledBeforePreparation { .. } => "cancelled",
+            Self::ContinuationCancelled { .. } => "cancelled",
             Self::UnsupportedContinuation { .. } | Self::Continuation { .. } => "continuation",
             Self::Native(IvpNativeSolverError::Bdf(BdfSolveError::Cancelled { .. }))
+            | Self::NativeWithTelemetry {
+                source: IvpNativeSolverError::Bdf(BdfSolveError::Cancelled { .. }),
+                ..
+            }
             | Self::Native(IvpNativeSolverError::BackwardEuler(BeError::Cancelled { .. }))
+            | Self::NativeWithTelemetry {
+                source: IvpNativeSolverError::BackwardEuler(BeError::Cancelled { .. }),
+                ..
+            }
             | Self::Native(IvpNativeSolverError::RadauCancelled { .. })
+            | Self::NativeWithTelemetry {
+                source: IvpNativeSolverError::RadauCancelled { .. },
+                ..
+            }
             | Self::Native(IvpNativeSolverError::Lsode2Cancelled { .. })
+            | Self::NativeWithTelemetry {
+                source: IvpNativeSolverError::Lsode2Cancelled { .. },
+                ..
+            }
             | Self::Native(IvpNativeSolverError::Universal(UniversalOdeError::Bdf(
                 BdfSolveError::Cancelled { .. },
             )))
@@ -1009,6 +1222,21 @@ impl IvpTaskError {
             Self::Native(IvpNativeSolverError::Universal(UniversalOdeError::NonStiff(
                 crate::numerical::NonStiff_api::NonStiffError::Cancelled { .. },
             ))) => "cancelled",
+            Self::NativeWithTelemetry { source, .. } => match source {
+                IvpNativeSolverError::Universal(UniversalOdeError::Bdf(
+                    BdfSolveError::Cancelled { .. },
+                ))
+                | IvpNativeSolverError::Universal(UniversalOdeError::BackwardEuler(
+                    BeError::Cancelled { .. },
+                ))
+                | IvpNativeSolverError::Universal(UniversalOdeError::NonStiff(
+                    crate::numerical::NonStiff_api::NonStiffError::Cancelled { .. }
+                    | crate::numerical::NonStiff_api::NonStiffError::Dop853(
+                        crate::numerical::NonStiff_api::Dop853Error::Cancelled { .. },
+                    ),
+                )) => "cancelled",
+                _ => "solver",
+            },
             Self::Native(_) => "solver",
             Self::Postprocess(_) => "postprocess",
         }
@@ -1052,6 +1280,12 @@ impl std::fmt::Display for IvpTaskError {
                 f,
                 "IVP task for `{solver}` was cancelled before solver preparation"
             ),
+            Self::ContinuationCancelled { method, partial } => write!(
+                f,
+                "IVP `{method}` continuation cancelled at segment {} after {} completed segment(s)",
+                partial.cancelled_segment_index,
+                partial.completed_segments.len()
+            ),
             Self::UnsupportedContinuation { method, mode } => write!(
                 f,
                 "IVP method `{method}` does not support continuation mode `{mode}`"
@@ -1076,6 +1310,7 @@ impl std::fmt::Display for IvpTaskError {
             }
             Self::Semantic(message) => write!(f, "{message}"),
             Self::Native(error) => write!(f, "{error}"),
+            Self::NativeWithTelemetry { source, .. } => write!(f, "{source}"),
             Self::Postprocess(error) => write!(f, "postprocessing error: {error}"),
         }
     }
@@ -1087,7 +1322,12 @@ impl std::error::Error for IvpTaskError {
             Self::Io { source, .. } => Some(source),
             Self::Document(error) => Some(error),
             Self::Native(error) => Some(error),
+            Self::NativeWithTelemetry { source, .. } => Some(source),
             Self::Postprocess(error) => Some(error),
+            Self::ContinuationCancelled { partial, .. } => partial
+                .source
+                .as_deref()
+                .map(|source| source as &(dyn std::error::Error + 'static)),
             _ => None,
         }
     }
@@ -2183,30 +2423,15 @@ pub fn run_ivp_task_from_str(input: &str) -> Result<IvpTaskRunResult, IvpTaskErr
 pub fn run_ivp_task(spec: IvpTaskSpec) -> Result<IvpTaskRunResult, IvpTaskError> {
     if spec.continuation.is_some() {
         let continuation = run_ivp_continuation(spec.clone())?;
-        let last = continuation
-            .segments
-            .last()
-            .ok_or_else(|| IvpTaskError::Continuation {
-                method: ivp_method_name(&spec.solver.method).to_string(),
-                message: "continuation produced no segments".to_string(),
-            })?;
-        return Ok(IvpTaskRunResult {
-            specification: spec,
-            t_result: last.t_result.clone(),
-            y_result: last.y_result.clone(),
-            status: last.status.clone(),
-            status_code: last.status_code.clone(),
-            trajectory: last.trajectory.clone(),
-            continuation: Some(continuation),
-        });
+        return continuation_task_result(spec, continuation);
     }
     let mut solver = build_ivp_solver_from_spec(&spec)?;
     run_ivp_task_single(spec, solver, None)
 }
 
 /// Run one IVP task with cooperative cancellation for routes that expose a
-/// native safe checkpoint. Continuation loops are rejected explicitly until
-/// their inter-segment lifecycle has a cancellation contract.
+/// native safe checkpoint. Fresh and explicit restart continuation segments
+/// preserve completed segments plus the active native partial snapshot.
 pub fn run_ivp_task_with_cancellation_token(
     spec: IvpTaskSpec,
     cancellation: &CancellationToken,
@@ -2217,7 +2442,11 @@ pub fn run_ivp_task_with_cancellation_token(
             solver: solver_name,
         });
     }
-    if spec.continuation.is_some() {
+    if spec
+        .continuation
+        .as_ref()
+        .is_some_and(|continuation| !continuation_cancellation_supported(&spec, continuation))
+    {
         return Err(IvpTaskError::CancellationUnsupported {
             solver: format!("{solver_name} parameter continuation"),
         });
@@ -2227,8 +2456,69 @@ pub fn run_ivp_task_with_cancellation_token(
             solver: solver_name,
         });
     }
+    if spec.continuation.is_some() {
+        let continuation = run_ivp_continuation_inner(spec.clone(), Some(cancellation))?;
+        return continuation_task_result(spec, continuation);
+    }
     let solver = build_ivp_solver_from_spec(&spec)?;
     run_ivp_task_single(spec, solver, Some(cancellation))
+}
+
+/// Whether this concrete task route can honor cooperative cancellation.
+/// Stateful `Continue` task loops remain explicitly unsupported; independent
+/// Fresh and explicit restart segments forward the token to native solvers.
+pub(crate) fn ivp_task_cancellation_supported(spec: &IvpTaskSpec) -> bool {
+    if !spec.solver.method.cancellation_supported() {
+        return false;
+    }
+    spec.continuation
+        .as_ref()
+        .is_none_or(|continuation| continuation_cancellation_supported(spec, continuation))
+}
+
+fn continuation_cancellation_supported(
+    spec: &IvpTaskSpec,
+    continuation: &ContinuationSpec,
+) -> bool {
+    if matches!(continuation.mode, ContinuationMode::Fresh) {
+        return spec.solver.method.cancellation_supported();
+    }
+    if matches!(
+        continuation.restart_policy,
+        ContinuationRestartPolicy::Continue
+    ) {
+        return false;
+    }
+    matches!(
+        spec.solver.method,
+        IvpMethodSpec::Bdf
+            | IvpMethodSpec::BackwardEuler
+            | IvpMethodSpec::Radau5
+            | IvpMethodSpec::Lsode2
+    )
+}
+
+fn continuation_task_result(
+    specification: IvpTaskSpec,
+    continuation: IvpContinuationRunResult,
+) -> Result<IvpTaskRunResult, IvpTaskError> {
+    let last = continuation
+        .segments
+        .last()
+        .ok_or_else(|| IvpTaskError::Continuation {
+            method: ivp_method_name(&specification.solver.method).to_string(),
+            message: "continuation produced no segments".to_string(),
+        })?;
+    Ok(IvpTaskRunResult {
+        specification,
+        t_result: last.t_result.clone(),
+        y_result: last.y_result.clone(),
+        status: last.status.clone(),
+        status_code: last.status_code.clone(),
+        trajectory: last.trajectory.clone(),
+        continuation: Some(continuation),
+        telemetry: None,
+    })
 }
 
 fn run_ivp_task_single(
@@ -2236,11 +2526,36 @@ fn run_ivp_task_single(
     mut solver: IvpTaskSolver,
     cancellation: Option<&CancellationToken>,
 ) -> Result<IvpTaskRunResult, IvpTaskError> {
-    if let Some(cancellation) = cancellation {
-        solver.try_solve_with_cancellation_token(cancellation)?;
+    let telemetry_mode = spec.solver_options.telemetry;
+    let telemetry_started = telemetry_mode
+        .filter(|mode| mode.collects_timings())
+        .map(|_| Instant::now());
+    let solve_result = if let Some(cancellation) = cancellation {
+        solver.try_solve_with_cancellation_token(cancellation)
     } else {
-        solver.try_solve()?;
+        solver.try_solve()
+    };
+    if let Err(error) = solve_result {
+        let telemetry = telemetry_mode
+            .filter(|mode| *mode != IvpTelemetryModeSpec::Off)
+            .map(|mode| {
+                solver.telemetry_snapshot(
+                    mode,
+                    telemetry_started.map(|started| started.elapsed().as_secs_f64() * 1_000.0),
+                )
+            });
+        return Err(match (error, telemetry) {
+            (IvpTaskError::Native(source), Some(telemetry)) => {
+                IvpTaskError::NativeWithTelemetry { source, telemetry }
+            }
+            (error, _) => error,
+        });
     }
+    let solve_elapsed_ms =
+        telemetry_started.map(|started| started.elapsed().as_secs_f64() * 1_000.0);
+    let telemetry = telemetry_mode
+        .filter(|mode| *mode != IvpTelemetryModeSpec::Off)
+        .map(|mode| solver.telemetry_snapshot(mode, solve_elapsed_ms));
     let (t_result, y_result) = solver.get_result();
     let status = solver.status();
     let status_code = solver.status_code();
@@ -2272,6 +2587,7 @@ fn run_ivp_task_single(
         status_code,
         trajectory,
         continuation: None,
+        telemetry,
     })
 }
 
@@ -2279,6 +2595,40 @@ fn run_ivp_task_single(
 /// alive for `warm` and `prepared` modes. `fresh` deliberately rebuilds every
 /// segment and is useful as an independent lifecycle reference.
 pub fn run_ivp_continuation(spec: IvpTaskSpec) -> Result<IvpContinuationRunResult, IvpTaskError> {
+    run_ivp_continuation_inner(spec, None)
+}
+
+/// Execute a cancellable continuation when each segment is an independent
+/// solve or an explicit restart. Completed segment results are moved into the
+/// typed cancellation error; the interrupted native segment remains its source.
+pub fn run_ivp_continuation_with_cancellation_token(
+    spec: IvpTaskSpec,
+    cancellation: &CancellationToken,
+) -> Result<IvpContinuationRunResult, IvpTaskError> {
+    if !spec
+        .continuation
+        .as_ref()
+        .is_some_and(|continuation| continuation_cancellation_supported(&spec, continuation))
+    {
+        return Err(IvpTaskError::CancellationUnsupported {
+            solver: format!(
+                "{} parameter continuation",
+                ivp_method_name(&spec.solver.method)
+            ),
+        });
+    }
+    if cancellation.is_cancelled() {
+        return Err(IvpTaskError::CancelledBeforePreparation {
+            solver: ivp_method_name(&spec.solver.method).to_owned(),
+        });
+    }
+    run_ivp_continuation_inner(spec, Some(cancellation))
+}
+
+fn run_ivp_continuation_inner(
+    spec: IvpTaskSpec,
+    cancellation: Option<&CancellationToken>,
+) -> Result<IvpContinuationRunResult, IvpTaskError> {
     let continuation = spec
         .continuation
         .clone()
@@ -2289,10 +2639,19 @@ pub fn run_ivp_continuation(spec: IvpTaskSpec) -> Result<IvpContinuationRunResul
     let mut segments = Vec::with_capacity(continuation.value_grid.len());
     let mut fresh_preparations = 0usize;
     let mut prepared_reuses = 0usize;
+    let telemetry_mode = spec
+        .solver_options
+        .telemetry
+        .filter(|mode| *mode != IvpTelemetryModeSpec::Off);
 
     match continuation.mode {
         ContinuationMode::Fresh => {
             for (index, parameter_values) in continuation.value_grid.iter().enumerate() {
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    return Err(continuation_cancelled_error(
+                        &spec, index, segments, None, None,
+                    ));
+                }
                 let prepare_started = Instant::now();
                 let mut segment_spec = spec.clone();
                 let rhs = continuation_rhs_for_values(&spec, &continuation, parameter_values);
@@ -2311,8 +2670,30 @@ pub fn run_ivp_continuation(spec: IvpTaskSpec) -> Result<IvpContinuationRunResul
                 fresh_preparations += 1;
                 let prepare_ms = prepare_started.elapsed().as_secs_f64() * 1_000.0;
                 let solve_started = Instant::now();
-                solver.try_solve()?;
+                let solve_result = match cancellation {
+                    Some(token) => solver.try_solve_with_cancellation_token(token),
+                    None => solver.try_solve(),
+                };
+                if let Err(error) = solve_result {
+                    if error.category() == "cancelled" {
+                        return Err(continuation_cancelled_error(
+                            &spec,
+                            index,
+                            segments,
+                            Some(error),
+                            telemetry_mode.map(|mode| {
+                                solver.telemetry_snapshot(
+                                    mode,
+                                    Some(solve_started.elapsed().as_secs_f64() * 1_000.0),
+                                )
+                            }),
+                        ));
+                    }
+                    return Err(error);
+                }
                 let solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
+                let telemetry =
+                    telemetry_mode.map(|mode| solver.telemetry_snapshot(mode, Some(solve_ms)));
                 let (t_result, y_result) = solver.get_result();
                 segments.push(IvpContinuationSegment {
                     parameter_value: parameter_values[0],
@@ -2324,6 +2705,7 @@ pub fn run_ivp_continuation(spec: IvpTaskSpec) -> Result<IvpContinuationRunResul
                     trajectory: solver.trajectory(),
                     prepare_ms,
                     solve_ms,
+                    telemetry,
                 });
             }
         }
@@ -2334,6 +2716,11 @@ pub fn run_ivp_continuation(spec: IvpTaskSpec) -> Result<IvpContinuationRunResul
             let initial_prepare_ms = prepare_started.elapsed().as_secs_f64() * 1_000.0;
             let initial = &spec.initial_conditions;
             for (index, grid_values) in continuation.value_grid.iter().enumerate() {
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                    return Err(continuation_cancelled_error(
+                        &spec, index, segments, None, None,
+                    ));
+                }
                 let segment_prepare_ms = if index == 0 { initial_prepare_ms } else { 0.0 };
                 let parameter_values =
                     continuation_parameter_values(&spec, &continuation, grid_values)?;
@@ -2353,8 +2740,30 @@ pub fn run_ivp_continuation(spec: IvpTaskSpec) -> Result<IvpContinuationRunResul
                     if continuation.y0_values.is_some() || continuation.t0_values.is_some() {
                         solver.try_restart_with_initial_state(&segment_initial)?;
                     }
-                    solver.try_solve()?;
+                    let solve_result = match cancellation {
+                        Some(token) => solver.try_solve_with_cancellation_token(token),
+                        None => solver.try_solve(),
+                    };
+                    if let Err(error) = solve_result {
+                        if error.category() == "cancelled" {
+                            return Err(continuation_cancelled_error(
+                                &spec,
+                                index,
+                                segments,
+                                Some(error),
+                                telemetry_mode.map(|mode| {
+                                    solver.telemetry_snapshot(
+                                        mode,
+                                        Some(solve_started.elapsed().as_secs_f64() * 1_000.0),
+                                    )
+                                }),
+                            ));
+                        }
+                        return Err(error);
+                    }
                     let solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
+                    let telemetry =
+                        telemetry_mode.map(|mode| solver.telemetry_snapshot(mode, Some(solve_ms)));
                     let (t_result, y_result) = solver.get_result();
                     segments.push(IvpContinuationSegment {
                         parameter_value: grid_values[0],
@@ -2366,17 +2775,38 @@ pub fn run_ivp_continuation(spec: IvpTaskSpec) -> Result<IvpContinuationRunResul
                         trajectory: solver.trajectory(),
                         prepare_ms: segment_prepare_ms,
                         solve_ms,
+                        telemetry,
                     });
                     continue;
                 } else {
                     prepared_reuses += 1;
                     let solve_started = Instant::now();
-                    solver.try_continue_with_parameters(
+                    let continue_result = solver.try_continue_with_parameters(
                         &parameter_values,
                         restart_each,
                         &segment_initial,
-                    )?;
+                        cancellation,
+                    );
+                    if let Err(error) = continue_result {
+                        if error.category() == "cancelled" {
+                            return Err(continuation_cancelled_error(
+                                &spec,
+                                index,
+                                segments,
+                                Some(error),
+                                telemetry_mode.map(|mode| {
+                                    solver.telemetry_snapshot(
+                                        mode,
+                                        Some(solve_started.elapsed().as_secs_f64() * 1_000.0),
+                                    )
+                                }),
+                            ));
+                        }
+                        return Err(error);
+                    }
                     let solve_ms = solve_started.elapsed().as_secs_f64() * 1_000.0;
+                    let telemetry =
+                        telemetry_mode.map(|mode| solver.telemetry_snapshot(mode, Some(solve_ms)));
                     let (t_result, y_result) = solver.get_result();
                     segments.push(IvpContinuationSegment {
                         parameter_value: grid_values[0],
@@ -2388,6 +2818,7 @@ pub fn run_ivp_continuation(spec: IvpTaskSpec) -> Result<IvpContinuationRunResul
                         trajectory: solver.trajectory(),
                         prepare_ms: segment_prepare_ms,
                         solve_ms,
+                        telemetry,
                     });
                 }
             }
@@ -2406,6 +2837,24 @@ pub fn run_ivp_continuation(spec: IvpTaskSpec) -> Result<IvpContinuationRunResul
         prepared_reuses,
         segments,
     })
+}
+
+fn continuation_cancelled_error(
+    spec: &IvpTaskSpec,
+    segment_index: usize,
+    completed_segments: Vec<IvpContinuationSegment>,
+    source: Option<IvpTaskError>,
+    active_segment_telemetry: Option<IvpTaskTelemetrySnapshot>,
+) -> IvpTaskError {
+    IvpTaskError::ContinuationCancelled {
+        method: ivp_method_name(&spec.solver.method).to_owned(),
+        partial: Box::new(IvpContinuationCancelled {
+            cancelled_segment_index: segment_index,
+            completed_segments,
+            source: source.map(Box::new),
+            active_segment_telemetry,
+        }),
+    }
 }
 
 fn continuation_parameter_values(

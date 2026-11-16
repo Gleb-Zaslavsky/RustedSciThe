@@ -15,6 +15,7 @@ use std::time::Duration;
 
 const CONTROL_PROTOCOL_VERSION: u32 = 1;
 const MAX_CONTROL_RECORD_BYTES: usize = 8 * 1024;
+const CONTROL_IO_TIMEOUT: Duration = Duration::from_millis(250);
 
 type ActiveJob = Arc<Mutex<Option<(String, Option<CancellationToken>)>>>;
 
@@ -80,6 +81,12 @@ impl WorkerControlServer {
             .active_job
             .lock()
             .map_err(|_| io::Error::other("worker active-job lock poisoned"))?;
+        if active.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "a worker job is already active",
+            ));
+        }
         *active = Some((job_id, token));
         Ok(())
     }
@@ -108,8 +115,8 @@ fn handle_control_connection(
     expected_token: &str,
     active_job: &ActiveJob,
 ) -> io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_read_timeout(Some(CONTROL_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONTROL_IO_TIMEOUT))?;
     let mut record = Vec::new();
     let mut reader = BufReader::new(stream.try_clone()?);
     let read = reader
@@ -280,6 +287,12 @@ mod tests {
         );
         assert_eq!(accepted["status"], "cancellation_requested");
         assert!(token.is_cancelled());
+
+        let repeated = send_control(
+            &server,
+            json!({"op":"cancel", "job_id":"job-17", "token":server.capability_token()}),
+        );
+        assert_eq!(repeated["status"], "cancellation_requested");
     }
 
     #[test]
@@ -294,5 +307,56 @@ mod tests {
             response["error"]["code"],
             "worker.control.authentication_failed"
         );
+    }
+
+    #[test]
+    fn slow_client_cannot_block_a_later_cancellation_for_seconds() {
+        let server = WorkerControlServer::bind_loopback().expect("bind worker control");
+        let token = CancellationToken::new();
+        server
+            .activate("job-18".to_owned(), Some(token.clone()))
+            .expect("activate job");
+
+        let mut slow = TcpStream::connect(server.address()).expect("connect slow client");
+        slow.write_all(br#"{"op":"status"}"#)
+            .expect("send incomplete line without newline");
+        thread::sleep(Duration::from_millis(300));
+
+        let started = std::time::Instant::now();
+        let response = send_control(
+            &server,
+            json!({"op":"cancel", "job_id":"job-18", "token":server.capability_token()}),
+        );
+        assert_eq!(response["status"], "cancellation_requested");
+        assert!(token.is_cancelled());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "slow client delayed cancellation for {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn activation_rejects_overwriting_an_active_job() {
+        let server = WorkerControlServer::bind_loopback().expect("bind worker control");
+        let first = CancellationToken::new();
+        let second = CancellationToken::new();
+        server
+            .activate("job-1".to_owned(), Some(first.clone()))
+            .expect("activate first job");
+        assert_eq!(
+            server
+                .activate("job-2".to_owned(), Some(second.clone()))
+                .expect_err("second activation must not replace the active job")
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        let response = send_control(
+            &server,
+            json!({"op":"cancel", "job_id":"job-1", "token":server.capability_token()}),
+        );
+        assert_eq!(response["status"], "cancellation_requested");
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
     }
 }

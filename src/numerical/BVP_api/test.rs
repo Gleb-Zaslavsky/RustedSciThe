@@ -1081,6 +1081,10 @@ fn common_telemetry_policy_is_forwarded_or_rejected_without_promotion() {
         damped.generated_backend_config.aot_telemetry_mode,
         BvpAotTelemetryMode::Detailed
     );
+    assert_eq!(
+        damped.generated_backend_config.bvp_logging_mode,
+        BvpLoggingMode::Detailed
+    );
 
     let unsupported = match BvpSolverSettings::Damped(DampedSolverOptions::default())
         .with_telemetry_mode(BvpApiTelemetryMode::Timings)

@@ -511,18 +511,11 @@ impl UniversalFitting {
         self.build_with_optional_cancellation(None)
     }
 
-    /// Build and solve with cooperative cancellation on LM and VarPro routes.
-    /// Gavin currently rejects this option explicitly.
+    /// Build and solve with cooperative cancellation on all fitting routes.
     pub fn build_with_cancellation_token(
         self,
         cancellation: CancellationToken,
     ) -> Result<UniversalFittingResult, UniversalFittingError> {
-        if self.method == Method::GAVIN {
-            return Err(UniversalFittingError::UnsupportedOption {
-                method: self.method,
-                option: "cancellation_token",
-            });
-        }
         self.build_with_optional_cancellation(Some(cancellation))
     }
 
@@ -650,15 +643,18 @@ impl UniversalFitting {
                     1e-1,
                 ));
                 let equations = self.equations;
-                let fit = self
+                let gavin = self
                     .gavin
                     .with_equations(equations.clone())
                     .with_frontend(self.frontend)
                     .with_lambdify_execution_policy(self.execution_policy)
                     .with_telemetry(self.gavin_telemetry_mode)
                     .with_logging(self.logging_enabled)
-                    .with_solver_controls(controls.0, controls.1, controls.2, controls.3)
-                    .try_solve()?;
+                    .with_solver_controls(controls.0, controls.1, controls.2, controls.3);
+                let fit = match cancellation {
+                    Some(token) => gavin.try_solve_with_cancellation_token(token)?,
+                    None => gavin.try_solve()?,
+                };
                 let parameters = fit
                     .parameter_names
                     .iter()
@@ -906,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn universal_lm_and_varpro_forward_cancellation_while_gavin_rejects_it() {
+    fn universal_lm_varpro_and_gavin_forward_cancellation_snapshots() {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         let result = UniversalFitting::new()
@@ -953,19 +949,28 @@ mod tests {
             ) if snapshot.completed_iterations == 0 && snapshot.parameters == vec![1.2]
         ));
 
+        let gavin_cancellation = CancellationToken::new();
+        gavin_cancellation.cancel();
         let result = UniversalFitting::new()
             .with_gavin()
-            .build_with_cancellation_token(CancellationToken::new());
+            .with_data(vec![0.0, 1.0, 2.0, 3.0], vec![1.0, 3.0, 5.0, 7.0])
+            .with_equation_str("a*x+b")
+            .with_arg("x")
+            .with_unknowns(["a", "b"])
+            .with_initial_guess(vec![1.0, 1.0])
+            .with_gavin_telemetry(crate::numerical::SolverTelemetryMode::Counters)
+            .build_with_cancellation_token(gavin_cancellation);
         let error = match result {
             Err(error) => error,
-            Ok(_) => panic!("VarPro unexpectedly accepted cancellation"),
+            Ok(_) => panic!("pre-cancelled Gavin solve unexpectedly succeeded"),
         };
         assert!(matches!(
             error,
-            UniversalFittingError::UnsupportedOption {
-                method: Method::GAVIN,
-                option: "cancellation_token"
-            }
+            UniversalFittingError::Gavin(
+                crate::numerical::optimization::lm_gavin::GavinLmError::Cancelled { ref snapshot }
+            ) if snapshot.completed_iterations == 0
+                && snapshot.parameters == vec![1.0, 1.0]
+                && snapshot.telemetry.as_ref().is_some_and(|stats| stats.objective_evaluations == 0)
         ));
     }
 
