@@ -127,6 +127,7 @@ Distrust convergence.
 - [Symbolic Engine and Backend Choices](#symbolic-engine-and-backend-choices)
 - [AOT and Parameter Continuation](#aot-and-parameter-continuation)
 - [Task Documents and CLI](#task-documents-and-cli)
+- [AI Agent Interoperability](#ai-agent-interoperability)
 - [Guides and Examples](#guides-and-examples)
 - [Diagnostics, Testing, and Benchmarks](#diagnostics-testing-and-benchmarks)
 - [Additional Tools and Dependencies](#additional-tools-and-dependencies)
@@ -202,7 +203,7 @@ entry points.
 
 Use the native solver API for detailed numerical and backend configuration.
 [UniversalODESolver](src/numerical/ODE_api2.rs) and the
-[shared BVP API](src/numerical/BVP_api.rs) provide convenient access for
+[shared BVP API](src/numerical/BVP_api/mod.rs) provide convenient access for
 prototyping across solver families.
 
 Standalone BDF, BE, and nonlinear-system solvers intentionally use dense linear
@@ -355,6 +356,85 @@ See the [task-document guide](src/command_interpreter/TASK_DOCS_GUIDE_EN.md),
 [commented reference tasks](examples/task_docs/reference/), and
 [recursive symbolic aliases example](examples/task_document_symbolic_aliases_guide.rs)
 for the complete syntax and per-solver options.
+
+## AI Agent Interoperability
+
+RustedSciThe can act as the numerical execution component in an agent-driven
+workflow. It does not contain an AI agent or domain physics: the client builds
+the model and defines scientific acceptance criteria; RST validates the task,
+selects the requested numerical route, runs it, and returns typed results and
+diagnostics. The task contract covers four families: IVP, BVP, nonlinear
+systems, and optimization/fitting.
+
+### JSON Task API
+
+Rust clients can validate a JSON task without preparing a solver, then execute
+it through the same family-specific parsers used by the text task format:
+
+```rust
+use RustedSciThe::command_interpreter::task_contract::{
+    inspect_task_json,
+    run_task_json_envelope,
+};
+
+let task_json = r#"{"format_version":1,"task":{"solver":"IVP","method":"RK45"},"equations":{"arg":"t","y":"-y"},"initial_conditions":{"t0":0.0,"t_end":1.0,"y0":1.0}}"#;
+let inspection = inspect_task_json(task_json)?;
+println!("{}", inspection.to_json());
+let result = run_task_json_envelope(task_json);
+println!("{result}");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The task format is versioned (`format_version: 1`) and has a strict
+[JSON Schema](src/command_interpreter/task_document.schema.json). Separate
+schemas describe bounded task results and acceptance reports. Inspection
+performs typed structural, symbolic-expression, and route validation without
+compiling AOT callbacks or running a solve. Named presets can expand common
+solver configurations; explicit task values remain visible and are validated
+after expansion.
+
+### Worker and Python Entry Points
+
+The optional built-in CLI worker accepts newline-delimited JSON (JSONL), one
+request and response per line. It supports protocol v1 operations
+`capabilities`, `presets`, `validate`, and `execute`, as well as the legacy
+Agent Job v1 request shape. For example, launch a single-request worker for an
+external supervisor:
+
+```sh
+cargo run --bin RustedSciThe -- worker --once
+```
+
+The worker also exposes a machine-readable catalog and schemas through
+`capabilities`; AOT toolchains are disabled unless explicitly allowlisted by
+the worker administrator. AOT artifacts are kept in the administrator-owned
+worker cache, not in job-selected paths. See the
+[worker guide](src/AI_AGENT_INTEROP_WORKER.md) for protocol records, AOT
+policy, control/cancellation, and deployment examples.
+
+Python is an optional direct client path, not a required transport layer for
+Rust or worker users. `TaskDocument.from_json(...)` uses the core JSON adapter
+and provides typed `parse`, `preview`, `check`, route inspection, and
+family-specific run methods. See the
+[Python task examples](bindings/python/examples/task_batch.py) and
+[Python API overview](bindings/python/README.md).
+
+### Diagnostics and Deployment Boundary
+
+Task errors preserve machine-readable category, stage, field path, and typed
+source information. Telemetry is opt-in: the compact result envelope reports
+measured, not-requested, unsupported, or partial metrics; requested detailed
+diagnostics travel separately and are size-bounded. Missing measurements are
+not represented as fabricated zeroes. See the
+[agent job contract](src/AI_AGENT_INTEROP_JOB_CONTRACT.md) and
+[telemetry contract](src/AI_AGENT_INTEROP_TELEMETRY.md).
+
+RST does not enforce hard wall-clock deadlines, memory limits, CPU quotas, or
+OS-level isolation. A scheduler/supervisor owns process lifecycle and resource
+budgets; it may use `worker --once` for one process per job. Cooperative
+cancellation is available on supported routes, while hard timeouts remain an
+external process-control responsibility. The worker is an adapter, not a
+sandbox, physics layer, or durable artifact store.
 
 ## Guides and Examples
 

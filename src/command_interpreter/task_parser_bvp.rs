@@ -2092,6 +2092,7 @@ fn run_bvp_damp_reused_continuation(
     // Keep the symbolic parameter schema intact. Unlike fresh mode this is
     // intentionally not substituted into new expressions per segment.
     let mut prepared_spec = spec.clone();
+    prepared_spec.equations.rhs = continuation.symbolic_rhs.clone();
     prepared_spec.continuation = None;
     let mut solver = build_bvp_solver_from_spec(&prepared_spec)?;
     if !matches!(&solver, BvpDampTaskSolver::Damped(_)) {

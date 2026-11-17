@@ -330,7 +330,11 @@ protocol versions and how unknown versions/operations are answered.
 
 **Resolution:** Use a strict envelope with `worker_protocol_version`,
 `operation`, and operation-specific `payload`; v1 supports `capabilities`,
-`presets`, `validate`, and `execute`. New requests receive uniform tagged
+`presets`, `task_schema`, `expand_preset`, `validate`, and `execute`.
+`task_schema` and `expand_preset` were added as backward-compatible discovery
+operations and are advertised by `capabilities`; older workers remain
+detectable by clients. `expand_preset` delegates all default/route semantics
+to the native Rust preset API. New requests receive uniform tagged
 responses; execute nests the unchanged Agent Job response. Direct Agent Job v1
 records remain legacy execute requests with their existing response shape.
 Capabilities is version discovery, and unsupported versions/operations return

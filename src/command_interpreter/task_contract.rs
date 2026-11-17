@@ -6384,6 +6384,29 @@ pub fn task_capabilities_json() -> Value {
                 "continuation_cancellation": {"fresh_segments":"supported when the selected method supports single-solve cancellation", "explicit_restart_segments":"supported for BDF, Backward Euler, Radau5, and LSODE2", "stateful_continue":false},
                 "route_axes": {"symbolic_frontends":["ExprLegacy", "AtomView"], "symbolic_executions":["Lambdify", "AOT"], "linear_layouts":["Dense", "Sparse", "Banded"], "callback_policies":["Sequential", "Parallel", "Auto"], "telemetry_modes":["Off", "Counters", "Timings", "Detailed"]},
                 "route_axes_apply_to": ["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"],
+                "solver_option_values": {
+                    "symbolic_frontend": {"allowed_values":["ExprLegacy", "AtomView"], "applies_to":["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"]},
+                    "symbolic_assembly": {"allowed_values":["ExprLegacy", "AtomView"], "applies_to":["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"], "alias_of":"symbolic_frontend"},
+                    "symbolic_execution": {"allowed_values":["Lambdify", "AOT"], "applies_to":["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"]},
+                    "aot_toolchain": {"allowed_values":["c_tcc", "c_gcc", "zig", "rust"], "applies_to":["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"], "when":"symbolic_execution=AOT"},
+                    "aot_profile": {"allowed_values":["debug", "release"], "applies_to":["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"], "when":"symbolic_execution=AOT"},
+                    "matrix_layout": {"allowed_values":["Dense", "Sparse", "Banded"], "applies_to":["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"], "method_overrides":{"backward_euler":{"allowed_values":["Dense"]}}},
+                    "linear_structure": {"allowed_values":["Dense", "Sparse", "Banded"], "applies_to":["bdf", "radau5", "lsode", "lsoda", "lsode2"], "alias_of":"matrix_layout"},
+                    "execution_policy": {"allowed_values":["Sequential", "Parallel", "Auto"], "applies_to":["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"], "method_overrides":{"backward_euler":{"allowed_values":["Sequential"]}}},
+                    "telemetry": {"allowed_values":["Off", "Counters", "Timings", "Detailed"], "applies_to":["rk45", "dopri", "dop853", "ab4", "bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"]},
+                    "logging": {"allowed_values":["Off", "Error", "Warn", "Info", "Debug"], "applies_to":["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"], "mutually_exclusive_with":"log_level"},
+                    "log_level": {"allowed_values":["Off", "Error", "Warn", "Info", "Debug"], "applies_to":["bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"], "mutually_exclusive_with":"logging"},
+                    "lsode2_method_family": {"allowed_values":["auto", "adams", "bdf"], "applies_to":["lsode2"]},
+                    "lsode2_controller": {"allowed_values":["auto", "adams", "bdf"], "applies_to":["lsode2"], "alias_of":"lsode2_method_family"},
+                    "lsode2_symbolic_assembly": {"allowed_values":["ExprLegacy", "AtomView"], "applies_to":["lsode2"]},
+                    "lsode2_symbolic_execution": {"allowed_values":["LambdifyExpr", "AOT"], "applies_to":["lsode2"]},
+                    "lsode2_aot_toolchain": {"allowed_values":["c_tcc", "c_gcc", "zig", "rust"], "applies_to":["lsode2"], "when":"lsode2_symbolic_execution=AOT"},
+                    "lsode2_aot_profile": {"allowed_values":["debug", "release"], "applies_to":["lsode2"], "when":"lsode2_symbolic_execution=AOT"},
+                    "lsode2_linear_structure": {"allowed_values":["Dense", "Sparse", "Banded"], "applies_to":["lsode2"]},
+                    "lsode2_linear_solver_policy": {"allowed_values":["auto", "dense_lu", "faer_sparse_lu", "lapack_faithful_banded_lu"], "applies_to":["lsode2"]},
+                    "lsode2_native_execution": {"allowed_values":["faithful_bdf_solve", "probe_before_bridge", "bridge_solve"], "applies_to":["lsode2"]},
+                    "lsode2_stop_comparator": {"allowed_values":["ge", "le", "abs_distance"], "applies_to":["lsode2"], "when":"lsode2_stop_variable and lsode2_stop_target are provided"}
+                },
                 "telemetry_modes_apply_to": ["rk45", "dopri", "dop853", "ab4", "bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"],
                 "effective_defaults_by_method": ivp_effective_defaults,
                 "defaults": {"bdf":{"rtol":1e-3,"atol":1e-6,"max_steps":1000000,"matrix_layout":"Dense"}, "backward_euler":{"tolerance":1e-6,"max_iterations":100}, "radau5":{"rtol":1e-6,"atol":1e-6,"max_newton_iterations":6}, "lsode_family":{"max_step":1e-3,"rtol":1e-5,"atol":1e-8,"controller":"method-dependent"}, "other_fields":"reported by inspect_task_json or delegated to native defaults"}
@@ -7739,6 +7762,133 @@ mod tests {
                 "ivp.option.unsupported",
                 "Backward Euler must reject {policy} callback policy"
             );
+        }
+    }
+
+    #[test]
+    fn ivp_capabilities_publish_route_scoped_string_values() {
+        let capabilities = task_capabilities_json();
+        let ivp = &capabilities["families"][0];
+        let method_names = ivp["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|method| method["name"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        let schema_fields = schema_option_names("/$defs/ivpSolverOptions/properties")
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let value_catalog = ivp["solver_option_values"]
+            .as_object()
+            .expect("IVP advertises allowed values for string controls");
+
+        for (field, descriptor) in value_catalog {
+            assert!(
+                schema_fields.contains(field),
+                "{field} is absent from schema"
+            );
+            assert!(
+                descriptor["allowed_values"]
+                    .as_array()
+                    .is_some_and(|values| !values.is_empty()),
+                "{field} must publish at least one canonical value"
+            );
+            let applies_to = descriptor["applies_to"].as_array().unwrap();
+            assert!(!applies_to.is_empty(), "{field} must declare route scope");
+            for method in applies_to {
+                assert!(
+                    method_names.contains(method.as_str().unwrap()),
+                    "{field} references unknown IVP method {method}"
+                );
+            }
+        }
+
+        for method in ivp["methods"].as_array().unwrap() {
+            let method_name = method["name"].as_str().unwrap();
+            if let Some(restricted) = method["unsupported_option_values"].as_object() {
+                for (field, rejected_values) in restricted {
+                    let descriptor = &value_catalog[field];
+                    let all_values = descriptor["allowed_values"]
+                        .as_array()
+                        .expect("constrained field has an allowed-value catalog")
+                        .iter()
+                        .map(Value::as_str)
+                        .collect::<Option<std::collections::BTreeSet<_>>>()
+                        .unwrap();
+                    let rejected_values = rejected_values
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(Value::as_str)
+                        .collect::<Option<std::collections::BTreeSet<_>>>()
+                        .unwrap();
+                    let expected = all_values
+                        .difference(&rejected_values)
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let advertised = descriptor["method_overrides"][method_name]
+                        .get("allowed_values")
+                        .and_then(Value::as_array)
+                        .expect("method-specific exclusions have an allowed-value override")
+                        .iter()
+                        .map(Value::as_str)
+                        .collect::<Option<std::collections::BTreeSet<_>>>()
+                        .unwrap();
+                    assert_eq!(advertised, expected, "{method_name}.{field}");
+                }
+            }
+        }
+
+        let lsode2_values = &value_catalog;
+        for field in [
+            "lsode2_method_family",
+            "lsode2_symbolic_assembly",
+            "lsode2_symbolic_execution",
+            "lsode2_aot_toolchain",
+            "lsode2_aot_profile",
+            "lsode2_linear_structure",
+            "lsode2_linear_solver_policy",
+            "lsode2_native_execution",
+            "lsode2_stop_comparator",
+        ] {
+            assert_eq!(
+                lsode2_values[field]["applies_to"],
+                serde_json::json!(["lsode2"]),
+                "{field} must be scoped to LSODE2"
+            );
+        }
+
+        for (field, descriptor) in value_catalog {
+            let all_values = descriptor["allowed_values"].as_array().unwrap();
+            for method in descriptor["applies_to"].as_array().unwrap() {
+                let method_name = method.as_str().unwrap();
+                let method_values = descriptor["method_overrides"][method_name]
+                    .get("allowed_values")
+                    .and_then(Value::as_array)
+                    .unwrap_or(all_values);
+                for value in method_values {
+                    let mut options = serde_json::Map::new();
+                    options.insert(field.clone(), value.clone());
+                    if descriptor["when"] == "symbolic_execution=AOT" {
+                        options.insert("symbolic_execution".into(), Value::from("AOT"));
+                    }
+                    if descriptor["when"] == "lsode2_symbolic_execution=AOT" {
+                        options.insert("lsode2_symbolic_execution".into(), Value::from("AOT"));
+                    }
+                    if field == "lsode2_stop_comparator" {
+                        options.insert("lsode2_stop_variable".into(), Value::from("y"));
+                        options.insert("lsode2_stop_target".into(), Value::from(0.5));
+                    }
+
+                    let mut document: Value = serde_json::from_str(IVP).unwrap();
+                    document["task"]["method"] = Value::from(method_name);
+                    document["solver_options"] = Value::Object(options);
+                    assert!(
+                        inspect_task_json(&document.to_string()).is_ok(),
+                        "advertised value {value} for {method_name}.{field} must pass RST preflight: {document}"
+                    );
+                }
+            }
         }
     }
 

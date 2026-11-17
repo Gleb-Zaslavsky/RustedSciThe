@@ -814,6 +814,41 @@ mod tests {
     }
 
     #[test]
+    fn agent_rhs_reference_examples_match_public_expr_parser() {
+        // Keep the AI-client RHS guide grounded in the parser used by task
+        // documents, rather than in a second Python implementation.
+        let accepted = [
+            "-k*y + exp(-t)",
+            "ln(1 + y^2)",
+            "log(x)",
+            "sin(theta) + cos(theta)",
+            "2.5e-3 * rate * y_0",
+            "(a + b)/(1 + beta*x)",
+            "tan(x) + asin(y) + acos(z) + atan(w)",
+        ];
+        for source in accepted {
+            assert!(
+                Expr::try_parse_expression(source).is_ok(),
+                "guide example should parse: {source}"
+            );
+        }
+
+        let rejected = ["sqrt(x)", "log10(x)", "2y", "x y", "x +", "1e+"];
+        for source in rejected {
+            assert!(
+                Expr::try_parse_expression(source).is_err(),
+                "guide anti-example should be rejected: {source}"
+            );
+        }
+
+        // The current Expr grammar accepts `log` as a natural-log alias.
+        assert_eq!(
+            Expr::try_parse_expression("log(x)").unwrap(),
+            Expr::try_parse_expression("ln(x)").unwrap()
+        );
+    }
+
+    #[test]
     fn test_parse_variable_with_underscore_indexing() {
         let expr = parse_expression_func(0, "x_0").unwrap();
         assert_eq!(expr, Expr::Var("x_0".to_string()));

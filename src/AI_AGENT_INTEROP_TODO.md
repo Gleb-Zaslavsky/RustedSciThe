@@ -273,13 +273,23 @@ with an agent-specific numerical implementation.
   not advertised as task controls. Route-level cancellation support is included in
   the versioned Rust task capability catalog, including IVP method and
   continuation-lifecycle distinctions. The JSONL worker now exposes
-  `capabilities`, `presets`, `validate`, and `execute` operations under its
+  `capabilities`, `presets`, `task_schema`, `expand_preset`, `validate`, and
+  `execute` operations under its
   versioned operation envelope while preserving direct Agent Job v1 behavior.
   Do not infer cancellation support from solver family names or
   Cartesian-product axes.
   An exhaustive matrix may be added later from shared metadata; do not
   independently duplicate parser rules. See decisions 6 and 9 in
   `AI_AGENT_INTEROP_OPEN_DECISIONS.md`.
+- [x] Expose canonical allowed values for IVP string-valued task settings in
+  the live capability response, scoped to applicable methods and annotated
+  with selector dependencies (including LSODE2 controller, execution,
+  linear-solver and stop-condition choices). This closes the gap where an
+  agent could discover a field name but had to guess its accepted spelling.
+  Capability drift tests check schema fields and method references, and every
+  advertised LSODE2 value is preflighted through the real RST parser. The
+  remaining broader enum/capability audit for non-IVP controls is separate;
+  do not present global axes as an unrestricted Cartesian product.
 - [x] Add a drift gate for every concrete default currently advertised in the
   capability catalog, comparing it with `inspect_task_json()` or native
   `Default` values. The gate caught and fixed a missing BVP_sci
@@ -639,7 +649,8 @@ with an agent-specific numerical implementation.
   1, 2, 8, and 12 and
   `AI_AGENT_INTEROP_WORKER.md`.
 - [x] Add a minimal, strictly typed, versioned worker-request protocol with
-  `capabilities`, `presets`, `validate`, and `execute` operations. Direct
+  `capabilities`, `presets`, `task_schema`, `expand_preset`, `validate`, and
+  `execute` operations. Direct
   `Agent Job v1` JSONL records remain the legacy execute form with their
   existing response shape; new requests receive uniform operation-tagged
   responses, and new `execute` nests the unchanged legacy job-result envelope.
@@ -647,7 +658,11 @@ with an agent-specific numerical implementation.
   fail with typed protocol errors. Request/response schemas are published,
   validation delegates to the no-solve `inspect_task_json()` path, and tests
   exercise discovery, validation, execute, rejection, schema shape, and legacy
-  compatibility. See decision 13.
+  compatibility. `task_schema` returns the canonical embedded TaskDocument
+  schema as a read-only discovery response; it is additive within protocol v1
+  and advertised through capabilities. `expand_preset` delegates route/default
+  application and native preflight to the canonical Rust preset API. See
+  decision 13.
 - [x] Preserve completed numerical results when worker control cleanup fails.
   A failed `control.deactivate()` is reported on stderr while the completed
   task envelope is retained unchanged on protocol stdout. This avoids a worker

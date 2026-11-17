@@ -570,22 +570,23 @@ fn process_protocol_request(
         );
     }
     let payload = &request["payload"];
+    if matches!(
+        operation,
+        "capabilities" | "presets" | "task_schema" | "expand_preset"
+    ) {
+        let result = process_discovery_operation(operation, payload);
+        return match result {
+            Ok(result) => json!({
+                "worker_protocol_version": WORKER_PROTOCOL_VERSION,
+                "operation": operation,
+                "status": "succeeded",
+                "result": result,
+                "error": Value::Null,
+            }),
+            Err((code, message, details)) => operation_error(operation, code, message, details),
+        };
+    }
     let result = match operation {
-        "capabilities" if payload.as_object().is_some_and(|map| map.is_empty()) => Ok(json!({
-            "protocol": {
-                "version": WORKER_PROTOCOL_VERSION,
-                "operations": ["capabilities", "presets", "validate", "execute"],
-                "max_record_bytes": MAX_WORKER_RECORD_BYTES,
-                "max_response_bytes": MAX_WORKER_RESPONSE_BYTES,
-                "max_inline_diagnostics_bytes": MAX_OPERATION_DIAGNOSTICS_BYTES,
-                "legacy_agent_job_v1": "accepted_as_execute",
-            },
-            "task_capabilities": crate::command_interpreter::task_contract::task_capabilities_json(),
-            "numerical_metrics": crate::command_interpreter::agent_metrics::NUMERICAL_METRIC_CATALOG,
-        })),
-        "presets" if payload.as_object().is_some_and(|map| map.is_empty()) => {
-            Ok(crate::command_interpreter::task_presets::task_presets_json())
-        }
         "validate"
             if payload.as_object().is_some_and(|map| {
                 map.len() == 1 && map.contains_key("task") && map["task"].is_object()
@@ -649,7 +650,7 @@ fn process_protocol_request(
                 });
             }
         }
-        "capabilities" | "presets" | "validate" | "execute" => {
+        "validate" | "execute" => {
             return operation_error(
                 operation,
                 "worker.protocol.payload_invalid",
@@ -663,7 +664,7 @@ fn process_protocol_request(
                 "worker.protocol.operation_unsupported",
                 "unsupported worker protocol operation",
                 json!({
-                    "supported": ["capabilities", "presets", "validate", "execute"],
+                    "supported": ["capabilities", "presets", "task_schema", "expand_preset", "validate", "execute"],
                 }),
             );
         }
@@ -678,6 +679,92 @@ fn process_protocol_request(
         }),
         Err((code, message, details)) => operation_error(operation, code, message, details),
     }
+}
+
+fn process_discovery_operation(
+    operation: &str,
+    payload: &Value,
+) -> Result<Value, (&'static str, &'static str, Value)> {
+    let empty_payload = payload.as_object().is_some_and(|map| map.is_empty());
+    let result = match operation {
+        "capabilities" if empty_payload => Ok(json!({
+            "protocol": {
+                "version": WORKER_PROTOCOL_VERSION,
+                "operations": ["capabilities", "presets", "task_schema", "expand_preset", "validate", "execute"],
+                "max_record_bytes": MAX_WORKER_RECORD_BYTES,
+                "max_response_bytes": MAX_WORKER_RESPONSE_BYTES,
+                "max_inline_diagnostics_bytes": MAX_OPERATION_DIAGNOSTICS_BYTES,
+                "legacy_agent_job_v1": "accepted_as_execute",
+            },
+            "task_capabilities": crate::command_interpreter::task_contract::task_capabilities_json(),
+            "numerical_metrics": crate::command_interpreter::agent_metrics::NUMERICAL_METRIC_CATALOG,
+        })),
+        "capabilities" => Err((
+            "worker.protocol.payload_invalid",
+            "payload does not match the selected operation schema",
+            Value::Null,
+        )),
+        "presets" if empty_payload => {
+            Ok(crate::command_interpreter::task_presets::task_presets_json())
+        }
+        "presets" => Err((
+            "worker.protocol.payload_invalid",
+            "payload does not match the selected operation schema",
+            Value::Null,
+        )),
+        "task_schema" if empty_payload => Ok(task_schema_result()),
+        "task_schema" => Err((
+            "worker.protocol.payload_invalid",
+            "payload does not match the selected operation schema",
+            Value::Null,
+        )),
+        "expand_preset"
+            if payload.as_object().is_some_and(|map| {
+                map.len() == 2
+                    && map.get("task").is_some_and(Value::is_object)
+                    && map
+                        .get("preset_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !id.trim().is_empty())
+            }) =>
+        {
+            let task = payload["task"].to_string();
+            let preset_id = payload["preset_id"].as_str().unwrap();
+            match crate::command_interpreter::task_presets::expand_task_preset_json(
+                &task, preset_id,
+            ) {
+                Ok(task) => Ok(task),
+                Err(error) => Err((
+                    "worker.task.preset_expansion_failed",
+                    "RST could not expand and validate the requested task preset",
+                    json!({
+                        "preset_id": preset_id,
+                        "reason": error.to_string(),
+                    }),
+                )),
+            }
+        }
+        "expand_preset" => Err((
+            "worker.protocol.payload_invalid",
+            "payload does not match the selected operation schema",
+            Value::Null,
+        )),
+        _ => unreachable!("caller filters discovery operations"),
+    };
+    result
+}
+
+fn task_schema_result() -> Value {
+    static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    json!({
+        "schema_version": 1,
+        "schema": SCHEMA.get_or_init(|| {
+            serde_json::from_str(
+                crate::command_interpreter::task_json::TASK_DOCUMENT_JSON_SCHEMA,
+            )
+            .expect("embedded TaskDocument schema is valid JSON")
+        }),
+    })
 }
 
 fn task_error_diagnostics(task_result: &Value) -> Value {
@@ -1285,7 +1372,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_protocol_serves_discovery_validation_and_execute_compatibly() {
+    fn operation_protocol_serves_capabilities_presets_and_validation() {
         let capabilities = process_record(
             protocol_request("capabilities", json!({}))
                 .to_string()
@@ -1351,7 +1438,20 @@ mod tests {
             "task.document.missing_family"
         );
         assert_protocol_response_matches_schema(&invalid);
+    }
 
+    #[test]
+    fn operation_protocol_executes_jobs_and_preserves_legacy_compatibility() {
+        std::thread::Builder::new()
+            .name("agent-worker-protocol-test".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(operation_protocol_executes_jobs_and_preserves_legacy_compatibility_inner)
+            .expect("protocol test thread starts")
+            .join()
+            .expect("protocol test passes");
+    }
+
+    fn operation_protocol_executes_jobs_and_preserves_legacy_compatibility_inner() {
         let job = job_without_budget();
         let executed = process_record(
             protocol_request("execute", json!({ "job": job.clone() }))
@@ -1502,6 +1602,56 @@ mod tests {
     }
 
     #[test]
+    fn task_schema_operation_returns_the_canonical_document_schema() {
+        let response = process_record(
+            protocol_request("task_schema", json!({}))
+                .to_string()
+                .as_bytes(),
+        );
+        assert_eq!(response["status"], "succeeded");
+        assert_eq!(response["result"]["schema_version"], 1);
+        assert_eq!(
+            response["result"]["schema"]["$id"],
+            "urn:rustedscithe:task-document:v1"
+        );
+        for family in ["ivpTask", "bvpTask", "nonlinearTask", "optimizationTask"] {
+            assert!(response["result"]["schema"]["$defs"][family].is_object());
+        }
+    }
+
+    #[test]
+    fn expand_preset_operation_uses_native_defaults_and_preflight() {
+        let job: Value = serde_json::from_str(JOB).unwrap();
+        let mut task = job["task"].clone();
+        task["task"]["method"] = json!("DOP853");
+        let expanded = process_record(
+            protocol_request(
+                "expand_preset",
+                json!({"task": task.clone(), "preset_id": "ivp_dop853_default"}),
+            )
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(expanded["status"], "succeeded");
+        assert_eq!(expanded["result"]["task"]["method"], "DOP853");
+
+        let conflict = process_record(
+            protocol_request(
+                "expand_preset",
+                json!({"task": task, "preset_id": "ivp_bdf_sparse"}),
+            )
+            .to_string()
+            .as_bytes(),
+        );
+        assert_eq!(conflict["status"], "rejected");
+        assert_eq!(
+            conflict["error"]["code"],
+            "worker.task.preset_expansion_failed"
+        );
+        assert_eq!(conflict["error"]["details"]["preset_id"], "ivp_bdf_sparse");
+    }
+
+    #[test]
     fn operation_protocol_rejects_unknown_versions_operations_and_payload_fields() {
         let mut request = protocol_request("capabilities", json!({}));
         request["worker_protocol_version"] = json!(2);
@@ -1636,7 +1786,12 @@ mod tests {
             .build(&request_schema)
             .expect("worker request schema references compile");
         assert!(validator.is_valid(&protocol_request("capabilities", json!({}))));
+        assert!(validator.is_valid(&protocol_request("task_schema", json!({}))));
         let task: Value = serde_json::from_str(JOB).unwrap();
+        assert!(validator.is_valid(&protocol_request(
+            "expand_preset",
+            json!({"task": task["task"], "preset_id": "ivp_rk45_default"}),
+        )));
         assert!(validator.is_valid(&protocol_request("validate", json!({"task": task["task"]}))));
         assert!(validator.is_valid(&protocol_request(
             "execute",
@@ -1709,6 +1864,16 @@ mod tests {
 
     #[test]
     fn worker_refuses_unenforced_budgets_and_unapproved_aot() {
+        std::thread::Builder::new()
+            .name("agent-worker-policy-test".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(worker_refuses_unenforced_budgets_and_unapproved_aot_inner)
+            .expect("policy test thread starts")
+            .join()
+            .expect("policy test passes");
+    }
+
+    fn worker_refuses_unenforced_budgets_and_unapproved_aot_inner() {
         for budget in [
             json!({"wall_time_ms": 1000}),
             json!({"memory_bytes": 1_000_000}),

@@ -867,6 +867,7 @@ task
 solver: BVP
 strategy: Damped
 method: Dense
+scheme: trapezoid
 
 equations
 arg: x
@@ -888,7 +889,7 @@ y: 0.0
 
 continuation
 parameter: rate
-values: 0.5, 1.0
+values: 0.5, 2.0
 mode: warm
 "#;
 
@@ -900,6 +901,20 @@ mode: warm
         run.continuation_segments
             .iter()
             .all(|segment| segment.result.iter().all(|value| value.is_finite()))
+    );
+    let final_segment = run
+        .continuation_segments
+        .last()
+        .expect("the last prepared continuation segment should be retained");
+    let endpoint = final_segment
+        .result
+        .get((final_segment.result.nrows() - 1, 0))
+        .copied()
+        .expect("the final segment profile should include its right endpoint");
+    assert!(
+        (endpoint - (-2.0_f64).exp()).abs() <= 2e-3,
+        "prepared parameter rebind should solve rate=2, endpoint={endpoint}, profile={:?}",
+        final_segment.result
     );
 }
 

@@ -10,13 +10,24 @@ response record; stdout is protocol-only and diagnostics go to stderr.
 The worker accepts either the legacy direct Agent Job v1 object or a v1
 operation request. Legacy jobs keep the existing response schema. Operation
 requests have `worker_protocol_version`, `operation`, and `payload`; supported
-operations are `capabilities`, `presets`, `validate`, and `execute`. New
+operations are `capabilities`, `presets`, `task_schema`, `expand_preset`,
+`validate`, and `execute`. New
 requests always receive an operation-tagged response. `execute` accepts an
 Agent Job v1 under `payload.job` and returns its unchanged legacy response in
 `result`. `validate` accepts a TaskDocument under `payload.task` and performs
 typed preflight only; it does not prepare callbacks, compile AOT, or solve.
+`task_schema` returns the canonical embedded TaskDocument JSON Schema for
+contract discovery; it does not validate or execute a task.
+`expand_preset` accepts a TaskDocument and preset id, then uses the Rust preset
+catalog/merge rules and typed preflight to return the expanded TaskDocument.
+It does not execute a numerical solve.
 Capabilities reports the protocol version, supported operations, task-route
-catalog, and the common numerical metric catalog with units/scopes. Unknown
+catalog, route-scoped canonical values for IVP string settings, and the common
+numerical metric catalog with units/scopes. IVP option-value entries identify
+the JSON field, canonical values, applicable methods, and important selector
+dependencies; `unsupported_options` remains authoritative for method-specific
+exclusions. These additive capability fields do not change TaskDocument or
+worker protocol versions. Unknown
 versions and operations are rejected with typed protocol errors. The Rust
 `agent_metrics` API evaluates comparisons only against fully measured metrics;
 partial, unsupported, and unrequested values return `not_evaluated`. This does
