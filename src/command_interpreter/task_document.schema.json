@@ -196,6 +196,24 @@
       },
       "additionalProperties": false
     },
+    "ivpPostprocessing": {
+      "type": "object",
+      "properties": {
+        "save_csv": { "type": "boolean" },
+        "csv_path": { "type": "string" },
+        "save_txt": { "type": "boolean" },
+        "txt_path": { "type": "string" },
+        "write_report": { "type": "boolean" },
+        "report_path": { "type": "string" },
+        "plotters_png": { "type": "boolean" },
+        "plotters_dir": { "type": "string" },
+        "gnuplot_png": { "type": "boolean" },
+        "gnuplot_dir": { "type": "string" },
+        "terminal_plot": { "type": "boolean" },
+        "plot": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
     "ivpTask": {
       "type": "object",
       "required": ["format_version", "task", "equations", "initial_conditions"],
@@ -226,7 +244,7 @@
           "additionalProperties": false
         },
         "solver_options": { "$ref": "#/$defs/ivpSolverOptions" },
-        "postprocessing": { "$ref": "#/$defs/postprocessing" },
+        "postprocessing": { "$ref": "#/$defs/ivpPostprocessing" },
         "continuation": { "$ref": "#/$defs/continuation" }
       },
       "additionalProperties": false

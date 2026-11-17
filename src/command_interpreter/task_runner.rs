@@ -3228,6 +3228,16 @@ mod tests {
         assert_properties("ivpSolverOptions", IVP_SOLVER_FIELDS);
         assert_properties("bvpSolverOptions", BVP_SOLVER_FIELDS);
         assert_properties("postprocessing", POSTPROCESSING_FIELDS);
+        assert_eq!(
+            schema["$defs"]["ivpTask"]["properties"]["postprocessing"]["$ref"],
+            "#/$defs/ivpPostprocessing"
+        );
+        assert!(
+            schema["$defs"]["ivpPostprocessing"]["properties"]
+                .get("output_policy")
+                .is_none(),
+            "IVP schema must not advertise BVP-only output_policy"
+        );
     }
 
     #[test]
@@ -3271,6 +3281,7 @@ mod tests {
             r#"{"format_version":1,"problem":{"formulation":"root","variables":"x","equations":"x","initial_guess":0.0},"solver":{"method":"newton","telemetry":"verbose"}}"#,
             r#"{"format_version":1,"data":{"x":[0.0,1.0],"y":[1.0,3.0]},"model":{"method":"lm","parameters":"a","initial_guess":1.0,"basis_parameters":"a","basis_equations":"x"}}"#,
             r#"{"format_version":1,"task":{"solver":"IVP","method":"RK45"},"equations":{"y":"-y","params":["k"]},"initial_conditions":{"t0":0.0,"t_end":1.0,"y0":1.0}}"#,
+            r#"{"format_version":1,"task":{"solver":"IVP","method":"RK45"},"equations":{"y":"-y"},"initial_conditions":{"t0":0.0,"t_end":1.0,"y0":1.0},"postprocessing":{"output_policy":"default"}}"#,
         ];
 
         for (index, input) in invalid_documents.iter().enumerate() {
