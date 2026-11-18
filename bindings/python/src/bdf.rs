@@ -241,6 +241,7 @@ pub(crate) fn map_bdf_error(error: BdfSolveError) -> PyErr {
             }
             BdfSolveError::MaxStepsExceeded { .. } => ExhaustionError::new_err(error.to_string()),
             BdfSolveError::Step(error) => SolverError::new_err(error.to_string()),
+            BdfSolveError::Cancelled { .. } => SolverError::new_err(error.to_string()),
         },
         "solve",
         "bdf",

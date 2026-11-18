@@ -54,7 +54,7 @@ fn nonlinear_task_telemetry_is_explicit_and_reaches_native_results() {
     )
     .expect("default root solve")
     {
-        NonlinearTaskRunResult::Root(result) => {
+        NonlinearTaskRunResult::Root { result, .. } => {
             assert!(!result.statistics.availability.is_collected());
             assert!(!result.statistics.timings_collected);
         }
@@ -72,7 +72,7 @@ fn nonlinear_task_telemetry_is_explicit_and_reaches_native_results() {
         Some(TaskTelemetryMode::Detailed)
     );
     match run_nonlinear_task(spec).expect("root solve") {
-        NonlinearTaskRunResult::Root(result) => {
+        NonlinearTaskRunResult::Root { result, .. } => {
             assert!(result.statistics.availability.is_collected());
             assert!(result.statistics.timings_collected);
         }
@@ -90,7 +90,7 @@ fn nonlinear_task_telemetry_is_explicit_and_reaches_native_results() {
         Some(TaskTelemetryMode::Counters)
     );
     match run_nonlinear_task(spec).expect("counter-enabled root solve") {
-        NonlinearTaskRunResult::Root(result) => {
+        NonlinearTaskRunResult::Root { result, .. } => {
             assert!(result.statistics.availability.is_collected());
             assert!(!result.statistics.timings_collected);
         }
@@ -168,7 +168,7 @@ fn native_runner_solves_root_and_rectangular_least_squares_tasks() {
     let result = run_nonlinear_task(parse_nonlinear_task_from_document(&task).expect("parse root"))
         .expect("root solve");
     match result {
-        NonlinearTaskRunResult::Root(result) => {
+        NonlinearTaskRunResult::Root { result, .. } => {
             assert!((result.x[0] - 2.0).abs() < 1e-8);
             assert!((result.x[1] - 1.0).abs() < 1e-8);
         }
@@ -207,6 +207,7 @@ fn native_runner_solves_root_and_rectangular_least_squares_tasks() {
         NonlinearTaskRunResult::LeastSquares {
             report,
             solution: Some(solution),
+            ..
         } => {
             assert!(report.termination.was_successful());
             assert!(report.statistics.availability.is_collected());

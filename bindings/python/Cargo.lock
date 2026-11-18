@@ -4,13 +4,14 @@ version = 4
 
 [[package]]
 name = "RustedSciThe"
-version = "0.4.35"
+version = "0.5.1"
 dependencies = [
  "ahash",
  "append-only-vec",
  "approx 0.5.1",
  "assert_matches",
  "bevy",
+ "blake3",
  "bspline",
  "byteorder",
  "bytes",

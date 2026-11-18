@@ -882,7 +882,7 @@ impl TaskRunResult {
             ),
             Self::Bvp(result) => result.result.is_some(),
             Self::Nonlinear(result) => match result {
-                NonlinearTaskRunResult::Root(result) => matches!(
+                NonlinearTaskRunResult::Root { result, .. } => matches!(
                     &result.termination,
                     crate::numerical::Nonlinear_systems::error::TerminationReason::Converged
                 ),
@@ -905,7 +905,7 @@ impl TaskRunResult {
                 result.status.as_deref().unwrap_or("unknown")
             ),
             Self::Bvp(_) => "BVP solver returned no solution".to_string(),
-            Self::Nonlinear(NonlinearTaskRunResult::Root(result)) => {
+            Self::Nonlinear(NonlinearTaskRunResult::Root { result, .. }) => {
                 format!("nonlinear root solver terminated: {:?}", result.termination)
             }
             Self::Nonlinear(NonlinearTaskRunResult::LeastSquares { report, .. }) => {

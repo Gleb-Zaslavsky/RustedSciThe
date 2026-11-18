@@ -81,10 +81,14 @@ pub struct NonlinearTaskSpec {
 
 #[derive(Debug)]
 pub enum NonlinearTaskRunResult {
-    Root(SolveResult),
+    Root {
+        result: SolveResult,
+        variables: Vec<String>,
+    },
     LeastSquares {
         report: MinimizationReport,
         solution: Option<DVector<f64>>,
+        variables: Vec<String>,
     },
 }
 
@@ -324,6 +328,7 @@ fn run_nonlinear_task_inner(
     spec: NonlinearTaskSpec,
     cancellation: Option<&CancellationToken>,
 ) -> Result<NonlinearTaskRunResult, NonlinearTaskRunError> {
+    let variables = spec.problem.variables.clone();
     match spec.problem.formulation {
         NonlinearFormulation::Root => {
             let parameters = (!spec.problem.parameter_names.is_empty())
@@ -352,7 +357,7 @@ fn run_nonlinear_task_inner(
                 )?,
                 None => solver.solve_root(&problem, initial_guess, options)?,
             };
-            Ok(NonlinearTaskRunResult::Root(result))
+            Ok(NonlinearTaskRunResult::Root { result, variables })
         }
         NonlinearFormulation::LeastSquares => {
             let mut solver = SymbolicLeastSquaresSolver::new()
@@ -389,7 +394,11 @@ fn run_nonlinear_task_inner(
                 }
             };
             let solution = solver.result.clone();
-            Ok(NonlinearTaskRunResult::LeastSquares { report, solution })
+            Ok(NonlinearTaskRunResult::LeastSquares {
+                report,
+                solution,
+                variables,
+            })
         }
     }
 }

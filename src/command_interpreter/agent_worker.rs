@@ -5,16 +5,21 @@
 //! acceptance checks. It rejects resource budgets and gates AOT requests using
 //! an administrator-owned toolchain allowlist; it never silently ignores them.
 
+use crate::Utils::postprocessing::{
+    PostprocessAction, PostprocessDataset, PostprocessError, PostprocessPlan, PostprocessReport,
+    PostprocessStatus,
+};
 use crate::command_interpreter::agent_job::{
     AgentJobError, AgentJobSpec, evaluate_acceptance, parse_agent_job_json,
 };
 use crate::command_interpreter::agent_provenance::{AotCompilerIdentity, task_provenance};
 use crate::command_interpreter::agent_worker_cache::WorkerArtifactCacheEntry;
 use crate::command_interpreter::agent_worker_control::WorkerControlServer;
-use crate::command_interpreter::task_contract::run_parsed_task_envelope;
+use crate::command_interpreter::task_contract::{error_envelope, result_envelope};
 use crate::command_interpreter::task_runner::{
-    ParsedTaskSpec, TaskAotToolchain, parse_task_spec_from_json, task_aot_toolchain,
-    task_requests_aot, task_supports_cooperative_cancellation,
+    ParsedTaskSpec, TaskAotToolchain, TaskRunResult, parse_task_spec_from_json, run_task_from_spec,
+    run_task_from_spec_with_cancellation_token, task_aot_toolchain, task_requests_aot,
+    task_supports_cooperative_cancellation,
 };
 use crate::numerical::CancellationToken;
 use serde_json::{Value, json};
@@ -22,6 +27,8 @@ use std::collections::BTreeSet;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Maximum JSONL request record, excluding its line terminator.
 pub const MAX_WORKER_RECORD_BYTES: usize = 16 * 1024 * 1024;
@@ -38,6 +45,7 @@ pub const AGENT_WORKER_PROTOCOL_RESPONSE_JSON_SCHEMA: &str =
     include_str!("agent_worker_protocol_response.schema.json");
 
 const WORKER_PROTOCOL_VERSION: u32 = 1;
+static NEXT_JOB_OUTPUT_ID: AtomicU64 = AtomicU64::new(0);
 /// Default upper bound for worker-managed AOT cache storage (GiB).
 pub const DEFAULT_WORKER_AOT_CACHE_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
@@ -49,6 +57,7 @@ pub const DEFAULT_WORKER_AOT_CACHE_MAX_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub struct WorkerAotPolicy {
     allowed_toolchains: BTreeSet<TaskAotToolchain>,
     artifact_root: Option<PathBuf>,
+    output_root: Option<PathBuf>,
     max_artifact_cache_bytes: u64,
     supervisor_enforces_resource_budgets: bool,
     one_job_per_process: bool,
@@ -59,6 +68,7 @@ impl Default for WorkerAotPolicy {
         Self {
             allowed_toolchains: BTreeSet::new(),
             artifact_root: None,
+            output_root: Some(PathBuf::from("rst-agent-output")),
             max_artifact_cache_bytes: DEFAULT_WORKER_AOT_CACHE_MAX_BYTES,
             supervisor_enforces_resource_budgets: false,
             one_job_per_process: false,
@@ -75,6 +85,7 @@ impl WorkerAotPolicy {
         Self {
             allowed_toolchains: toolchains.into_iter().collect(),
             artifact_root: None,
+            output_root: Some(PathBuf::from("rst-agent-output")),
             max_artifact_cache_bytes: DEFAULT_WORKER_AOT_CACHE_MAX_BYTES,
             supervisor_enforces_resource_budgets: false,
             one_job_per_process: false,
@@ -84,6 +95,12 @@ impl WorkerAotPolicy {
     /// Set the administrator-owned directory used for AOT outputs/cache.
     pub fn with_artifact_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.artifact_root = Some(path.into());
+        self
+    }
+
+    /// Set the administrator-owned root under which isolated job outputs are written.
+    pub fn with_output_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.output_root = Some(path.into());
         self
     }
 
@@ -242,7 +259,7 @@ impl WorkerAotPolicy {
             ));
         }
         let Some(path) = self.artifact_root.as_ref() else {
-            return Ok(self.clone());
+            return self.validated_output_root();
         };
         std::fs::create_dir_all(path)?;
         let canonical = std::fs::canonicalize(path)?;
@@ -254,6 +271,25 @@ impl WorkerAotPolicy {
         }
         let mut validated = self.clone();
         validated.artifact_root = Some(canonical);
+        validated.validated_output_root()
+    }
+
+    fn validated_output_root(&self) -> io::Result<Self> {
+        let path = self.output_root.clone().unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("rst-agent-output")
+        });
+        std::fs::create_dir_all(&path)?;
+        let canonical = std::fs::canonicalize(path)?;
+        if !canonical.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "worker output root must be a directory",
+            ));
+        }
+        let mut validated = self.clone();
+        validated.output_root = Some(canonical);
         Ok(validated)
     }
 }
@@ -377,6 +413,13 @@ fn legacy_job_response(
         );
     }
     let mut task = job.task.clone();
+    if let Err(message) = reject_task_output_paths(&task) {
+        return job_rejected(
+            job.job_id.as_deref(),
+            "worker.output_path_forbidden",
+            &message,
+        );
+    }
     let worker_injected_bvp_sci_path = is_bvp_sci_aot_without_output_path(&task);
     if worker_injected_bvp_sci_path {
         let Some(root) = aot_policy.artifact_root.as_deref() else {
@@ -414,6 +457,33 @@ fn legacy_job_response(
     if let Some((code, message)) = aot_policy_rejection(&parsed_task, aot_policy) {
         return job_rejected(job.job_id.as_deref(), code, message);
     }
+    let Some(output_root) = aot_policy.output_root.as_deref() else {
+        return job_rejected(
+            job.job_id.as_deref(),
+            "worker.output_root_unconfigured",
+            "worker has no administrator-owned output root",
+        );
+    };
+    let job_output_dir = match create_job_output_dir(output_root) {
+        Ok(path) => path,
+        Err(error) => {
+            return job_rejected(
+                job.job_id.as_deref(),
+                "worker.output_directory_failed",
+                &error.to_string(),
+            );
+        }
+    };
+    let output_plan = match prepare_worker_output_plan(&mut parsed_task, &job_output_dir) {
+        Ok(plan) => plan,
+        Err(message) => {
+            return job_rejected(
+                job.job_id.as_deref(),
+                "worker.output_policy_unsupported",
+                &message,
+            );
+        }
+    };
     let selected_toolchain = task_aot_toolchain(&parsed_task);
     let compiler_identity = match selected_toolchain {
         Some(toolchain) => match resolve_aot_compiler_identity(toolchain) {
@@ -484,10 +554,15 @@ fn legacy_job_response(
                     &error.to_string(),
                 );
             }
-            let result = run_parsed_task_envelope(parsed_task, cancellation.as_ref());
+            let result = run_worker_task(
+                parsed_task,
+                output_plan.as_ref(),
+                &job_output_dir,
+                cancellation.as_ref(),
+            );
             preserve_task_result_on_control_cleanup(result, control.deactivate())
         }
-        None => run_parsed_task_envelope(parsed_task, None),
+        None => run_worker_task(parsed_task, output_plan.as_ref(), &job_output_dir, None),
     };
     if !protocol_operation && let Some(task_result) = task_result.as_object_mut() {
         task_result.remove("diagnostics");
@@ -515,11 +590,320 @@ fn legacy_job_response(
         "worker_protocol_version": WORKER_PROTOCOL_VERSION,
         "job_contract_version": 1,
         "job_id": job.job_id,
+        "output_directory": job_output_dir,
         "status": task_result["status"],
         "task_result": task_result,
         "acceptance": acceptance,
         "error": Value::Null,
     })
+}
+
+fn reject_task_output_paths(task: &Value) -> Result<(), String> {
+    let Some(postprocessing) = task.get("postprocessing").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    for field in [
+        "csv_path",
+        "txt_path",
+        "report_path",
+        "plotters_dir",
+        "gnuplot_dir",
+    ] {
+        if postprocessing
+            .get(field)
+            .is_some_and(|value| !value.is_null())
+        {
+            return Err(format!(
+                "model-generated `postprocessing.{field}` is forbidden; output paths are worker-owned"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn create_job_output_dir(root: &Path) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(root)?;
+    let root = std::fs::canonicalize(root)?;
+    for _ in 0..32 {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let sequence = NEXT_JOB_OUTPUT_ID.fetch_add(1, Ordering::Relaxed);
+        let path = root.join(format!("job-{timestamp:x}-{sequence:x}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique worker job output directory",
+    ))
+}
+
+fn prepare_worker_output_plan(
+    spec: &mut ParsedTaskSpec,
+    job_dir: &Path,
+) -> Result<Option<PostprocessPlan>, String> {
+    let plan = match spec {
+        ParsedTaskSpec::Ivp(spec) => {
+            if spec.postprocessing.plot || spec.postprocessing.terminal_plot {
+                return Err("terminal plotting is not supported in worker jobs; request a file artifact instead".into());
+            }
+            if spec.postprocessing.save_csv {
+                spec.postprocessing.csv_path =
+                    Some(job_dir.join("ivp_result.csv").display().to_string());
+            }
+            if spec.postprocessing.save_txt {
+                spec.postprocessing.txt_path =
+                    Some(job_dir.join("ivp_result.txt").display().to_string());
+            }
+            if spec.postprocessing.write_report {
+                spec.postprocessing.report_path =
+                    Some(job_dir.join("ivp_report.md").display().to_string());
+            }
+            if spec.postprocessing.plotters_png {
+                spec.postprocessing.plotters_dir =
+                    Some(job_dir.join("ivp_plotters").display().to_string());
+            }
+            if spec.postprocessing.gnuplot_png {
+                spec.postprocessing.gnuplot_dir =
+                    Some(job_dir.join("ivp_gnuplot").display().to_string());
+            }
+            let plan = spec.postprocessing.to_plan("ivp_result.csv");
+            spec.postprocessing = Default::default();
+            plan
+        }
+        ParsedTaskSpec::Bvp(spec) => {
+            if spec.postprocessing.plot
+                || spec.postprocessing.terminal_plot
+                || matches!(
+                    spec.postprocessing.output_policy,
+                    crate::command_interpreter::task_parser_bvp::BvpOutputPolicy::Terminal
+                )
+            {
+                return Err("terminal plotting is not supported in worker jobs; request a file artifact instead".into());
+            }
+            if matches!(
+                spec.postprocessing.output_policy,
+                crate::command_interpreter::task_parser_bvp::BvpOutputPolicy::Plotters
+            ) {
+                spec.postprocessing.plotters_png = true;
+            }
+            if matches!(
+                spec.postprocessing.output_policy,
+                crate::command_interpreter::task_parser_bvp::BvpOutputPolicy::Gnuplot
+            ) {
+                spec.postprocessing.gnuplot_png = true;
+            }
+            if spec.postprocessing.save_csv {
+                spec.postprocessing.csv_path =
+                    Some(job_dir.join("bvp_result.csv").display().to_string());
+            }
+            if spec.postprocessing.save_txt {
+                spec.postprocessing.txt_path =
+                    Some(job_dir.join("bvp_result.txt").display().to_string());
+            }
+            if spec.postprocessing.write_report {
+                spec.postprocessing.report_path =
+                    Some(job_dir.join("bvp_report.md").display().to_string());
+            }
+            if spec.postprocessing.plotters_png {
+                spec.postprocessing.plotters_dir =
+                    Some(job_dir.join("bvp_plotters").display().to_string());
+            }
+            if spec.postprocessing.gnuplot_png {
+                spec.postprocessing.gnuplot_dir =
+                    Some(job_dir.join("bvp_gnuplot").display().to_string());
+            }
+            let plan = spec.postprocessing.to_plan("bvp_result.csv");
+            spec.postprocessing = Default::default();
+            plan
+        }
+        ParsedTaskSpec::Nonlinear(_) | ParsedTaskSpec::Optimization(_) => return Ok(None),
+    };
+    Ok((!plan.actions.is_empty()).then_some(plan))
+}
+
+fn run_worker_task(
+    spec: ParsedTaskSpec,
+    output_plan: Option<&PostprocessPlan>,
+    output_directory: &Path,
+    cancellation: Option<&CancellationToken>,
+) -> Value {
+    let result = match cancellation {
+        Some(token) => run_task_from_spec_with_cancellation_token(spec, token),
+        None => run_task_from_spec(spec),
+    };
+    let mut envelope = match result {
+        Ok(result) => {
+            let postprocessing =
+                output_plan.map(|plan| execute_worker_postprocessing(&result, plan));
+            let mut envelope = result_envelope(result);
+            envelope["postprocessing"] = postprocessing.map_or_else(
+                || {
+                    json!({
+                        "status": "not_requested",
+                        "result_scope": "final_task_result",
+                        "output_directory": output_directory,
+                        "artifacts": [],
+                        "entries": [],
+                        "error": Value::Null,
+                    })
+                },
+                |postprocessing| {
+                    worker_postprocessing_json(
+                        postprocessing,
+                        output_plan.unwrap(),
+                        output_directory,
+                    )
+                },
+            );
+            envelope
+        }
+        Err(error) => {
+            let mut envelope = error_envelope(&error);
+            envelope["postprocessing"] = json!({
+                "status": "not_attempted",
+                "result_scope": "final_task_result",
+                "output_directory": output_directory,
+                "artifacts": [],
+                "entries": [],
+                "error": Value::Null,
+            });
+            envelope
+        }
+    };
+    suppress_worker_trajectory_data(&mut envelope);
+    envelope
+}
+
+fn execute_worker_postprocessing(
+    result: &TaskRunResult,
+    plan: &PostprocessPlan,
+) -> Result<PostprocessReport, PostprocessError> {
+    let dataset = match result {
+        TaskRunResult::Ivp(result) => PostprocessDataset::new(
+            result.specification.equations.arg.clone(),
+            result.specification.equations.unknowns.clone(),
+            result.t_result.clone().ok_or_else(|| {
+                PostprocessError::InvalidDataset("IVP result has no time mesh".into())
+            })?,
+            result.y_result.clone().ok_or_else(|| {
+                PostprocessError::InvalidDataset("IVP result has no state matrix".into())
+            })?,
+        )?,
+        TaskRunResult::Bvp(result) => PostprocessDataset::new(
+            "x",
+            result.specification.equations.unknowns.clone(),
+            nalgebra::DVector::from_vec(result.mesh.clone().ok_or_else(|| {
+                PostprocessError::InvalidDataset("BVP result has no mesh".into())
+            })?),
+            result.result.clone().ok_or_else(|| {
+                PostprocessError::InvalidDataset("BVP result matrix is unavailable".into())
+            })?,
+        )?,
+        TaskRunResult::Nonlinear(_) | TaskRunResult::Optimization(_) => {
+            return Err(PostprocessError::InvalidDataset(
+                "worker trajectory exports are available only for IVP/BVP".into(),
+            ));
+        }
+    };
+    plan.execute(&dataset)
+}
+
+fn worker_postprocessing_json(
+    result: Result<PostprocessReport, PostprocessError>,
+    plan: &PostprocessPlan,
+    output_directory: &Path,
+) -> Value {
+    match result {
+        Ok(report) => {
+            let artifacts = report
+                .entries
+                .iter()
+                .filter_map(|entry| {
+                    entry.path.as_ref().map(|path| {
+                        json!({
+                            "path": path,
+                            "status": postprocess_status_name(&entry.status),
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "status": if report.all_done() { "succeeded" } else { "partial" },
+                "result_scope": "final_task_result",
+                "output_directory": output_directory,
+                "artifacts": artifacts,
+                "entries": report.entries.iter().map(|entry| json!({
+                    "action": format!("{:?}", entry.action),
+                    "status": postprocess_status_name(&entry.status),
+                    "path": entry.path,
+                    "message": entry.message,
+                })).collect::<Vec<_>>(),
+                "error": Value::Null,
+            })
+        }
+        Err(error) => {
+            let kind = match &error {
+                PostprocessError::InvalidDataset(_) => "invalid_dataset",
+                PostprocessError::InvalidPath(_) => "invalid_path",
+                PostprocessError::Io(_) => "io",
+            };
+            let artifacts = plan
+                .actions
+                .iter()
+                .filter_map(|action| {
+                    let path = match action {
+                        PostprocessAction::SaveTxt { path }
+                        | PostprocessAction::SaveCsv { path }
+                        | PostprocessAction::WriteReport { path } => path,
+                        PostprocessAction::PlottersPng { output_dir }
+                        | PostprocessAction::GnuplotPng { output_dir } => output_dir,
+                        PostprocessAction::TerminalPlot => return None,
+                    };
+                    Some(json!({
+                        "path": path,
+                        "status": if path.exists() { "created" } else { "failed" },
+                    }))
+                })
+                .collect::<Vec<_>>();
+            json!({
+                "status": "failed",
+                "result_scope": "final_task_result",
+                "output_directory": output_directory,
+                "artifacts": artifacts,
+                "entries": [],
+                "error": { "kind": kind, "message": error.to_string() },
+            })
+        }
+    }
+}
+
+fn postprocess_status_name(status: &PostprocessStatus) -> &'static str {
+    match status {
+        PostprocessStatus::Done => "created",
+        PostprocessStatus::Skipped => "skipped",
+        PostprocessStatus::Failed => "failed",
+    }
+}
+
+fn suppress_worker_trajectory_data(envelope: &mut Value) {
+    if !matches!(
+        envelope.get("task_family").and_then(Value::as_str),
+        Some("ivp" | "bvp")
+    ) {
+        return;
+    }
+    let result = &mut envelope["result"];
+    if result.get("data").is_some() {
+        result["data"] = Value::Null;
+        result["data_omitted"] = json!(true);
+        result["omission_reason"] = json!("worker_artifacts_only");
+    }
 }
 
 fn process_protocol_request(
@@ -1249,10 +1633,11 @@ mod tests {
     use super::{
         AGENT_WORKER_PROTOCOL_RESPONSE_JSON_SCHEMA, AGENT_WORKER_REQUEST_JSON_SCHEMA,
         AGENT_WORKER_RESPONSE_JSON_SCHEMA, MAX_OPERATION_DIAGNOSTICS_BYTES,
-        MAX_WORKER_RECORD_BYTES, MAX_WORKER_RESPONSE_BYTES, WorkerAotPolicy, aot_policy_rejection,
-        aot_version_argument, assign_worker_aot_root, bounded_operation_diagnostics,
-        encode_worker_response, inject_bvp_sci_aot_output_path, is_bvp_sci_aot_without_output_path,
-        job_rejected, process_record, serialize_bounded_json, serve_jsonl,
+        MAX_WORKER_RECORD_BYTES, MAX_WORKER_RESPONSE_BYTES, PostprocessPlan, WorkerAotPolicy,
+        aot_policy_rejection, aot_version_argument, assign_worker_aot_root,
+        bounded_operation_diagnostics, encode_worker_response, inject_bvp_sci_aot_output_path,
+        is_bvp_sci_aot_without_output_path, job_rejected, process_record,
+        process_record_with_policy, run_worker_task, serialize_bounded_json, serve_jsonl,
         serve_jsonl_with_control, serve_one_jsonl_with_policy, task_error_diagnostics,
     };
     use crate::command_interpreter::agent_worker_control::WorkerControlServer;
@@ -1262,6 +1647,7 @@ mod tests {
     use serde_json::{Value, json};
     use std::io::{BufRead, BufReader, Cursor, Write};
     use std::net::TcpStream;
+    use std::path::PathBuf;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -1842,6 +2228,88 @@ mod tests {
             assert_eq!(response["acceptance"]["status"], "accepted");
             assert!(response["error"].is_null());
         }
+    }
+
+    #[test]
+    fn worker_owns_job_outputs_hides_trajectory_arrays_and_returns_artifacts() {
+        let root = tempfile::tempdir().expect("temporary output root");
+        let canonical_root = std::fs::canonicalize(root.path()).expect("canonical output root");
+        let mut job = job_without_budget();
+        job["task"]["postprocessing"] = json!({ "save_csv": true, "write_report": true });
+        let policy = WorkerAotPolicy::deny_all().with_output_root(root.path());
+        let response = process_record_with_policy(job.to_string().as_bytes(), &policy);
+
+        assert_eq!(response["status"], "succeeded", "{response}");
+        let output_directory = PathBuf::from(
+            response["output_directory"]
+                .as_str()
+                .expect("worker returns job output directory"),
+        );
+        assert!(output_directory.starts_with(&canonical_root));
+        assert!(output_directory.is_dir());
+        assert_eq!(response["task_result"]["result"]["data"], Value::Null);
+        assert_eq!(
+            response["task_result"]["postprocessing"]["result_scope"],
+            "final_task_result"
+        );
+        assert_eq!(
+            response["task_result"]["result"]["omission_reason"],
+            "worker_artifacts_only"
+        );
+        let artifacts = response["task_result"]["postprocessing"]["artifacts"]
+            .as_array()
+            .expect("artifact list");
+        assert_eq!(artifacts.len(), 2);
+        for artifact in artifacts {
+            assert_eq!(artifact["status"], "created");
+            let path = PathBuf::from(artifact["path"].as_str().unwrap());
+            assert!(path.starts_with(&output_directory));
+            assert!(path.is_file());
+        }
+        assert_response_matches_schema(&response);
+
+        let no_export =
+            process_record_with_policy(job_without_budget().to_string().as_bytes(), &policy);
+        assert_eq!(
+            no_export["task_result"]["postprocessing"]["status"],
+            "not_requested"
+        );
+        assert_eq!(
+            no_export["task_result"]["postprocessing"]["result_scope"],
+            "final_task_result"
+        );
+        assert_response_matches_schema(&no_export);
+    }
+
+    #[test]
+    fn worker_rejects_model_generated_output_paths() {
+        let mut job = job_without_budget();
+        job["task"]["postprocessing"] = json!({
+            "save_csv": true,
+            "csv_path": "../../outside.csv"
+        });
+        let response = process_record(job.to_string().as_bytes());
+        assert_eq!(response["status"], "rejected");
+        assert_eq!(response["error"]["code"], "worker.output_path_forbidden");
+    }
+
+    #[test]
+    fn export_failure_does_not_replace_successful_numerical_result() {
+        let root = tempfile::tempdir().expect("temporary output root");
+        let parent_file = root.path().join("not-a-directory");
+        std::fs::write(&parent_file, b"block output directory creation").unwrap();
+        let task = job_without_budget()["task"].clone();
+        let spec = parse_task_spec_from_json(&task.to_string()).expect("valid task fixture");
+        let plan = PostprocessPlan::new().save_csv(parent_file.join("result.csv"));
+
+        let result = run_worker_task(spec, Some(&plan), root.path(), None);
+
+        assert_eq!(result["status"], "succeeded", "{result}");
+        assert_eq!(result["result"]["data"], Value::Null);
+        assert_eq!(result["postprocessing"]["status"], "failed");
+        assert_eq!(result["postprocessing"]["artifacts"][0]["status"], "failed");
+        assert_eq!(result["postprocessing"]["error"]["kind"], "io");
+        assert!(result["error"].is_null());
     }
 
     #[test]

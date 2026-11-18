@@ -289,7 +289,7 @@ pub struct PostprocessingSpec {
 }
 
 impl PostprocessingSpec {
-    fn to_plan(&self, default_csv_path: &str) -> PostprocessPlan {
+    pub(crate) fn to_plan(&self, default_csv_path: &str) -> PostprocessPlan {
         let mut plan = PostprocessPlan::new();
         if self.save_csv {
             plan = plan.save_csv(

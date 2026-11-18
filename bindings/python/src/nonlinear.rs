@@ -65,6 +65,7 @@ pub(crate) fn map_solve_error_context(
             | SolveError::NonFiniteInitialGuess { .. } => {
                 InvalidConfigurationError::new_err(error.to_string())
             }
+            SolveError::Cancelled { .. } => SolverError::new_err(error.to_string()),
             SolveError::CompiledAotRuntimeUnavailable(_)
             | SolveError::CompiledAotArtifactMissing(_)
             | SolveError::CompiledAotArtifactNotBuilt(_)
@@ -103,9 +104,8 @@ pub(crate) fn map_least_squares_error(error: LeastSquaresError) -> PyErr {
             }
             LeastSquaresError::CallbackFailed { .. }
             | LeastSquaresError::DomainViolation
-            | LeastSquaresError::NumericalBreakdown { .. } => {
-                SolverError::new_err(error.to_string())
-            }
+            | LeastSquaresError::NumericalBreakdown { .. }
+            | LeastSquaresError::Cancelled { .. } => SolverError::new_err(error.to_string()),
         },
         "solve",
         "least_squares",
@@ -917,6 +917,7 @@ fn solver_telemetry_mode_name(mode: SolverTelemetryMode) -> &'static str {
 /// count and telemetry describe the completed solve.
 #[pyclass(name = "NonlinearSolution", module = "rustedscithe")]
 pub struct NonlinearSolution {
+    variables: Vec<String>,
     solution: Vec<f64>,
     residual: Vec<f64>,
     residual_norm: f64,
@@ -931,6 +932,20 @@ impl NonlinearSolution {
     /// Return the solved variable vector as a Python list.
     pub fn solution(&self) -> Vec<f64> {
         self.solution.clone()
+    }
+
+    /// Return solved values keyed by the declared unknown names.
+    pub fn solution_map(&self) -> HashMap<String, f64> {
+        self.variables
+            .iter()
+            .cloned()
+            .zip(self.solution.iter().copied())
+            .collect()
+    }
+
+    /// Alias emphasizing that keys are the nonlinear unknown variables.
+    pub fn variable_values(&self) -> HashMap<String, f64> {
+        self.solution_map()
     }
     /// Return the residual vector evaluated at the returned solution.
     pub fn residual(&self) -> Vec<f64> {
@@ -1394,6 +1409,7 @@ impl NonlinearSolver {
             .solve(&bound, DVector::from_vec(initial_guess), options)
             .map_err(|error| map_solve_error_context(error, "solve", "nonlinear_system", &route))?;
         Ok(NonlinearSolution {
+            variables: self.variables.clone(),
             solution: result.x.iter().copied().collect(),
             residual: result.residual.iter().copied().collect(),
             residual_norm: result.residual_norm,

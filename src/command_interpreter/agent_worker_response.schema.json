@@ -16,6 +16,7 @@
     "worker_protocol_version": { "const": 1 },
     "job_contract_version": { "const": 1 },
     "job_id": { "type": ["string", "null"] },
+    "output_directory": { "type": "string" },
     "status": {
       "enum": ["succeeded", "not_converged", "failed", "rejected"]
     },

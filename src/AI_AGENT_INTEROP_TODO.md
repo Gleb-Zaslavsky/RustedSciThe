@@ -556,9 +556,15 @@ with an agent-specific numerical implementation.
 - [x] Produce a compact machine-readable summary plus an optional detailed
   report and durable numerical artifacts. The compact response and result
   schema are implemented. Detailed telemetry uses a separate diagnostic
-  channel per decision 3. RST exposes typed diagnostics; external
-  report/artifact persistence and references are worker/client-owned by
-  decision 4 and deliberately are not implemented in the RST envelope.
+  channel per decision 3. Worker-managed IVP/BVP exports use a unique
+  administrator-rooted directory per job; model-supplied paths are rejected,
+  trajectories are omitted from the worker response, and artifact path/status
+  entries are returned separately from solver status. Exports describe only
+  the final task result, not each continuation segment. Durable retention and
+  cleanup remain deployment/client policy. Nonlinear results expose declared
+  unknown names with values and compact metrics; optional nonlinear CSV/TXT
+  remains deferred. Fitting export format remains an explicit open product
+  contract and plots are not enabled automatically.
 
 ### 5. Deployment and Safety Boundary
 
@@ -797,3 +803,39 @@ numerical tool surface that an external agent can call safely and understand:
   persistence is deliberately external to RST and owned by the worker/client.
   Agent planning and scientific judgment stay with the external system and its
   human operators.
+
+### Result Presentation and Export Contract
+
+- [x] Worker execution returns solver status independently from optional
+  postprocessing status. A successful numerical result survives an export
+  failure, which is reported as typed postprocessing diagnostics; a solver
+  failure marks export as `not_attempted`.
+- [x] Python chat renders compact human-readable summaries instead of dumping
+  raw JSON: IVP/BVP show status and artifact references without inline arrays,
+  nonlinear tasks show named unknown/value pairs and metrics, and fitting
+  shows fitted parameters and quality metrics. Raw JSON remains available in
+  the worker protocol and persisted run record.
+- [x] Direct Python IVP/BVP facades retain their existing native result and
+  postprocessing APIs. `StiffAPI` and `BVP_api` already provide common plans;
+  no duplicate facade-level export surface was added. Nonlinear named values
+  are exposed alongside the backwards-compatible ordered vector. No automatic
+  nonlinear/fitting exports or fitting plots were added; fitting report/table
+  contents require a separate product decision.
+- [x] Python chat regression exercises the user-visible lifecycle boundary:
+  preflight renders readable TaskDocument/native-validation tables, exact
+  digest approval gates execution, result summaries omit arrays/raw response
+  JSON, and a returned artifact reference is checked against a readable file.
+  Resource-control evidence is rendered as labeled text rather than a JSON
+  dump. This deterministic UI test complements, but does not replace, RST
+  worker tests that execute numerical tasks and create their output files.
+- [ ] Add a real-model lifecycle exam through the Python chat and RST worker.
+  For every exercised family, score the model's method/route/configuration
+  choices independently, verify the preflight message is human-readable, verify
+  no solve starts before explicit confirmation, then verify the post-run
+  message is human-readable and each reported IVP/BVP artifact exists, parses,
+  and contains the expected solution data. Nonlinear output must show named
+  unknowns and metrics. Keep raw JSON available only as a separate diagnostic
+  record, not as the user-facing answer. Include successful solve/export,
+  solve failure, and export failure cases so numerical status and export status
+  cannot be conflated. This exam belongs to the external Python client gate;
+  the Rust capstone alone cannot certify console presentation or user workflow.

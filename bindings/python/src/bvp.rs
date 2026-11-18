@@ -246,7 +246,8 @@ pub(crate) fn map_error(error: BvpSciNewError) -> PyErr {
             | BvpSciNewError::Logging(_)
             | BvpSciNewError::AotRuntime { .. }
             | BvpSciNewError::OutputOutOfDomain
-            | BvpSciNewError::OutputUnavailable => SolverError::new_err(message),
+            | BvpSciNewError::OutputUnavailable
+            | BvpSciNewError::Cancelled { .. } => SolverError::new_err(message),
         },
         stage,
         "bvp_sci",

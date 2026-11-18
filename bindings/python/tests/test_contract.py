@@ -638,6 +638,7 @@ method: newton
     assert result.formulation == "root"
     assert result.successful
     assert result.solution == pytest.approx([2.0])
+    assert result.variable_values() == {"x": pytest.approx(2.0)}
     assert result.residual_norm == pytest.approx(0.0, abs=1e-10)
     with pytest.raises(TaskDocumentError, match="unsupported_route"):
         document.run()
@@ -938,6 +939,16 @@ def test_nonlinear_solver_exposes_prepared_symbolic_methods_and_telemetry():
     assert result.residual_norm < 1e-8
     assert result.telemetry_counters()["jacobian_evaluations"] >= 1
     assert "total_ms" in result.telemetry_timings_ms()
+
+
+def test_nonlinear_solution_exposes_named_unknown_values():
+    system = SymbolicSystem(
+        [Expr.parse("temperature - 900"), Expr.parse("rate - 0.2")],
+        ["temperature", "rate"],
+    )
+    result = NonlinearSolver(system, method="newton").solve([1.0, 1.0])
+    assert result.solution_map() == pytest.approx({"temperature": 900.0, "rate": 0.2})
+    assert result.variable_values() == result.solution_map()
 
 
 def test_nonlinear_solver_explicit_parameter_rebind_shortcut():

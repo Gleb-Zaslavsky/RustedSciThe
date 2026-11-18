@@ -139,6 +139,23 @@ fn map_api_error(error: BvpApiError) -> PyErr {
             "bvp_api",
             solver,
         ),
+        BvpApiError::CancellationUnsupported { solver } => (
+            UnsupportedOptionError::new_err(format!(
+                "cooperative cancellation is not supported by the {solver} BVP route"
+            )),
+            "CancellationUnsupported".to_owned(),
+            "bvp_api",
+            solver,
+        ),
+        BvpApiError::Cancelled { snapshot } => (
+            SolverError::new_err(format!(
+                "BVP solve cancelled at iteration {}",
+                snapshot.iteration
+            )),
+            "Cancelled".to_owned(),
+            "bvp_api",
+            "native",
+        ),
         BvpApiError::Damped(error) | BvpApiError::Frozen(error) => {
             return crate::bvp_damp::map_native_error(error);
         }

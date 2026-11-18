@@ -23,6 +23,43 @@
         { "type": "null" }
       ]
     },
+    "postprocessing": {
+      "type": "object",
+      "required": ["status", "result_scope", "output_directory", "artifacts", "entries", "error"],
+      "properties": {
+        "status": { "enum": ["not_requested", "not_attempted", "succeeded", "partial", "failed"] },
+        "result_scope": { "const": "final_task_result" },
+        "output_directory": { "type": "string" },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "status"],
+            "properties": {
+              "path": { "type": "string" },
+              "status": { "enum": ["created", "skipped", "failed"] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "entries": { "type": "array", "items": { "type": "object" } },
+        "error": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["kind", "message"],
+              "properties": {
+                "kind": { "enum": ["invalid_dataset", "invalid_path", "io"] },
+                "message": { "type": "string" }
+              },
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "result": {
       "oneOf": [
         { "$ref": "#/$defs/ivpResult" },
@@ -218,6 +255,7 @@
         "iterations": { "type": "integer", "minimum": 0 },
         "residual_norm": { "$ref": "#/$defs/finiteOrNull" },
         "solution": { "oneOf": [{ "$ref": "#/$defs/numberArray" }, { "type": "null" }] },
+        "variable_values": { "type": ["object", "null"], "additionalProperties": { "$ref": "#/$defs/finiteOrNull" } },
         "solution_length": { "type": "integer", "minimum": 0 },
         "solution_omitted": { "type": "boolean" },
         "non_finite_values_encoded_as_null": { "type": "integer", "minimum": 0 }
@@ -232,6 +270,7 @@
         "evaluations": { "type": "integer", "minimum": 0 },
         "objective": { "$ref": "#/$defs/finiteOrNull" },
         "solution": { "oneOf": [{ "$ref": "#/$defs/numberArray" }, { "type": "null" }] },
+        "variable_values": { "type": ["object", "null"], "additionalProperties": { "$ref": "#/$defs/finiteOrNull" } },
         "solution_length": { "type": "integer", "minimum": 0 },
         "solution_omitted": { "type": "boolean" },
         "non_finite_values_encoded_as_null": { "type": "integer", "minimum": 0 }

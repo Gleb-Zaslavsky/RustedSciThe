@@ -123,6 +123,7 @@ fn map_native_task_error(error: TaskRunnerError, route: &'static str) -> PyErr {
 pub struct NonlinearTaskResult {
     formulation: String,
     solution: Option<Vec<f64>>,
+    variable_values: HashMap<String, f64>,
     residual: Vec<f64>,
     residual_norm: Option<f64>,
     objective_function: Option<f64>,
@@ -136,9 +137,13 @@ pub struct NonlinearTaskResult {
 impl NonlinearTaskResult {
     fn from_native(result: NonlinearTaskRunResult) -> Self {
         match result {
-            NonlinearTaskRunResult::Root(result) => Self {
+            NonlinearTaskRunResult::Root { result, variables } => Self {
                 formulation: "root".to_owned(),
                 solution: Some(vector_values(Some(&result.x))),
+                variable_values: variables
+                    .into_iter()
+                    .zip(result.x.iter().copied())
+                    .collect(),
                 residual: vector_values(Some(&result.residual)),
                 residual_norm: Some(result.residual_norm),
                 objective_function: None,
@@ -148,8 +153,16 @@ impl NonlinearTaskResult {
                 counters: crate::nonlinear::statistics_counters(&result.statistics),
                 timings_ms: crate::nonlinear::statistics_timings(&result.statistics),
             },
-            NonlinearTaskRunResult::LeastSquares { report, solution } => Self {
+            NonlinearTaskRunResult::LeastSquares {
+                report,
+                solution,
+                variables,
+            } => Self {
                 formulation: "least_squares".to_owned(),
+                variable_values: solution
+                    .as_ref()
+                    .map(|values| variables.into_iter().zip(values.iter().copied()).collect())
+                    .unwrap_or_default(),
                 solution: solution.map(|value| vector_values(Some(&value))),
                 residual: Vec::new(),
                 residual_norm: None,
@@ -175,6 +188,10 @@ impl NonlinearTaskResult {
     /// Solved variables in declaration order, or `None` when unavailable.
     pub fn solution(&self) -> Option<Vec<f64>> {
         self.solution.clone()
+    }
+    /// Solved unknown values keyed by their declared variable names.
+    pub fn variable_values(&self) -> HashMap<String, f64> {
+        self.variable_values.clone()
     }
     /// Final root residual; rectangular least-squares tasks expose the objective instead.
     pub fn residual(&self) -> Vec<f64> {

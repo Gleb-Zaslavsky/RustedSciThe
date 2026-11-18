@@ -85,6 +85,11 @@ enum Commands {
         aot_cache_dir: Option<PathBuf>,
         #[arg(
             long,
+            help = "Administrator-owned root for isolated per-job output artifacts"
+        )]
+        output_dir: Option<PathBuf>,
+        #[arg(
+            long,
             default_value_t = crate::command_interpreter::agent_worker::DEFAULT_WORKER_AOT_CACHE_MAX_BYTES,
             help = "Maximum worker-managed AOT cache size in bytes"
         )]
@@ -499,24 +504,26 @@ fn print_run_summary(result: &TaskRunResult) {
             print_bvp_artifact_summary(&bvp.specification.postprocessing);
         }
         TaskRunResult::Nonlinear(nonlinear) => match nonlinear {
-            crate::command_interpreter::task_parser_nonlinear::NonlinearTaskRunResult::Root(
+            crate::command_interpreter::task_parser_nonlinear::NonlinearTaskRunResult::Root {
                 result,
-            ) => {
+                variables,
+            } => {
                 println!("Task kind : Nonlinear root");
                 println!("Termination: {:?}", result.termination);
                 println!("Iterations : {}", result.iterations);
                 println!("Residual norm: {:.6e}", result.residual_norm);
-                println!("Solution  : {:?}", result.x.as_slice());
+                println!("Solution  : {}", format_named_values(&variables, result.x.as_slice()));
             }
             crate::command_interpreter::task_parser_nonlinear::NonlinearTaskRunResult::LeastSquares {
                 report,
                 solution,
+                variables,
             } => {
                 println!("Task kind : Nonlinear least-squares");
                 println!("Termination: {:?}", report.termination);
                 println!("Evaluations: {}", report.number_of_evaluations);
                 println!("Objective : {:.6e}", report.objective_function);
-                println!("Solution  : {:?}", solution.as_ref().map(|value| value.as_slice()));
+                println!("Solution  : {}", solution.as_ref().map(|value| format_named_values(&variables, value.as_slice())).unwrap_or_else(|| "<unavailable>".into()));
             }
         },
         TaskRunResult::Optimization(fit) => {
@@ -545,6 +552,33 @@ fn json_quote(value: &str) -> String {
     }
     escaped.push('"');
     escaped
+}
+
+fn format_named_values(names: &[String], values: &[f64]) -> String {
+    if names.len() != values.len() {
+        return format!("<{} unnamed values>", values.len());
+    }
+    names
+        .iter()
+        .zip(values)
+        .map(|(name, value)| format!("{name} = {value:.8e}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_named_json(names: &[String], values: &[f64]) -> String {
+    if names.len() != values.len() {
+        return "null".into();
+    }
+    format!(
+        "{{{}}}",
+        names
+            .iter()
+            .zip(values)
+            .map(|(name, value)| format!("{}:{}", json_quote(name), json_number(*value)))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 /// Stable, compact success summary for scripts which need one task per
@@ -639,26 +673,28 @@ fn render_run_summary_json(result: &TaskRunResult) -> String {
             )
         }
         TaskRunResult::Nonlinear(nonlinear) => match nonlinear {
-            crate::command_interpreter::task_parser_nonlinear::NonlinearTaskRunResult::Root(
+            crate::command_interpreter::task_parser_nonlinear::NonlinearTaskRunResult::Root {
                 result,
-            ) => format!(
-                "{{\"status\":{},\"kind\":\"nonlinear\",\"formulation\":\"root\",\"termination\":{},\"iterations\":{},\"residual_norm\":{},\"solution\":[{}]}}\n",
+                variables,
+            } => format!(
+                "{{\"status\":{},\"kind\":\"nonlinear\",\"formulation\":\"root\",\"termination\":{},\"iterations\":{},\"residual_norm\":{},\"variable_values\":{}}}\n",
                 json_quote(if matches!(&result.termination, crate::numerical::Nonlinear_systems::error::TerminationReason::Converged) { "passed" } else { "not_converged" }),
                 json_quote(&format!("{:?}", result.termination)),
                 result.iterations,
                 json_number(result.residual_norm),
-                result.x.iter().map(|value| json_number(*value)).collect::<Vec<_>>().join(",")
+                format_named_json(&variables, result.x.as_slice())
             ),
             crate::command_interpreter::task_parser_nonlinear::NonlinearTaskRunResult::LeastSquares {
                 report,
                 solution,
+                variables,
             } => format!(
-                "{{\"status\":{},\"kind\":\"nonlinear\",\"formulation\":\"least_squares\",\"termination\":{},\"evaluations\":{},\"objective\":{},\"solution\":{}}}\n",
+                "{{\"status\":{},\"kind\":\"nonlinear\",\"formulation\":\"least_squares\",\"termination\":{},\"evaluations\":{},\"objective\":{},\"variable_values\":{}}}\n",
                 json_quote(if report.termination.was_successful() { "passed" } else { "not_converged" }),
                 json_quote(&format!("{:?}", report.termination)),
                 report.number_of_evaluations,
                 json_number(report.objective_function),
-                solution.as_ref().map(|values| format!("[{}]", values.iter().map(|value| json_number(*value)).collect::<Vec<_>>().join(","))).unwrap_or_else(|| "null".into())
+                solution.as_ref().map(|values| format_named_json(&variables, values.as_slice())).unwrap_or_else(|| "null".into())
             ),
         },
         TaskRunResult::Optimization(fit) => {
@@ -1197,6 +1233,7 @@ pub fn run() -> Result<(), i32> {
             control,
             allow_aot_toolchains,
             aot_cache_dir,
+            output_dir,
             aot_cache_max_bytes,
             once,
             supervisor_enforces_resource_budgets,
@@ -1209,6 +1246,9 @@ pub fn run() -> Result<(), i32> {
                 );
             if let Some(path) = aot_cache_dir {
                 aot_policy = aot_policy.with_artifact_root(path);
+            }
+            if let Some(path) = output_dir {
+                aot_policy = aot_policy.with_output_root(path);
             }
             aot_policy = aot_policy.with_max_artifact_cache_bytes(aot_cache_max_bytes);
             if supervisor_enforces_resource_budgets {

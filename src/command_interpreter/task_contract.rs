@@ -146,7 +146,7 @@ const MAX_INLINE_NUMERIC_VALUES: usize = 4096;
 const MAX_INLINE_CONTINUATION_SEGMENTS: usize = 128;
 const MAX_INLINE_DIAGNOSTIC_ATTEMPTS: usize = 1024;
 
-fn result_envelope(result: TaskRunResult) -> Value {
+pub(crate) fn result_envelope(result: TaskRunResult) -> Value {
     let successful = result.is_successful();
     let telemetry = compact_task_telemetry(&result, successful);
     let diagnostics = detailed_task_diagnostics(&result, successful);
@@ -239,21 +239,30 @@ fn result_envelope(result: TaskRunResult) -> Value {
             })
         }
         TaskRunResult::Nonlinear(result) => match result {
-            NonlinearTaskRunResult::Root(result) => {
+            NonlinearTaskRunResult::Root { result, variables } => {
                 let (solution, omitted) = bounded_vector(result.x.as_slice());
+                let named_solution = named_values(&variables, result.x.as_slice());
                 json!({
                     "formulation": "root",
                     "termination": root_termination_name(&result.termination),
                     "iterations": result.iterations,
                     "residual_norm": json_f64(result.residual_norm),
                     "solution": solution,
+                    "variable_values": named_solution,
                     "solution_length": result.x.len(),
                     "solution_omitted": omitted,
                     "non_finite_values_encoded_as_null": result.x.iter().filter(|value| !value.is_finite()).count() + usize::from(!result.residual_norm.is_finite()),
                 })
             }
-            NonlinearTaskRunResult::LeastSquares { report, solution } => {
+            NonlinearTaskRunResult::LeastSquares {
+                report,
+                solution,
+                variables,
+            } => {
                 let solution_len = solution.as_ref().map_or(0, |values| values.len());
+                let named_solution = solution
+                    .as_ref()
+                    .and_then(|values| named_values(&variables, values.as_slice()));
                 let non_finite_count = solution.as_ref().map_or(0, |values| {
                     values.iter().filter(|value| !value.is_finite()).count()
                 }) + usize::from(!report.objective_function.is_finite());
@@ -267,6 +276,7 @@ fn result_envelope(result: TaskRunResult) -> Value {
                     "evaluations": report.number_of_evaluations,
                     "objective": json_f64(report.objective_function),
                     "solution": solution,
+                    "variable_values": named_solution,
                     "solution_length": solution_len,
                     "solution_omitted": omitted,
                     "non_finite_values_encoded_as_null": non_finite_count,
@@ -327,6 +337,19 @@ fn result_envelope(result: TaskRunResult) -> Value {
         response["termination_message"] = json!(termination_message);
     }
     response
+}
+
+fn named_values(names: &[String], values: &[f64]) -> Option<Value> {
+    if names.len() != values.len() || names.len() > MAX_INLINE_NUMERIC_VALUES {
+        return None;
+    }
+    Some(Value::Object(
+        names
+            .iter()
+            .cloned()
+            .zip(values.iter().copied().map(json_f64))
+            .collect(),
+    ))
 }
 
 fn ivp_continuation_summary(
@@ -469,7 +492,7 @@ fn detailed_task_diagnostics(result: &TaskRunResult, successful: bool) -> Value 
         }
         TaskRunResult::Nonlinear(result) => {
             let statistics = match result {
-                NonlinearTaskRunResult::Root(result) => &result.statistics,
+                NonlinearTaskRunResult::Root { result, .. } => &result.statistics,
                 NonlinearTaskRunResult::LeastSquares { report, .. } => &report.statistics,
             };
             if statistics.availability
@@ -768,7 +791,7 @@ fn compact_task_telemetry(result: &TaskRunResult, successful: bool) -> Value {
         }
         TaskRunResult::Nonlinear(result) => {
             let statistics = match result {
-                NonlinearTaskRunResult::Root(result) => &result.statistics,
+                NonlinearTaskRunResult::Root { result, .. } => &result.statistics,
                 NonlinearTaskRunResult::LeastSquares { report, .. } => &report.statistics,
             };
             return compact_statistics_telemetry(statistics, successful, "nonlinear_solver");
@@ -2261,7 +2284,7 @@ fn unavailable_task_telemetry(
     })
 }
 
-fn error_envelope(error: &TaskRunnerError) -> Value {
+pub(crate) fn error_envelope(error: &TaskRunnerError) -> Value {
     let classification = classify_error(error);
     let category = if classification.stage == "cancellation" {
         "cancelled"
@@ -7010,6 +7033,18 @@ mod tests {
         );
         assert!(response["diagnostics"]["aggregate"]["jacobian_evaluations"].is_u64());
         assert!(response["diagnostics"]["attempts"].as_array().is_some());
+        let schema: Value = serde_json::from_str(TASK_RESULT_JSON_SCHEMA).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&response), "schema rejected {response}");
+    }
+
+    #[test]
+    fn nonlinear_result_keeps_unknown_names_with_solution_values() {
+        let input = r#"{"format_version":1,"problem":{"formulation":"root","variables":"temperature","equations":"temperature - 900","initial_guess":0.0},"solver":{"method":"newton"}}"#;
+        let response = run_task_json_envelope(input);
+        assert_eq!(response["status"], "succeeded", "{response}");
+        assert_eq!(response["result"]["variable_values"]["temperature"], 900.0);
+        assert_eq!(response["result"]["solution"][0], 900.0);
         let schema: Value = serde_json::from_str(TASK_RESULT_JSON_SCHEMA).unwrap();
         let validator = jsonschema::validator_for(&schema).unwrap();
         assert!(validator.is_valid(&response), "schema rejected {response}");

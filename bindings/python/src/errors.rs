@@ -104,6 +104,7 @@ native_error_kinds!(rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError {
     rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::InvalidMaxSteps => "InvalidMaxSteps",
     rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::InvalidContinuationBound => "InvalidContinuationBound",
     rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::ContinuationRequiresPreparedBackend => "ContinuationRequiresPreparedBackend",
+    rustedscithe_core::numerical::BDF::BDF_api::BdfSolveError::Cancelled { .. } => "Cancelled",
 });
 
 native_error_kinds!(rustedscithe_core::somelinalg::banded::BandedError {
@@ -140,6 +141,7 @@ native_error_kinds!(rustedscithe_core::numerical::BE::BeError {
     rustedscithe_core::numerical::BE::BeError::Newton(_) => "Newton",
     rustedscithe_core::numerical::BE::BeError::StepUnderflow { .. } => "StepUnderflow",
     rustedscithe_core::numerical::BE::BeError::StepLimit { .. } => "StepLimit",
+    rustedscithe_core::numerical::BE::BeError::Cancelled { .. } => "Cancelled",
 });
 
 native_error_kinds!(rustedscithe_core::numerical::LSODE2::solver::Lsode2Error {
@@ -147,6 +149,8 @@ native_error_kinds!(rustedscithe_core::numerical::LSODE2::solver::Lsode2Error {
     rustedscithe_core::numerical::LSODE2::solver::Lsode2Error::InvalidConfig(_) => "InvalidConfig",
     rustedscithe_core::numerical::LSODE2::solver::Lsode2Error::GeneratedBackend(_) => "GeneratedBackend",
     rustedscithe_core::numerical::LSODE2::solver::Lsode2Error::NativeStep(_) => "NativeStep",
+    rustedscithe_core::numerical::LSODE2::solver::Lsode2Error::Bridge(_) => "Bridge",
+    rustedscithe_core::numerical::LSODE2::solver::Lsode2Error::Cancelled { .. } => "Cancelled",
 });
 
 native_error_kinds!(rustedscithe_core::symbolic::symbolic_ivp::IvpBackendError {
@@ -195,6 +199,7 @@ native_error_kinds!(rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError {
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::ParameterBindingMismatch { .. } => "ParameterBindingMismatch",
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::OutputOutOfDomain => "OutputOutOfDomain",
     rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::OutputUnavailable => "OutputUnavailable",
+    rustedscithe_core::numerical::BVP_sci::new::BvpSciNewError::Cancelled { .. } => "Cancelled",
 });
 
 native_error_kinds!(rustedscithe_core::numerical::Nonlinear_systems::error::SolveError {
@@ -217,6 +222,7 @@ native_error_kinds!(rustedscithe_core::numerical::Nonlinear_systems::error::Solv
     rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::LinearSolveFailure(_) => "LinearSolveFailure",
     rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::SingularJacobian => "SingularJacobian",
     rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::NumericalBreakdown(_) => "NumericalBreakdown",
+    rustedscithe_core::numerical::Nonlinear_systems::error::SolveError::Cancelled { .. } => "Cancelled",
 });
 
 native_error_kinds!(rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError {
@@ -233,6 +239,7 @@ native_error_kinds!(rustedscithe_core::numerical::Nonlinear_systems::least_squar
     rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::NonFiniteValue { .. } => "NonFiniteValue",
     rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::NumericalBreakdown { .. } => "NumericalBreakdown",
     rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::Problem(_) => "Problem",
+    rustedscithe_core::numerical::Nonlinear_systems::least_squares::LeastSquaresError::Cancelled { .. } => "Cancelled",
 });
 
 native_error_kinds!(rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError {
@@ -267,6 +274,7 @@ native_error_kinds!(rustedscithe_core::numerical::optimization::lm_gavin::GavinL
     rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::SingularCovariance => "SingularCovariance",
     rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::InvalidCovarianceDiagonal { .. } => "InvalidCovarianceDiagonal",
     rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::NumericalBreakdown { .. } => "NumericalBreakdown",
+    rustedscithe_core::numerical::optimization::lm_gavin::GavinLmError::Cancelled { .. } => "Cancelled",
 });
 
 native_error_kinds!(rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError {
@@ -338,6 +346,7 @@ native_error_kinds!(rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrat
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::AotLifecycleFailure { .. } => "AotLifecycleFailure",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::BoundStepBlocked { .. } => "BoundStepBlocked",
     rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::BoundStateOutsideBounds { .. } => "BoundStateOutsideBounds",
+    rustedscithe_core::symbolic::bvp::legacy::BvpBackendIntegrationError::Cancelled { .. } => "Cancelled",
 });
 
 native_error_kinds!(rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError {
@@ -357,6 +366,7 @@ native_error_kinds!(rustedscithe_core::numerical::BVP_CorrectionNewton::Correcti
     rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::NonFiniteCorrectionNorm { .. } => "NonFiniteCorrectionNorm",
     rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::NonConvergence { .. } => "NonConvergence",
     rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::DampingDomainExhausted { .. } => "DampingDomainExhausted",
+    rustedscithe_core::numerical::BVP_CorrectionNewton::CorrectionNewtonSolverError::Cancelled { .. } => "Cancelled",
 });
 
 native_error_kinds!(rustedscithe_core::numerical::Radau::api::RadauErrorKind {

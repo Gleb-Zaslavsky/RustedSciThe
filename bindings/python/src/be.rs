@@ -773,6 +773,7 @@ pub(crate) fn map_be_error(error: BeError) -> PyErr {
             }
             BeError::StepLimit { .. } => ExhaustionError::new_err(message),
             BeError::Newton(_) | BeError::StepUnderflow { .. } => SolverError::new_err(message),
+            BeError::Cancelled { .. } => SolverError::new_err(message),
         },
         "solve",
         "backward_euler",

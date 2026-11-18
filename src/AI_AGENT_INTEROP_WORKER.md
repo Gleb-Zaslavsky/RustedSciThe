@@ -93,6 +93,30 @@ channel before hard-killing the process. A hard kill cannot return an in-process
 partial snapshot; report that as a supervisor/process outcome, not solver
 non-convergence. See `AI_AGENT_INTEROP_SUPERVISOR.md` for the launch protocol.
 
+## Job Outputs
+
+The worker accepts `--output-dir <administrator-owned-root>`; without it,
+outputs are rooted at `rst-agent-output` under the worker's current directory.
+It allocates a unique subdirectory per accepted job and returns that directory
+in the outer response. IVP/BVP postprocessing requests may select file types,
+but all destination paths are worker-generated inside that job directory.
+Model-supplied CSV/TXT/report/plot paths are rejected, and terminal plotting is
+not available through the worker protocol. The task result reports
+`postprocessing.status` independently from numerical solve status, along with
+artifact `{path, status}` entries and typed export diagnostics. For a solve
+failure, export is `not_attempted`; for an export failure, the computed
+numerical result remains available. Artifacts describe the final task result,
+not each continuation segment. IVP/BVP arrays are omitted from worker responses
+so clients can consume the generated CSV/TXT/report/plot files instead. The
+worker does not yet impose a retention/cleanup schedule; deployment policy owns
+that lifecycle.
+
+Nonlinear results include declared variable names paired with solved values
+and compact residual/objective/iteration metrics. No generic nonlinear export
+is enabled. Fitting currently returns fitted parameters and quality metrics;
+its report/table schema is deliberately pending a separate contract decision,
+and fitting plots are never enabled automatically.
+
 ## Workload Acceptance Gate
 
 Run `scripts/ai_agent_interop_capstone.ps1 -Profile Release` for the explicit
