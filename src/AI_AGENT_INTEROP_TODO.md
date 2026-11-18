@@ -287,9 +287,18 @@ with an agent-specific numerical implementation.
   linear-solver and stop-condition choices). This closes the gap where an
   agent could discover a field name but had to guess its accepted spelling.
   Capability drift tests check schema fields and method references, and every
-  advertised LSODE2 value is preflighted through the real RST parser. The
-  remaining broader enum/capability audit for non-IVP controls is separate;
-  do not present global axes as an unrestricted Cartesian product.
+  advertised LSODE2 value is preflighted through the real RST parser.
+- [x] Complete route-scoped settings help for BVP, nonlinear systems, and
+  optimization as well as IVP. The live capability response now carries
+  concise descriptions, explicit per-route control lists, effective defaults,
+  BVP strategy/frontend/execution/layout choices, and known finite allowed
+  values. It does not advertise native-only or hybrid-parser controls that the
+  JSON TaskDocument route cannot express. Python chat renders the live metadata
+  directly and refuses to substitute family-wide unions when an older worker
+  omits route details. Rust drift tests cover every schema control and all
+  route inventories; Python tests cover concrete routes in all four families.
+  Capability axes remain descriptive and are not an unrestricted Cartesian
+  product; concrete combinations are still checked by typed preflight.
 - [x] Add a drift gate for every concrete default currently advertised in the
   capability catalog, comparing it with `inspect_task_json()` or native
   `Default` values. The gate caught and fixed a missing BVP_sci

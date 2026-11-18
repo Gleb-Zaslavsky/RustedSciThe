@@ -201,6 +201,7 @@ pub(crate) fn result_envelope(result: TaskRunResult) -> Value {
         TaskRunResult::Bvp(result) => {
             let values = result.result.as_ref();
             let mesh = result.mesh.as_deref();
+            let state_count = result.specification.equations.unknowns.len();
             let scalar_count = mesh.map_or(0, <[f64]>::len)
                 + values.map_or(0, |matrix| matrix.nrows().saturating_mul(matrix.ncols()));
             let non_finite_count = mesh.map_or(0, |values| {
@@ -210,7 +211,13 @@ pub(crate) fn result_envelope(result: TaskRunResult) -> Value {
                 match (mesh, values) {
                     (Some(mesh), Some(values)) => Some(json!({
                         "mesh": mesh.iter().copied().map(json_f64).collect::<Vec<_>>(),
-                        "values": matrix_rows(values),
+                        "values": if result.specification.solver.family
+                            == BvpSolverFamilySpec::Sci
+                        {
+                            matrix_columns_as_rows(values)
+                        } else {
+                            matrix_rows(values)
+                        },
                         "mesh_orientation": "rows",
                         "state_orientation": "columns",
                     })),
@@ -230,7 +237,7 @@ pub(crate) fn result_envelope(result: TaskRunResult) -> Value {
             json!({
                 "solver": bvp_solver_name(&result.specification.solver.family),
                 "sample_count": mesh.map_or(0, <[f64]>::len),
-                "state_count": values.map_or(0, |matrix| matrix.ncols()),
+                "state_count": state_count,
                 "numeric_value_count": scalar_count,
                 "non_finite_values_encoded_as_null": non_finite_count,
                 "data": data,
@@ -5702,6 +5709,16 @@ fn matrix_rows(matrix: &nalgebra::DMatrix<f64>) -> Vec<Vec<Value>> {
         .collect()
 }
 
+fn matrix_columns_as_rows(matrix: &nalgebra::DMatrix<f64>) -> Vec<Vec<Value>> {
+    (0..matrix.ncols())
+        .map(|column| {
+            (0..matrix.nrows())
+                .map(|row| json_f64(matrix[(row, column)]))
+                .collect()
+        })
+        .collect()
+}
+
 fn matrix_non_finite_count(matrix: &nalgebra::DMatrix<f64>) -> usize {
     matrix.iter().filter(|value| !value.is_finite()).count()
 }
@@ -6363,6 +6380,11 @@ pub fn task_capabilities_json() -> Value {
             "frontends": capability.frontends,
             "executions": capability.executions,
             "linear_layouts": capability.layouts,
+            "settings": bvp_route_settings(match family {
+                BvpSolverFamilySpec::Damp => "damped",
+                BvpSolverFamilySpec::Sci => "sci",
+                BvpSolverFamilySpec::CorrectionNewton => "correction_newton",
+            }),
                 "strategy_choices": match family {
                     BvpSolverFamilySpec::Damp => json!(["Damped", "Frozen", "Naive"]),
                     BvpSolverFamilySpec::CorrectionNewton => json!(["Damped"]),
@@ -6393,16 +6415,16 @@ pub fn task_capabilities_json() -> Value {
                     "compatibility": "Controls are parsed by the selected method; inspect_task_json is authoritative for route compatibility."
                 },
                 "methods": [
-                    {"name":"rk45", "route":"nonstiff", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "logging"]},
-                    {"name":"dopri", "route":"nonstiff", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "logging"]},
-                    {"name":"dop853", "route":"nonstiff_adaptive", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "logging"]},
-                    {"name":"ab4", "route":"nonstiff", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "logging"]},
-                    {"name":"bdf", "route":"native_bdf", "supports_single_solve_cancellation":true, "unsupported_options":["step_size", "tolerance", "parallel", "neighborhood_check"]},
-                    {"name":"backward_euler", "route":"native_backward_euler", "supports_single_solve_cancellation":true, "unsupported_options":["rtol", "atol", "max_step", "first_step", "vectorized", "parallel"], "unsupported_option_values":{"matrix_layout":["Sparse", "Banded"], "execution_policy":["Parallel", "Auto"]}},
-                    {"name":"radau5", "route":"native_radau", "supports_single_solve_cancellation":true, "unsupported_options":["step_size", "vectorized", "parallel", "neighborhood_check"]},
-                    {"name":"lsode", "route":"lsode2_bdf_compatibility", "supports_single_solve_cancellation":false, "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"]},
-                    {"name":"lsoda", "route":"lsode2_auto_adams_bdf", "supports_single_solve_cancellation":false, "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"]},
-                    {"name":"lsode2", "route":"lsode2_native", "supports_single_solve_cancellation":true, "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"]}
+                    {"name":"rk45", "route":"nonstiff", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "logging"], "settings": ivp_route_settings("rk45")},
+                    {"name":"dopri", "route":"nonstiff", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "logging"], "settings": ivp_route_settings("dopri")},
+                    {"name":"dop853", "route":"nonstiff_adaptive", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "logging"], "settings": ivp_route_settings("dop853")},
+                    {"name":"ab4", "route":"nonstiff", "supports_single_solve_cancellation":true, "unsupported_options":["symbolic_frontend", "symbolic_execution", "matrix_layout", "execution_policy", "logging"], "settings": ivp_route_settings("ab4")},
+                    {"name":"bdf", "route":"native_bdf", "supports_single_solve_cancellation":true, "unsupported_options":["step_size", "tolerance", "parallel", "neighborhood_check"], "settings": ivp_route_settings("bdf")},
+                    {"name":"backward_euler", "route":"native_backward_euler", "supports_single_solve_cancellation":true, "unsupported_options":["rtol", "atol", "max_step", "first_step", "vectorized", "parallel"], "unsupported_option_values":{"matrix_layout":["Sparse", "Banded"], "execution_policy":["Parallel", "Auto"]}, "settings": ivp_route_settings("backward_euler")},
+                    {"name":"radau5", "route":"native_radau", "supports_single_solve_cancellation":true, "unsupported_options":["step_size", "vectorized", "parallel", "neighborhood_check"], "settings": ivp_route_settings("radau5")},
+                    {"name":"lsode", "route":"lsode2_bdf_compatibility", "supports_single_solve_cancellation":false, "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"], "settings": ivp_route_settings("lsode")},
+                    {"name":"lsoda", "route":"lsode2_auto_adams_bdf", "supports_single_solve_cancellation":false, "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"], "settings": ivp_route_settings("lsoda")},
+                    {"name":"lsode2", "route":"lsode2_native", "supports_single_solve_cancellation":true, "unsupported_options":["step_size", "tolerance", "max_iterations", "parallel", "neighborhood_check"], "settings": ivp_route_settings("lsode2")}
                 ],
                 "continuation_cancellation": {"fresh_segments":"supported when the selected method supports single-solve cancellation", "explicit_restart_segments":"supported for BDF, Backward Euler, Radau5, and LSODE2", "stateful_continue":false},
                 "route_axes": {"symbolic_frontends":["ExprLegacy", "AtomView"], "symbolic_executions":["Lambdify", "AOT"], "linear_layouts":["Dense", "Sparse", "Banded"], "callback_policies":["Sequential", "Parallel", "Auto"], "telemetry_modes":["Off", "Counters", "Timings", "Detailed"]},
@@ -6431,6 +6453,8 @@ pub fn task_capabilities_json() -> Value {
                     "lsode2_stop_comparator": {"allowed_values":["ge", "le", "abs_distance"], "applies_to":["lsode2"], "when":"lsode2_stop_variable and lsode2_stop_target are provided"}
                 },
                 "telemetry_modes_apply_to": ["rk45", "dopri", "dop853", "ab4", "bdf", "backward_euler", "radau5", "lsode", "lsoda", "lsode2"],
+                "setting_descriptions": task_setting_descriptions("ivp"),
+                "setting_values": task_setting_values("ivp"),
                 "effective_defaults_by_method": ivp_effective_defaults,
                 "defaults": {"bdf":{"rtol":1e-3,"atol":1e-6,"max_steps":1000000,"matrix_layout":"Dense"}, "backward_euler":{"tolerance":1e-6,"max_iterations":100}, "radau5":{"rtol":1e-6,"atol":1e-6,"max_newton_iterations":6}, "lsode_family":{"max_step":1e-3,"rtol":1e-5,"atol":1e-8,"controller":"method-dependent"}, "other_fields":"reported by inspect_task_json or delegated to native defaults"}
             },
@@ -6441,6 +6465,9 @@ pub fn task_capabilities_json() -> Value {
                     "compatibility": "Controls are parsed by the selected solver/strategy; inspect_task_json is authoritative for route compatibility."
                 },
                 "solvers": bvp,
+                "setting_descriptions": task_setting_descriptions("bvp"),
+                "setting_values": task_setting_values("bvp"),
+                "setting_values_are_canonical": true,
                 "effective_defaults_by_route": bvp_effective_defaults,
                 "supports_task_cancellation": true,
                 "task_level_restrictions": {"correction_newton":"fixed-mesh trapezoid route; no task-document continuation", "sci":"supports mesh refinement and singular term", "damped":"Damped/Frozen/Naive strategy selection"},
@@ -6455,6 +6482,9 @@ pub fn task_capabilities_json() -> Value {
                 "supports_task_cancellation": true,
                 "formulations": ["root", "least_squares"],
                 "methods": ["newton", "damped_newton", "damped_newton_advanced", "levenberg_marquardt", "backtracking_levenberg_marquardt", "levenberg_marquardt_minpack", "nielsen_levenberg_marquardt", "nielsen_levenberg_marquardt_advanced", "trust_region", "powell_dogleg", "trust_region_lm"],
+                "settings_by_route": nonlinear_route_settings(),
+                "setting_descriptions": task_setting_descriptions("nonlinear"),
+                "setting_values": task_setting_values("nonlinear"),
                 "method_formulation_rules": [{"formulation":"root", "methods":"all listed root methods"}, {"formulation":"least_squares", "methods":["levenberg_marquardt"]}],
                 "telemetry_modes": ["off", "counters", "timings", "detailed"],
                 "effective_defaults_by_route": nonlinear_effective_defaults,
@@ -6468,6 +6498,13 @@ pub fn task_capabilities_json() -> Value {
                 },
                 "supports_task_cancellation": true,
                 "methods": ["lm", "gavin", "varpro"],
+                "settings_by_route": {
+                    "lm": optimization_route_settings("lm"),
+                    "gavin": optimization_route_settings("gavin"),
+                    "varpro": optimization_route_settings("varpro")
+                },
+                "setting_descriptions": task_setting_descriptions("optimization"),
+                "setting_values": task_setting_values("optimization"),
                 "method_model_rules": [{"method":"lm", "model":"equation_model"}, {"method":"gavin", "model":"equation_model"}, {"method":"varpro", "model":"basis_and_invariants"}],
                 "telemetry_modes": ["off", "counters", "timings", "detailed"],
                 "effective_defaults_by_method": optimization_effective_defaults,
@@ -6493,6 +6530,456 @@ fn schema_option_names(pointer: &str) -> Vec<String> {
         .collect::<Vec<_>>();
     names.sort();
     names
+}
+
+fn ivp_route_settings(method: &str) -> Vec<String> {
+    let excluded: &[&str] = match method {
+        "rk45" | "dopri" | "dop853" | "ab4" => &[
+            "symbolic_frontend",
+            "symbolic_assembly",
+            "symbolic_execution",
+            "aot_toolchain",
+            "aot_profile",
+            "aot_output_dir",
+            "matrix_layout",
+            "linear_structure",
+            "banded_lower",
+            "banded_kl",
+            "banded_upper",
+            "banded_ku",
+            "execution_policy",
+            "parallel_min_work",
+            "logging",
+            "log_level",
+            "lsode2_method_family",
+            "lsode2_controller",
+            "lsode2_symbolic_assembly",
+            "lsode2_symbolic_execution",
+            "lsode2_aot_toolchain",
+            "lsode2_aot_profile",
+            "lsode2_aot_output_dir",
+            "lsode2_linear_structure",
+            "lsode2_banded_kl",
+            "lsode2_banded_ku",
+            "lsode2_linear_solver_policy",
+            "lsode2_native_execution",
+            "lsode2_native_max_step_attempts",
+            "lsode2_native_max_accepted_steps",
+            "lsode2_stop_variable",
+            "lsode2_stop_comparator",
+            "lsode2_stop_target",
+            "lsode2_stop_tolerance",
+        ],
+        "bdf" => &[
+            "step_size",
+            "tolerance",
+            "parallel",
+            "neighborhood_check",
+            "lsode2_method_family",
+            "lsode2_controller",
+            "lsode2_symbolic_assembly",
+            "lsode2_symbolic_execution",
+            "lsode2_aot_toolchain",
+            "lsode2_aot_profile",
+            "lsode2_aot_output_dir",
+            "lsode2_linear_structure",
+            "lsode2_banded_kl",
+            "lsode2_banded_ku",
+            "lsode2_linear_solver_policy",
+            "lsode2_native_execution",
+            "lsode2_native_max_step_attempts",
+            "lsode2_native_max_accepted_steps",
+            "lsode2_stop_variable",
+            "lsode2_stop_comparator",
+            "lsode2_stop_target",
+            "lsode2_stop_tolerance",
+        ],
+        "radau5" => &[
+            "step_size",
+            "vectorized",
+            "parallel",
+            "neighborhood_check",
+            "lsode2_method_family",
+            "lsode2_controller",
+            "lsode2_symbolic_assembly",
+            "lsode2_symbolic_execution",
+            "lsode2_aot_toolchain",
+            "lsode2_aot_profile",
+            "lsode2_aot_output_dir",
+            "lsode2_linear_structure",
+            "lsode2_banded_kl",
+            "lsode2_banded_ku",
+            "lsode2_linear_solver_policy",
+            "lsode2_native_execution",
+            "lsode2_native_max_step_attempts",
+            "lsode2_native_max_accepted_steps",
+            "lsode2_stop_variable",
+            "lsode2_stop_comparator",
+            "lsode2_stop_target",
+            "lsode2_stop_tolerance",
+        ],
+        "backward_euler" => &[
+            "rtol",
+            "atol",
+            "max_step",
+            "first_step",
+            "vectorized",
+            "parallel",
+            "lsode2_method_family",
+            "lsode2_controller",
+            "lsode2_symbolic_assembly",
+            "lsode2_symbolic_execution",
+            "lsode2_aot_toolchain",
+            "lsode2_aot_profile",
+            "lsode2_aot_output_dir",
+            "lsode2_linear_structure",
+            "lsode2_banded_kl",
+            "lsode2_banded_ku",
+            "lsode2_linear_solver_policy",
+            "lsode2_native_execution",
+            "lsode2_native_max_step_attempts",
+            "lsode2_native_max_accepted_steps",
+            "lsode2_stop_variable",
+            "lsode2_stop_comparator",
+            "lsode2_stop_target",
+            "lsode2_stop_tolerance",
+        ],
+        "lsode" | "lsoda" | "lsode2" => &[
+            "step_size",
+            "tolerance",
+            "max_iterations",
+            "parallel",
+            "neighborhood_check",
+        ],
+        _ => &[],
+    };
+    schema_option_names("/$defs/ivpSolverOptions/properties")
+        .into_iter()
+        .filter(|name| !excluded.contains(&name.as_str()))
+        .collect()
+}
+
+fn bvp_route_settings(route: &str) -> Vec<String> {
+    if route == "correction_newton" {
+        return [
+            "absolute_tolerance",
+            "default_relative_tolerance",
+            "max_iterations",
+            "max_jacobian_age",
+            "max_damping_trials",
+            "loglevel",
+            "telemetry",
+            "aot_build_policy",
+            "aot_build_profile",
+            "aot_codegen_backend",
+            "aot_c_compiler",
+            "aot_output_dir",
+            "aot_handoff_path",
+            "aot_crate_name",
+            "aot_module_name",
+            "aot_residual_chunking",
+            "aot_residual_chunk_size",
+            "aot_sparse_jacobian_chunking",
+            "aot_sparse_jacobian_chunk_size",
+            "aot_banded_jacobian_chunking",
+            "aot_banded_jacobian_chunk_size",
+            "rel_tolerance",
+            "bounds",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    }
+    let excluded: &[&str] = match route {
+        "damped" => &[
+            "boundary_tolerance",
+            "max_nodes",
+            "max_newton_iterations",
+            "max_jacobian_refreshes",
+            "max_mesh_refinements",
+            "max_backtracking_steps",
+            "banded_lower",
+            "banded_upper",
+            "sparse_factorization",
+            "execution_policy",
+            "execution_min_work",
+            "output_policy",
+            "singular_term_a",
+            "singular_term_matrix",
+            "absolute_tolerance",
+            "default_relative_tolerance",
+            "max_jacobian_age",
+            "max_damping_trials",
+            "aot_crate_name",
+            "aot_module_name",
+            "aot_residual_chunking",
+            "aot_residual_chunk_size",
+            "aot_sparse_jacobian_chunking",
+            "aot_sparse_jacobian_chunk_size",
+            "aot_banded_jacobian_chunking",
+            "aot_banded_jacobian_chunk_size",
+        ],
+        "sci" => &[
+            "max_iterations",
+            "max_jacobian_refreshes",
+            "max_mesh_refinements",
+            "max_backtracking_steps",
+            "execution_policy",
+            "execution_min_work",
+            "generated_backend",
+            "matrix_backend",
+            "backend_policy",
+            "symbolic_backend",
+            "aot_compile_preset",
+            "aot_execution_policy",
+            "banded_linear_solver",
+            "refinement_steps",
+            "absolute_tolerance",
+            "default_relative_tolerance",
+            "max_jacobian_age",
+            "max_damping_trials",
+            "aot_crate_name",
+            "aot_module_name",
+            "aot_residual_chunking",
+            "aot_residual_chunk_size",
+            "aot_sparse_jacobian_chunking",
+            "aot_sparse_jacobian_chunk_size",
+            "aot_banded_jacobian_chunking",
+            "aot_banded_jacobian_chunk_size",
+        ],
+        "correction_newton" => &[
+            "tolerance",
+            "boundary_tolerance",
+            "max_iterations",
+            "max_nodes",
+            "max_newton_iterations",
+            "max_jacobian_refreshes",
+            "max_mesh_refinements",
+            "max_backtracking_steps",
+            "banded_lower",
+            "banded_upper",
+            "sparse_factorization",
+            "execution_policy",
+            "execution_min_work",
+            "telemetry",
+            "output_policy",
+            "singular_term_a",
+            "singular_term_matrix",
+            "linear_sys_method",
+            "loglevel",
+            "generated_backend",
+            "matrix_backend",
+            "backend_policy",
+            "symbolic_backend",
+            "aot_codegen_backend",
+            "aot_c_compiler",
+            "aot_build_policy",
+            "aot_build_profile",
+            "aot_compile_preset",
+            "aot_execution_policy",
+            "aot_output_dir",
+            "aot_handoff_path",
+            "banded_linear_solver",
+            "refinement_steps",
+        ],
+        _ => &[],
+    };
+    let mut settings = schema_option_names("/$defs/bvpSolverOptions/properties")
+        .into_iter()
+        .filter(|name| !excluded.contains(&name.as_str()))
+        .collect::<Vec<_>>();
+    if route == "damped" {
+        settings.push("bounds".into());
+    }
+    settings
+}
+
+fn optimization_route_settings(method: &str) -> Vec<String> {
+    let mut fields = schema_option_names("/$defs/optimizationTask/properties/solver/properties");
+    if method != "gavin" {
+        fields.retain(|name| name != "gavin_weights" && name != "gavin_positive_parameters");
+    }
+    fields
+}
+
+fn nonlinear_route_settings() -> Value {
+    let root_fields = schema_option_names("/$defs/nonlinearTask/properties/solver/properties")
+        .into_iter()
+        .filter(|name| !["residual_tolerance", "gradient_tolerance"].contains(&name.as_str()))
+        .collect::<Vec<_>>();
+    let least_squares_fields =
+        schema_option_names("/$defs/nonlinearTask/properties/solver/properties");
+    let root_methods = [
+        "newton",
+        "damped_newton",
+        "damped_newton_advanced",
+        "levenberg_marquardt",
+        "backtracking_levenberg_marquardt",
+        "levenberg_marquardt_minpack",
+        "nielsen_levenberg_marquardt",
+        "nielsen_levenberg_marquardt_advanced",
+        "trust_region",
+        "powell_dogleg",
+        "trust_region_lm",
+    ];
+    let mut routes = serde_json::Map::new();
+    for method in root_methods {
+        routes.insert(method.to_owned(), json!(root_fields));
+    }
+    routes.insert(
+        "least_squares/levenberg_marquardt".into(),
+        json!(least_squares_fields),
+    );
+    Value::Object(routes)
+}
+
+fn task_setting_descriptions(family: &str) -> Value {
+    let descriptions: std::collections::BTreeMap<&str, &str> = [
+        ("step_size", "Fixed integration step size; the method's step semantics apply."),
+        ("tolerance", "Solver convergence/error tolerance; its precise norm and stopping role depend on the selected method."),
+        ("method", "Selects the numerical algorithm; accepted methods depend on the task family and formulation."),
+        ("rtol", "Relative local-error tolerance used by adaptive IVP methods."),
+        ("atol", "Absolute local-error tolerance used by adaptive IVP methods."),
+        ("max_step", "Upper bound on an adaptive integration step."),
+        ("first_step", "Optional initial step size; null leaves selection to the solver."),
+        ("max_iterations", "Maximum nonlinear or solver iterations; the route defines what counts as an iteration."),
+        ("max_nodes", "Upper bound on BVP mesh nodes, including nodes introduced by refinement."),
+        ("max_newton_iterations", "Maximum Newton iterations per BVP solve/mesh stage."),
+        ("max_jacobian_refreshes", "Limit on Jacobian refreshes in the BVP_sci nonlinear iteration."),
+        ("max_mesh_refinements", "Maximum adaptive BVP mesh-refinement rounds."),
+        ("max_backtracking_steps", "Maximum line-search backtracking trials in BVP_sci."),
+        ("banded_lower", "Lower bandwidth for a banded linear system; only meaningful on a Banded route."),
+        ("banded_upper", "Upper bandwidth for a banded linear system; only meaningful on a Banded route."),
+        ("banded_kl", "Lower bandwidth in the IVP banded-matrix convention."),
+        ("banded_ku", "Upper bandwidth in the IVP banded-matrix convention."),
+        ("sparse_factorization", "Sparse factorization choice for the sparse BVP_sci route."),
+        ("execution_policy", "Callback execution policy; accepted choices depend on the solver route."),
+        ("execution_min_work", "Minimum estimated callback work before Auto policy dispatches in parallel."),
+        ("parallel_min_work", "Minimum estimated callback work before Auto policy dispatches in parallel."),
+        ("telemetry", "Diagnostic collection level; Off avoids collecting optional telemetry."),
+        ("logging", "Text log verbosity; independent of numerical telemetry."),
+        ("log_level", "Alias for text log verbosity; do not combine with logging."),
+        ("symbolic_frontend", "Symbolic expression frontend used to prepare callbacks."),
+        ("symbolic_assembly", "Alias selecting the symbolic assembly frontend."),
+        ("assembly", "Symbolic frontend used to assemble the CorrectionNewton residual and Jacobian."),
+        ("execution", "Selects lambdified callbacks or ahead-of-time compiled callbacks."),
+        ("symbolic_execution", "Callback execution mode: interpreted/lambdified or compiled AOT."),
+        ("aot_toolchain", "Compiler/toolchain used to build AOT callbacks."),
+        ("aot_profile", "AOT compilation profile, such as debug or release."),
+        ("aot_output_dir", "Directory for generated AOT artifacts; required only on routes that require persisted output."),
+        ("matrix_layout", "Linear-system storage/solver layout; accepted layouts are route-specific."),
+        ("linear_structure", "Alias for the requested linear-system structure."),
+        ("vectorized", "Whether the selected callback is declared to accept vectorized state batches."),
+        ("parallel", "Legacy parallel-callback switch; use execution_policy when supported."),
+        ("neighborhood_check", "BDF neighborhood-check threshold; interpreted by the native BDF route."),
+        ("lsode2_method_family", "LSODE2 integration family: automatic switching, Adams, or BDF."),
+        ("lsode2_controller", "Alias selecting the LSODE2 integration family/controller."),
+        ("lsode2_symbolic_assembly", "Symbolic frontend used by the LSODE2 native route."),
+        ("lsode2_symbolic_execution", "LSODE2 callback execution mode."),
+        ("lsode2_aot_toolchain", "Compiler/toolchain for LSODE2 AOT callbacks."),
+        ("lsode2_aot_profile", "Compilation profile for LSODE2 AOT callbacks."),
+        ("lsode2_aot_output_dir", "Output directory for LSODE2 AOT artifacts."),
+        ("lsode2_linear_structure", "Linear-system structure for LSODE2: dense, sparse, or banded."),
+        ("lsode2_banded_kl", "Alias for the LSODE2 lower bandwidth on a banded linear structure."),
+        ("lsode2_banded_ku", "Alias for the LSODE2 upper bandwidth on a banded linear structure."),
+        ("lsode2_linear_solver_policy", "LSODE2 policy selecting the concrete linear solver backend."),
+        ("lsode2_native_execution", "Selects the LSODE2 native solve/bridge execution route."),
+        ("lsode2_native_max_step_attempts", "Maximum native LSODE2 step attempts before route fallback/failure."),
+        ("lsode2_native_max_accepted_steps", "Maximum accepted native LSODE2 steps."),
+        ("lsode2_stop_variable", "Named state variable used by an optional LSODE2 stop condition."),
+        ("lsode2_stop_comparator", "Comparison rule for the LSODE2 stop target."),
+        ("lsode2_stop_target", "Target value for the optional LSODE2 state stop condition."),
+        ("lsode2_stop_tolerance", "Tolerance used when evaluating the LSODE2 stop condition."),
+        ("boundary_tolerance", "Tolerance for satisfying BVP boundary conditions."),
+        ("output_policy", "BVP output selection policy; does not change the numerical solve."),
+        ("singular_term_a", "Endpoint coefficient for the BVP_sci singular-term formulation."),
+        ("singular_term_matrix", "Matrix coefficient for the BVP_sci singular-term formulation."),
+        ("linear_sys_method", "Linear algebra method selector for BVP_sci."),
+        ("loglevel", "Text logging verbosity for routes that expose this control."),
+        ("generated_backend", "Generated callback backend preset for the selected BVP route."),
+        ("matrix_backend", "Matrix assembly/backend selection for generated BVP callbacks."),
+        ("backend_policy", "Policy for choosing among available generated callback backends."),
+        ("symbolic_backend", "Symbolic backend used to assemble generated callbacks."),
+        ("aot_codegen_backend", "AOT code generator language/backend."),
+        ("aot_c_compiler", "C compiler used when the AOT backend is C."),
+        ("aot_build_policy", "Policy controlling whether and when AOT artifacts are built or reused."),
+        ("aot_build_profile", "Build optimization profile for AOT artifacts."),
+        ("aot_compile_preset", "Named compilation preset for generated BVP callbacks."),
+        ("aot_execution_policy", "Policy selecting execution of generated AOT callbacks."),
+        ("aot_handoff_path", "Path used to hand generated AOT artifacts to an external consumer."),
+        ("banded_linear_solver", "Concrete linear solver used for a banded BVP system."),
+        ("refinement_steps", "Number of refinement steps used by the generated backend."),
+        ("absolute_tolerance", "Absolute stopping tolerance for the CorrectionNewton correction residual."),
+        ("default_relative_tolerance", "Default relative tolerance applied to BVP state components."),
+        ("max_jacobian_age", "Maximum reuse age of the Jacobian before it must be refreshed."),
+        ("max_damping_trials", "Maximum trial steps considered by the CorrectionNewton damping search."),
+        ("aot_crate_name", "Crate name assigned to a generated AOT artifact."),
+        ("aot_module_name", "Module name assigned to generated AOT code."),
+        ("aot_residual_chunking", "Chunking strategy for generated residual callbacks."),
+        ("aot_residual_chunk_size", "Target size/count parameter for residual callback chunks."),
+        ("aot_sparse_jacobian_chunking", "Chunking strategy for generated sparse Jacobian callbacks."),
+        ("aot_sparse_jacobian_chunk_size", "Target size/count parameter for sparse Jacobian chunks."),
+        ("aot_banded_jacobian_chunking", "Chunking strategy for generated banded Jacobian callbacks."),
+        ("aot_banded_jacobian_chunk_size", "Target size/count parameter for banded Jacobian chunks."),
+        ("rel_tolerance", "Per-state relative tolerance overrides; keys must name declared BVP unknowns."),
+        ("bounds", "Per-state lower and upper solution bounds, supplied as [lower, upper] pairs."),
+        ("residual_tolerance", "Least-squares residual stopping tolerance; only valid for least-squares formulation."),
+        ("gradient_tolerance", "Gradient/first-order optimality stopping tolerance."),
+        ("objective_tolerance", "Stopping tolerance for change in the fitting objective."),
+        ("gavin_weights", "Per-observation weights for the Gavin fitting method."),
+        ("gavin_positive_parameters", "Parameter names constrained to positive values by Gavin fitting."),
+    ].into_iter().collect();
+    let pointer = match family {
+        "ivp" => "/$defs/ivpSolverOptions/properties",
+        "bvp" => "/$defs/bvpSolverOptions/properties",
+        "nonlinear" => "/$defs/nonlinearTask/properties/solver/properties",
+        "optimization" => "/$defs/optimizationTask/properties/solver/properties",
+        _ => return json!({}),
+    };
+    let mut known = schema_option_names(pointer)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if family == "bvp" {
+        known.extend(bvp_route_settings("correction_newton"));
+    }
+    let mut output = serde_json::Map::new();
+    for (name, description) in descriptions {
+        if known.contains(name) {
+            output.insert(name.to_owned(), json!(description));
+        }
+    }
+    Value::Object(output)
+}
+
+fn task_setting_values(family: &str) -> Value {
+    match family {
+        "bvp" => json!({
+            "sparse_factorization": ["standard_faer", "superlu"],
+            "execution_policy": ["Sequential", "Parallel", "Auto"],
+            "telemetry": ["Off", "Counters", "Timings", "Detailed"],
+            "output_policy": ["FinalOnly", "MeshAndValues", "DenseOutput"],
+            "loglevel": ["Off", "Error", "Warn", "Info", "Debug"],
+            "assembly": ["ExprLegacy", "AtomView"],
+            "execution": ["Lambdify", "AOT"],
+            "matrix_layout": ["Dense", "Sparse", "BandedAuto"],
+            "aot_codegen_backend": ["C", "Zig", "Rust"],
+            "aot_build_profile": ["Debug", "Release"],
+            "aot_compile_preset": ["production", "fast_build", "dev_fastest"],
+            "aot_execution_policy": ["auto", "sequential"],
+            "backend_policy": ["numeric_only", "lambdify_only", "aot_only", "prefer_aot_then_lambdify", "prefer_aot_then_numeric", "prefer_lambdify_then_numeric"],
+            "generated_backend": ["default", "sparse", "sparse_lambdify", "sparse_aot", "sparse_aot_gcc", "sparse_aot_tcc", "sparse_aot_zig", "banded", "banded_lambdify", "banded_aot", "banded_aot_gcc", "banded_aot_tcc", "banded_aot_zig"],
+            "matrix_backend": ["default", "dense", "sparse", "banded"],
+            "symbolic_backend": ["ExprLegacy", "AtomView"],
+            "aot_residual_chunking": ["whole", "target_chunks", "output_count"],
+            "aot_sparse_jacobian_chunking": ["whole", "target_chunks", "nnz", "rows"],
+            "aot_banded_jacobian_chunking": ["whole", "target_chunks", "diagonals"],
+            "banded_linear_solver": ["auto", "faithful", "block_tridiagonal", "block_tridiagonal_consistent", "faer_sparse", "general_partial_pivot"]
+        }),
+        "nonlinear" | "optimization" => json!({
+            "telemetry": ["off", "counters", "timings", "detailed"]
+        }),
+        _ => json!({}),
+    }
 }
 
 fn task_family_name(kind: TaskDocumentKind) -> &'static str {
@@ -7755,6 +8242,70 @@ mod tests {
                 published, actual,
                 "family {index} control inventory drifted"
             );
+            let descriptions = families[index]["setting_descriptions"]
+                .as_object()
+                .expect("family publishes setting descriptions");
+            for name in actual {
+                assert!(
+                    descriptions
+                        .get(&name)
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.is_empty()),
+                    "family {index} setting {name} has no help description"
+                );
+            }
+        }
+
+        for method in families[0]["methods"].as_array().unwrap() {
+            let settings = method["settings"].as_array().expect("IVP method settings");
+            assert!(
+                !settings.is_empty(),
+                "IVP method has no settings inventory: {}",
+                method["name"]
+            );
+            let unsupported = method["unsupported_options"].as_array().unwrap();
+            for setting in settings {
+                assert!(
+                    !unsupported.contains(setting),
+                    "IVP setting {} is marked unsupported for {}",
+                    setting,
+                    method["name"]
+                );
+            }
+        }
+        for route in families[1]["solvers"].as_array().unwrap() {
+            let settings = route["settings"].as_array().expect("BVP route settings");
+            let descriptions = families[1]["setting_descriptions"].as_object().unwrap();
+            for setting in settings {
+                let name = setting.as_str().unwrap();
+                assert!(
+                    descriptions.get(name).and_then(Value::as_str).is_some(),
+                    "BVP route setting {name} has no description"
+                );
+            }
+        }
+        for (family_index, method_key) in [(2, "settings_by_route"), (3, "settings_by_route")] {
+            let routes = families[family_index][method_key].as_object().unwrap();
+            assert!(
+                !routes.is_empty(),
+                "family {family_index} has no route settings"
+            );
+            for (route, settings) in routes {
+                assert!(
+                    settings.as_array().is_some_and(|values| !values.is_empty()),
+                    "route {route} has no settings"
+                );
+                let descriptions = families[family_index]["setting_descriptions"]
+                    .as_object()
+                    .unwrap();
+                for setting in settings.as_array().unwrap() {
+                    let name = setting.as_str().unwrap();
+                    assert!(
+                        descriptions.get(name).and_then(Value::as_str).is_some(),
+                        "route {route} setting {name} has no description"
+                    );
+                }
+            }
         }
 
         let ivp_options = schema_option_names("/$defs/ivpSolverOptions/properties");
@@ -8042,6 +8593,7 @@ mod tests {
         assert_eq!(bvp_response["status"], "succeeded");
         assert_eq!(bvp_response["result"]["solver"], "BVP_sci");
         assert_eq!(bvp_response["result"]["data"]["mesh_orientation"], "rows");
+        assert_eq!(bvp_response["result"]["state_count"], 1);
         assert_eq!(
             bvp_response["result"]["data"]["mesh"]
                 .as_array()
@@ -8049,6 +8601,13 @@ mod tests {
                 .len(),
             bvp_response["result"]["sample_count"].as_u64().unwrap() as usize
         );
+        let mesh_count = bvp_response["result"]["data"]["mesh"]
+            .as_array()
+            .unwrap()
+            .len();
+        let values = bvp_response["result"]["data"]["values"].as_array().unwrap();
+        assert_eq!(values.len(), mesh_count);
+        assert!(values.iter().all(|row| row.as_array().unwrap().len() == 1));
 
         let fit_response = run_task_json_envelope(OPTIMIZATION);
         assert_eq!(fit_response["status"], "succeeded");

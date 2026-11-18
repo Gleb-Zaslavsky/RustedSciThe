@@ -173,7 +173,19 @@
         "aot_output_dir": { "type": "string" },
         "aot_handoff_path": { "type": "string" },
         "banded_linear_solver": { "type": "string" },
-        "refinement_steps": { "type": "integer", "minimum": 0 }
+        "refinement_steps": { "type": "integer", "minimum": 0 },
+        "absolute_tolerance": { "type": "number", "exclusiveMinimum": 0 },
+        "default_relative_tolerance": { "type": "number", "exclusiveMinimum": 0 },
+        "max_jacobian_age": { "type": "integer", "minimum": 0 },
+        "max_damping_trials": { "type": "integer", "minimum": 1 },
+        "aot_crate_name": { "type": "string" },
+        "aot_module_name": { "type": "string" },
+        "aot_residual_chunking": { "type": "string" },
+        "aot_residual_chunk_size": { "type": "integer", "minimum": 1 },
+        "aot_sparse_jacobian_chunking": { "type": "string" },
+        "aot_sparse_jacobian_chunk_size": { "type": "integer", "minimum": 1 },
+        "aot_banded_jacobian_chunking": { "type": "string" },
+        "aot_banded_jacobian_chunk_size": { "type": "integer", "minimum": 1 }
       },
       "additionalProperties": false
     },
@@ -311,6 +323,13 @@
               "minItems": 2,
               "maxItems": 2
             }
+          },
+          "additionalProperties": false
+        },
+        "rel_tolerance": {
+          "type": "object",
+          "patternProperties": {
+            "^[A-Za-z_][A-Za-z0-9_]*$": { "type": "number", "exclusiveMinimum": 0 }
           },
           "additionalProperties": false
         },

@@ -801,9 +801,29 @@ fn execute_worker_postprocessing(
             nalgebra::DVector::from_vec(result.mesh.clone().ok_or_else(|| {
                 PostprocessError::InvalidDataset("BVP result has no mesh".into())
             })?),
-            result.result.clone().ok_or_else(|| {
-                PostprocessError::InvalidDataset("BVP result matrix is unavailable".into())
-            })?,
+            {
+                let matrix = result.result.clone().ok_or_else(|| {
+                    PostprocessError::InvalidDataset("BVP result matrix is unavailable".into())
+                })?;
+                if result.specification.solver.family
+                    == crate::command_interpreter::task_parser_bvp::BvpSolverFamilySpec::Sci
+                {
+                    let expected_states = result.specification.equations.unknowns.len();
+                    let expected_nodes = result.mesh.as_ref().map_or(0, Vec::len);
+                    if matrix.nrows() != expected_states || matrix.ncols() != expected_nodes {
+                        return Err(PostprocessError::InvalidDataset(format!(
+                            "BVP_sci result shape is {} states x {} nodes; expected {} states x {} nodes",
+                            matrix.nrows(),
+                            matrix.ncols(),
+                            expected_states,
+                            expected_nodes,
+                        )));
+                    }
+                    matrix.transpose().into_owned()
+                } else {
+                    matrix
+                }
+            },
         )?,
         TaskRunResult::Nonlinear(_) | TaskRunResult::Optimization(_) => {
             return Err(PostprocessError::InvalidDataset(
@@ -2279,6 +2299,46 @@ mod tests {
             "final_task_result"
         );
         assert_response_matches_schema(&no_export);
+    }
+
+    #[test]
+    fn worker_exports_bvp_sci_state_major_solution_as_node_major_csv() {
+        let root = tempfile::tempdir().expect("temporary output root");
+        let mut job = job_without_budget();
+        job["task"] = json!({
+            "format_version": 1,
+            "task": {"solver": "BVP_sci", "method": "Sparse"},
+            "equations": {"arg": "x", "unknowns": "y", "rhs": "0"},
+            "boundary_conditions": {"y_left": 1.0},
+            "mesh": {"t0": 0.0, "t_end": 1.0, "n_steps": 8},
+            "initial_guess": {"y": 1.0},
+            "postprocessing": {"save_csv": true},
+        });
+        let policy = WorkerAotPolicy::deny_all().with_output_root(root.path());
+        let response = process_record_with_policy(job.to_string().as_bytes(), &policy);
+
+        assert_eq!(response["status"], "succeeded", "{response}");
+        assert_eq!(response["task_result"]["status"], "succeeded");
+        assert_eq!(response["task_result"]["result"]["sample_count"], 8);
+        assert_eq!(response["task_result"]["result"]["state_count"], 1);
+        assert_eq!(
+            response["task_result"]["postprocessing"]["status"],
+            "succeeded"
+        );
+        assert_eq!(response["task_result"]["result"]["data"], Value::Null);
+
+        let output_directory = PathBuf::from(
+            response["output_directory"]
+                .as_str()
+                .expect("worker returns job output directory"),
+        );
+        let artifact = &response["task_result"]["postprocessing"]["artifacts"][0];
+        assert_eq!(artifact["status"], "created");
+        let path = PathBuf::from(artifact["path"].as_str().unwrap());
+        assert!(path.starts_with(&output_directory));
+        let csv = std::fs::read_to_string(&path).expect("BVP_sci CSV artifact should exist");
+        assert_eq!(csv.lines().count(), 9, "header plus one row per mesh node");
+        assert!(csv.lines().all(|line| line.split(',').count() == 2));
     }
 
     #[test]
