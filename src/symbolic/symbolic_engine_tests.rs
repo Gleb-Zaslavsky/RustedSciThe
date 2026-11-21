@@ -568,6 +568,15 @@ mod tests {
     }
 
     #[test]
+    fn substitute_expression_inside_trigonometric_nodes_uses_replacement() {
+        let expression = Expr::sin(Box::new(Expr::Var("x".to_owned())));
+        let replacement = Expr::Const(3.0);
+        let result = expression.substitute_variable("x", &replacement);
+
+        assert_eq!(result, Expr::sin(Box::new(Expr::Const(3.0))));
+    }
+
+    #[test]
     fn test_symbols_macro() {
         let (x, y, z) = symbols!(x, y, z);
         assert_eq!(x, Expr::Var("x".to_string()));

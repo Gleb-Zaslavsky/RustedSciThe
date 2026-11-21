@@ -539,3 +539,24 @@ for target in [1.0, 2.0, 3.0] {
     println!("target={target}, fit={:?}", solver.map_of_solutions);
 }
 ```
+
+### Именованные символьные подвыражения
+
+`SymbolicProblemOptions::with_substitutions` раскрывает alias до вывода списка
+неизвестных и подготовки callbacks/Jacobian. Это символьная предобработка до
+решения, а не переназначение параметров и не continuation.
+
+```rust
+let options = SymbolicProblemOptions::new()
+    .with_substitutions([("force", Expr::parse_expression("rate*x")?)])
+    .with_parameters(vec!["rate".into()]);
+let problem = SymbolicNonlinearProblem::from_expressions_with_options(
+    vec![Expr::parse_expression("force - 2")?],
+    options,
+)?;
+```
+
+При автоматическом выводе неизвестных имя alias не становится неизвестной;
+выводятся символы, оставшиеся после раскрытия. Alias не может затенять
+объявленный параметр или явно заданную неизвестную. Некорректные и циклические
+определения дают типизированную ошибку до запуска численного алгоритма.

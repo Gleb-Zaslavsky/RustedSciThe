@@ -48,6 +48,55 @@ fn parses_square_root_task_and_typed_solver_options() {
 }
 
 #[test]
+fn nonlinear_task_expands_named_subexpressions_before_symbol_validation() {
+    let mut task = root_task();
+    task.get_mut("problem").unwrap().insert(
+        "equations".into(),
+        Some(vec![
+            Value::String("sum - 3".into()),
+            Value::String("x - y - 1".into()),
+        ]),
+    );
+    task.get_mut("problem").unwrap().insert(
+        "substitutions".into(),
+        Some(vec![Value::String("sum=x+y".into())]),
+    );
+    let spec = parse_nonlinear_task_from_document(&task)
+        .expect("alias should expand before checking equation symbols");
+    assert_eq!(
+        spec.problem.equations[0]
+            .all_arguments_are_variables()
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        HashSet::from(["x".to_string(), "y".to_string()])
+    );
+    match run_nonlinear_task(spec).expect("aliased nonlinear task solves") {
+        NonlinearTaskRunResult::Root { result, .. } => {
+            assert!((result.x[0] - 2.0).abs() < 1e-8);
+            assert!((result.x[1] - 1.0).abs() < 1e-8);
+        }
+        _ => panic!("expected root result"),
+    }
+}
+
+#[test]
+fn nonlinear_task_rejects_substitution_names_that_shadow_variables() {
+    let mut task = root_task();
+    task.get_mut("problem").unwrap().insert(
+        "substitutions".into(),
+        Some(vec![Value::String("x=2*y".into())]),
+    );
+    assert!(matches!(
+        parse_nonlinear_task_from_document(&task),
+        Err(NonlinearTaskError::InvalidField {
+            section: "problem",
+            field: "substitutions",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn nonlinear_task_telemetry_is_explicit_and_reaches_native_results() {
     match run_nonlinear_task(
         parse_nonlinear_task_from_document(&root_task()).expect("default telemetry parses"),

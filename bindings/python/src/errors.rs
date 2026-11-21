@@ -288,10 +288,12 @@ native_error_kinds!(rustedscithe_core::numerical::optimization::varpro::symbolic
     rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::SolverFailed { .. } => "SolverFailed",
     rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::FitOutputUnavailable => "FitOutputUnavailable",
     rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::FittedModel(_) => "FittedModel",
+    rustedscithe_core::numerical::optimization::varpro::symbolic::SymbolicVarProError::SymbolicSubstitution(_) => "SymbolicSubstitution",
 });
 
 native_error_kinds!(rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError {
     rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::Fitting(_) => "Fitting",
+    rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::SymbolicSubstitution(_) => "SymbolicSubstitution",
     rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::VarPro(_) => "VarPro",
     rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::SolverConfiguration(_) => "SolverConfiguration",
     rustedscithe_core::numerical::optimization::universal_fitting::UniversalFittingError::Gavin(_) => "Gavin",
@@ -371,6 +373,7 @@ native_error_kinds!(rustedscithe_core::numerical::BVP_CorrectionNewton::Correcti
 
 native_error_kinds!(rustedscithe_core::numerical::Radau::api::RadauErrorKind {
     rustedscithe_core::numerical::Radau::api::RadauErrorKind::Configuration => "Configuration",
+    rustedscithe_core::numerical::Radau::api::RadauErrorKind::SymbolicSubstitution => "SymbolicSubstitution",
     rustedscithe_core::numerical::Radau::api::RadauErrorKind::Cancelled => "Cancelled",
     rustedscithe_core::numerical::Radau::api::RadauErrorKind::Unsupported => "Unsupported",
     rustedscithe_core::numerical::Radau::api::RadauErrorKind::Aot => "Aot",

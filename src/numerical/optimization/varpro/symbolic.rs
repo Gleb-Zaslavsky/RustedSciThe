@@ -21,6 +21,7 @@ use crate::numerical::optimization::varpro::problem::{
     SeparableProblemBuilder, SeparableProblemBuilderError, SingleRhs,
 };
 use crate::numerical::optimization::varpro::solvers::levmar::LevMarSolver;
+use crate::symbolic::substitutions::{SymbolicSubstitutionError, apply_symbolic_substitutions};
 use crate::symbolic::symbolic_engine::Expr;
 
 /// Boxed VarPro basis function with one nonlinear scalar parameter.
@@ -85,6 +86,10 @@ pub enum SymbolicVarProError {
     /// The fitted model could not be wrapped for reusable post-fit evaluation.
     #[error(transparent)]
     FittedModel(#[from] FittedModelError),
+
+    /// A symbolic substitution definition was invalid or shadowed a model name.
+    #[error(transparent)]
+    SymbolicSubstitution(#[from] SymbolicSubstitutionError),
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +118,7 @@ pub struct SymbolicVarProBuilder {
     y_data: Option<DVector<f64>>,
     basis_functions: Vec<UnaryBasisSpec>,
     invariant_functions: Vec<Expr>,
+    substitutions: Vec<(String, Expr)>,
 }
 
 impl SymbolicVarProBuilder {
@@ -129,6 +135,7 @@ impl SymbolicVarProBuilder {
             y_data: None,
             basis_functions: Vec::new(),
             invariant_functions: Vec::new(),
+            substitutions: Vec::new(),
         }
     }
 
@@ -249,15 +256,50 @@ impl SymbolicVarProBuilder {
         self.with_invariant_expr(Expr::parse_expression(expression))
     }
 
+    /// Expand named symbolic subexpressions in basis and invariant expressions
+    /// when the model is prepared. Names cannot shadow the independent
+    /// variable or declared nonlinear parameters.
+    pub fn with_substitutions<I, N>(mut self, definitions: I) -> Self
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        self.substitutions = definitions
+            .into_iter()
+            .map(|(name, expression)| (name.into(), expression))
+            .collect();
+        self
+    }
+
     /// Build the underlying separable model without solving it.
     pub fn build_model(&self) -> Result<SeparableModel<f64>, SymbolicVarProError> {
         self.validate()?;
 
+        let mut symbolic_expressions = self
+            .basis_functions
+            .iter()
+            .map(|basis| basis.expression.clone())
+            .chain(self.invariant_functions.iter().cloned())
+            .collect::<Vec<_>>();
+        let reserved_names = std::iter::once(self.x_name.clone())
+            .chain(self.parameter_names.iter().cloned())
+            .collect::<Vec<_>>();
+        apply_symbolic_substitutions(
+            &mut symbolic_expressions,
+            self.substitutions.clone(),
+            &reserved_names,
+        )?;
+
         let mut model_builder = SeparableModelBuilder::<f64>::new(self.parameter_names.clone());
 
-        for basis_spec in &self.basis_functions {
+        let basis_count = self.basis_functions.len();
+        for (basis_spec, expression) in self
+            .basis_functions
+            .iter()
+            .zip(symbolic_expressions.iter().take(basis_count))
+        {
             let (basis, derivative) = unary_basis_and_derivative(
-                basis_spec.expression.clone(),
+                expression.clone(),
                 &self.x_name,
                 &basis_spec.parameter_name,
             );
@@ -266,7 +308,7 @@ impl SymbolicVarProBuilder {
                 .partial_deriv(&basis_spec.parameter_name, derivative);
         }
 
-        for invariant in &self.invariant_functions {
+        for invariant in symbolic_expressions.iter().skip(basis_count) {
             model_builder =
                 model_builder.invariant_function(invariant_basis(invariant.clone(), &self.x_name));
         }

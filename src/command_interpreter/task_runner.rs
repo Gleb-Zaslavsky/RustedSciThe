@@ -1049,6 +1049,7 @@ enum JsonFieldShape {
     Boolean,
     NullableNumber,
     StringOrArray,
+    StringMap,
     NumberOrArray,
 }
 
@@ -1077,6 +1078,9 @@ fn validate_json_field_shapes(
                         .as_array()
                         .is_some_and(|values| values.iter().all(serde_json::Value::is_string))
             }
+            JsonFieldShape::StringMap => value
+                .as_object()
+                .is_some_and(|values| values.values().all(serde_json::Value::is_string)),
             JsonFieldShape::NumberOrArray => {
                 value.is_number()
                     || value
@@ -1106,6 +1110,9 @@ fn validate_json_field_shapes(
                             JsonFieldShape::Boolean => "a boolean",
                             JsonFieldShape::NullableNumber => "a number or null",
                             JsonFieldShape::StringOrArray => "a string or an array of strings",
+                            JsonFieldShape::StringMap => {
+                                "an object mapping names to expression strings"
+                            }
                             JsonFieldShape::NumberOrArray => "a number or an array of numbers",
                         },
                     });
@@ -1328,6 +1335,7 @@ fn validate_json_field_shapes(
                     ("initial_guess", NumberOrArray),
                     ("parameters", StringOrArray),
                     ("parameter_values", NumberOrArray),
+                    ("substitutions", StringMap),
                 ],
             )?;
             fields(
@@ -1359,6 +1367,7 @@ fn validate_json_field_shapes(
                     ("basis_parameters", StringOrArray),
                     ("basis_equations", StringOrArray),
                     ("invariants", StringOrArray),
+                    ("substitutions", StringMap),
                 ],
             )?;
             fields(
@@ -1880,8 +1889,12 @@ const IVP_POSTPROCESSING_FIELDS: &[&str] = &[
 
 const BVP_SOLVER_FIELDS: &[&str] = &[
     "tolerance",
+    "absolute_tolerance",
+    "default_relative_tolerance",
     "boundary_tolerance",
     "max_iterations",
+    "max_jacobian_age",
+    "max_damping_trials",
     "max_nodes",
     "max_newton_iterations",
     "max_jacobian_refreshes",
@@ -1910,6 +1923,14 @@ const BVP_SOLVER_FIELDS: &[&str] = &[
     "aot_execution_policy",
     "aot_output_dir",
     "aot_handoff_path",
+    "aot_crate_name",
+    "aot_module_name",
+    "aot_residual_chunking",
+    "aot_residual_chunk_size",
+    "aot_sparse_jacobian_chunking",
+    "aot_sparse_jacobian_chunk_size",
+    "aot_banded_jacobian_chunking",
+    "aot_banded_jacobian_chunk_size",
     "banded_linear_solver",
     "refinement_steps",
 ];
@@ -3060,9 +3081,26 @@ mod tests {
         assert!(root.is_successful());
         assert_eq!(root.kind(), TaskDocumentKind::Nonlinear);
 
+        let nonlinear_with_aliases = r#"{"format_version":1,"problem":{"formulation":"root","variables":["x","y"],"equations":["sum-3","x-y-1"],"initial_guess":[0.0,0.0],"substitutions":{"sum":"x+y"}},"solver":{"method":"newton"}}"#;
+        let root = run_task_from_json(nonlinear_with_aliases)
+            .expect("JSON nonlinear task with symbolic aliases runs");
+        assert!(root.is_successful());
+
         let fit = run_task_from_json(fitting).expect("JSON optimization task runs");
         assert!(fit.is_successful());
         assert_eq!(fit.kind(), TaskDocumentKind::Optimization);
+
+        let fitting_with_aliases = r#"{"format_version":1,"data":{"x":[0.0,1.0,2.0],"y":[1.0,3.0,5.0]},"model":{"method":"lm","parameters":["a","b"],"initial_guess":[0.0,0.0],"equations":["line"],"substitutions":{"line":"a*x+b"}}}"#;
+        let fit = run_task_from_json(fitting_with_aliases)
+            .expect("JSON optimization task with symbolic aliases runs");
+        assert!(fit.is_successful());
+        if let TaskRunResult::Optimization(result) = fit {
+            let parameters = result.solution_map().unwrap();
+            assert!((parameters["a"] - 2.0).abs() < 1e-5);
+            assert!((parameters["b"] - 1.0).abs() < 1e-5);
+        } else {
+            panic!("expected optimization result");
+        }
     }
 
     #[test]
@@ -3376,6 +3414,7 @@ mod tests {
                     Some("number") => serde_json::json!("not-a-number"),
                     Some("integer") => serde_json::json!(1.5),
                     Some("boolean") => serde_json::json!("not-a-boolean"),
+                    Some("object") => serde_json::json!({"not": 1}),
                     Some(_) => serde_json::json!({"not": "a scalar or supported array"}),
                     None => serde_json::json!({"not": "a supported scalar or array"}),
                 };

@@ -27,6 +27,7 @@ pub mod prelude {
 use self::NR_for_Euler::{NRE, NreError, NreStepMode};
 use crate::numerical::logging::{SolverLogGuard, SolverLogLevel, solver_info as info};
 use crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot;
+use crate::symbolic::substitutions::{SymbolicSubstitutionError, apply_symbolic_substitutions};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
 use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
@@ -421,6 +422,10 @@ pub struct BeSolverOptions {
     pub generated_backend_config: SymbolicIvpGeneratedBackendConfig,
     /// Symbolic expression frontend used when callbacks are prepared.
     pub symbolic_assembly_backend: BeSymbolicAssemblyBackend,
+    /// Ordered names of runtime-bound symbols referenced by the equations.
+    pub equation_parameters: Option<Vec<String>>,
+    /// Initial runtime bindings corresponding to `equation_parameters`.
+    pub equation_parameter_values: Option<DVector<f64>>,
     /// Maximum integration step attempts in one solve/continuation segment.
     pub max_steps: usize,
     /// Controls solver and callback instrumentation.
@@ -430,6 +435,26 @@ pub struct BeSolverOptions {
 }
 
 impl BeSolverOptions {
+    /// Expands named symbolic aliases before generated callbacks are prepared.
+    pub fn try_with_substitutions<I, N>(
+        mut self,
+        definitions: I,
+    ) -> Result<Self, SymbolicSubstitutionError>
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        let reserved = self
+            .values
+            .iter()
+            .cloned()
+            .chain(std::iter::once(self.arg.clone()))
+            .chain(self.equation_parameters.iter().flatten().cloned())
+            .collect::<Vec<_>>();
+        apply_symbolic_substitutions(&mut self.eq_system, definitions, &reserved)?;
+        Ok(self)
+    }
+
     /// Creates grouped Backward Euler options.
     pub fn new(
         eq_system: Vec<Expr>,
@@ -454,6 +479,8 @@ impl BeSolverOptions {
             y0,
             generated_backend_config: SymbolicIvpGeneratedBackendConfig::defaults(),
             symbolic_assembly_backend: BeSymbolicAssemblyBackend::default(),
+            equation_parameters: None,
+            equation_parameter_values: None,
             max_steps: DEFAULT_BE_MAX_STEPS,
             telemetry_mode: BeTelemetryMode::Off,
             logging_level: SolverLogLevel::Off,
@@ -478,6 +505,18 @@ impl BeSolverOptions {
     /// Selects the symbolic frontend used to prepare residual/Jacobian callbacks.
     pub fn with_symbolic_assembly_backend(mut self, backend: BeSymbolicAssemblyBackend) -> Self {
         self.symbolic_assembly_backend = backend;
+        self
+    }
+
+    /// Declares ordered symbolic parameter names before callback preparation.
+    pub fn with_equation_parameters(mut self, parameters: Vec<String>) -> Self {
+        self.equation_parameters = Some(parameters);
+        self
+    }
+
+    /// Sets the initial values for the declared symbolic parameters.
+    pub fn with_equation_parameter_values(mut self, values: DVector<f64>) -> Self {
+        self.equation_parameter_values = Some(values);
         self
     }
 
@@ -662,6 +701,13 @@ impl BE {
         solver.try_set_telemetry_mode(options.telemetry_mode)?;
         solver.set_logging_level(options.logging_level);
         solver.set_symbolic_assembly_backend(symbolic_assembly_backend);
+        if let Some(parameters) = options.equation_parameters.as_ref() {
+            let names = parameters.iter().map(String::as_str).collect::<Vec<_>>();
+            solver.try_set_equation_parameters(Some(&names))?;
+        }
+        if let Some(values) = options.equation_parameter_values {
+            solver.try_set_parameter_values(values)?;
+        }
         Ok(solver)
     }
 

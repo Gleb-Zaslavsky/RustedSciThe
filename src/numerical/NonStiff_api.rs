@@ -1,5 +1,6 @@
 use crate::Utils::plots::plots;
 use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpTelemetrySnapshot};
+use crate::symbolic::substitutions::{SymbolicSubstitutionError, apply_symbolic_substitutions};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, SymbolicIvpProblemOptions, prepare_symbolic_ivp_residual_problem,
@@ -191,6 +192,25 @@ impl Solver for AdamsBashforth4 {
 }
 
 impl nonstiffODE {
+    /// Expands named symbolic aliases before residual preparation.
+    pub fn try_with_substitutions<I, N>(
+        mut self,
+        definitions: I,
+    ) -> Result<Self, SymbolicSubstitutionError>
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        let reserved = self
+            .values
+            .iter()
+            .cloned()
+            .chain(std::iter::once(self.arg.clone()))
+            .collect::<Vec<_>>();
+        apply_symbolic_substitutions(&mut self.eq_system, definitions, &reserved)?;
+        Ok(self)
+    }
+
     pub fn new(
         eq_system: Vec<Expr>,
         values: Vec<String>,
@@ -1076,6 +1096,29 @@ mod tests_nonstiff_api {
                 .to_string()
                 .contains("duplicate IVP callback argument name")
         );
+    }
+
+    #[test]
+    fn nonstiff_aliases_expand_before_symbolic_preparation() {
+        let mut solver = nonstiffODE::try_new(
+            vec![Expr::parse_expression("decay")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            "DOP853".to_string(),
+            0.0,
+            DVector::from_element(1, 1.0),
+            1.0,
+            0.2,
+            None,
+        )
+        .unwrap()
+        .try_with_substitutions([("decay", Expr::parse_expression("-2*y"))])
+        .unwrap();
+
+        solver.try_solve().unwrap();
+        let (times, states) = solver.get_result();
+        assert_eq!(times[times.len() - 1], 1.0);
+        assert!((states[(states.nrows() - 1, 0)] - (-2.0f64).exp()).abs() < 1e-9);
     }
 
     #[test]

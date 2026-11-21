@@ -353,7 +353,12 @@
             "equations": { "$ref": "#/$defs/stringOrStringArray" },
             "initial_guess": { "$ref": "#/$defs/numberOrNumberArray" },
             "parameters": { "$ref": "#/$defs/stringOrStringArray" },
-            "parameter_values": { "$ref": "#/$defs/numberOrNumberArray" }
+            "parameter_values": { "$ref": "#/$defs/numberOrNumberArray" },
+            "substitutions": {
+              "type": "object",
+              "description": "Named Expr aliases expanded before nonlinear solve preparation.",
+              "additionalProperties": { "type": "string" }
+            }
           },
           "additionalProperties": false
         },
@@ -422,7 +427,12 @@
             "equations": { "$ref": "#/$defs/stringOrStringArray" },
             "basis_parameters": { "$ref": "#/$defs/stringOrStringArray" },
             "basis_equations": { "$ref": "#/$defs/stringOrStringArray" },
-            "invariants": { "$ref": "#/$defs/stringOrStringArray" }
+            "invariants": { "$ref": "#/$defs/stringOrStringArray" },
+            "substitutions": {
+              "type": "object",
+              "description": "Named Expr aliases expanded before fitting model preparation.",
+              "additionalProperties": { "type": "string" }
+            }
           },
           "additionalProperties": false
         },

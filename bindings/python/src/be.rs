@@ -393,7 +393,7 @@ impl BackwardEulerSolver {
     /// `tolerance` and `max_iterations` control the implicit step solve.
     /// `options` selects the frontend, execution route and telemetry.
     #[new]
-    #[pyo3(signature=(expressions, state_variables, time_variable, y0, t0, t_end, h=None, tolerance=1e-6, max_iterations=100, options=None, parameters=None, parameter_values=None))]
+    #[pyo3(signature=(expressions, state_variables, time_variable, y0, t0, t_end, h=None, tolerance=1e-6, max_iterations=100, options=None, parameters=None, parameter_values=None, substitutions=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         expressions: Vec<PyExpr>,
@@ -408,6 +408,7 @@ impl BackwardEulerSolver {
         options: Option<PyRef<'_, SolverOptions>>,
         parameters: Option<Vec<String>>,
         parameter_values: Option<Vec<f64>>,
+        substitutions: Option<HashMap<String, PyExpr>>,
     ) -> PyResult<Self> {
         validate_names(&state_variables, "state_variables")?;
         finite_vector(&y0, "y0")?;
@@ -440,7 +441,28 @@ impl BackwardEulerSolver {
                 "parameters must not collide with time_variable or state_variables",
             ));
         }
-        validate_expression_symbols(&expressions, &state_variables, &time_variable, &parameters)?;
+        let reserved = state_variables
+            .iter()
+            .cloned()
+            .chain(std::iter::once(time_variable.clone()))
+            .chain(parameters.iter().cloned())
+            .collect::<Vec<_>>();
+        let native_expressions = crate::expr::resolve_solver_substitutions(
+            expressions
+                .into_iter()
+                .map(|expression| expression.inner)
+                .collect(),
+            substitutions,
+            &reserved,
+            "backward_euler",
+        )?;
+        crate::expr::validate_resolved_solver_symbols(
+            &native_expressions,
+            &state_variables,
+            &time_variable,
+            &parameters,
+            "Backward Euler",
+        )?;
         validate_scalar(t0, "t0")?;
         validate_scalar(t_end, "t_end")?;
         if t0 == t_end {
@@ -485,10 +507,7 @@ impl BackwardEulerSolver {
         let (frontend, telemetry_mode) = validate_route(&options)?;
         let logging_level = crate::contract::native_logging_level(&options, "backward_euler")?;
         let mut native_options = BeSolverOptions::new(
-            expressions
-                .into_iter()
-                .map(|expression| expression.inner)
-                .collect(),
+            native_expressions,
             state_variables,
             time_variable,
             tolerance,
@@ -501,25 +520,20 @@ impl BackwardEulerSolver {
         .with_symbolic_assembly_backend(frontend)
         .with_telemetry_mode(telemetry_mode)
         .with_logging_level(logging_level);
+        if !parameters.is_empty() {
+            native_options = native_options.with_equation_parameters(parameters.clone());
+            if let Some(values) = parameter_values.as_ref() {
+                native_options = native_options
+                    .with_equation_parameter_values(DVector::from_vec(values.clone()));
+            }
+        }
         if options.execution() == "aot" {
             native_options =
                 native_options.with_generated_backend_config(generated_config(&options)?);
         }
         let route = format!("{}:{}", options.frontend(), options.execution());
         let solver = catch_panic("construct", "backward_euler", &route, || {
-            let mut solver = BE::try_new_with_options(native_options).map_err(map_be_error)?;
-            if !parameters.is_empty() {
-                let parameter_refs = parameters.iter().map(String::as_str).collect::<Vec<_>>();
-                solver
-                    .try_set_equation_parameters(Some(&parameter_refs))
-                    .map_err(map_be_error)?;
-            }
-            if let Some(values) = parameter_values {
-                solver
-                    .try_set_parameter_values(DVector::from_vec(values))
-                    .map_err(map_be_error)?;
-            }
-            Ok(solver)
+            BE::try_new_with_options(native_options).map_err(map_be_error)
         })?;
         Ok(Self {
             solver,

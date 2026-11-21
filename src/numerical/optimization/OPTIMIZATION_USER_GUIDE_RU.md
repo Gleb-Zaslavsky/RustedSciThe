@@ -278,3 +278,26 @@ Gavin и VarPro. Вызовы после подгонки не запускаю�
 она не гарантирует физическую достоверность и не оценивает доверительные границы.
 Полный пример запускается командой `cargo run --example
 universal_fitting_post_fit`.
+
+## Именованные символьные подвыражения
+
+`UniversalFitting::with_substitutions` рекурсивно раскрывает alias до подготовки
+модели выбранным fitting-маршрутом. Определения применяются к уравнениям
+LM/Gavin, а также basis- и invariant-выражениям VarPro. Это символьная
+предобработка ввода, а не переназначение параметров и не continuation.
+
+```rust
+let fit = UniversalFitting::new()
+    .with_data(x, y)
+    .with_arg("x")
+    .with_unknowns(["slope", "offset"])
+    .with_initial_guess(vec![1.0, 0.0])
+    .with_equation_str("line")
+    .with_substitutions([("line", Expr::parse_expression("slope*x+offset"))])
+    .build()?;
+```
+
+Alias может ссылаться на другие alias, а обычные символы модели остаются
+свободными. Имена не могут затенять независимую переменную или явно заданные
+параметры подгонки. Некорректные, циклические и конфликтующие определения
+возвращают типизированную ошибку до запуска численного fitting.

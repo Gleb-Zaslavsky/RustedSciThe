@@ -82,6 +82,99 @@ fn public_solver_exposes_frontend_continuation_output_and_telemetry() {
 }
 
 #[test]
+fn symbolic_substitutions_expand_before_prepare_and_keep_parameters_runtime_bound() {
+    for frontend in [RadauFrontend::ExprLegacy, RadauFrontend::AtomViewNative] {
+        let problem = RadauProblem::new(
+            vec![Expr::parse_expression("-rate*y")],
+            vec!["y".to_owned()],
+            "t",
+        )
+        .with_parameter_names(vec!["a".to_owned()])
+        .with_substitutions([
+            ("rate", Expr::parse_expression("2*decay")),
+            ("decay", Expr::parse_expression("a")),
+        ])
+        .with_jacobian(vec![Expr::parse_expression("-rate")]);
+        let mut solver = RadauSolver::prepare(
+            problem,
+            RadauConfig {
+                frontend,
+                t_bound: 0.5,
+                first_step: Some(0.05),
+                max_step: 0.1,
+                ..RadauConfig::default()
+            },
+        )
+        .unwrap();
+
+        for a in [0.5, 1.25] {
+            let solution = solver
+                .try_solve_with_parameter_values(&[1.0], &[a])
+                .unwrap();
+            let expected = (-2.0 * a * 0.5_f64).exp();
+            assert!(
+                (solution.y[0] - expected).abs() < 2.0e-5,
+                "{frontend:?}, a={a}: got {}, expected {expected}",
+                solution.y[0]
+            );
+        }
+    }
+
+    let problem = RadauProblem::new(
+        vec![Expr::parse_expression("-rate*y")],
+        vec!["y".to_owned()],
+        "t",
+    )
+    .with_parameter_names(vec!["a".to_owned()])
+    .with_substitutions([("rate", Expr::parse_expression("2*a"))]);
+    let mut solver = RadauSolver::prepare(
+        problem,
+        RadauConfig {
+            frontend: RadauFrontend::ExprLegacy,
+            t_bound: 0.5,
+            ..RadauConfig::default()
+        },
+    )
+    .unwrap();
+    let solution = solver
+        .try_solve_with_parameter_values(&[1.0], &[0.75])
+        .unwrap();
+    assert!((solution.y[0] - (-0.75_f64).exp()).abs() < 2.0e-5);
+}
+
+#[test]
+fn symbolic_substitution_cycles_and_name_conflicts_are_typed_prepare_errors() {
+    let cyclic = RadauProblem::new(
+        vec![Expr::parse_expression("-rate*y")],
+        vec!["y".to_owned()],
+        "t",
+    )
+    .with_substitutions([
+        ("rate", Expr::parse_expression("decay")),
+        ("decay", Expr::parse_expression("rate")),
+    ]);
+    let error = match RadauSolver::prepare(cyclic, RadauConfig::default()) {
+        Ok(_) => panic!("cyclic substitutions must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), RadauErrorKind::SymbolicSubstitution);
+    assert!(error.to_string().contains("cyclic symbolic substitutions"));
+
+    let conflicting = RadauProblem::new(
+        vec![Expr::parse_expression("-rate*y")],
+        vec!["y".to_owned()],
+        "t",
+    )
+    .with_substitutions([("y", Expr::parse_expression("1"))]);
+    let error = match RadauSolver::prepare(conflicting, RadauConfig::default()) {
+        Ok(_) => panic!("state-name collisions must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), RadauErrorKind::SymbolicSubstitution);
+    assert!(error.to_string().contains("conflicts with a declared"));
+}
+
+#[test]
 fn expr_legacy_derives_compact_analytic_jacobian_when_omitted() {
     let workload = build_workload(WorkloadKind::DiffusionChain, 12);
     let variables: Vec<&str> = workload.variables.iter().map(String::as_str).collect();

@@ -134,6 +134,7 @@ use crate::symbolic::codegen::codegen_aot_driver::AotCodegenBackend;
 use crate::symbolic::ivp_telemetry::{
     IvpLambdifyExecutionPolicy, IvpTelemetry, IvpTelemetrySnapshot,
 };
+use crate::symbolic::substitutions::{SymbolicSubstitutionError, apply_symbolic_substitutions};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     IvpBackendError, IvpSymbolicAssemblyBackend, SharedIvpParameterValues,
@@ -437,6 +438,24 @@ pub struct BdfSolverOptions {
 }
 
 impl BdfSolverOptions {
+    /// Expands named symbolic aliases before any solver preparation occurs.
+    /// Runtime parameters may be referenced by alias expressions and remain
+    /// runtime-bound; aliases themselves are not parameter rebinding.
+    pub fn try_with_substitutions<I, N>(
+        mut self,
+        definitions: I,
+    ) -> Result<Self, SymbolicSubstitutionError>
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        let mut reserved = self.values.clone();
+        reserved.push(self.arg.clone());
+        reserved.extend(self.equation_parameters.iter().flatten().cloned());
+        apply_symbolic_substitutions(&mut self.eq_system, definitions, &reserved)?;
+        Ok(self)
+    }
+
     /// Creates grouped BDF options through the legacy method-string interface.
     /// Prefer [`Self::for_bdf`] for new code; any method other than `"BDF"`
     /// is rejected immediately.

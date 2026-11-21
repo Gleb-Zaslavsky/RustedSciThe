@@ -18,6 +18,7 @@ use crate::symbolic::codegen::codegen_runtime_api::ResidualChunkingStrategy;
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetry, IvpTelemetryMode};
+use crate::symbolic::substitutions::{SymbolicSubstitutionError, apply_symbolic_substitutions};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::{
     build_expr_legacy_banded_jacobian, build_expr_legacy_sparse_jacobian,
@@ -25,6 +26,7 @@ use crate::symbolic::symbolic_ivp::{
 use crate::symbolic::symbolic_ivp_generated::{
     SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
 };
+use crate::symbolic::symexpr_graphs::{Definition, SymbolicSystem, SymbolicSystemError};
 
 use super::new::analytic_jacobian::AnalyticJacobianCallback;
 use super::new::aot::AotPlan;
@@ -274,9 +276,36 @@ pub struct RadauProblem {
     independent_variable: String,
     variables: Vec<String>,
     parameters: Vec<String>,
+    substitutions: Vec<(String, Expr)>,
 }
 
 impl RadauProblem {
+    /// Expands aliases immediately, returning a typed error before preparation.
+    /// The older [`Self::with_substitutions`] builder remains available for
+    /// deferred validation at `RadauSolver::prepare`.
+    pub fn try_with_substitutions<I, N>(
+        mut self,
+        definitions: I,
+    ) -> Result<Self, SymbolicSubstitutionError>
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        let definitions = definitions
+            .into_iter()
+            .map(|(name, expression)| (name.into(), expression))
+            .collect::<Vec<_>>();
+        let mut reserved = self.variables.clone();
+        reserved.push(self.independent_variable.clone());
+        reserved.extend(self.parameters.iter().cloned());
+        apply_symbolic_substitutions(&mut self.residual, definitions.iter().cloned(), &reserved)?;
+        if let Some(jacobian) = &mut self.jacobian {
+            apply_symbolic_substitutions(jacobian, definitions, &reserved)?;
+        }
+        self.substitutions.clear();
+        Ok(self)
+    }
+
     /// Create a problem from residual expressions and ordered variable names.
     pub fn new(
         residual: Vec<Expr>,
@@ -289,7 +318,28 @@ impl RadauProblem {
             independent_variable: independent_variable.into(),
             variables,
             parameters: Vec::new(),
+            substitutions: Vec::new(),
         }
+    }
+
+    /// Add named symbolic expressions that are expanded into the residual and
+    /// optional explicit Jacobian during preparation, before frontend
+    /// callbacks, structural analysis, differentiation, or AOT compilation.
+    ///
+    /// Definitions may refer to one another; dependency chains are expanded
+    /// recursively. Cycles, duplicate names, and collisions with declared
+    /// state/time/parameter names are reported as a typed preparation error.
+    /// This is symbolic input convenience, not runtime parameter binding.
+    pub fn with_substitutions<I, N>(mut self, definitions: I) -> Self
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        self.substitutions = definitions
+            .into_iter()
+            .map(|(name, expression)| (name.into(), expression))
+            .collect();
+        self
     }
 
     /// Supply an explicit row-major symbolic Jacobian for Lambdify or AOT.
@@ -327,6 +377,59 @@ impl RadauProblem {
     pub fn state_dimension(&self) -> usize {
         self.variables.len()
     }
+
+    fn apply_substitutions(&mut self) -> Result<(), RadauError> {
+        if self.substitutions.is_empty() {
+            return Ok(());
+        }
+
+        for (name, _) in &self.substitutions {
+            if name.is_empty()
+                || name == &self.independent_variable
+                || self.variables.iter().any(|variable| variable == name)
+                || self.parameters.iter().any(|parameter| parameter == name)
+            {
+                return Err(RadauError::symbolic_substitution(format!(
+                    "substitution name `{name}` is empty or conflicts with a declared time, state, or parameter name"
+                )));
+            }
+        }
+
+        let definitions = self
+            .substitutions
+            .iter()
+            .map(|(name, expression)| Definition::new(name.clone(), expression.clone()));
+        let system = SymbolicSystem::new(definitions).map_err(symbolic_substitution_error)?;
+        let expanded = system.expand_all().map_err(symbolic_substitution_error)?;
+
+        for (name, expression) in expanded {
+            for residual in &mut self.residual {
+                *residual = residual.substitute_variable(&name, &expression);
+            }
+            if let Some(jacobian) = &mut self.jacobian {
+                for entry in jacobian {
+                    *entry = entry.substitute_variable(&name, &expression);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn symbolic_substitution_error(error: SymbolicSystemError) -> RadauError {
+    let message = match error {
+        SymbolicSystemError::DuplicateDefinition(name) => {
+            format!("symbolic substitution `{name}` is defined more than once")
+        }
+        SymbolicSystemError::UnknownTarget(name) => {
+            format!("symbolic substitution target `{name}` is not defined")
+        }
+        SymbolicSystemError::CyclicDependency(names) => format!(
+            "cyclic symbolic substitutions are not allowed: {}",
+            names.join(" -> ")
+        ),
+    };
+    RadauError::symbolic_substitution(message)
 }
 
 /// Machine-readable public error category.
@@ -334,6 +437,7 @@ impl RadauProblem {
 pub enum RadauErrorKind {
     Cancelled,
     Configuration,
+    SymbolicSubstitution,
     Callback,
     NonFiniteCallback,
     Shape,
@@ -358,6 +462,13 @@ pub struct RadauError {
 impl RadauError {
     pub fn kind(&self) -> RadauErrorKind {
         self.kind
+    }
+
+    fn symbolic_substitution(message: String) -> Self {
+        Self {
+            kind: RadauErrorKind::SymbolicSubstitution,
+            message,
+        }
     }
 }
 
@@ -1047,7 +1158,8 @@ impl RadauSolver {
     /// parameter values reuse the prepared frontend and do not repeat symbolic
     /// construction. Each solve starts from its explicitly supplied initial
     /// state; it is not solution-seeded continuation.
-    pub fn prepare(problem: RadauProblem, mut config: RadauConfig) -> Result<Self, RadauError> {
+    pub fn prepare(mut problem: RadauProblem, mut config: RadauConfig) -> Result<Self, RadauError> {
+        problem.apply_substitutions()?;
         let symbolic_bandwidth = if matches!(
             config.matrix_layout,
             RadauMatrixLayout::BandedAuto | RadauMatrixLayout::Banded { .. }

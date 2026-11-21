@@ -8,6 +8,7 @@ use crate::symbolic::codegen::codegen_runtime_api::{
 use crate::symbolic::codegen::codegen_tasks::SparseChunkingStrategy;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::ivp_telemetry::{IvpLambdifyExecutionPolicy, IvpTelemetry};
+use crate::symbolic::substitutions::{SymbolicSubstitutionError, apply_symbolic_substitutions};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::SymbolicIvpAotOptions;
 use crate::symbolic::symbolic_ivp_generated::{
@@ -893,6 +894,30 @@ pub struct Lsode2ProblemConfig {
 }
 
 impl Lsode2ProblemConfig {
+    /// Expands named symbolic aliases before LSODE2 prepares any callbacks.
+    pub fn try_with_substitutions<I, N>(
+        mut self,
+        definitions: I,
+    ) -> Result<Self, SymbolicSubstitutionError>
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        if self.analytical_callbacks.is_some()
+            || matches!(
+                self.residual_jacobian_source,
+                Lsode2ResidualJacobianSource::Analytical
+            )
+        {
+            return Err(SymbolicSubstitutionError::NonSymbolicCallbackRoute);
+        }
+        let mut reserved = self.values.clone();
+        reserved.push(self.arg.clone());
+        reserved.extend(self.equation_parameters.iter().flatten().cloned());
+        apply_symbolic_substitutions(&mut self.eq_system, definitions, &reserved)?;
+        Ok(self)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         eq_system: Vec<Expr>,

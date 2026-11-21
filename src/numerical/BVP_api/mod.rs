@@ -34,6 +34,7 @@ use crate::numerical::BVP_sci::new::{
 use crate::numerical::cancellation::CancellationToken;
 use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::codegen_backend_selection::BackendSelectionPolicy;
+use crate::symbolic::substitutions::{SymbolicSubstitutionError, apply_symbolic_substitutions};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_functions_BVP::BvpBackendIntegrationError;
 use crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedBackendConfig;
@@ -182,6 +183,7 @@ pub struct BvpProblem {
     mesh: Vec<f64>,
     boundary_conditions: Vec<BvpBoundaryCondition>,
     external_parameters: Option<BvpSciExternalParameters>,
+    substitution_names: Vec<String>,
 }
 
 /// Fixed symbolic model inputs for BVP_sci. The schema is supplied before
@@ -212,9 +214,47 @@ impl BvpProblem {
             mesh,
             boundary_conditions,
             external_parameters: None,
+            substitution_names: Vec::new(),
         };
         problem.validate()?;
         Ok(problem)
+    }
+
+    /// Expand named symbolic subexpressions before constructing a BVP solver.
+    /// This changes only the input expressions, not the numerical method.
+    pub fn try_with_substitutions<I, N>(
+        mut self,
+        definitions: I,
+    ) -> Result<Self, SymbolicSubstitutionError>
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        let definitions = definitions
+            .into_iter()
+            .map(|(name, expression)| (name.into(), expression))
+            .collect::<Vec<_>>();
+        let reserved = self
+            .state_names
+            .iter()
+            .cloned()
+            .chain(std::iter::once(self.independent_variable.clone()))
+            .chain(
+                self.external_parameters
+                    .iter()
+                    .flat_map(|parameters| parameters.names.iter().cloned()),
+            )
+            .collect::<Vec<_>>();
+        apply_symbolic_substitutions(
+            &mut self.equations,
+            definitions
+                .iter()
+                .map(|(name, expression)| (name.clone(), expression.clone())),
+            &reserved,
+        )?;
+        self.substitution_names
+            .extend(definitions.into_iter().map(|(name, _)| name));
+        Ok(self)
     }
 
     /// Declare fixed symbolic inputs before constructing a BVP_sci or
@@ -248,6 +288,14 @@ impl BvpProblem {
         }) {
             return Err(BvpApiError::InvalidProblem(
                 "external parameter names must be unique and distinct from state and independent-variable names".into(),
+            ));
+        }
+        if let Some(name) = names
+            .iter()
+            .find(|name| self.substitution_names.contains(name))
+        {
+            return Err(BvpApiError::SymbolicSubstitution(
+                SymbolicSubstitutionError::ReservedName(name.clone()),
             ));
         }
         self.external_parameters = Some(BvpSciExternalParameters { names, values });
@@ -813,6 +861,8 @@ pub enum BvpParameterLoopReport {
 pub enum BvpApiError {
     #[error("invalid BVP problem: {0}")]
     InvalidProblem(String),
+    #[error("BVP symbolic substitution failed")]
+    SymbolicSubstitution(#[source] SymbolicSubstitutionError),
     #[error("unsupported {solver} BVP route: {reason}")]
     UnsupportedRoute {
         solver: &'static str,
@@ -881,6 +931,20 @@ impl BvpSolver {
     /// Construct a solver using an explicit solver-family configuration.
     pub fn new(problem: BvpProblem, config: BvpSolverConfig) -> Result<Self, BvpApiError> {
         problem.validate()?;
+        if let BvpSolverConfig::SciWithFreeParameters {
+            free_parameters, ..
+        } = &config
+        {
+            if let Some(name) = free_parameters
+                .names
+                .iter()
+                .find(|name| problem.substitution_names.contains(name))
+            {
+                return Err(BvpApiError::SymbolicSubstitution(
+                    SymbolicSubstitutionError::ReservedName(name.clone()),
+                ));
+            }
+        }
         let mut boundary_values_binding = None;
         let mut damped_explicit_mesh = false;
         let native = match config {

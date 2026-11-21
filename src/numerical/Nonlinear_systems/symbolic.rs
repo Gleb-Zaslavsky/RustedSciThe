@@ -47,6 +47,7 @@ use crate::symbolic::codegen::codegen_runtime_api::{
     DenseJacobianChunkingStrategy, ResidualChunkingStrategy,
 };
 use crate::symbolic::codegen::codegen_tasks::{JacobianTask, ResidualTask};
+use crate::symbolic::substitutions::{SymbolicSubstitutionError, apply_symbolic_substitutions};
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::{DMatrix, DVector};
 use std::cell::RefCell;
@@ -705,6 +706,8 @@ pub struct SymbolicProblemOptions {
     pub equation_parameters: Option<Vec<String>>,
     /// Optional parameter values used during evaluation.
     pub equation_parameter_values: Option<DVector<f64>>,
+    /// Named subexpressions expanded before schema validation and preparation.
+    pub substitutions: Vec<(String, Expr)>,
     /// Backend used to prepare the symbolic provider.
     pub backend_config: SymbolicBackendConfig,
     /// Frontend used by the in-process Lambdify backend.
@@ -742,6 +745,20 @@ impl SymbolicProblemOptions {
     /// callers can bind other values without repeating symbolic preparation.
     pub fn with_parameter_values(mut self, values: DVector<f64>) -> Self {
         self.equation_parameter_values = Some(values);
+        self
+    }
+
+    /// Adds named symbolic aliases to expand before numeric preparation.
+    pub fn with_substitutions<I, N>(mut self, definitions: I) -> Self
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        self.substitutions.extend(
+            definitions
+                .into_iter()
+                .map(|(name, expression)| (name.into(), expression)),
+        );
         self
     }
 
@@ -1880,6 +1897,41 @@ impl<'a> BoundSymbolicNonlinearProblem<'a> {
     }
 }
 
+fn expand_nonlinear_substitutions(
+    mut equations: Vec<Expr>,
+    options: &SymbolicProblemOptions,
+) -> Result<Vec<Expr>, SolveError> {
+    if options.substitutions.is_empty() {
+        return Ok(equations);
+    }
+    let alias_names = options
+        .substitutions
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let parameter_names = options.equation_parameters.as_deref().unwrap_or_default();
+    let variables = options.variables.clone().unwrap_or_else(|| {
+        let mut names = equations
+            .iter()
+            .flat_map(Expr::all_arguments_are_variables)
+            .filter(|name| !alias_names.contains(name.as_str()))
+            .filter(|name| !parameter_names.contains(name))
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    });
+    let reserved = variables
+        .into_iter()
+        .chain(parameter_names.iter().cloned())
+        .collect::<Vec<_>>();
+    apply_symbolic_substitutions(&mut equations, options.substitutions.clone(), &reserved)
+        .map_err(|error: SymbolicSubstitutionError| {
+            SolveError::InvalidConfig(format!("symbolic substitution failed: {error}"))
+        })?;
+    Ok(equations)
+}
+
 impl SymbolicNonlinearProblem {
     /// Builds a symbolic problem from parsed expressions.
     pub fn from_expressions(
@@ -1902,6 +1954,7 @@ impl SymbolicNonlinearProblem {
         equations: Vec<Expr>,
         options: SymbolicProblemOptions,
     ) -> Result<Self, SolveError> {
+        let equations = expand_nonlinear_substitutions(equations, &options)?;
         Self::from_expressions_with_backend_and_policy(
             equations,
             options.variables,
@@ -1964,6 +2017,7 @@ impl SymbolicNonlinearProblem {
         aot_options: SymbolicDenseAotOptions,
         require_square: bool,
     ) -> Result<Self, SolveError> {
+        let equations = expand_nonlinear_substitutions(equations, &options)?;
         let preparation_started = Instant::now();
         let mut problem = if require_square {
             Self::from_expressions_with_backend_and_policy(
@@ -2866,6 +2920,47 @@ mod tests {
                 .with_lambdify_backend(),
         )
         .expect("symbolic problem should build")
+    }
+
+    #[test]
+    fn nonlinear_symbolic_options_expand_aliases_before_variable_inference() {
+        let problem = SymbolicNonlinearProblem::from_expressions_with_options(
+            vec![Expr::parse_expression("force - 2")],
+            SymbolicProblemOptions::new()
+                .with_parameter_names(vec!["rate".into()])
+                .with_parameter_values(DVector::from_element(1, 2.0))
+                .with_substitutions([("force", Expr::parse_expression("rate*x"))]),
+        )
+        .expect("aliases should expand before inferring unknowns");
+
+        assert_eq!(problem.variables(), &["x"]);
+        assert!(
+            !problem.equations()[0]
+                .all_arguments_are_variables()
+                .contains(&"force".to_string())
+        );
+        assert!(
+            problem.equations()[0]
+                .all_arguments_are_variables()
+                .contains(&"rate".to_string())
+        );
+    }
+
+    #[test]
+    fn nonlinear_symbolic_options_reject_substitution_parameter_collisions() {
+        let result = SymbolicNonlinearProblem::from_expressions_with_options(
+            vec![Expr::parse_expression("rate*x - 1")],
+            SymbolicProblemOptions::new()
+                .with_variables(vec!["x".into()])
+                .with_parameter_names(vec!["rate".into()])
+                .with_substitutions([("rate", Expr::parse_expression("2"))]),
+        );
+        let error = match result {
+            Ok(_) => panic!("a substitution cannot shadow a numeric parameter"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("conflicts with a declared"));
     }
 
     fn solve_elementary_with_bounds<M>(method: M) -> DVector<f64>

@@ -3860,6 +3860,11 @@ fn classify_radau_error(kind: crate::numerical::Radau::api::RadauErrorKind) -> E
             "radau_configuration_error",
             "configuration",
         ),
+        SymbolicSubstitution => (
+            "ivp.radau.symbolic_substitution.invalid",
+            "radau_symbolic_substitution_error",
+            "preparation",
+        ),
         Callback => (
             "ivp.radau.callback.failed",
             "radau_callback_error",
@@ -5121,6 +5126,13 @@ fn classify_universal_fitting_error(
         }
         Gavin(error) => classify_gavin_error(error),
         FittedModel(error) => classify_fitted_model_error(error),
+        SymbolicSubstitution(error) => error_class(
+            "optimization.symbolic_substitution.invalid",
+            "symbolic_substitution_error",
+            "validation",
+            Some("$.model.substitutions".into()),
+            json!({"message": error.to_string()}),
+        ),
         UnsupportedOption { method, option } => error_class(
             "optimization.option.unsupported",
             "unsupported_option",
@@ -5296,6 +5308,13 @@ fn classify_varpro_error(
             Value::Null,
         ),
         FittedModel(error) => classify_fitted_model_error(error),
+        SymbolicSubstitution(error) => error_class(
+            "optimization.symbolic_substitution.invalid",
+            "symbolic_substitution_error",
+            "validation",
+            Some("$.model.substitutions".into()),
+            json!({"message": error.to_string()}),
+        ),
     }
 }
 

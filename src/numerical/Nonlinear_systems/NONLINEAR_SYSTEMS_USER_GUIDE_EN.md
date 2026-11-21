@@ -579,3 +579,24 @@ for target in [1.0, 2.0, 3.0] {
     println!("target={target}, fit={:?}", solver.map_of_solutions);
 }
 ```
+
+### Named symbolic subexpressions
+
+`SymbolicProblemOptions::with_substitutions` expands aliases before unknown
+inference and callback/Jacobian preparation. This is pre-solve symbolic
+preprocessing; it is distinct from parameter rebinding and continuation.
+
+```rust
+let options = SymbolicProblemOptions::new()
+    .with_substitutions([("force", Expr::parse_expression("rate*x")?)])
+    .with_parameters(vec!["rate".into()]);
+let problem = SymbolicNonlinearProblem::from_expressions_with_options(
+    vec![Expr::parse_expression("force - 2")?],
+    options,
+)?;
+```
+
+With inferred unknowns, an alias name is not treated as an unknown; symbols
+remaining after expansion are inferred instead. Alias definitions cannot
+shadow declared parameters or explicitly declared unknowns. Invalid or cyclic
+definitions fail with a typed configuration error before numerical solving.

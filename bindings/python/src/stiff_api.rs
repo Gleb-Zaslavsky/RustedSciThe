@@ -426,6 +426,7 @@ impl PyStiffSolverRequest {
             &state_variables,
             &time_variable,
             &parameters,
+            &[],
             "residual",
         )?;
         if let Some(jacobian) = &jacobian {
@@ -439,6 +440,7 @@ impl PyStiffSolverRequest {
                 &state_variables,
                 &time_variable,
                 &parameters,
+                &[],
                 "jacobian",
             )?;
         }
@@ -818,6 +820,24 @@ impl PyStiffSolverRequest {
             callback_failure: callback_pair.map(|(_, failure)| failure),
             callback_route,
         })
+    }
+
+    /// Expand aliases in the symbolic equations before preparation. For
+    /// example, `{"loss": parse_expr("-rate*y")}` can be used in an RHS
+    /// containing `loss`; `rate` remains a runtime-bound parameter.
+    fn with_substitutions(&mut self, substitutions: HashMap<String, PyExpr>) -> PyResult<()> {
+        let request = self.inner.as_ref().cloned().ok_or_else(|| {
+            InvalidConfigurationError::new_err("StiffSolverRequest has already been consumed")
+        })?;
+        let definitions = substitutions
+            .into_iter()
+            .map(|(name, expression)| (name, expression.inner));
+        self.inner = Some(
+            request
+                .try_with_substitutions(definitions)
+                .map_err(map_prepare_error)?,
+        );
+        Ok(())
     }
 
     /// Apply a native profile and prepare the configured solver.
@@ -1477,6 +1497,13 @@ fn telemetry_snapshot_dict<'py>(
 fn map_prepare_error(error: rustedscithe_core::numerical::StiffAPI::StiffApiError) -> PyErr {
     use rustedscithe_core::numerical::StiffAPI::StiffApiError;
     match error {
+        StiffApiError::SymbolicSubstitution { solver, source } => crate::errors::annotate_native(
+            InvalidConfigurationError::new_err(source.to_string()),
+            "configuration",
+            solver_name(solver),
+            "symbolic_substitution",
+            "SymbolicSubstitution",
+        ),
         StiffApiError::Bdf(error) => {
             crate::errors::annotate(map_bdf_error(error), "prepare", "bdf", "stiff_api:prepare")
         }

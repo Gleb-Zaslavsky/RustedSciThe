@@ -911,7 +911,7 @@ impl Lsode2PythonSolver {
     /// Optional callback arguments provide a residual and, when available, an
     /// analytical Jacobian; omit the Jacobian to use the native fallback.
     #[new]
-    #[pyo3(signature=(expressions, state_variables, time_variable, y0, t0, t_end, max_step, rtol=1e-6, atol=1e-8, options=None, method="bdf", band_lower=None, band_upper=None, parameters=None, parameter_values=None, residual_callback=None, jacobian_callback=None))]
+    #[pyo3(signature=(expressions, state_variables, time_variable, y0, t0, t_end, max_step, rtol=1e-6, atol=1e-8, options=None, method="bdf", band_lower=None, band_upper=None, parameters=None, parameter_values=None, residual_callback=None, jacobian_callback=None, substitutions=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         expressions: Vec<PyExpr>,
@@ -931,6 +931,7 @@ impl Lsode2PythonSolver {
         parameter_values: Option<Vec<f64>>,
         residual_callback: Option<Py<PyAny>>,
         jacobian_callback: Option<Py<PyAny>>,
+        substitutions: Option<HashMap<String, PyExpr>>,
     ) -> PyResult<Self> {
         validate_names(&state_variables, "state_variables")?;
         finite_vector(&y0, "y0")?;
@@ -977,7 +978,37 @@ impl Lsode2PythonSolver {
                 "parameter_values are required when parameters are declared",
             ));
         }
-        validate_expression_symbols(&expressions, &state_variables, &time_variable, &parameters)?;
+        if substitutions
+            .as_ref()
+            .is_some_and(|definitions| !definitions.is_empty())
+            && (residual_callback.is_some() || jacobian_callback.is_some())
+        {
+            return Err(UnsupportedOptionError::new_err(
+                "symbolic substitutions cannot be combined with user-provided residual/Jacobian callbacks",
+            ));
+        }
+        let reserved = state_variables
+            .iter()
+            .cloned()
+            .chain(std::iter::once(time_variable.clone()))
+            .chain(parameters.iter().cloned())
+            .collect::<Vec<_>>();
+        let native_expressions = crate::expr::resolve_solver_substitutions(
+            expressions
+                .into_iter()
+                .map(|expression| expression.inner)
+                .collect(),
+            substitutions,
+            &reserved,
+            "lsode2",
+        )?;
+        crate::expr::validate_resolved_solver_symbols(
+            &native_expressions,
+            &state_variables,
+            &time_variable,
+            &parameters,
+            "LSODE2",
+        )?;
         validate_scalar(t0, "t0")?;
         validate_scalar(t_end, "t_end")?;
         if t0 == t_end {
@@ -1046,10 +1077,7 @@ impl Lsode2PythonSolver {
         };
         let parameter_count = parameters.len();
         let mut config = Lsode2ProblemConfig::new(
-            expressions
-                .into_iter()
-                .map(|expression| expression.inner)
-                .collect(),
+            native_expressions,
             state_variables,
             time_variable,
             t0,

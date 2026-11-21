@@ -249,27 +249,25 @@ pub(crate) fn validate_route(
 pub(crate) fn map_radau_error(error: RadauError) -> PyErr {
     let native_kind = crate::errors::native_variant(&error.kind());
     let message = error.to_string();
-    annotate_native(
-        match error.kind() {
-            RadauErrorKind::Cancelled => SolverError::new_err(message),
-            RadauErrorKind::Configuration => InvalidConfigurationError::new_err(message),
-            RadauErrorKind::Unsupported => UnsupportedOptionError::new_err(message),
-            RadauErrorKind::Aot | RadauErrorKind::Workspace => PreparationError::new_err(message),
-            RadauErrorKind::StepBudget => ExhaustionError::new_err(message),
-            RadauErrorKind::Callback
-            | RadauErrorKind::NonFiniteCallback
-            | RadauErrorKind::Shape
-            | RadauErrorKind::Newton
-            | RadauErrorKind::StepUnderflow
-            | RadauErrorKind::StepControl
-            | RadauErrorKind::LinearSolve
-            | RadauErrorKind::Output => SolverError::new_err(message),
-        },
-        "solve",
-        "radau5",
-        "native",
-        &native_kind,
-    )
+    let (mapped, stage) = match error.kind() {
+        RadauErrorKind::Cancelled => (SolverError::new_err(message), "solve"),
+        RadauErrorKind::Configuration => (InvalidConfigurationError::new_err(message), "prepare"),
+        RadauErrorKind::SymbolicSubstitution => (PreparationError::new_err(message), "prepare"),
+        RadauErrorKind::Unsupported => (UnsupportedOptionError::new_err(message), "prepare"),
+        RadauErrorKind::Aot | RadauErrorKind::Workspace => {
+            (PreparationError::new_err(message), "prepare")
+        }
+        RadauErrorKind::StepBudget => (ExhaustionError::new_err(message), "solve"),
+        RadauErrorKind::Callback
+        | RadauErrorKind::NonFiniteCallback
+        | RadauErrorKind::Shape
+        | RadauErrorKind::Newton
+        | RadauErrorKind::StepUnderflow
+        | RadauErrorKind::StepControl
+        | RadauErrorKind::LinearSolve
+        | RadauErrorKind::Output => (SolverError::new_err(message), "solve"),
+    };
+    annotate_native(mapped, stage, "radau5", "native", &native_kind)
 }
 
 pub(crate) fn validate_expression_symbols(
@@ -277,6 +275,7 @@ pub(crate) fn validate_expression_symbols(
     state_variables: &[String],
     time_variable: &str,
     parameters: &[String],
+    substitution_names: &[String],
     label: &str,
 ) -> PyResult<()> {
     let allowed: HashSet<&str> = state_variables
@@ -284,6 +283,7 @@ pub(crate) fn validate_expression_symbols(
         .map(String::as_str)
         .chain(std::iter::once(time_variable))
         .chain(parameters.iter().map(String::as_str))
+        .chain(substitution_names.iter().map(String::as_str))
         .collect();
     for (index, expression) in expressions.iter().enumerate() {
         if let Some(unknown) = expression
@@ -297,6 +297,36 @@ pub(crate) fn validate_expression_symbols(
                 "{label} expression {index} references undeclared symbol '{unknown}'"
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_substitutions(
+    substitutions: &HashMap<String, PyExpr>,
+    state_variables: &[String],
+    time_variable: &str,
+    parameters: &[String],
+) -> PyResult<()> {
+    let substitution_names = substitutions.keys().cloned().collect::<Vec<_>>();
+    validate_names(&substitution_names, "substitution names", true)?;
+    if substitution_names.iter().any(|name| {
+        name == time_variable
+            || state_variables.iter().any(|state| state == name)
+            || parameters.iter().any(|parameter| parameter == name)
+    }) {
+        return Err(InvalidConfigurationError::new_err(
+            "substitution names must not collide with time_variable, state_variables, or parameters",
+        ));
+    }
+    for (name, expression) in substitutions {
+        validate_expression_symbols(
+            std::slice::from_ref(expression),
+            state_variables,
+            time_variable,
+            parameters,
+            &substitution_names,
+            &format!("substitution '{name}'"),
+        )?;
     }
     Ok(())
 }
@@ -646,7 +676,7 @@ impl RadauSolver {
     /// Optional `parameter_values` become the default binding for `solve()`;
     /// an explicit parameter vector passed to `solve()` overrides them.
     #[new]
-    #[pyo3(signature=(expressions, state_variables, time_variable, t0, t_end, max_step, rtol=1e-3, atol=1e-6, options=None, parameters=None, jacobian=None, output="final", first_step=None, max_steps=1_000_000, max_newton_iterations=6, max_retries=12, parameter_values=None))]
+    #[pyo3(signature=(expressions, state_variables, time_variable, t0, t_end, max_step, rtol=1e-3, atol=1e-6, options=None, parameters=None, jacobian=None, output="final", first_step=None, max_steps=1_000_000, max_newton_iterations=6, max_retries=12, parameter_values=None, substitutions=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         expressions: Vec<PyExpr>,
@@ -666,6 +696,7 @@ impl RadauSolver {
         max_newton_iterations: usize,
         max_retries: usize,
         parameter_values: Option<Vec<f64>>,
+        substitutions: Option<HashMap<String, PyExpr>>,
     ) -> PyResult<Self> {
         validate_names(&state_variables, "state_variables", false)?;
         if expressions.len() != state_variables.len() {
@@ -687,6 +718,14 @@ impl RadauSolver {
         }
         let parameters = parameters.unwrap_or_default();
         validate_names(&parameters, "parameters", true)?;
+        let substitutions = substitutions.unwrap_or_default();
+        validate_substitutions(
+            &substitutions,
+            &state_variables,
+            &time_variable,
+            &parameters,
+        )?;
+        let substitution_names = substitutions.keys().cloned().collect::<Vec<_>>();
         let default_parameter_values = match parameter_values {
             Some(values) => {
                 if values.len() != parameters.len() {
@@ -714,6 +753,7 @@ impl RadauSolver {
             &state_variables,
             &time_variable,
             &parameters,
+            &substitution_names,
             "residual",
         )?;
         if let Some(jacobian) = &jacobian {
@@ -727,6 +767,7 @@ impl RadauSolver {
                 &state_variables,
                 &time_variable,
                 &parameters,
+                &substitution_names,
                 "jacobian",
             )?;
         }
@@ -824,7 +865,12 @@ impl RadauSolver {
             state_variables,
             time_variable,
         )
-        .with_parameter_names(parameters);
+        .with_parameter_names(parameters)
+        .with_substitutions(
+            substitutions
+                .into_iter()
+                .map(|(name, expression)| (name, expression.inner)),
+        );
         if let Some(jacobian) = jacobian {
             problem = problem.with_jacobian(
                 jacobian

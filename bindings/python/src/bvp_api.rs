@@ -133,6 +133,12 @@ fn map_api_error(error: BvpApiError) -> PyErr {
             "bvp_api",
             "configuration",
         ),
+        BvpApiError::SymbolicSubstitution(error) => (
+            InvalidConfigurationError::new_err(error.to_string()),
+            "SymbolicSubstitution".to_owned(),
+            "bvp_api",
+            "symbolic_substitution",
+        ),
         BvpApiError::UnsupportedRoute { solver, reason } => (
             UnsupportedOptionError::new_err(format!("{solver}: {reason}")),
             "UnsupportedRoute".to_owned(),
@@ -311,6 +317,22 @@ impl PyBvpPostprocessPlan {
 
 #[pymethods]
 impl PyBvpSolverRequest {
+    /// Expand named expressions before the selected BVP route is prepared.
+    fn with_substitutions(&mut self, substitutions: HashMap<String, PyExpr>) -> PyResult<()> {
+        let problem = self.problem.as_ref().cloned().ok_or_else(|| {
+            InvalidConfigurationError::new_err("BvpSolverRequest has already been consumed")
+        })?;
+        let definitions = substitutions
+            .into_iter()
+            .map(|(name, expression)| (name, expression.inner));
+        self.problem = Some(
+            problem
+                .try_with_substitutions(definitions)
+                .map_err(|error| map_api_error(BvpApiError::SymbolicSubstitution(error)))?,
+        );
+        Ok(())
+    }
+
     /// Configure the adaptive Damped Newton route. By default its guess has one row per
     /// free-coordinate ordinal; each state omits its constrained endpoint and
     /// is sampled in increasing mesh order. The facade packs it for the native

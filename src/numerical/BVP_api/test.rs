@@ -49,6 +49,46 @@ fn valid_problem() -> BvpProblem {
     .expect("valid BVP should construct")
 }
 
+#[test]
+fn bvp_problem_expands_named_subexpressions_before_solver_construction() {
+    let problem = BvpProblem::new(
+        vec![Expr::parse_expression("decay")],
+        vec!["y".into()],
+        "x",
+        vec![0.0, 1.0],
+        vec![BvpBoundaryCondition {
+            state: 0,
+            side: BvpBoundarySide::Left,
+            value: 1.0,
+        }],
+    )
+    .unwrap()
+        .try_with_substitutions([("decay", Expr::parse_expression("-rate*y"))])
+        .expect("symbolic aliases should be expanded before preparation");
+    let symbols = problem.equations[0].extract_variables().1;
+    assert!(symbols.iter().any(|name| name == "rate"));
+    assert!(!symbols.iter().any(|name| name == "decay"));
+
+    let collision = valid_problem()
+        .try_with_substitutions([("y", Expr::parse_expression("-y"))])
+        .expect_err("aliases must not shadow BVP states");
+    assert!(matches!(
+        collision,
+        crate::symbolic::substitutions::SymbolicSubstitutionError::ReservedName(name)
+            if name == "y"
+    ));
+}
+
+#[test]
+fn bvp_problem_rejects_aliases_that_shadow_later_declared_parameters() {
+    let error = valid_problem()
+        .try_with_substitutions([("rate", Expr::parse_expression("2.0"))])
+        .expect("unrelated alias can be recorded initially")
+        .with_external_parameters(vec!["rate".into()], vec![2.0])
+        .expect_err("a subsequently declared runtime parameter must not be shadowed");
+    assert!(matches!(error, BvpApiError::SymbolicSubstitution(_)));
+}
+
 fn nonuniform_linear_problem() -> (BvpProblem, DMatrix<f64>) {
     let mesh = vec![0.0, 0.07, 0.31, 0.66, 1.0];
     let guess = DMatrix::from_fn(1, mesh.len(), |_, node| 0.5 * mesh[node] * mesh[node]);

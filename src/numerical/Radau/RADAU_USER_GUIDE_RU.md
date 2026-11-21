@@ -58,6 +58,32 @@ println!("t={} y={:?}", solution.t, solution.y);
 вызов `solve`/`try_solve_with_parameter_values`, оставив нужный вектор
 параметров. Между вызовами Radau не сохраняет историю интегрирования.
 
+### Именованные символьные подвыражения
+
+Для задач, заданных через `Expr`, метод `.with_substitutions(...)` позволяет
+именовать и повторно использовать формулы, не разворачивая вручную каждый RHS
+и Jacobian. Определения рекурсивно подставляются во время `prepare`, до
+структурного анализа, символьного дифференцирования, Lambdify и AOT. Это не
+привязка runtime-значений параметров.
+
+```rust
+let problem = RadauProblem::new(
+    vec![Expr::parse_expression("-rate*y")],
+    vec!["y".to_owned()],
+    "t",
+)
+.with_parameter_names(vec!["k".to_owned()])
+.with_substitutions([
+    ("rate", Expr::parse_expression("2*decay")),
+    ("decay", Expr::parse_expression("k")),
+]);
+```
+
+Здесь `rate` и `decay` — символьные алиасы, а `k` остаётся runtime-параметром,
+который передаётся в `try_solve_with_parameter_values`. Циклы, повторные
+определения и конфликты имён с переменной времени, состояниями или параметрами
+отклоняются при подготовке с `RadauErrorKind::SymbolicSubstitution`.
+
 ## 2. Выбор символьного frontend
 
 `RadauFrontend::ExprLegacy` оставляет подготовку в legacy-представлении

@@ -113,7 +113,11 @@ ExprLegacy/Lambdify, Dense, and sequential execution, but not AOT, AtomNative,
 parameter rebinding or restart. Fixed-step methods may overshoot `t_end` by
 less than one step; DOP853 does not. DOP853 currently returns accepted mesh
 samples and does not provide dense-output interpolation. Stiff methods continue
-to use their dedicated solver APIs.
+to use their dedicated solver APIs. Symbolic routes accept an optional
+`substitutions={"decay": Expr.parse("-rate*y")}` constructor argument to expand
+named RHS subexpressions before preparation. Alias names cannot shadow states
+or time; unlike the stiff solvers, this nonstiff route does not bind runtime
+parameters.
 
 ### Convenience facade typing
 
@@ -219,6 +223,8 @@ to Python. Start with the relevant route:
   two symbolic frontends, IVP selection and solve telemetry.
 - [Nonlinear systems and fitting](NONLINEAR_FITTING_GUIDE_EN.md): root,
   least-squares and fitting APIs.
+- [Symbolic substitutions](SYMBOLIC_SUBSTITUTIONS_GUIDE_EN.md): reusable named
+  Expr subexpressions expanded before IVP, BVP and nonlinear preparation.
 
 Runnable, commented Python scripts are indexed in
 [`examples/README.md`](../examples/README.md).

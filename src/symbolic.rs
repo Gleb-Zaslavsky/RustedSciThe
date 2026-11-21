@@ -24,6 +24,7 @@
 /// println!("{}, Rust function: {}  \n",input,  parsed_function(&[1.0, 2.0]));
 ///  ```
 pub mod parse_expr;
+pub(crate) mod structural;
 ///  Symbolic engine 1) turns a String expression into a symbolic expression
 /// 2) turns a symbolic expression into a Rust function
 /// 3) turns a symbolic expression into a string expression for printing and control results
@@ -108,10 +109,13 @@ pub mod parse_expr;
 ///  println!("norm = {}, res = {}", norm, res);
 /// ```
 pub mod symbolic_engine;
-pub(crate) mod structural;
 /// basic functionality for analytical differentiation of symbolic expressions
 pub mod symbolic_engine_derivatives;
 
+/// Explicit legacy/direct/telemetry boundaries for the BVP symbolic pipeline.
+pub mod bvp;
+/// opt-in typed telemetry for symbolic IVP preparation and callbacks
+pub mod ivp_telemetry;
 ///
 /// calculate symbolic jacobian and evaluate it
 /// Example#
@@ -163,12 +167,8 @@ pub mod symbolic_functions2;
 /// creating residual functions and Jacobian for BVP
 pub mod symbolic_functions_BVP;
 pub mod symbolic_functions_BVP2;
-/// Explicit legacy/direct/telemetry boundaries for the BVP symbolic pipeline.
-pub mod bvp;
 /// modern shared IVP backend contracts and params-aware symbolic preparation
 pub mod symbolic_ivp;
-/// opt-in typed telemetry for symbolic IVP preparation and callbacks
-pub mod ivp_telemetry;
 /// thin IVP bridge into the generic AOT lifecycle
 pub mod symbolic_ivp_aot;
 /// high-level generated-backend orchestration for IVP symbolic problems
@@ -193,6 +193,7 @@ pub mod symbolic_vectors;
 
 pub mod View;
 pub mod codegen;
+pub mod substitutions;
 pub mod symexpr_graphs;
 ///______________________________________________________________________________________________________________________________________________
 /// the collection of utility functions mainly for bracket parsing and proceeding

@@ -41,6 +41,31 @@ second = solver.solve_with_parameter_values([0.8], [1.2])
 подставляется автоматически. Для нового интервала используйте
 `solve_with_parameter_values_in_interval(t0, y0, t_end, values)`.
 
+### Именованные символьные подвыражения
+
+Для Radau-задач, заданных через `Expr`, передайте отображение имён в формулы
+через `substitutions`. Solver рекурсивно подставит определения в RHS и, если
+он задан, явный Jacobian при подготовке, до Lambdify/AOT и численного
+интегрирования. Это только удобство символьного ввода: числовые параметры
+остаются runtime-bound и поддерживают rebind.
+
+```python
+rate = Expr.variable("rate")
+decay = Expr.variable("decay")
+a = Expr.variable("a")
+y = Expr.variable("y")
+solver = RadauSolver(
+    [-rate * y], ["y"], "t", 0.0, 0.5, 0.1,
+    parameters=["a"],
+    substitutions={"rate": 2.0 * decay, "decay": a},
+    jacobian=[-rate],
+)
+solution = solver.solve([1.0], [0.75])
+```
+
+Циклы, повторные имена и конфликты алиасов с переменными времени, состояниями
+или параметрами дают типизированную ошибку подготовки.
+
 ## Frontend, execution и матричный layout
 
 `expr_legacy`/`atom_native` выбирают символьную подготовку;

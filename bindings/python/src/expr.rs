@@ -4,6 +4,7 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict};
 
+use rustedscithe_core::symbolic::substitutions::apply_symbolic_substitutions;
 use rustedscithe_core::symbolic::symbolic_engine::Expr;
 
 use crate::errors::{
@@ -14,6 +15,61 @@ use rustedscithe_core::symbolic::symbolic_integration::QuadMethod;
 
 const MAX_TAYLOR_ORDER: usize = 32;
 const MAX_GAUSS_QUADRATURE_DEGREE: usize = 4096;
+
+pub(crate) fn resolve_solver_substitutions(
+    mut expressions: Vec<Expr>,
+    substitutions: Option<HashMap<String, PyExpr>>,
+    reserved_names: &[String],
+    solver: &str,
+) -> PyResult<Vec<Expr>> {
+    if let Some(substitutions) = substitutions {
+        apply_symbolic_substitutions(
+            &mut expressions,
+            substitutions
+                .into_iter()
+                .map(|(name, expression)| (name, expression.inner)),
+            reserved_names,
+        )
+        .map_err(|error| {
+            crate::errors::annotate_native(
+                InvalidConfigurationError::new_err(error.to_string()),
+                "configuration",
+                solver,
+                "symbolic_substitution",
+                "SymbolicSubstitution",
+            )
+        })?;
+    }
+    Ok(expressions)
+}
+
+pub(crate) fn validate_resolved_solver_symbols(
+    expressions: &[Expr],
+    state_variables: &[String],
+    time_variable: &str,
+    parameters: &[String],
+    solver: &str,
+) -> PyResult<()> {
+    let allowed = state_variables
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(time_variable))
+        .chain(parameters.iter().map(String::as_str))
+        .collect::<std::collections::HashSet<_>>();
+    for (index, expression) in expressions.iter().enumerate() {
+        if let Some(unknown) = expression
+            .extract_variables()
+            .1
+            .iter()
+            .find(|name| !allowed.contains(name.as_str()))
+        {
+            return Err(InvalidConfigurationError::new_err(format!(
+                "{solver} RHS expression {index} references undeclared symbol '{unknown}'"
+            )));
+        }
+    }
+    Ok(())
+}
 
 fn checked_gaussian_quadrature(
     expression: &Expr,

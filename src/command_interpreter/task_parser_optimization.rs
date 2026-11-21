@@ -11,6 +11,7 @@ use crate::numerical::Nonlinear_systems::least_squares::LeastSquaresTelemetryMod
 use crate::numerical::optimization::universal_fitting::{
     Method as FittingMethod, UniversalFitting, UniversalFittingError, UniversalFittingResult,
 };
+use crate::symbolic::substitutions::apply_symbolic_substitutions;
 use crate::symbolic::symbolic_engine::Expr;
 use std::collections::HashSet;
 use thiserror::Error;
@@ -62,6 +63,7 @@ pub struct OptimizationTaskSpec {
     pub method: OptimizationMethodSpec,
     pub data: OptimizationDataSpec,
     pub model: OptimizationModelSpec,
+    pub substitutions: Vec<(String, Expr)>,
     pub solver_options: OptimizationSolverOptionsSpec,
     pub gavin_weights: Option<Vec<f64>>,
     pub gavin_positive_parameters: Vec<String>,
@@ -87,6 +89,7 @@ fn run_optimization_task_inner(
     spec: OptimizationTaskSpec,
     cancellation: Option<&CancellationToken>,
 ) -> Result<UniversalFittingResult, OptimizationTaskRunError> {
+    let substitutions = spec.substitutions;
     let method = match spec.method {
         OptimizationMethodSpec::LevenbergMarquardt => FittingMethod::LM,
         OptimizationMethodSpec::Gavin => FittingMethod::GAVIN,
@@ -96,6 +99,7 @@ fn run_optimization_task_inner(
         .with_method(method)
         .with_data(spec.data.x, spec.data.y)
         .with_arg(spec.data.arg);
+    fitting = fitting.with_substitutions(substitutions);
     if let Some(value) = spec.solver_options.tolerance {
         fitting = fitting.with_tolerance(value);
     }
@@ -240,6 +244,7 @@ pub fn parse_optimization_task_from_document(
             "basis_parameters",
             "basis_equations",
             "invariants",
+            "substitutions",
         ],
     )?;
     let method_raw = required_string(model_section, "model", "method")?;
@@ -276,6 +281,7 @@ pub fn parse_optimization_task_from_document(
     if !x.iter().chain(&y).all(|v| v.is_finite()) {
         return invalid("data", "x", "all sample values must be finite".into());
     }
+    let substitutions = parse_substitutions(model_section)?;
 
     let (model, symbols) = match method {
         OptimizationMethodSpec::LevenbergMarquardt | OptimizationMethodSpec::Gavin => {
@@ -310,12 +316,27 @@ pub fn parse_optimization_task_from_document(
                 );
             }
             let equations = parse_expressions(&equation_strings, "model", "equations")?;
+            let mut expanded_equations = equations.clone();
+            apply_symbolic_substitutions(
+                &mut expanded_equations,
+                substitutions.clone(),
+                &parameter_names
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(arg.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|error| OptimizationTaskError::InvalidField {
+                section: "model",
+                field: "substitutions",
+                message: error.to_string(),
+            })?;
             let allowed = parameter_names
                 .iter()
                 .map(String::as_str)
                 .chain(std::iter::once(arg.as_str()))
                 .collect::<HashSet<_>>();
-            validate_symbols(&equations, &allowed, "equations")?;
+            validate_symbols(&expanded_equations, &allowed, "equations")?;
             let names = parameter_names.clone();
             (
                 OptimizationModelSpec::EquationModel {
@@ -369,13 +390,38 @@ pub fn parse_optimization_task_from_document(
             let invariant_text =
                 optional_strings(model_section, "model", "invariants")?.unwrap_or_default();
             let invariants = parse_expressions(&invariant_text, "model", "invariants")?;
+            let mut expanded_model_expressions = basis_exprs
+                .iter()
+                .chain(invariants.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            apply_symbolic_substitutions(
+                &mut expanded_model_expressions,
+                substitutions.clone(),
+                &parameter_names
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(arg.clone()))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|error| OptimizationTaskError::InvalidField {
+                section: "model",
+                field: "substitutions",
+                message: error.to_string(),
+            })?;
+            let (expanded_basis, expanded_invariants) =
+                expanded_model_expressions.split_at(basis_exprs.len());
             let allowed = parameter_names
                 .iter()
                 .map(String::as_str)
                 .chain(std::iter::once(arg.as_str()))
                 .collect::<HashSet<_>>();
-            validate_symbols(&basis_exprs, &allowed, "basis_equations")?;
-            validate_symbols(&invariants, &HashSet::from([arg.as_str()]), "invariants")?;
+            validate_symbols(expanded_basis, &allowed, "basis_equations")?;
+            validate_symbols(
+                expanded_invariants,
+                &HashSet::from([arg.as_str()]),
+                "invariants",
+            )?;
             let basis = basis_names.into_iter().zip(basis_exprs).collect();
             let names = parameter_names.clone();
             (
@@ -453,6 +499,7 @@ pub fn parse_optimization_task_from_document(
         method,
         data: OptimizationDataSpec { arg, x, y },
         model,
+        substitutions,
         solver_options,
         gavin_weights,
         gavin_positive_parameters,
@@ -598,6 +645,40 @@ fn optional_strings(
                 .collect()
         })
         .transpose()
+}
+fn parse_substitutions(
+    section: &std::collections::HashMap<String, Option<Vec<Value>>>,
+) -> Result<Vec<(String, Expr)>, OptimizationTaskError> {
+    let entries = optional_strings(section, "model", "substitutions")?.unwrap_or_default();
+    let mut definitions = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.into_iter().enumerate() {
+        let Some((name, expression)) = entry.split_once('=') else {
+            return invalid(
+                "model",
+                "substitutions",
+                format!("entry {index} must use `name=expression` form"),
+            );
+        };
+        let name = name.trim().to_string();
+        let expression = Expr::try_parse_expression(expression.trim()).map_err(|error| {
+            OptimizationTaskError::InvalidField {
+                section: "model",
+                field: "substitutions",
+                message: format!("entry {index} expression: {error}"),
+            }
+        })?;
+        definitions.push((name, expression));
+    }
+    validate_names(
+        &definitions
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>(),
+        "model",
+        "substitutions",
+        true,
+    )?;
+    Ok(definitions)
 }
 fn required_floats(
     section: &std::collections::HashMap<String, Option<Vec<Value>>>,

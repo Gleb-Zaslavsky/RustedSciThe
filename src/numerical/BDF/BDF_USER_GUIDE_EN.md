@@ -1,5 +1,8 @@
 # BDF User Guide
 
+For named `Expr` aliases expanded before solver preparation, see the shared
+[symbolic substitutions guide](../StiffAPI/SYMBOLIC_SUBSTITUTIONS_GUIDE_EN.md).
+
 The standalone BDF solver is a dense, SciPy-faithful implicit solver for
 small-to-medium fully coupled systems. It is intentionally not a second
 structured solver. For sparse or banded storage, use LSODE2 and select its

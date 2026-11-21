@@ -39,6 +39,8 @@ pub use crate::numerical::logging::SolverLogLevel;
 use crate::symbolic::codegen::rust_backend::codegen_aot_build::AotBuildProfile;
 use crate::symbolic::ivp_telemetry::IvpLambdifyExecutionPolicy;
 use crate::symbolic::ivp_telemetry::IvpTelemetrySnapshot;
+use crate::symbolic::substitutions::SymbolicSubstitutionError;
+use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpSymbolicAssemblyBackend;
 use crate::symbolic::symbolic_ivp_generated::{
     IvpBackendStatistics, SymbolicIvpAotBuildPolicy, SymbolicIvpGeneratedBackendConfig,
@@ -91,6 +93,7 @@ pub enum StiffSolverKind {
 
 /// Route-aware request that keeps each solver's native model/configuration
 /// contract intact while centralizing application-level solver dispatch.
+#[derive(Clone)]
 pub enum StiffSolverRequest {
     Bdf {
         options: BdfSolverOptions,
@@ -1062,6 +1065,57 @@ impl StiffSolverRequest {
             Self::BackwardEuler { .. } => StiffSolverKind::BackwardEuler,
             Self::Lsode2 { .. } => StiffSolverKind::Lsode2,
         }
+    }
+
+    /// Expand named aliases in the selected symbolic IVP before preparation.
+    /// Alias expansion is a one-time symbolic input operation, independent of
+    /// runtime parameter binding/rebinding and solver continuation.
+    pub fn try_with_substitutions<I, N>(mut self, definitions: I) -> Result<Self, StiffApiError>
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        let solver = self.solver_kind();
+        let definitions = definitions
+            .into_iter()
+            .map(|(name, expression)| (name.into(), expression))
+            .collect::<Vec<_>>();
+        let result = match &mut self {
+            Self::Bdf { options } => options
+                .clone()
+                .try_with_substitutions(definitions)
+                .map(|updated| *options = updated),
+            Self::Radau { problem, .. } => problem
+                .clone()
+                .try_with_substitutions(definitions)
+                .map(|updated| *problem = updated),
+            Self::BackwardEuler {
+                options,
+                equation_parameters,
+                ..
+            } => {
+                let mut options_with_aliases = options.clone();
+                let reserved = options_with_aliases
+                    .values
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(options_with_aliases.arg.clone()))
+                    .chain(equation_parameters.iter().cloned())
+                    .collect::<Vec<_>>();
+                crate::symbolic::substitutions::apply_symbolic_substitutions(
+                    &mut options_with_aliases.eq_system,
+                    definitions,
+                    &reserved,
+                )
+                .map(|()| *options = options_with_aliases)
+            }
+            Self::Lsode2 { config, .. } => config
+                .clone()
+                .try_with_substitutions(definitions)
+                .map(|updated| *config = updated),
+        };
+        result.map_err(|source| StiffApiError::SymbolicSubstitution { solver, source })?;
+        Ok(self)
     }
 
     /// Apply the common profile and prepare the selected native implementation.
@@ -2241,6 +2295,10 @@ fn validate_state_dimension(
 /// Typed facade failures. Native errors remain intact as source errors.
 #[derive(Debug)]
 pub enum StiffApiError {
+    SymbolicSubstitution {
+        solver: StiffSolverKind,
+        source: SymbolicSubstitutionError,
+    },
     ConflictingPresetAxis(&'static str),
     SolverKindMismatch {
         selected: StiffSolverKind,
@@ -2273,6 +2331,7 @@ impl StiffApiError {
     /// Identify the solver involved when the error is solver-specific.
     pub const fn solver_kind(&self) -> Option<StiffSolverKind> {
         match self {
+            Self::SymbolicSubstitution { solver, .. } => Some(*solver),
             Self::UnsupportedCapability { solver, .. } | Self::DimensionMismatch { solver, .. } => {
                 Some(*solver)
             }
@@ -2288,6 +2347,7 @@ impl StiffApiError {
     /// Classify facade validation separately from native preparation errors.
     pub const fn stage(&self) -> StiffApiErrorStage {
         match self {
+            Self::SymbolicSubstitution { .. } => StiffApiErrorStage::Configuration,
             Self::ConflictingPresetAxis(_)
             | Self::SolverKindMismatch { .. }
             | Self::UnsupportedCapability { .. }
@@ -2302,6 +2362,9 @@ impl StiffApiError {
 impl fmt::Display for StiffApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SymbolicSubstitution { solver, source } => {
+                write!(f, "invalid {solver:?} symbolic substitutions: {source}")
+            }
             Self::ConflictingPresetAxis(axis) => {
                 write!(f, "multiple StiffAPI presets configure the {axis} axis")
             }
@@ -2334,6 +2397,7 @@ impl fmt::Display for StiffApiError {
 impl Error for StiffApiError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::SymbolicSubstitution { source, .. } => Some(source),
             Self::Radau(error) => Some(error),
             Self::Bdf(error) => Some(error),
             Self::BackwardEuler(error) => Some(error),

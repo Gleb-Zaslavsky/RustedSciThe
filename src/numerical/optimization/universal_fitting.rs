@@ -27,6 +27,7 @@ use crate::numerical::optimization::sym_fitting::{
 use crate::numerical::optimization::varpro::symbolic::{
     SymbolicVarProBuilder, SymbolicVarProError, SymbolicVarProFit,
 };
+use crate::symbolic::substitutions::{SymbolicSubstitutionError, apply_symbolic_substitutions};
 use crate::symbolic::symbolic_engine::Expr;
 use log::Level;
 use nalgebra::DVector;
@@ -157,6 +158,9 @@ pub enum UniversalFittingError {
     /// A successful backend fit could not produce its reusable evaluator.
     #[error(transparent)]
     FittedModel(#[from] FittedModelError),
+    /// Symbolic aliases were invalid or shadowed a declared model variable.
+    #[error(transparent)]
+    SymbolicSubstitution(#[from] SymbolicSubstitutionError),
     /// A requested shared option has no equivalent in the selected controller.
     #[error("option '{option}' is not supported by fitting method {method:?}")]
     UnsupportedOption {
@@ -174,6 +178,7 @@ pub enum UniversalFittingError {
 pub struct UniversalFitting {
     method: Method,
     equations: Vec<Expr>,
+    substitutions: Vec<(String, Expr)>,
     lm: Fitting,
     varpro: SymbolicVarProBuilder,
     gavin: GavinSymbolicFitting,
@@ -197,6 +202,7 @@ impl UniversalFitting {
         Self {
             method: Method::LM,
             equations: Vec::new(),
+            substitutions: Vec::new(),
             lm: Fitting::new(),
             varpro: SymbolicVarProBuilder::new("x"),
             gavin: GavinSymbolicFitting::new(),
@@ -314,6 +320,20 @@ impl UniversalFitting {
     pub fn with_equations(mut self, eq_system: Vec<Expr>) -> Self {
         self.equations = eq_system;
         self.gavin = self.gavin.with_equations(self.equations.clone());
+        self
+    }
+
+    /// Expand named subexpressions in equations and, for VarPro, basis and
+    /// invariant expressions before any numerical preparation begins.
+    pub fn with_substitutions<I, N>(mut self, definitions: I) -> Self
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        self.substitutions = definitions
+            .into_iter()
+            .map(|(name, expression)| (name.into(), expression))
+            .collect();
         self
     }
 
@@ -535,11 +555,22 @@ impl UniversalFitting {
             SolverLogLevel::Off
         };
         let _logging_scope = SolverLogGuard::enter(log_level);
+        let mut equations = self.equations.clone();
+        let reserved_names = std::iter::once(self.lm.arg.clone())
+            .chain(self.lm.unknown_coeffs.iter().cloned())
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+        apply_symbolic_substitutions(&mut equations, self.substitutions.clone(), &reserved_names)?;
+        let varpro = self
+            .varpro
+            .clone()
+            .with_equations(equations.clone())
+            .with_substitutions(self.substitutions.clone());
         match self.method {
             Method::LM => {
                 let mut lm = self
                     .lm
-                    .with_equations(self.equations)
+                    .with_equations(equations.clone())
                     .with_symbolic_frontend(self.frontend)
                     .with_lambdify_execution_policy(self.execution_policy)
                     .with_telemetry(self.telemetry_mode);
@@ -578,7 +609,6 @@ impl UniversalFitting {
                         option: "lambdify_execution_policy",
                     });
                 }
-                let varpro = self.varpro.with_equations(self.equations);
                 let mut solver = LevenbergMarquardt::new()
                     .with_gtol(0.0)
                     .with_telemetry(self.telemetry_mode);
@@ -642,7 +672,6 @@ impl UniversalFitting {
                     self.tolerance.unwrap_or(1e-3),
                     1e-1,
                 ));
-                let equations = self.equations;
                 let gavin = self
                     .gavin
                     .with_equations(equations.clone())
@@ -686,6 +715,66 @@ impl Default for UniversalFitting {
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    #[test]
+    fn named_substitutions_expand_before_lm_fitting_and_reserve_model_names() {
+        let x = (0..11).map(|index| index as f64 / 10.0).collect::<Vec<_>>();
+        let y = x.iter().map(|value| 2.0 * value + 0.5).collect::<Vec<_>>();
+        let fitted = UniversalFitting::new()
+            .with_data(x, y)
+            .with_equation_str("line")
+            .with_arg("x")
+            .with_unknowns(["slope", "offset"])
+            .with_initial_guess(vec![1.0, 0.0])
+            .with_substitutions([("line", Expr::parse_expression("slope*x+offset"))])
+            .build()
+            .unwrap();
+        let solution = fitted.solution_map().unwrap();
+        assert_relative_eq!(solution["slope"], 2.0, epsilon = 1e-7);
+        assert_relative_eq!(solution["offset"], 0.5, epsilon = 1e-7);
+
+        let collision = UniversalFitting::new()
+            .with_data(vec![0.0, 1.0], vec![0.0, 1.0])
+            .with_equation_str("slope*x")
+            .with_arg("x")
+            .with_unknowns(["slope"])
+            .with_initial_guess(vec![1.0])
+            .with_substitutions([("slope", Expr::parse_expression("2*x"))])
+            .build();
+        assert!(matches!(
+            collision,
+            Err(UniversalFittingError::SymbolicSubstitution(
+                SymbolicSubstitutionError::ReservedName(name)
+            )) if name == "slope"
+        ));
+    }
+
+    #[test]
+    fn named_substitutions_expand_varpro_basis_before_model_preparation() {
+        let x = (0..21).map(|index| index as f64 / 10.0).collect::<Vec<_>>();
+        let y = x
+            .iter()
+            .map(|value| 2.0 * (-value / 1.5_f64).exp() + 0.5)
+            .collect::<Vec<_>>();
+        let fitted = UniversalFitting::new()
+            .with_varpro()
+            .with_data(x, y)
+            .with_arg("x")
+            .with_parameters(["tau"])
+            .with_initial_guess(vec![1.2])
+            .with_basis_expr("tau", Expr::parse_expression("decay"))
+            .with_equation_str("offset")
+            .with_substitutions([
+                ("decay", Expr::parse_expression("exp(-x/tau)")),
+                ("offset", Expr::parse_expression("1")),
+            ])
+            .build()
+            .unwrap();
+        let solution = fitted.solution_map().unwrap();
+        assert_relative_eq!(solution["tau"], 1.5, epsilon = 2e-3);
+        assert_relative_eq!(solution["c0"], 2.0, epsilon = 2e-3);
+        assert_relative_eq!(solution["c1"], 0.5, epsilon = 2e-3);
+    }
 
     #[test]
     fn post_fit_evaluation_is_shared_by_lm_gavin_and_varpro() {

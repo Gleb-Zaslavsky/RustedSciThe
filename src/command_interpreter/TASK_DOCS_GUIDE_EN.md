@@ -329,6 +329,31 @@ parameters: A, E, R
 parameter_values: 1.0e7, 1.2e5, 8.314
 ```
 
+For JSON TaskDocuments, the equivalent fields are family-specific maps:
+
+```json
+{
+  "format_version": 1,
+  "problem": {
+    "formulation": "root",
+    "variables": ["x", "y"],
+    "equations": ["total - 3", "x - y - 1"],
+    "substitutions": {"total": "x + y"}
+  },
+  "solver": {"method": "newton"}
+}
+```
+
+Nonlinear systems use `problem.substitutions`; optimization/fitting models use
+`model.substitutions`. Both are JSON objects from alias name to expression
+string. Aliases are recursively expanded in the symbolic expressions before
+native solver preparation. They are not parameter values or runtime rebinding:
+keep numeric parameters in their dedicated `parameters` fields. An alias may
+not shadow an independent variable, state, or declared numeric parameter.
+Natural-language wording such as “where”, “here define”, “подстановка”,
+“где” or “здесь” should be represented as these symbolic aliases when it
+defines a reusable expression; a numeric assignment remains a parameter value.
+
 ---
 
 ## 3. IVP Task Docs

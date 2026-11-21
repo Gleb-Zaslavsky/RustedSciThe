@@ -968,6 +968,27 @@ def test_nonlinear_solver_explicit_parameter_rebind_shortcut():
         solver.solve_with_parameter_values([1.0], [])
 
 
+def test_nonlinear_solver_expands_named_subexpressions_before_preparation():
+    system = SymbolicSystem([Expr.parse("force - 2")])
+    solver = NonlinearSolver(
+        system,
+        parameters=["rate"],
+        parameter_values=[4.0],
+        substitutions={"force": Expr.parse("rate*x")},
+        tolerance=1e-10,
+    )
+    assert solver.variables() == ["x"]
+    result = solver.solve([1.0])
+    assert result.solution_map() == pytest.approx({"x": 0.5}, abs=1e-9)
+
+    with pytest.raises(InvalidConfigurationError, match="conflicts with a declared"):
+        NonlinearSolver(
+            SymbolicSystem([Expr.parse("rate*x - 1")], ["rate", "x"]),
+            parameters=["rate"],
+            substitutions={"rate": Expr.parse("2")},
+        )
+
+
 def test_nonlinear_solver_accepts_method_specific_options_and_rejects_typos():
     system = SymbolicSystem([Expr.parse("x^2 - 4")], ["x"])
     solver = NonlinearSolver(
@@ -1167,6 +1188,52 @@ def test_universal_fitting_facade_dispatches_native_routes(method, frontend):
     assert solver.is_built()
     with pytest.raises(SolverError, match="one-shot"):
         solver.build()
+
+
+def test_universal_fitting_expands_named_subexpressions_for_lm():
+    x = [index / 10.0 for index in range(11)]
+    y = [2.0 * value + 0.5 for value in x]
+    solver = UniversalFitting("lm")
+    solver.with_data(x, y)
+    solver.with_arg("x")
+    solver.with_unknowns(["slope", "offset"])
+    solver.with_initial_guess([1.0, 0.0])
+    solver.with_equation_str("line")
+    solver.with_substitutions({"line": Expr.parse("slope*x+offset")})
+    result = solver.build()
+    assert result.solution_map() == pytest.approx(
+        {"slope": 2.0, "offset": 0.5}, abs=1e-7
+    )
+
+    invalid = UniversalFitting("lm")
+    invalid.with_data([0.0, 1.0], [0.0, 1.0])
+    invalid.with_arg("x")
+    invalid.with_unknowns(["slope"])
+    invalid.with_initial_guess([1.0])
+    invalid.with_equation_str("slope*x")
+    invalid.with_substitutions({"slope": Expr.parse("2*x")})
+    with pytest.raises(InvalidConfigurationError) as error:
+        invalid.build()
+    assert error.value.native_kind == "SymbolicSubstitution"
+
+
+def test_universal_fitting_expands_named_subexpressions_in_varpro_basis():
+    x = [index / 10.0 for index in range(21)]
+    y = [2.0 * math.exp(-value / 1.5) + 0.5 for value in x]
+    solver = UniversalFitting("varpro")
+    solver.with_data(x, y)
+    solver.with_arg("x")
+    solver.with_unknowns(["tau"])
+    solver.with_initial_guess([1.2])
+    solver.with_basis_str("tau", "decay")
+    solver.with_equations_str(["offset"])
+    solver.with_substitutions(
+        {"decay": Expr.parse("exp(-x/tau)"), "offset": Expr.parse("1")}
+    )
+    result = solver.build()
+    assert result.solution_map() == pytest.approx(
+        {"tau": 1.5, "c0": 2.0, "c1": 0.5}, abs=2e-3
+    )
 
 
 def test_universal_fitting_preserves_method_specific_options_and_rejects_unsupported_routes():
@@ -1808,6 +1875,23 @@ def test_ode_api2_dop853_adaptive_solution_and_telemetry():
     assert int(diagnostics["accepted_steps"]) > 0
     assert int(diagnostics["rhs_evaluations"]) > 0
     assert int(diagnostics["callback_evaluations"]) == int(diagnostics["rhs_evaluations"])
+
+
+def test_ode_api2_nonstiff_symbolic_substitutions_expand_before_validation():
+    solver = UniversalNonStiffSolver(
+        "dop853", [Expr.parse("decay")], ["y"], "t", [1.0], 0.0, 1.0, 0.2,
+        substitutions={"decay": Expr.parse("-2*y")},
+    )
+    result = solver.solve()
+    assert result.times()[-1] == 1.0
+    assert result.states()[-1][0] == pytest.approx(np.exp(-2.0), rel=2e-9)
+
+    facade_solver = python_facade.create_ivp(
+        "dop853", [Expr.parse("decay")], ["y"], "t", [1.0], 0.0, 1.0, 0.2,
+        substitutions={"decay": Expr.parse("-2*y")},
+    )
+    facade_result = facade_solver.solve()
+    assert facade_result.states()[-1][0] == pytest.approx(np.exp(-2.0), rel=2e-9)
 
 
 def test_ode_api2_nonstiff_facade_and_stop_condition():
@@ -2826,6 +2910,31 @@ def test_radau_symbolic_dense_lambdify_supports_frontend_output_and_continuation
     }
     rebound = solver.solve_with_parameter_values([1.0], [2.0])
     assert rebound.final_state[0] == pytest.approx(math.exp(-2.0), rel=4e-3)
+
+
+def test_radau_named_symbolic_substitutions_expand_before_prepare_and_preserve_parameters():
+    y, a = Expr.variable("y"), Expr.variable("a")
+    solver = RadauSolver(
+        [-Expr.variable("rate") * y], ["y"], "t", 0.0, 0.5, 0.1,
+        parameters=["a"],
+        substitutions={
+            "rate": Expr.constant(2.0) * Expr.variable("decay"),
+            "decay": a,
+        },
+        jacobian=[-Expr.variable("rate")],
+    )
+
+    for value in (0.5, 1.25):
+        solution = solver.solve([1.0], [value])
+        assert solution.final_state[0] == pytest.approx(math.exp(-value), rel=4e-3)
+
+    cyclic = RadauSolver(
+        [-Expr.variable("rate") * y], ["y"], "t", 0.0, 0.1, 0.05,
+        substitutions={"rate": Expr.variable("decay"), "decay": Expr.variable("rate")},
+    )
+    with pytest.raises(PreparationError) as failure:
+        cyclic.prepare()
+    assert failure.value.native_kind == "SymbolicSubstitution"
 
 
 def test_radau_telemetry_modes_have_disjoint_collection_contracts():
@@ -4132,6 +4241,27 @@ def test_bvp_api_typed_request_builds_native_sci_route_and_keeps_telemetry():
     assert telemetry["mode"] == "counters"
     assert telemetry["counters"]["rhs_calls"] > 0
     assert telemetry["timings_ms"] == {}
+
+
+def test_bvp_api_expands_named_subexpressions_before_route_preparation():
+    mesh = [index / 10.0 for index in range(11)]
+    request = BvpSolverRequest.sci(
+        [Expr.parse("decay")], ["y"], "x", mesh, [(0, "left", 1.0)],
+        [[math.exp(-coordinate)] for coordinate in mesh],
+        tolerance=1e-5,
+    )
+    request.with_substitutions({"decay": Expr.parse("-y")})
+    solution = request.prepare().solve()
+    assert solution.values()[0][0] == pytest.approx(1.0, abs=1e-8)
+    assert solution.values()[-1][0] == pytest.approx(math.exp(-1.0), rel=2e-3)
+
+    invalid = BvpSolverRequest.sci(
+        [Expr.parse("-y")], ["y"], "x", [0.0, 1.0], [(0, "left", 1.0)],
+        [[1.0], [math.exp(-1.0)]],
+    )
+    with pytest.raises(InvalidConfigurationError) as error:
+        invalid.with_substitutions({"y": Expr.parse("1")})
+    assert error.value.native_kind == "SymbolicSubstitution"
 
 
 def test_bvp_api_correction_newton_route_exposes_frontend_backend_and_native_telemetry():
@@ -6789,6 +6919,71 @@ def test_stiff_api_bdf_native_request_prepares_and_dispatches_without_wrapper_co
     assert restarted.states()[-1][0] == pytest.approx(2.0 * math.exp(-0.1), rel=2e-3)
     with pytest.raises(InvalidConfigurationError, match="already been consumed"):
         request.prepare()
+
+
+def test_stiff_api_symbolic_substitutions_expand_before_prepare_and_keep_parameters():
+    from rustedscithe import StiffSolverRequest
+
+    request = StiffSolverRequest.bdf(
+        [Expr.parse("decay")],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.1,
+        0.01,
+        parameters=["rate"],
+        parameter_values=[2.0],
+    )
+    request.with_substitutions({"decay": Expr.parse("-rate*y")})
+    prepared = request.prepare()
+    result = prepared.solve()
+    assert result.states()[-1][0] == pytest.approx(math.exp(-0.2), rel=2e-3)
+
+    invalid = StiffSolverRequest.bdf(
+        [Expr.parse("alias*y")], ["y"], "t", [1.0], 0.0, 0.1, 0.01
+    )
+    with pytest.raises(InvalidConfigurationError) as error:
+        invalid.with_substitutions(
+            {"alias": Expr.parse("cycle"), "cycle": Expr.parse("alias")}
+        )
+    assert error.value.native_kind == "SymbolicSubstitution"
+
+
+@pytest.mark.parametrize("solver_name", ["bdf", "backward_euler", "lsode2"])
+def test_direct_stiff_ivp_bindings_accept_symbolic_substitutions(solver_name):
+    solver_types = {
+        "bdf": BdfSolver,
+        "backward_euler": BackwardEulerSolver,
+        "lsode2": Lsode2Solver,
+    }
+    solver = solver_types[solver_name](
+        [Expr.parse("decay")],
+        ["y"],
+        "t",
+        [1.0],
+        0.0,
+        0.05,
+        0.005,
+        parameters=["rate"],
+        parameter_values=[2.0],
+        substitutions={"decay": Expr.parse("-rate*y")},
+    )
+    solution = solver.solve()
+    assert solution.states()[-1][0] == pytest.approx(math.exp(-0.1), rel=5e-3)
+
+    with pytest.raises(InvalidConfigurationError) as error:
+        solver_types[solver_name](
+            [Expr.parse("alias*y")],
+            ["y"],
+            "t",
+            [1.0],
+            0.0,
+            0.05,
+            0.005,
+            substitutions={"y": Expr.parse("1")},
+        )
+    assert error.value.native_kind == "SymbolicSubstitution"
 
 
 def test_bdf_parameter_loop_retains_typed_failures_and_solution_telemetry():

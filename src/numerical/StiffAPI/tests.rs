@@ -26,6 +26,177 @@ fn family_types_are_available_from_the_stiff_api_boundary() {
 }
 
 #[test]
+fn symbolic_aliases_are_expanded_before_preparation_on_every_stiff_route() {
+    use crate::numerical::BE::BeSolverOptions;
+    use crate::numerical::Radau::api::{RadauConfig, RadauProblem};
+
+    let definitions = || [("decay", Expr::parse_expression("-rate*y"))];
+    let states = || vec!["y".to_owned()];
+    let initial = DVector::from_element(1, 1.0);
+    let t_bound = 0.05;
+
+    let bdf = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("decay")],
+        states(),
+        "t".into(),
+        0.0,
+        initial.clone(),
+        t_bound,
+        0.01,
+        1e-8,
+        1e-10,
+        None,
+        false,
+        Some(0.001),
+    )
+    .with_equation_parameters(vec!["rate".into()])
+    .with_equation_parameter_values(DVector::from_element(1, 2.0));
+    let mut bdf = StiffSolverRequest::Bdf { options: bdf }
+        .try_with_substitutions(definitions())
+        .unwrap()
+        .prepare(None)
+        .unwrap();
+    bdf.try_solve().unwrap();
+
+    let be = BeSolverOptions::new(
+        vec![Expr::parse_expression("decay")],
+        states(),
+        "t".into(),
+        1e-10,
+        20,
+        Some(0.001),
+        0.0,
+        t_bound,
+        initial.clone(),
+    );
+    let mut be = StiffSolverRequest::BackwardEuler {
+        options: be,
+        equation_parameters: vec!["rate".into()],
+        parameter_values: vec![2.0],
+    }
+    .try_with_substitutions(definitions())
+    .unwrap()
+    .prepare(None)
+    .unwrap();
+    be.try_solve().unwrap();
+
+    let lsode2 = Lsode2ProblemConfig::new(
+        vec![Expr::parse_expression("decay")],
+        states(),
+        "t".into(),
+        0.0,
+        initial.clone(),
+        t_bound,
+        0.01,
+        1e-8,
+        1e-10,
+    )
+    .with_equation_parameters(vec!["rate".into()])
+    .with_equation_parameter_values(DVector::from_element(1, 2.0));
+    let mut lsode2 = StiffSolverRequest::Lsode2 {
+        config: lsode2,
+        logging_level: None,
+    }
+    .try_with_substitutions(definitions())
+    .unwrap()
+    .prepare(None)
+    .unwrap();
+    lsode2.try_solve().unwrap();
+
+    let radau = RadauProblem::new(vec![Expr::parse_expression("decay")], states(), "t")
+        .with_parameter_names(vec!["rate".into()]);
+    let mut radau = StiffSolverRequest::Radau {
+        problem: radau,
+        config: RadauConfig {
+            t_bound,
+            first_step: Some(0.001),
+            max_step: 0.01,
+            ..RadauConfig::default()
+        },
+        initial_state: vec![1.0],
+        parameters: vec![2.0],
+    }
+    .try_with_substitutions(definitions())
+    .unwrap()
+    .prepare(None)
+    .unwrap();
+    radau.try_solve().unwrap();
+}
+
+#[test]
+fn stiff_substitution_errors_are_typed_configuration_failures() {
+    let options = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("alias*y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.1,
+        0.01,
+        1e-6,
+        1e-8,
+        None,
+        false,
+        None,
+    );
+    let error = match (StiffSolverRequest::Bdf { options }).try_with_substitutions([
+        ("alias", Expr::parse_expression("loop")),
+        ("loop", Expr::parse_expression("alias")),
+    ]) {
+        Ok(_) => panic!("cyclic aliases must be rejected before solver preparation"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        StiffApiError::SymbolicSubstitution {
+            solver: StiffSolverKind::Bdf,
+            ..
+        }
+    ));
+    assert_eq!(error.stage(), StiffApiErrorStage::Configuration);
+}
+
+#[test]
+fn backward_euler_grouped_options_bind_parameters_before_symbolic_aliases() {
+    let options = BeSolverOptions::new(
+        vec![Expr::parse_expression("decay")],
+        vec!["y".into()],
+        "t".into(),
+        1e-10,
+        20,
+        Some(0.001),
+        0.0,
+        0.05,
+        DVector::from_element(1, 1.0),
+    )
+    .with_equation_parameters(vec!["rate".into()])
+    .with_equation_parameter_values(DVector::from_element(1, 2.0))
+    .try_with_substitutions([("decay", Expr::parse_expression("-rate*y"))])
+    .unwrap();
+    let mut solver = BE::try_new_with_options(options).unwrap();
+    solver.try_solve().unwrap();
+
+    let conflicting = BeSolverOptions::new(
+        vec![Expr::parse_expression("rate*y")],
+        vec!["y".into()],
+        "t".into(),
+        1e-10,
+        20,
+        Some(0.001),
+        0.0,
+        0.05,
+        DVector::from_element(1, 1.0),
+    )
+    .with_equation_parameters(vec!["rate".into()])
+    .try_with_substitutions([("rate", Expr::parse_expression("2"))]);
+    assert!(matches!(
+        conflicting,
+        Err(crate::symbolic::substitutions::SymbolicSubstitutionError::ReservedName(name))
+            if name == "rate"
+    ));
+}
+
+#[test]
 fn selected_hybrid_settings_reject_a_different_native_request_family() {
     let options = BdfSolverOptions::for_bdf(
         vec![Expr::parse_expression("-y")],

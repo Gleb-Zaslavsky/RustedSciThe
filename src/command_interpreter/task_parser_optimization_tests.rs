@@ -80,6 +80,41 @@ fn native_runner_fits_equation_model_and_returns_reusable_result() {
 }
 
 #[test]
+fn fitting_task_expands_named_subexpressions_before_symbol_validation_and_solve() {
+    let mut task = lm_task();
+    let model = task.get_mut("model").unwrap();
+    model.insert("equations".into(), Some(vec![Value::String("line".into())]));
+    model.insert(
+        "substitutions".into(),
+        Some(vec![Value::String("line=a*x+b".into())]),
+    );
+    let spec = parse_optimization_task_from_document(&task)
+        .expect("aliases should be expanded during semantic validation");
+    assert_eq!(spec.substitutions.len(), 1);
+    let result = run_optimization_task(spec).expect("the aliased fit should solve");
+    let parameters = result.solution_map().unwrap();
+    assert!((parameters["a"] - 2.0).abs() < 1e-5);
+    assert!((parameters["b"] - 1.0).abs() < 1e-5);
+}
+
+#[test]
+fn fitting_task_rejects_aliases_that_shadow_fitted_parameters() {
+    let mut task = lm_task();
+    task.get_mut("model").unwrap().insert(
+        "substitutions".into(),
+        Some(vec![Value::String("a=2*x".into())]),
+    );
+    assert!(matches!(
+        parse_optimization_task_from_document(&task),
+        Err(OptimizationTaskError::InvalidField {
+            section: "model",
+            field: "substitutions",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn fitting_task_telemetry_is_opt_in_and_reaches_lm_result() {
     let default_spec = parse_optimization_task_from_document(&lm_task()).expect("default task");
     assert_eq!(default_spec.solver_options.telemetry, None);

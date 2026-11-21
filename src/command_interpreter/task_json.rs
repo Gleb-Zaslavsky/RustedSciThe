@@ -268,6 +268,30 @@ fn section_map_from_json(
     let mut fields = HashMap::with_capacity(section.len());
     for (field_name, json_value) in section {
         let path = format!("{section_path}.{field_name}");
+        if matches!(section_path, "$.model" | "$.problem") && field_name == "substitutions" {
+            let definitions =
+                json_value
+                    .as_object()
+                    .ok_or_else(|| TaskJsonError::InvalidShape {
+                        path: path.clone(),
+                        expected: "an object mapping substitution names to expression strings",
+                    })?;
+            let values = definitions
+                .iter()
+                .map(|(name, expression)| {
+                    let expression =
+                        expression
+                            .as_str()
+                            .ok_or_else(|| TaskJsonError::InvalidShape {
+                                path: format!("{path}.{name}"),
+                                expected: "a symbolic expression string",
+                            })?;
+                    Ok(Value::String(format!("{name}={expression}")))
+                })
+                .collect::<Result<Vec<_>, TaskJsonError>>()?;
+            fields.insert(field_name.clone(), Some(values));
+            continue;
+        }
         let values = match json_value {
             JsonValue::Null => vec![Value::Optional(None)],
             JsonValue::Array(items) => array_values(items, &path)?,
@@ -431,6 +455,48 @@ mod tests {
             map["solver"]["max_iterations"],
             Some(vec![Value::Usize(usize::MAX)])
         );
+    }
+
+    #[test]
+    fn converts_optimization_substitution_object_to_native_string_entries() {
+        let map = document_map_from_json(
+            r#"{"format_version":1,"data":{"x":[0,1],"y":[0,1]},"model":{"method":"lm","parameters":["a"],"initial_guess":[0],"equations":["model"],"substitutions":{"model":"a*x"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            map["model"]["substitutions"],
+            Some(vec![Value::String("model=a*x".into())])
+        );
+    }
+
+    #[test]
+    fn converts_nonlinear_substitution_object_to_native_string_entries() {
+        let map = document_map_from_json(
+            r#"{"format_version":1,"problem":{"formulation":"root","variables":["x","y"],"equations":["sum-3","x-y-1"],"substitutions":{"sum":"x+y"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            map["problem"]["substitutions"],
+            Some(vec![Value::String("sum=x+y".into())])
+        );
+    }
+
+    #[test]
+    fn rejects_non_string_nonlinear_substitution_values_with_json_path() {
+        let error = document_map_from_json(
+            r#"{"format_version":1,"problem":{"formulation":"root","variables":["x"],"equations":["x-1"],"substitutions":{"alias":1}}}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("$.problem.substitutions.alias"));
+    }
+
+    #[test]
+    fn rejects_non_string_optimization_substitution_values_with_json_path() {
+        let error = document_map_from_json(
+            r#"{"format_version":1,"data":{"x":[0,1],"y":[0,1]},"model":{"method":"lm","parameters":["a"],"initial_guess":[0],"equations":["model"],"substitutions":{"model":1}}}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("$.model.substitutions.model"));
     }
 
     #[test]

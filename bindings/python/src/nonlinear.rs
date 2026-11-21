@@ -1057,7 +1057,7 @@ impl NonlinearSolver {
     /// lifecycle policy/profile/output directory are independent of the
     /// ExprLegacy/AtomNative symbolic frontend. Lambdify remains the default.
     #[new]
-    #[pyo3(signature=(system, *, method="newton", frontend="expr_legacy", execution="lambdify", execution_policy="sequential", min_work=1, aot_policy="build_if_missing", aot_profile="release", aot_output_dir=None, telemetry="off", parameters=None, parameter_values=None, method_options=None, method_flags=None, method_vectors=None, method_choices=None, tolerance=1e-6, max_iterations=100, bounds=None, loglevel="off"))]
+    #[pyo3(signature=(system, *, method="newton", frontend="expr_legacy", execution="lambdify", execution_policy="sequential", min_work=1, aot_policy="build_if_missing", aot_profile="release", aot_output_dir=None, telemetry="off", parameters=None, parameter_values=None, method_options=None, method_flags=None, method_vectors=None, method_choices=None, tolerance=1e-6, max_iterations=100, bounds=None, loglevel="off", substitutions=None))]
     pub fn new(
         system: SymbolicSystem,
         method: &str,
@@ -1079,6 +1079,7 @@ impl NonlinearSolver {
         max_iterations: usize,
         bounds: Option<HashMap<String, (Option<f64>, Option<f64>)>>,
         loglevel: &str,
+        substitutions: Option<HashMap<String, PyExpr>>,
     ) -> PyResult<Self> {
         if !tolerance.is_finite() || tolerance <= 0.0 || max_iterations == 0 {
             return Err(InvalidConfigurationError::new_err(
@@ -1169,7 +1170,32 @@ impl NonlinearSolver {
             }
             (None, None) => None,
         };
-        let mut variables = system.variables();
+        let original_variables = system.variables();
+        let equations = crate::expr::resolve_solver_substitutions(
+            system
+                .expressions()
+                .into_iter()
+                .map(|expr| expr.inner)
+                .collect(),
+            substitutions,
+            parameters.as_deref().unwrap_or_default(),
+            "nonlinear",
+        )?;
+        let used_symbols = equations
+            .iter()
+            .flat_map(|equation| equation.extract_variables().1)
+            .collect::<std::collections::HashSet<_>>();
+        let mut variables = original_variables
+            .into_iter()
+            .filter(|name| used_symbols.contains(name))
+            .collect::<Vec<_>>();
+        for equation in &equations {
+            for name in equation.extract_variables().1 {
+                if !variables.contains(&name) {
+                    variables.push(name);
+                }
+            }
+        }
         if let Some(parameter_names) = parameters.as_ref() {
             let mut unique = std::collections::HashSet::with_capacity(parameter_names.len());
             for name in parameter_names {
@@ -1191,11 +1217,6 @@ impl NonlinearSolver {
                 ));
             }
         }
-        let equations = system
-            .expressions()
-            .into_iter()
-            .map(|expr| expr.inner)
-            .collect();
         let parameter_names = parameters;
         if let Some(diag) = method_vectors.get("diag") {
             if diag.len() != variables.len() {

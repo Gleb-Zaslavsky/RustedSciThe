@@ -607,7 +607,7 @@ impl BdfSolver {
     /// `rtol`, `atol`, `first_step`, `max_bdf_order`, and `max_steps` control
     /// integration. `options` selects the symbolic and linear routes.
     #[new]
-    #[pyo3(signature=(expressions, state_variables, time_variable, y0, t0, t_end, max_step, rtol=1e-6, atol=1e-8, options=None, parameters=None, parameter_values=None, first_step=None, max_bdf_order=5, max_steps=1_000_000))]
+    #[pyo3(signature=(expressions, state_variables, time_variable, y0, t0, t_end, max_step, rtol=1e-6, atol=1e-8, options=None, parameters=None, parameter_values=None, first_step=None, max_bdf_order=5, max_steps=1_000_000, substitutions=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         expressions: Vec<PyExpr>,
@@ -625,6 +625,7 @@ impl BdfSolver {
         first_step: Option<f64>,
         max_bdf_order: usize,
         max_steps: usize,
+        substitutions: Option<HashMap<String, PyExpr>>,
     ) -> PyResult<Self> {
         validate_names(&state_variables, "state_variables")?;
         if expressions.len() != state_variables.len() {
@@ -674,25 +675,28 @@ impl BdfSolver {
                 "parameter_values are required when parameters are declared",
             ));
         }
-        let allowed_symbols: HashSet<&str> = state_variables
+        let reserved = state_variables
             .iter()
-            .map(String::as_str)
-            .chain(std::iter::once(time_variable.as_str()))
-            .chain(parameters.iter().map(String::as_str))
-            .collect();
-        for (index, expression) in expressions.iter().enumerate() {
-            if let Some(unknown) = expression
-                .inner
-                .extract_variables()
-                .1
-                .iter()
-                .find(|name| !allowed_symbols.contains(name.as_str()))
-            {
-                return Err(InvalidConfigurationError::new_err(format!(
-                    "RHS expression {index} references undeclared symbol '{unknown}'"
-                )));
-            }
-        }
+            .cloned()
+            .chain(std::iter::once(time_variable.clone()))
+            .chain(parameters.iter().cloned())
+            .collect::<Vec<_>>();
+        let native_expressions = crate::expr::resolve_solver_substitutions(
+            expressions
+                .into_iter()
+                .map(|expression| expression.inner)
+                .collect(),
+            substitutions,
+            &reserved,
+            "bdf",
+        )?;
+        crate::expr::validate_resolved_solver_symbols(
+            &native_expressions,
+            &state_variables,
+            &time_variable,
+            &parameters,
+            "BDF",
+        )?;
         finite_vector(&y0, "y0")?;
         validate_scalar(t0, "t0")?;
         validate_scalar(t_end, "t_end")?;
@@ -739,10 +743,6 @@ impl BdfSolver {
         };
         let (telemetry_mode, execution_policy) = validate_route(&options)?;
         let logging_level = crate::contract::native_logging_level(&options, "bdf")?;
-        let native_expressions = expressions
-            .into_iter()
-            .map(|expression| expression.inner)
-            .collect();
         let parameter_count = parameters.len();
         let mut native_options = BdfSolverOptions::for_bdf(
             native_expressions,

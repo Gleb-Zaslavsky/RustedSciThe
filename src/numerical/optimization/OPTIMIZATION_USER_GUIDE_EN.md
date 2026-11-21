@@ -289,3 +289,26 @@ matched ExprLegacy/AtomView measurements, is maintained in
 [`GAVIN_STORY_TESTS.md`](GAVIN_STORY_TESTS.md). Current evidence shows that
 frontend speed depends on sample count and controller policy; do not infer a
 universal winner from preparation time alone.
+
+## Named symbolic subexpressions
+
+`UniversalFitting::with_substitutions` recursively expands named aliases before
+the selected fitting backend prepares its model. Definitions apply to LM/Gavin
+equations and to VarPro basis/invariant expressions. This is input-side
+symbolic preprocessing, not parameter rebinding or fitting continuation.
+
+```rust
+let fit = UniversalFitting::new()
+    .with_data(x, y)
+    .with_arg("x")
+    .with_unknowns(["slope", "offset"])
+    .with_initial_guess(vec![1.0, 0.0])
+    .with_equation_str("line")
+    .with_substitutions([("line", Expr::parse_expression("slope*x+offset"))])
+    .build()?;
+```
+
+Aliases may reference other aliases while ordinary model symbols remain free.
+Names may not shadow the independent variable or explicitly declared fitted
+parameters. Invalid, cyclic, or conflicting definitions return a typed
+symbolic-substitution error before numerical fitting starts.

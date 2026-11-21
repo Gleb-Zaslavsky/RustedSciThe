@@ -1,5 +1,8 @@
 # Radau User Guide
 
+For named `Expr` aliases expanded before solver preparation, see the shared
+[symbolic substitutions guide](../StiffAPI/SYMBOLIC_SUBSTITUTIONS_GUIDE_EN.md).
+
 This is the guide for the maintained Radau implementation in
 `src/numerical/Radau/new`. The archived implementation is kept only as a
 reference and is not the default production route.
@@ -53,6 +56,31 @@ println!("t={} y={:?}", solution.t, solution.y);
 
 Preparation is fallible and separate from solving. A prepared solver owns the
 symbolic callbacks and can be reused for a parameter series.
+
+### Named symbolic subexpressions
+
+For Expr-based problems, `.with_substitutions(...)` lets you name and reuse
+formulas without manually expanding every RHS or Jacobian. Definitions are
+recursively expanded during `prepare`, before structural analysis, symbolic
+differentiation, Lambdify, or AOT. They do not bind runtime parameter values.
+
+```rust
+let problem = RadauProblem::new(
+    vec![Expr::parse_expression("-rate*y")],
+    vec!["y".to_owned()],
+    "t",
+)
+.with_parameter_names(vec!["k".to_owned()])
+.with_substitutions([
+    ("rate", Expr::parse_expression("2*decay")),
+    ("decay", Expr::parse_expression("k")),
+]);
+```
+
+Here `rate` and `decay` are symbolic aliases; `k` remains a runtime parameter
+that can be supplied to `try_solve_with_parameter_values`. Cyclic or duplicate
+definitions and names that collide with the time/state/parameter schema are
+rejected during preparation with `RadauErrorKind::SymbolicSubstitution`.
 
 ## 2. Select A Frontend
 

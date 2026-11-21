@@ -64,7 +64,10 @@ fn map_error(error: SymbolicVarProError) -> PyErr {
         | SymbolicVarProError::ModelBuild(_)
         | SymbolicVarProError::ProblemBuild(_)
         | SymbolicVarProError::FitOutputUnavailable
-        | SymbolicVarProError::FittedModel(_) => InvalidConfigurationError::new_err(message),
+        | SymbolicVarProError::FittedModel(_)
+        | SymbolicVarProError::SymbolicSubstitution(_) => {
+            InvalidConfigurationError::new_err(message)
+        }
         SymbolicVarProError::SolverFailed { .. } => SolverError::new_err(message),
     };
     annotate_native(mapped, "solve", "varpro", "lambdify", &native_kind)

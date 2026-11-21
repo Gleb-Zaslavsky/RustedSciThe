@@ -354,3 +354,25 @@ to the physical model. Text logging is configured uniformly through
 `BvpSolverConfig::with_logging_level(SolverLogLevel)` and defaults to Off;
 result export/postprocessing is a separate concern. Unknown keys and
 unsupported route combinations produce typed errors with the field path.
+
+### Named symbolic subexpressions
+
+For an Expr-based problem, `BvpProblem::try_with_substitutions` expands named
+subexpressions before route preparation. It is a symbolic input convenience,
+not parameter binding or continuation; this builder performs no solver work.
+
+```rust
+let problem = BvpProblem::new(
+    vec![Expr::parse_expression("decay")?],
+    vec!["y".into()],
+    "x",
+    mesh,
+    boundary_conditions,
+)?
+.try_with_substitutions([("decay", Expr::parse_expression("-rate*y")?)])?;
+```
+
+Aliases are recursively expanded before callbacks/Jacobians are prepared. Names
+cannot shadow states, the independent variable, or declared external/free
+parameters. Invalid, cyclic, or colliding definitions return a typed symbolic
+substitution error. The builder is available for every BVP_api route.

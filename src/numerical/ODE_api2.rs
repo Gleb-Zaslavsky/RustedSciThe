@@ -26,6 +26,7 @@ use crate::numerical::Radau::{RadauError, RadauSolution};
 #[cfg(not(test))]
 use crate::numerical::Radau::{RadauNativeSolver, RadauProblem, RadauSolver};
 use crate::symbolic::ivp_telemetry::{IvpTelemetry, IvpTelemetrySnapshot};
+use crate::symbolic::substitutions::{SymbolicSubstitutionError, apply_symbolic_substitutions};
 use crate::symbolic::symbolic_engine::Expr;
 use crate::symbolic::symbolic_ivp::IvpBackendError;
 use crate::symbolic::symbolic_ivp_generated::{
@@ -495,6 +496,37 @@ impl UniversalODESolver {
             radau_solution: None,
             solver_params_legacy: HashMap::new(),
         }
+    }
+
+    /// Expands named aliases in the symbolic RHS before solver preparation.
+    /// Routes backed by caller-supplied callbacks or an independent LSODE2
+    /// problem config reject this operation rather than silently ignoring it.
+    pub fn try_with_substitutions<I, N>(
+        mut self,
+        definitions: I,
+    ) -> Result<Self, SymbolicSubstitutionError>
+    where
+        I: IntoIterator<Item = (N, Expr)>,
+        N: Into<String>,
+    {
+        let definitions = definitions
+            .into_iter()
+            .map(|(name, expression)| (name.into(), expression))
+            .collect::<Vec<_>>();
+        if definitions.is_empty() {
+            return Ok(self);
+        }
+        if self.native_residual.is_some() || self.lsode2_problem_config.is_some() {
+            return Err(SymbolicSubstitutionError::NonSymbolicCallbackRoute);
+        }
+        let reserved = self
+            .values
+            .iter()
+            .cloned()
+            .chain(std::iter::once(self.arg.clone()))
+            .collect::<Vec<_>>();
+        apply_symbolic_substitutions(&mut self.eq_system, definitions, &reserved)?;
+        Ok(self)
     }
 
     fn method_label(&self) -> String {
@@ -1492,6 +1524,54 @@ mod tests {
         let arg = "t".to_string();
         let y0 = DVector::from_vec(vec![1.0]);
         (eq_system, values, arg, y0)
+    }
+
+    #[test]
+    fn universal_nonstiff_route_expands_symbolic_aliases_before_solve() {
+        let mut solver = UniversalODESolver::new(
+            vec![Expr::parse_expression("decay")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            SolverType::NonStiff(NonStiffMethod::Dop853),
+            0.0,
+            DVector::from_element(1, 1.0),
+            1.0,
+        );
+        solver.set_step_size(0.2);
+        solver.set_rtol(1e-11);
+        solver.set_atol(1e-13);
+        solver.set_max_step(0.2);
+        let mut solver = solver
+            .try_with_substitutions([("decay", Expr::parse_expression("-2*y"))])
+            .unwrap();
+
+        solver.try_solve().unwrap();
+        let (times, states) = solver.get_result();
+        let times = times.unwrap();
+        let states = states.unwrap();
+        assert_eq!(times[times.len() - 1], 1.0);
+        assert!((states[(states.nrows() - 1, 0)] - (-2.0f64).exp()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn universal_symbolic_aliases_reject_callback_backed_route() {
+        let rhs = |_: f64, y: &DVector<f64>| -y;
+        let jacobian = |_: f64, _: &DVector<f64>| DMatrix::from_element(1, 1, -1.0);
+        let solver = UniversalODESolver::new(
+            vec![Expr::parse_expression("y")],
+            vec!["y".to_string()],
+            "t".to_string(),
+            SolverType::Bdf,
+            0.0,
+            DVector::from_element(1, 1.0),
+            1.0,
+        )
+        .with_native_ode_callbacks(rhs, Some(jacobian));
+
+        assert!(matches!(
+            solver.try_with_substitutions([("alias", Expr::parse_expression("-y"))]),
+            Err(SymbolicSubstitutionError::NonSymbolicCallbackRoute)
+        ));
     }
 
     #[test]

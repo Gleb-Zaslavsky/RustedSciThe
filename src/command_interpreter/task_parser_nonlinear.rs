@@ -23,6 +23,7 @@ use crate::numerical::Nonlinear_systems::symbolic::SymbolicNonlinearProblem;
 use crate::numerical::Nonlinear_systems::{
     error::SolveError, least_squares::LeastSquaresTelemetryMode,
 };
+use crate::symbolic::substitutions::apply_symbolic_substitutions;
 use crate::symbolic::symbolic_engine::Expr;
 use nalgebra::DVector;
 use std::collections::HashSet;
@@ -158,6 +159,7 @@ pub fn parse_nonlinear_task_from_document(
             "initial_guess",
             "parameters",
             "parameter_values",
+            "substitutions",
         ],
     )?;
     let formulation_raw = required_string(problem, "problem", "formulation")?;
@@ -180,6 +182,7 @@ pub fn parse_nonlinear_task_from_document(
     let parameter_names = optional_strings(problem, "problem", "parameters")?.unwrap_or_default();
     let parameter_values =
         optional_floats(problem, "problem", "parameter_values")?.unwrap_or_default();
+    let substitutions = parse_substitutions(problem)?;
 
     validate_names(&variables, "variables")?;
     validate_optional_names(&parameter_names, "parameters")?;
@@ -234,7 +237,22 @@ pub fn parse_nonlinear_task_from_document(
         .chain(&parameter_names)
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    for (index, equation) in equations.iter().enumerate() {
+    let mut expanded_equations = equations;
+    apply_symbolic_substitutions(
+        &mut expanded_equations,
+        substitutions,
+        &variables
+            .iter()
+            .chain(&parameter_names)
+            .cloned()
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| NonlinearTaskError::InvalidField {
+        section: "problem",
+        field: "substitutions",
+        message: error.to_string(),
+    })?;
+    for (index, equation) in expanded_equations.iter().enumerate() {
         let unknown = equation
             .all_arguments_are_variables()
             .into_iter()
@@ -296,7 +314,7 @@ pub fn parse_nonlinear_task_from_document(
         problem: NonlinearProblemSpec {
             formulation,
             variables,
-            equations,
+            equations: expanded_equations,
             initial_guess,
             parameter_names,
             parameter_values,
@@ -665,6 +683,46 @@ fn parse_expressions(
             })
         })
         .collect()
+}
+fn parse_substitutions(
+    section: &std::collections::HashMap<String, Option<Vec<Value>>>,
+) -> Result<Vec<(String, Expr)>, NonlinearTaskError> {
+    let entries = optional_strings(section, "problem", "substitutions")?.unwrap_or_default();
+    let mut definitions = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.into_iter().enumerate() {
+        let Some((name, expression)) = entry.split_once('=') else {
+            return invalid(
+                "problem",
+                "substitutions",
+                format!("entry {index} must use `name=expression` form"),
+            );
+        };
+        let name = name.trim().to_string();
+        let expression = Expr::try_parse_expression(expression.trim()).map_err(|error| {
+            NonlinearTaskError::InvalidField {
+                section: "problem",
+                field: "substitutions",
+                message: format!("entry {index} expression: {error}"),
+            }
+        })?;
+        definitions.push((name, expression));
+    }
+    let names = definitions
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    let mut unique = HashSet::with_capacity(names.len());
+    if names
+        .iter()
+        .any(|name| name.trim().is_empty() || !unique.insert(name))
+    {
+        return invalid(
+            "problem",
+            "substitutions",
+            "alias names must be non-empty and unique".into(),
+        );
+    }
+    Ok(definitions)
 }
 fn validate_names(names: &[String], field_name: &'static str) -> Result<(), NonlinearTaskError> {
     if names.is_empty() {

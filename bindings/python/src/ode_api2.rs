@@ -14,6 +14,7 @@ use crate::errors::{
 };
 use crate::expr::PyExpr;
 use crate::numpy_support;
+use rustedscithe_core::symbolic::symbolic_engine::Expr;
 use rustedscithe_core::numerical::ODE_api2::{
     NonStiffMethod, SolverType, UniversalIvpStatistics, UniversalODESolver,
 };
@@ -126,7 +127,7 @@ impl UniversalNonStiffSolver {
     /// and uses `rtol`, `atol`, and `first_step` for adaptive control.
     ///
     #[new]
-    #[pyo3(signature=(method, expressions, state_variables, time_variable, y0, t0, t_end, step_size, *, options=None, stop_condition=None, neighborhood_check=1e-3, rtol=1e-8, atol=1e-10, first_step=None))]
+    #[pyo3(signature=(method, expressions, state_variables, time_variable, y0, t0, t_end, step_size, *, options=None, stop_condition=None, neighborhood_check=1e-3, rtol=1e-8, atol=1e-10, first_step=None, substitutions=None))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         method: &str,
@@ -143,6 +144,7 @@ impl UniversalNonStiffSolver {
         rtol: f64,
         atol: f64,
         first_step: Option<f64>,
+        substitutions: Option<HashMap<String, PyExpr>>,
     ) -> PyResult<Self> {
         let (native_method, canonical_method) = match method.trim().to_ascii_lowercase().as_str() {
             "rk45" => (NonStiffMethod::Rk45, "rk45"),
@@ -162,6 +164,23 @@ impl UniversalNonStiffSolver {
                 "rtol, atol and first_step are only supported by DOP853",
             ));
         }
+        let expressions = crate::expr::resolve_solver_substitutions(
+            expressions.into_iter().map(|expr| expr.inner).collect(),
+            substitutions,
+            &state_variables
+                .iter()
+                .cloned()
+                .chain(std::iter::once(time_variable.to_owned()))
+                .collect::<Vec<_>>(),
+            "ode_api2_nonstiff",
+        )?;
+        crate::expr::validate_resolved_solver_symbols(
+            &expressions,
+            &state_variables,
+            time_variable,
+            &[],
+            "ode_api2_nonstiff",
+        )?;
         validate_problem(
             &expressions,
             &state_variables,
@@ -181,7 +200,7 @@ impl UniversalNonStiffSolver {
         }
 
         let mut solver = UniversalODESolver::new(
-            expressions.into_iter().map(|expr| expr.inner).collect(),
+            expressions,
             state_variables,
             time_variable.to_owned(),
             SolverType::NonStiff(native_method),
@@ -337,7 +356,7 @@ fn telemetry_from_name(name: &str) -> PyResult<IvpTelemetry> {
 
 #[allow(clippy::too_many_arguments)]
 fn validate_problem(
-    expressions: &[PyExpr],
+    expressions: &[Expr],
     states: &[String],
     time_variable: &str,
     y0: &[f64],
@@ -409,7 +428,6 @@ fn validate_problem(
     }
     for (index, expression) in expressions.iter().enumerate() {
         if let Some(unknown) = expression
-            .inner
             .extract_variables()
             .1
             .iter()

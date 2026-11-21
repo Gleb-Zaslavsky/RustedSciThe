@@ -141,11 +141,23 @@ fn map_error(error: UniversalFittingError) -> PyErr {
                 "VarPro",
             );
         }
+        UniversalFittingError::VarPro(SymbolicVarProError::SymbolicSubstitution(_)) => {
+            return annotate_native(
+                InvalidConfigurationError::new_err(error.to_string()),
+                "build",
+                "universal_fitting",
+                "native",
+                "SymbolicSubstitution",
+            );
+        }
         _ => {}
     }
     let native_kind = native_variant(&error);
     let mapped = match error {
         UniversalFittingError::Fitting(_) => unreachable!("handled before common mapping"),
+        UniversalFittingError::SymbolicSubstitution(_) => {
+            InvalidConfigurationError::new_err(error.to_string())
+        }
         UniversalFittingError::UnsupportedOption { .. } => {
             UnsupportedOptionError::new_err(error.to_string())
         }
@@ -522,6 +534,14 @@ impl PyUniversalFitting {
     pub fn with_equations(&mut self, expressions: Vec<PyExpr>) -> PyResult<()> {
         let expressions = expressions.into_iter().map(|expr| expr.inner).collect();
         self.update(|builder| builder.with_equations(expressions))
+    }
+
+    /// Expand named symbolic subexpressions before fitting preparation.
+    pub fn with_substitutions(&mut self, substitutions: HashMap<String, PyExpr>) -> PyResult<()> {
+        let substitutions = substitutions
+            .into_iter()
+            .map(|(name, expression)| (name, expression.inner));
+        self.update(|builder| builder.with_substitutions(substitutions))
     }
 
     /// Set one symbolic model expression from a string.

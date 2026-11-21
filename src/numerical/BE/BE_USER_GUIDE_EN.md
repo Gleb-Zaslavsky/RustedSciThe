@@ -1,5 +1,8 @@
 # Backward Euler User Guide
 
+For named `Expr` aliases expanded before solver preparation, see the shared
+[symbolic substitutions guide](../StiffAPI/SYMBOLIC_SUBSTITUTIONS_GUIDE_EN.md).
+
 Backward Euler (BE) is an implicit, fixed-step integrator intended for small
 and medium systems where robustness is more important than the cost of a dense
 Newton solve. The implementation uses a dense `nalgebra` Jacobian and LU

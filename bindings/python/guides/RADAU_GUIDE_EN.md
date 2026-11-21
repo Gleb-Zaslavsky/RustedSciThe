@@ -44,6 +44,31 @@ t_end, values)` to change the interval as well.
 `solve_with_initial_state(y0)` is the explicit same-parameter spelling of
 `solve(y0)`; Radau has no retained integration history to reset.
 
+### Named symbolic subexpressions
+
+For Expr-based Radau tasks, pass a mapping of names to `Expr` formulas through
+`substitutions`. The solver recursively expands these definitions into both
+the residual and an optional explicit Jacobian during preparation, before
+Lambdify/AOT and numerical integration. This is symbolic input convenience;
+declared numeric parameters remain runtime-bound and can still be rebound.
+
+```python
+rate = Expr.variable("rate")
+decay = Expr.variable("decay")
+a = Expr.variable("a")
+y = Expr.variable("y")
+solver = RadauSolver(
+    [-rate * y], ["y"], "t", 0.0, 0.5, 0.1,
+    parameters=["a"],
+    substitutions={"rate": 2.0 * decay, "decay": a},
+    jacobian=[-rate],
+)
+solution = solver.solve([1.0], [0.75])
+```
+
+Cycles, duplicate names, and alias names colliding with state/time/parameter
+names fail during preparation with a typed symbolic-substitution error.
+
 ## Frontend, execution and layout
 
 These are independent configuration axes. `expr_legacy` and `atom_native`

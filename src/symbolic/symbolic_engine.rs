@@ -1195,40 +1195,45 @@ impl Expr {
         }
     }
     /// substitute a variable with an expression
-    pub fn substitute_variable(&self, var: &str, expr: &Expr) -> Expr {
+    pub fn substitute_variable(&self, var: &str, replacement: &Expr) -> Expr {
         match self {
-            Expr::Var(name) if name == var => expr.clone(),
+            Expr::Var(name) if name == var => replacement.clone(),
             Expr::Add(lhs, rhs) => Expr::Add(
-                Box::new(lhs.substitute_variable(var, expr)),
-                Box::new(rhs.substitute_variable(var, expr)),
+                Box::new(lhs.substitute_variable(var, replacement)),
+                Box::new(rhs.substitute_variable(var, replacement)),
             ),
             Expr::Sub(lhs, rhs) => Expr::Sub(
-                Box::new(lhs.substitute_variable(var, expr)),
-                Box::new(rhs.substitute_variable(var, expr)),
+                Box::new(lhs.substitute_variable(var, replacement)),
+                Box::new(rhs.substitute_variable(var, replacement)),
             ),
             Expr::Mul(lhs, rhs) => Expr::Mul(
-                Box::new(lhs.substitute_variable(var, expr)),
-                Box::new(rhs.substitute_variable(var, expr)),
+                Box::new(lhs.substitute_variable(var, replacement)),
+                Box::new(rhs.substitute_variable(var, replacement)),
             ),
             Expr::Div(lhs, rhs) => Expr::Div(
-                Box::new(lhs.substitute_variable(var, expr)),
-                Box::new(rhs.substitute_variable(var, expr)),
+                Box::new(lhs.substitute_variable(var, replacement)),
+                Box::new(rhs.substitute_variable(var, replacement)),
             ),
             Expr::Pow(base, exp) => Expr::Pow(
-                Box::new(base.substitute_variable(var, expr)),
-                Box::new(exp.substitute_variable(var, expr)),
+                Box::new(base.substitute_variable(var, replacement)),
+                Box::new(exp.substitute_variable(var, replacement)),
             ),
-            Expr::Exp(expr_old) => Expr::Exp(Box::new(expr_old.substitute_variable(var, expr))),
-            Expr::Ln(expr_old) => Expr::Ln(Box::new(expr_old.substitute_variable(var, expr))),
-
-            Expr::sin(expr) => Expr::sin(Box::new(expr.substitute_variable(var, expr))),
-            Expr::cos(expr) => Expr::cos(Box::new(expr.substitute_variable(var, expr))),
-            Expr::tg(expr) => Expr::tg(Box::new(expr.substitute_variable(var, expr))),
-            Expr::ctg(expr) => Expr::ctg(Box::new(expr.substitute_variable(var, expr))),
-            Expr::arcsin(expr) => Expr::arcsin(Box::new(expr.substitute_variable(var, expr))),
-            Expr::arccos(expr) => Expr::arccos(Box::new(expr.substitute_variable(var, expr))),
-            Expr::arctg(expr) => Expr::arctg(Box::new(expr.substitute_variable(var, expr))),
-            Expr::arcctg(expr) => Expr::arcctg(Box::new(expr.substitute_variable(var, expr))),
+            Expr::Exp(node) => Expr::Exp(Box::new(node.substitute_variable(var, replacement))),
+            Expr::Ln(node) => Expr::Ln(Box::new(node.substitute_variable(var, replacement))),
+            Expr::sin(node) => Expr::sin(Box::new(node.substitute_variable(var, replacement))),
+            Expr::cos(node) => Expr::cos(Box::new(node.substitute_variable(var, replacement))),
+            Expr::tg(node) => Expr::tg(Box::new(node.substitute_variable(var, replacement))),
+            Expr::ctg(node) => Expr::ctg(Box::new(node.substitute_variable(var, replacement))),
+            Expr::arcsin(node) => {
+                Expr::arcsin(Box::new(node.substitute_variable(var, replacement)))
+            }
+            Expr::arccos(node) => {
+                Expr::arccos(Box::new(node.substitute_variable(var, replacement)))
+            }
+            Expr::arctg(node) => Expr::arctg(Box::new(node.substitute_variable(var, replacement))),
+            Expr::arcctg(node) => {
+                Expr::arcctg(Box::new(node.substitute_variable(var, replacement)))
+            }
             _ => self.clone(),
         }
     }

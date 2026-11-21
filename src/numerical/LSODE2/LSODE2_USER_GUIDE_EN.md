@@ -1,5 +1,8 @@
 # LSODE2 in RustedSciThe: user guide
 
+For named `Expr` aliases expanded before solver preparation, see the shared
+[symbolic substitutions guide](../StiffAPI/SYMBOLIC_SUBSTITUTIONS_GUIDE_EN.md).
+
 ## Cooperative cancellation
 
 Call `Lsode2Solver::solve_with_cancellation_token(&token)` to opt into

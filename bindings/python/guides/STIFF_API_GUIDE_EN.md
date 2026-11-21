@@ -1,5 +1,8 @@
 # Stiff API
 
+For pre-preparation named-expression aliases across all four IVP routes, see
+the [symbolic substitutions guide](SYMBOLIC_SUBSTITUTIONS_GUIDE_EN.md).
+
 `StiffSolverRequest` is a Python facade over the Rust StiffAPI. It centralizes
 common route selection and native solve dispatch without converting the four
 solver families into a lowest-common-denominator solver. Each request is built
