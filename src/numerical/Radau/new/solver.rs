@@ -115,7 +115,14 @@ pub(crate) fn try_solve_symbolic_dense_with_output(
     callbacks: &mut SymbolicCallbackSession<'_>,
     y0: &[f64],
 ) -> Result<(RadauSolveResult, RadauOutput), RadauError> {
-    try_solve_symbolic_dense_with_output_and_cancellation(config, callbacks, y0, None)
+    let mut failure_state = None;
+    try_solve_symbolic_dense_with_output_and_cancellation(
+        config,
+        callbacks,
+        y0,
+        None,
+        &mut failure_state,
+    )
 }
 
 pub(crate) fn try_solve_symbolic_dense_with_output_and_cancellation(
@@ -123,6 +130,7 @@ pub(crate) fn try_solve_symbolic_dense_with_output_and_cancellation(
     callbacks: &mut SymbolicCallbackSession<'_>,
     y0: &[f64],
     cancellation: Option<&CancellationToken>,
+    failure_state: &mut Option<RadauFailureState>,
 ) -> Result<(RadauSolveResult, RadauOutput), RadauError> {
     config.validate()?;
     callbacks.telemetry_mut().set_mode(config.telemetry);
@@ -153,8 +161,14 @@ pub(crate) fn try_solve_symbolic_dense_with_output_and_cancellation(
         workspace,
     };
     let mut collector = RadauOutputCollector::new(config.output.clone(), y0.len())?;
-    let result =
-        run_adaptive_dense_with_output(config, y0, &mut runner, Some(&mut collector), cancellation);
+    let result = run_adaptive_dense_with_output(
+        config,
+        y0,
+        &mut runner,
+        Some(&mut collector),
+        cancellation,
+        Some(failure_state),
+    );
     let runtime_telemetry = runner.workspace.telemetry.clone();
     drop(runner);
     callbacks.telemetry_mut().absorb_runtime(&runtime_telemetry);
@@ -440,7 +454,16 @@ fn run_adaptive_dense<R>(
 where
     R: AdaptiveStepRunner,
 {
-    run_adaptive_dense_with_output(config, y0, runner, None, None)
+    run_adaptive_dense_with_output(config, y0, runner, None, None, None)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RadauFailureState {
+    pub t: f64,
+    pub y: Vec<f64>,
+    pub attempts: usize,
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
 }
 
 fn run_adaptive_dense_with_output<R>(
@@ -449,199 +472,216 @@ fn run_adaptive_dense_with_output<R>(
     runner: &mut R,
     mut output: Option<&mut RadauOutputCollector>,
     cancellation: Option<&CancellationToken>,
+    failure_state: Option<&mut Option<RadauFailureState>>,
 ) -> Result<RadauSolveResult, RadauError>
 where
     R: AdaptiveStepRunner,
 {
     let mut state = RadauSolverState::new(config, y0)?;
-    if cancellation.is_some_and(CancellationToken::is_cancelled) {
-        return Err(cancelled_error(&state));
-    }
-    if config.first_step.is_none() {
-        state.h_abs = runner.select_initial_step(config, state.t, state.direction, &state.y)?;
-    }
-    runner.record_initial_step(state.h_abs);
-    // `trial` is deliberately allocated once.  Rejected steps overwrite it
-    // and never mutate the committed state until `commit` accepts the result.
-    let mut trial = vec![0.0; y0.len()];
-    let mut retries = 0usize;
-    let mut rejected = false;
-    // Retry sizes are local to the current accepted-state interval. Keep the
-    // prior accepted-step controller history unchanged until commit succeeds.
-    let mut retry_state: Option<(f64, Option<f64>, Option<f64>)> = None;
-
-    loop {
+    let result = (|| -> Result<(), RadauError> {
         if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(cancelled_error(&state));
         }
-        if is_finished(state.t, config) {
-            break;
+        if config.first_step.is_none() {
+            state.h_abs = runner.select_initial_step(config, state.t, state.direction, &state.y)?;
         }
-        if state.attempts >= config.max_steps {
-            return Err(RadauError::StepBudgetExceeded {
-                steps: state.attempts,
-            });
-        }
-        let minimum = min_step(state.t, state.direction);
-        if !minimum.is_finite() || minimum <= 0.0 {
-            return Err(RadauError::StepUnderflow {
-                t: state.t,
-                h: state.direction * minimum,
-            });
-        }
-        let (h_candidate, h_abs_old, error_norm_old) = match retry_state {
-            Some((retry_h, old_h, old_error)) => (retry_h, old_h, old_error),
-            None if state.h_abs > config.max_step => (config.max_step, None, None),
-            None if state.h_abs < minimum => (minimum, None, None),
-            None => (state.h_abs, state.h_abs_old, state.error_norm_old),
-        };
-        let h_abs = clamp_step_to_bound(state.t, h_candidate, config);
-        let h = state.direction * h_abs;
-        if !h_abs.is_finite() || h_abs < minimum || state.t + h == state.t {
-            return Err(RadauError::StepUnderflow { t: state.t, h });
-        }
+        runner.record_initial_step(state.h_abs);
+        // `trial` is deliberately allocated once.  Rejected steps overwrite it
+        // and never mutate the committed state until `commit` accepts the result.
+        let mut trial = vec![0.0; y0.len()];
+        let mut retries = 0usize;
+        let mut rejected = false;
+        // Retry sizes are local to the current accepted-state interval. Keep the
+        // prior accepted-step controller history unchanged until commit succeeds.
+        let mut retry_state: Option<(f64, Option<f64>, Option<f64>)> = None;
 
-        state.attempts += 1;
-        let attempt = runner.try_step(state.t, h, &state.y, &mut trial, rejected);
-        match attempt {
-            Ok(result) if result.error_norm.is_finite() && result.error_norm <= 1.0 => {
-                // A successful attempt publishes both time and state.  The
-                // next step may reuse all backend factors' capacity, but it
-                // must assemble/factor again if its new h changes the shift.
-                let next_t = state.t + h;
-                let recompute_jac =
-                    result.iterations > 2 && result.rate.map(|rate| rate > 1e-3).unwrap_or(false);
-                let mut factor =
-                    predict_factor(h_abs, h_abs_old, result.error_norm, error_norm_old);
-                factor = (safety_factor(result.iterations) * factor).clamp(0.2, 10.0);
-                let factor_invalidated = recompute_jac || factor >= 1.2;
-                if !factor_invalidated {
-                    factor = 1.0;
-                } else {
-                    runner.invalidate_factor();
-                }
-                let next_h_abs = (h_abs * factor).min(config.max_step);
-                state.commit(next_t, &trial, next_h_abs, result.error_norm);
-                retry_state = None;
-                runner.record_step(true);
-                runner.record_adaptive_step(RadauAdaptiveStepTrace {
-                    h_abs,
-                    error_norm: result.error_norm,
-                    newton_iterations: result.iterations,
-                    accepted: true,
-                    was_retry: rejected,
-                    next_h_abs,
-                    factor_invalidated,
-                    jacobian_refreshed: recompute_jac,
-                });
-                if cancellation.is_some_and(CancellationToken::is_cancelled) {
-                    return Err(cancelled_error(&state));
-                }
-                if let Some(collector) = output.as_mut() {
-                    if let Some(segment) = runner.dense_output_segment()? {
-                        collector.push(segment)?;
-                    }
-                }
-                if recompute_jac {
-                    runner.refresh_jacobian(next_t, &state.y)?;
-                } else {
-                    runner.mark_jacobian_stale();
-                }
-                retries = 0;
-                rejected = false;
+        loop {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                return Err(cancelled_error(&state));
             }
-            Ok(result) if result.error_norm.is_finite() => {
-                // A finite but too-large embedded error is a normal adaptive
-                // rejection, not a callback failure.  Preserve the committed
-                // state and retry with a smaller step.
-                state.rejected_steps += 1;
-                retries += 1;
-                runner.record_step(false);
-                if retries > config.max_retries {
-                    return Err(RadauError::StepControlFailure {
+            if is_finished(state.t, config) {
+                break;
+            }
+            if state.attempts >= config.max_steps {
+                return Err(RadauError::StepBudgetExceeded {
+                    steps: state.attempts,
+                });
+            }
+            let minimum = min_step(state.t, state.direction);
+            if !minimum.is_finite() || minimum <= 0.0 {
+                return Err(RadauError::StepUnderflow {
+                    t: state.t,
+                    h: state.direction * minimum,
+                });
+            }
+            let (h_candidate, h_abs_old, error_norm_old) = match retry_state {
+                Some((retry_h, old_h, old_error)) => (retry_h, old_h, old_error),
+                None if state.h_abs > config.max_step => (config.max_step, None, None),
+                None if state.h_abs < minimum => (minimum, None, None),
+                None => (state.h_abs, state.h_abs_old, state.error_norm_old),
+            };
+            let h_abs = clamp_step_to_bound(state.t, h_candidate, config);
+            let h = state.direction * h_abs;
+            if !h_abs.is_finite() || h_abs < minimum || state.t + h == state.t {
+                return Err(RadauError::StepUnderflow { t: state.t, h });
+            }
+
+            state.attempts += 1;
+            let attempt = runner.try_step(state.t, h, &state.y, &mut trial, rejected);
+            match attempt {
+                Ok(result) if result.error_norm.is_finite() && result.error_norm <= 1.0 => {
+                    // A successful attempt publishes both time and state.  The
+                    // next step may reuse all backend factors' capacity, but it
+                    // must assemble/factor again if its new h changes the shift.
+                    let next_t = state.t + h;
+                    let recompute_jac = result.iterations > 2
+                        && result.rate.map(|rate| rate > 1e-3).unwrap_or(false);
+                    let mut factor =
+                        predict_factor(h_abs, h_abs_old, result.error_norm, error_norm_old);
+                    factor = (safety_factor(result.iterations) * factor).clamp(0.2, 10.0);
+                    let factor_invalidated = recompute_jac || factor >= 1.2;
+                    if !factor_invalidated {
+                        factor = 1.0;
+                    } else {
+                        runner.invalidate_factor();
+                    }
+                    let next_h_abs = (h_abs * factor).min(config.max_step);
+                    state.commit(next_t, &trial, next_h_abs, result.error_norm);
+                    retry_state = None;
+                    runner.record_step(true);
+                    runner.record_adaptive_step(RadauAdaptiveStepTrace {
+                        h_abs,
                         error_norm: result.error_norm,
-                        retries,
+                        newton_iterations: result.iterations,
+                        accepted: true,
+                        was_retry: rejected,
+                        next_h_abs,
+                        factor_invalidated,
+                        jacobian_refreshed: recompute_jac,
+                    });
+                    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                        return Err(cancelled_error(&state));
+                    }
+                    if let Some(collector) = output.as_mut() {
+                        if let Some(segment) = runner.dense_output_segment()? {
+                            collector.push(segment)?;
+                        }
+                    }
+                    if recompute_jac {
+                        runner.refresh_jacobian(next_t, &state.y)?;
+                    } else {
+                        runner.mark_jacobian_stale();
+                    }
+                    retries = 0;
+                    rejected = false;
+                }
+                Ok(result) if result.error_norm.is_finite() => {
+                    // A finite but too-large embedded error is a normal adaptive
+                    // rejection, not a callback failure.  Preserve the committed
+                    // state and retry with a smaller step.
+                    state.rejected_steps += 1;
+                    retries += 1;
+                    runner.record_step(false);
+                    if retries > config.max_retries {
+                        return Err(RadauError::StepControlFailure {
+                            error_norm: result.error_norm,
+                            retries,
+                        });
+                    }
+                    let factor =
+                        predict_factor(h_abs, h_abs_old, result.error_norm, error_norm_old);
+                    // SciPy applies the Newton-iteration safety factor on error
+                    // rejection as well as acceptance. Omitting it changes the
+                    // very next trial step and can produce a different mesh.
+                    let rejected_factor = (safety_factor(result.iterations) * factor).max(0.2);
+                    let next_h_abs = h_abs * rejected_factor;
+                    retry_state = Some((next_h_abs, h_abs_old, error_norm_old));
+                    runner.record_adaptive_step(RadauAdaptiveStepTrace {
+                        h_abs,
+                        error_norm: result.error_norm,
+                        newton_iterations: result.iterations,
+                        accepted: false,
+                        was_retry: rejected,
+                        next_h_abs,
+                        factor_invalidated: true,
+                        jacobian_refreshed: false,
+                    });
+                    rejected = true;
+                }
+                Ok(_) => {
+                    runner.record_step(false);
+                    return Err(RadauError::NonFiniteCallback {
+                        stage: RadauStage::StepControl,
                     });
                 }
-                let factor = predict_factor(h_abs, h_abs_old, result.error_norm, error_norm_old);
-                // SciPy applies the Newton-iteration safety factor on error
-                // rejection as well as acceptance. Omitting it changes the
-                // very next trial step and can produce a different mesh.
-                let rejected_factor = (safety_factor(result.iterations) * factor).max(0.2);
-                let next_h_abs = h_abs * rejected_factor;
-                retry_state = Some((next_h_abs, h_abs_old, error_norm_old));
-                runner.record_adaptive_step(RadauAdaptiveStepTrace {
-                    h_abs,
-                    error_norm: result.error_norm,
-                    newton_iterations: result.iterations,
-                    accepted: false,
-                    was_retry: rejected,
-                    next_h_abs,
-                    factor_invalidated: true,
-                    jacobian_refreshed: false,
-                });
-                rejected = true;
-            }
-            Ok(_) => {
-                runner.record_step(false);
-                return Err(RadauError::NonFiniteCallback {
-                    stage: RadauStage::StepControl,
-                });
-            }
-            Err(RadauError::NewtonFailure { iterations }) => {
-                // Newton failure is recoverable at the controller level: the
-                // current trial is discarded and the step is retried with a
-                // conservative half-size.  Other typed errors are fatal and
-                // are returned unchanged below.
-                state.rejected_steps += 1;
-                retries += 1;
-                runner.record_step(false);
-                if cancellation.is_some_and(CancellationToken::is_cancelled) {
-                    return Err(cancelled_error(&state));
-                }
-                if !runner.jacobian_current() {
-                    // SciPy retries the same h with a freshly evaluated J when
-                    // the retained Jacobian is stale.  A current J instead
-                    // leads directly to the conservative half-step branch.
-                    runner.refresh_jacobian(state.t, &state.y)?;
+                Err(RadauError::NewtonFailure { iterations }) => {
+                    // Newton failure is recoverable at the controller level: the
+                    // current trial is discarded and the step is retried with a
+                    // conservative half-size.  Other typed errors are fatal and
+                    // are returned unchanged below.
+                    state.rejected_steps += 1;
+                    retries += 1;
+                    runner.record_step(false);
+                    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                        return Err(cancelled_error(&state));
+                    }
+                    if !runner.jacobian_current() {
+                        // SciPy retries the same h with a freshly evaluated J when
+                        // the retained Jacobian is stale.  A current J instead
+                        // leads directly to the conservative half-step branch.
+                        runner.refresh_jacobian(state.t, &state.y)?;
+                        runner.record_adaptive_step(RadauAdaptiveStepTrace {
+                            h_abs,
+                            error_norm: f64::INFINITY,
+                            newton_iterations: iterations,
+                            accepted: false,
+                            was_retry: rejected,
+                            next_h_abs: h_abs,
+                            factor_invalidated: true,
+                            jacobian_refreshed: true,
+                        });
+                        continue;
+                    }
+                    if retries > config.max_retries {
+                        return Err(RadauError::StepControlFailure {
+                            error_norm: f64::INFINITY,
+                            retries,
+                        });
+                    }
+                    let next_h_abs = h_abs * 0.5;
+                    retry_state = Some((next_h_abs, h_abs_old, error_norm_old));
                     runner.record_adaptive_step(RadauAdaptiveStepTrace {
                         h_abs,
                         error_norm: f64::INFINITY,
                         newton_iterations: iterations,
                         accepted: false,
                         was_retry: rejected,
-                        next_h_abs: h_abs,
+                        next_h_abs,
                         factor_invalidated: true,
-                        jacobian_refreshed: true,
-                    });
-                    continue;
-                }
-                if retries > config.max_retries {
-                    return Err(RadauError::StepControlFailure {
-                        error_norm: f64::INFINITY,
-                        retries,
+                        jacobian_refreshed: false,
                     });
                 }
-                let next_h_abs = h_abs * 0.5;
-                retry_state = Some((next_h_abs, h_abs_old, error_norm_old));
-                runner.record_adaptive_step(RadauAdaptiveStepTrace {
-                    h_abs,
-                    error_norm: f64::INFINITY,
-                    newton_iterations: iterations,
-                    accepted: false,
-                    was_retry: rejected,
-                    next_h_abs,
-                    factor_invalidated: true,
-                    jacobian_refreshed: false,
-                });
-            }
-            Err(error) => {
-                runner.record_step(false);
-                return Err(error);
+                Err(error) => {
+                    runner.record_step(false);
+                    return Err(error);
+                }
             }
         }
-    }
 
+        Ok(())
+    })();
+    if result.is_err() {
+        if let Some(slot) = failure_state {
+            *slot = Some(RadauFailureState {
+                t: state.t,
+                y: state.y.clone(),
+                attempts: state.attempts,
+                accepted_steps: state.accepted_steps,
+                rejected_steps: state.rejected_steps,
+            });
+        }
+    }
+    result?;
     Ok(RadauSolveResult {
         t: state.t,
         y: state.y,
@@ -747,7 +787,7 @@ where
     };
     let mut collector = RadauOutputCollector::new(config.output.clone(), y0.len())?;
     let result =
-        run_adaptive_dense_with_output(config, y0, &mut runner, Some(&mut collector), None)?;
+        run_adaptive_dense_with_output(config, y0, &mut runner, Some(&mut collector), None, None)?;
     let telemetry = runner.workspace.telemetry.clone();
     Ok((result, collector.finish()?, telemetry))
 }
@@ -796,6 +836,7 @@ where
         &mut runner,
         Some(&mut collector),
         Some(cancellation),
+        None,
     )
     .map(|result| (result, collector.finish()))
     .and_then(|(result, output)| output.map(|output| (result, output)));

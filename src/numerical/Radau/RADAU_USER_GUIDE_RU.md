@@ -328,6 +328,9 @@ Preparation и solve возвращают `Result<_, RadauError>`. В прикл
 проверяйте тип ошибки, а не разбирайте display-строку. Отдельно различаются
 ошибки configuration, shape, callback, unsupported route, Newton failure,
 step-budget exhaustion и output range.
+Если внутренний callback/solver error сохранил классифицированную стадию,
+публичный accessor `RadauError::stage()` возвращает её (например, `Residual`
+или `Jacobian`) отдельно от общей категории `RadauError::kind()`.
 
 Готовые examples:
 

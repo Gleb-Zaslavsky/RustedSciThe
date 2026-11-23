@@ -63,8 +63,8 @@ fn bvp_problem_expands_named_subexpressions_before_solver_construction() {
         }],
     )
     .unwrap()
-        .try_with_substitutions([("decay", Expr::parse_expression("-rate*y"))])
-        .expect("symbolic aliases should be expanded before preparation");
+    .try_with_substitutions([("decay", Expr::parse_expression("-rate*y"))])
+    .expect("symbolic aliases should be expanded before preparation");
     let symbols = problem.equations[0].extract_variables().1;
     assert!(symbols.iter().any(|name| name == "rate"));
     assert!(!symbols.iter().any(|name| name == "decay"));

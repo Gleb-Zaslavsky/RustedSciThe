@@ -17,6 +17,33 @@ route, last accepted state/history, native and callback statistics, and the
 telemetry snapshot. A cancellation is an error, not a successful partial
 trajectory publication; previously visible result data is preserved.
 
+For attempt correlation and opt-in failure diagnostics, use
+`try_solve_with_report(token)` or its parameter-rebind/initial-state variants.
+The report carries a monotonic `solve_id`, the typed outcome/error, telemetry,
+and on failure an explicitly diagnostic-only `StiffDiagnosticTrajectory`.
+The ordinary `try_solve()` path does not allocate/copy this report.
+`report.callback_failure_diagnostic()` exposes structured callback facts only
+when the native typed error retains them (for example, non-finite RHS/Jacobian
+or an AtomView entry index). Unknown callback time, trial state, or an
+unclassified domain failure remain absent; error display strings are never
+parsed to fill them.
+
+For LSODE2, `try_solve_with_report_and_telemetry_delta(token)` additionally
+returns a compact per-call delta for symbolic residual/Jacobian counts and
+timings plus native solve, step, callback and linear-solve metrics. It also
+retains full native LSODE2 statistics immediately before and after the call,
+so controller/event counter deltas remain available without duplicating every
+field in a second schema. The report still retains the full cumulative native
+snapshot; the delta scope indicates whether preparation was included. Symbolic
+metrics are `None` when their telemetry mode did not request collection.
+
+The token records the first request timestamp when `cancel()` is called; native
+solvers poll only at their documented safe checkpoints. The report distinguishes
+`ObservedBySolver`, `RequestedButNotObserved`, `CompletedBeforeRequest`, and
+`NotRequested`. A normal solve that completed before a later request remains
+successful. Diagnostic state is copied after a failure/cancellation, never on
+each integration step.
+
 ## Select a Route and Solve
 
 `StiffSolverRequest` stores a typed configuration for the selected solver. An

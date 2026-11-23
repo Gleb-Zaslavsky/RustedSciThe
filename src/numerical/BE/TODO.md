@@ -1,5 +1,18 @@
 # Backward Euler: Audit and Refactoring Plan
 
+## StiffAPI Attempt Diagnostics
+
+- [x] Correlate opt-in StiffAPI attempt reports with a unique `solve_id`; failed retries expose
+  only their own accepted prefix and telemetry.
+- [x] Preserve `Off` as no-copy/no-history mode in the ordinary solve path; materialize cancellation
+  snapshots only when cancellation is observed.
+- [x] Verify deterministic cancellation after Newton work preserves the
+  committed trajectory and timing (`be_cancellation_after_newton_step_preserves_partial_trajectory_and_timing`).
+- [x] Verify a successful solve followed by an invalid initial-state retry
+  receives a fresh report ID and no prior telemetry/trajectory.
+- [x] Verify in-flight cancellation through the StiffAPI report envelope after
+  accepted work.
+
 ## Fresh Solve With a Replacement Initial State (2026-11-07)
 
 - [x] Add `try_solve_with_initial_state(y0)` on the configured interval,

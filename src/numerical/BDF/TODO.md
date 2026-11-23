@@ -1,5 +1,17 @@
 # BDF: Audit and Refactoring Plan
 
+## StiffAPI Attempt Diagnostics
+
+- [x] Correlate opt-in StiffAPI attempt reports with a unique `solve_id`; failed retries expose
+  only their own accepted prefix and telemetry.
+- [x] Preserve `Off` as no-copy/no-history mode in the ordinary solve path; materialize cancellation
+  snapshots only when cancellation is observed.
+- [x] Add BDF failed-retry regression through StiffAPI.
+- [x] Verify deterministic cancellation after RHS work retains the last
+  accepted BDF step and telemetry (`bdf_cancellation_after_rhs_work_preserves_last_accepted_step_and_timing`).
+- [x] Add deterministic in-flight cancellation report regression through the
+  common StiffAPI attempt envelope.
+
 ## Fresh Solve With a Replacement Initial State (2026-11-07)
 
 - [x] Add `try_solve_with_initial_state(y0)` to reuse the configured interval,

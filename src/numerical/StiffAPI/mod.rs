@@ -7,6 +7,7 @@
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use nalgebra::{DMatrix, DVector};
 
@@ -190,6 +191,346 @@ pub enum StiffCancellationError {
     Unsupported { solver: &'static str },
 }
 
+static NEXT_STIFF_SOLVE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// One owned partial trajectory from a failed or cancelled attempt.
+///
+/// This type is intentionally distinct from successful solver outputs so it
+/// cannot be mistaken for an accepted numerical solution.
+#[derive(Debug, Clone)]
+pub struct StiffDiagnosticTrajectory {
+    pub solve_id: u64,
+    pub solver: StiffSolverKind,
+    pub axis: DVector<f64>,
+    /// Row-oriented values: `(time_points, state_variables)`.
+    pub values: DMatrix<f64>,
+    pub accepted_steps: Option<usize>,
+}
+
+/// Result of exactly one explicit diagnostic solve call.
+///
+/// `solve_id` identifies both the native telemetry snapshot and any partial
+/// trajectory. Collection is opt-in through `try_solve_with_report`; ordinary
+/// `try_solve` does not copy trajectories or allocate this report.
+#[derive(Debug)]
+pub struct StiffSolveAttemptReport {
+    pub solve_id: u64,
+    pub result: Result<StiffSolveOutcome, StiffAttemptError>,
+    pub completed_at: std::time::Instant,
+    pub cancellation_at_return: StiffCancellationDisposition,
+    pub telemetry: Option<StiffAttemptTelemetry>,
+    /// Present only on failure/cancellation, and always diagnostic-only.
+    pub partial_trajectory: Option<StiffDiagnosticTrajectory>,
+}
+
+/// Structured callback-failure facts that can be recovered from the native
+/// typed error chain without inspecting its display text.
+///
+/// Fields absent from a native error remain `None`; in particular, the last
+/// accepted time/state is not substituted for a failed trial's callback
+/// inputs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StiffCallbackFailureDiagnostic {
+    pub evaluation: StiffCallbackEvaluation,
+    pub reason: StiffCallbackFailureReason,
+    pub element_index: Option<usize>,
+    pub callback_time: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StiffCallbackEvaluation {
+    Residual,
+    Jacobian,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StiffCallbackFailureReason {
+    NonFiniteOutput,
+    ShapeMismatch,
+    CallbackFailed,
+}
+
+impl StiffSolveAttemptReport {
+    /// Reclassify a shared token against the attempt's completion timestamp.
+    /// This also detects a cancellation request that races just after solve
+    /// completion but before the caller inspects the report.
+    pub fn cancellation_disposition_for(
+        &self,
+        token: &CancellationToken,
+    ) -> StiffCancellationDisposition {
+        if matches!(&self.result, Err(StiffAttemptError::Cancelled(_))) {
+            return StiffCancellationDisposition::ObservedBySolver;
+        }
+        match token.requested_at() {
+            None => StiffCancellationDisposition::NotRequested,
+            Some(requested_at) if requested_at > self.completed_at => {
+                StiffCancellationDisposition::CompletedBeforeRequest
+            }
+            Some(_) => StiffCancellationDisposition::RequestedButNotObserved,
+        }
+    }
+
+    /// Return only callback provenance present in the typed native error.
+    ///
+    /// This accessor does not parse error messages and does not collect or
+    /// copy trial states. Native routes that currently flatten callback errors
+    /// return `None` until they preserve structured provenance themselves.
+    pub fn callback_failure_diagnostic(&self) -> Option<StiffCallbackFailureDiagnostic> {
+        let StiffAttemptError::Solve(error) = self.result.as_ref().err()? else {
+            return None;
+        };
+        callback_failure_diagnostic(error)
+    }
+}
+
+fn callback_failure_diagnostic(error: &StiffSolveError) -> Option<StiffCallbackFailureDiagnostic> {
+    use crate::numerical::BDF::BDF_solver::BdfStepError;
+    use crate::numerical::BE::NR_for_Euler::NreError;
+    use crate::symbolic::symbolic_ivp::IvpBackendError;
+
+    let from_backend = |backend: &IvpBackendError| match backend {
+        IvpBackendError::AtomEvaluationFailure { stage, index, .. } => {
+            let evaluation = match stage.as_str() {
+                "residual" | "Residual" => StiffCallbackEvaluation::Residual,
+                "jacobian" | "Jacobian" => StiffCallbackEvaluation::Jacobian,
+                _ => StiffCallbackEvaluation::Unknown,
+            };
+            Some(StiffCallbackFailureDiagnostic {
+                evaluation,
+                reason: StiffCallbackFailureReason::CallbackFailed,
+                element_index: Some(*index),
+                callback_time: None,
+            })
+        }
+        IvpBackendError::InvalidOutputShape { stage, .. }
+        | IvpBackendError::InvalidMatrixShape { stage, .. } => {
+            let evaluation = match stage.as_str() {
+                "residual" | "Residual" => StiffCallbackEvaluation::Residual,
+                "jacobian" | "Jacobian" => StiffCallbackEvaluation::Jacobian,
+                _ => StiffCallbackEvaluation::Unknown,
+            };
+            Some(StiffCallbackFailureDiagnostic {
+                evaluation,
+                reason: StiffCallbackFailureReason::ShapeMismatch,
+                element_index: None,
+                callback_time: None,
+            })
+        }
+        _ => None,
+    };
+
+    let from_bdf = |error: &BdfSolveError| match error {
+        BdfSolveError::Backend(backend) => from_backend(backend),
+        BdfSolveError::Step(step) => match step {
+            BdfStepError::NonFiniteRhs => Some(StiffCallbackFailureDiagnostic {
+                evaluation: StiffCallbackEvaluation::Residual,
+                reason: StiffCallbackFailureReason::NonFiniteOutput,
+                element_index: None,
+                callback_time: None,
+            }),
+            BdfStepError::NonFiniteJacobian => Some(StiffCallbackFailureDiagnostic {
+                evaluation: StiffCallbackEvaluation::Jacobian,
+                reason: StiffCallbackFailureReason::NonFiniteOutput,
+                element_index: None,
+                callback_time: None,
+            }),
+            BdfStepError::RhsDimension => Some(StiffCallbackFailureDiagnostic {
+                evaluation: StiffCallbackEvaluation::Residual,
+                reason: StiffCallbackFailureReason::ShapeMismatch,
+                element_index: None,
+                callback_time: None,
+            }),
+            BdfStepError::InvalidJacobianDimension | BdfStepError::InvalidJacobianStructure => {
+                Some(StiffCallbackFailureDiagnostic {
+                    evaluation: StiffCallbackEvaluation::Jacobian,
+                    reason: StiffCallbackFailureReason::ShapeMismatch,
+                    element_index: None,
+                    callback_time: None,
+                })
+            }
+            BdfStepError::JacobianCallback => Some(StiffCallbackFailureDiagnostic {
+                evaluation: StiffCallbackEvaluation::Jacobian,
+                reason: StiffCallbackFailureReason::CallbackFailed,
+                element_index: None,
+                callback_time: None,
+            }),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    let from_be = |error: &BeError| match error {
+        BeError::Backend(backend) => from_backend(backend),
+        BeError::GeneratedBackend(
+            crate::symbolic::symbolic_ivp_generated::SymbolicIvpGeneratedError::IvpBackend(backend),
+        ) => from_backend(backend),
+        BeError::Newton(NreError::NonFiniteCallback { stage }) => {
+            let evaluation = match *stage {
+                "Jacobian" => StiffCallbackEvaluation::Jacobian,
+                "residual" | "Residual" => StiffCallbackEvaluation::Residual,
+                _ => StiffCallbackEvaluation::Unknown,
+            };
+            Some(StiffCallbackFailureDiagnostic {
+                evaluation,
+                reason: StiffCallbackFailureReason::NonFiniteOutput,
+                element_index: None,
+                callback_time: None,
+            })
+        }
+        BeError::Newton(NreError::InvalidResidualShape { .. }) => {
+            Some(StiffCallbackFailureDiagnostic {
+                evaluation: StiffCallbackEvaluation::Residual,
+                reason: StiffCallbackFailureReason::ShapeMismatch,
+                element_index: None,
+                callback_time: None,
+            })
+        }
+        BeError::Newton(NreError::InvalidJacobianShape { .. }) => {
+            Some(StiffCallbackFailureDiagnostic {
+                evaluation: StiffCallbackEvaluation::Jacobian,
+                reason: StiffCallbackFailureReason::ShapeMismatch,
+                element_index: None,
+                callback_time: None,
+            })
+        }
+        BeError::Newton(_)
+        | BeError::GeneratedBackend(_)
+        | BeError::InvalidConfiguration(_)
+        | BeError::StepUnderflow { .. }
+        | BeError::StepLimit { .. }
+        | BeError::Cancelled { .. } => None,
+    };
+
+    match error {
+        StiffSolveError::Bdf(error) => from_bdf(error),
+        StiffSolveError::BackwardEuler(error) => from_be(error),
+        StiffSolveError::Lsode2(crate::numerical::LSODE2::Lsode2Error::GeneratedBackend(
+            backend,
+        )) => from_backend(backend),
+        StiffSolveError::Lsode2(crate::numerical::LSODE2::Lsode2Error::Bridge(error)) => {
+            from_bdf(error)
+        }
+        StiffSolveError::Radau(error) => {
+            let evaluation = match error.stage() {
+                Some(crate::numerical::Radau::api::RadauErrorStage::Residual) => {
+                    StiffCallbackEvaluation::Residual
+                }
+                Some(crate::numerical::Radau::api::RadauErrorStage::Jacobian) => {
+                    StiffCallbackEvaluation::Jacobian
+                }
+                _ => StiffCallbackEvaluation::Unknown,
+            };
+            let (evaluation, reason) = match error.kind() {
+                crate::numerical::Radau::api::RadauErrorKind::NonFiniteCallback => {
+                    (evaluation, StiffCallbackFailureReason::NonFiniteOutput)
+                }
+                crate::numerical::Radau::api::RadauErrorKind::Callback => {
+                    (evaluation, StiffCallbackFailureReason::CallbackFailed)
+                }
+                crate::numerical::Radau::api::RadauErrorKind::Shape => {
+                    (evaluation, StiffCallbackFailureReason::ShapeMismatch)
+                }
+                _ => return None,
+            };
+            Some(StiffCallbackFailureDiagnostic {
+                evaluation,
+                reason,
+                element_index: None,
+                callback_time: None,
+            })
+        }
+        StiffSolveError::Restart(_) | StiffSolveError::Lsode2(_) => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StiffCancellationDisposition {
+    NotRequested,
+    ObservedBySolver,
+    CompletedBeforeRequest,
+    RequestedButNotObserved,
+}
+
+#[derive(Debug, Clone)]
+pub struct StiffAttemptTelemetry {
+    pub solve_id: u64,
+    pub scope: StiffTelemetryScope,
+    pub snapshot: StiffTelemetrySnapshot,
+}
+
+/// Optional per-call LSODE2 telemetry differences, computed from native
+/// snapshots immediately before and after an explicit report call.
+///
+/// This is additive to the native lifecycle-cumulative snapshot in
+/// [`StiffSolveAttemptReport`]. `None` symbolic metrics mean their telemetry
+/// mode did not request that measurement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StiffLsode2AttemptTelemetryDelta {
+    pub scope: StiffTelemetryScope,
+    /// Full native snapshots bracketing this explicit report call. These let
+    /// consumers compute deltas for controller/event counters that are not
+    /// duplicated as convenience fields below.
+    pub native_before: Lsode2NativeStatistics,
+    pub native_after: Lsode2NativeStatistics,
+    pub symbolic_residual_evaluations: Option<u64>,
+    pub symbolic_jacobian_evaluations: Option<u64>,
+    pub symbolic_residual_time: Option<std::time::Duration>,
+    pub symbolic_jacobian_time: Option<std::time::Duration>,
+    pub native_solve_calls: usize,
+    pub native_solve_time_ms: f64,
+    pub native_step_attempts: usize,
+    pub native_step_accepts: usize,
+    pub native_step_rejects: usize,
+    pub native_residual_calls: usize,
+    pub native_jacobian_calls: usize,
+    pub native_linear_solve_calls: usize,
+    /// True if a native cumulative counter decreased between snapshots. In
+    /// that case its delta is the post-call value, indicating a reset boundary.
+    pub native_statistics_reset: bool,
+    pub symbolic_counters_reset: bool,
+}
+
+/// A standard attempt report plus an optional LSODE2 per-call telemetry delta.
+/// Existing report APIs and their snapshot semantics remain unchanged.
+#[derive(Debug)]
+pub struct StiffSolveAttemptReportWithTelemetryDelta {
+    pub report: StiffSolveAttemptReport,
+    pub lsode2_delta: Option<StiffLsode2AttemptTelemetryDelta>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StiffTelemetryScope {
+    Attempt,
+    AttemptAndPreparation,
+    SolverLifecycleCumulative,
+}
+
+/// Typed failure for an attempt report, preserving native error chains.
+#[derive(Debug)]
+pub enum StiffAttemptError {
+    Solve(StiffSolveError),
+    Cancelled(StiffCancellationError),
+}
+
+impl fmt::Display for StiffAttemptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Solve(error) => error.fmt(f),
+            Self::Cancelled(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Error for StiffAttemptError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Solve(error) => Some(error),
+            Self::Cancelled(error) => Some(error),
+        }
+    }
+}
+
 impl fmt::Display for StiffCancellationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -225,17 +566,24 @@ impl Error for StiffCancellationError {
 #[derive(Debug)]
 pub struct StiffParameterLoopPoint {
     pub index: usize,
+    pub solve_id: u64,
     pub parameter_values: Vec<f64>,
     pub result: Result<IvpParameterLoopSolution, StiffParameterLoopError>,
-    /// Solver-native telemetry. `None` means the selected native solver did
-    /// not publish a snapshot for this attempted point.
-    pub telemetry: Option<StiffTelemetrySnapshot>,
+    pub telemetry: Option<StiffAttemptTelemetry>,
+    pub partial_trajectory: Option<StiffDiagnosticTrajectory>,
+}
+
+struct StiffLoopAttemptMetadata {
+    solve_id: u64,
+    telemetry: Option<StiffAttemptTelemetry>,
+    partial_trajectory: Option<StiffDiagnosticTrajectory>,
 }
 
 /// Failure while solving or materializing one StiffAPI loop point.
 #[derive(Debug)]
 pub enum StiffParameterLoopError {
     Solve(StiffSolveError),
+    Cancelled(StiffCancellationError),
     Output(StiffPostprocessError),
 }
 
@@ -243,6 +591,7 @@ impl fmt::Display for StiffParameterLoopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Solve(error) => write!(f, "parameter-point solve failed: {error}"),
+            Self::Cancelled(error) => write!(f, "parameter-point solve cancelled: {error}"),
             Self::Output(error) => write!(f, "parameter-point output failed: {error}"),
         }
     }
@@ -252,6 +601,7 @@ impl Error for StiffParameterLoopError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Solve(error) => Some(error),
+            Self::Cancelled(error) => Some(error),
             Self::Output(error) => Some(error),
         }
     }
@@ -261,6 +611,30 @@ impl Error for StiffParameterLoopError {
 #[derive(Debug, Default)]
 pub struct StiffParameterLoopReport {
     pub points: Vec<StiffParameterLoopPoint>,
+}
+
+fn diagnostic_from_rows(
+    solve_id: u64,
+    solver: StiffSolverKind,
+    times: Vec<f64>,
+    states: Vec<Vec<f64>>,
+    accepted_steps: Option<usize>,
+) -> Option<StiffDiagnosticTrajectory> {
+    let state_dimension = states.first()?.len();
+    if state_dimension == 0
+        || times.len() != states.len()
+        || states.iter().any(|state| state.len() != state_dimension)
+    {
+        return None;
+    }
+    let values = states.into_iter().flatten().collect::<Vec<_>>();
+    Some(StiffDiagnosticTrajectory {
+        solve_id,
+        solver,
+        axis: DVector::from_vec(times),
+        values: DMatrix::from_row_slice(values.len() / state_dimension, state_dimension, &values),
+        accepted_steps,
+    })
 }
 
 impl StiffSolveError {
@@ -623,6 +997,307 @@ impl PreparedStiffSolver {
         }
     }
 
+    /// Execute one solve and return an attempt-scoped diagnostic report.
+    ///
+    /// Unlike `try_solve`, this explicit reporting operation owns a copy of
+    /// partial accepted output when the attempt fails or is cancelled. The
+    /// regular solve path remains allocation-light and unchanged.
+    pub fn try_solve_with_report(
+        &mut self,
+        cancellation: Option<CancellationToken>,
+    ) -> StiffSolveAttemptReport {
+        let solve_id = NEXT_STIFF_SOLVE_ID.fetch_add(1, Ordering::Relaxed);
+        let token_for_report = cancellation.clone();
+        let result = match cancellation {
+            Some(token) => self
+                .try_solve_with_cancellation_token(token)
+                .map_err(StiffAttemptError::Cancelled),
+            None => self.try_solve().map_err(StiffAttemptError::Solve),
+        };
+        let completed_at = std::time::Instant::now();
+        let observed = matches!(&result, Err(StiffAttemptError::Cancelled(_)));
+        let disposition = match token_for_report.and_then(|token| token.requested_at()) {
+            None if !observed => StiffCancellationDisposition::NotRequested,
+            _ if observed => StiffCancellationDisposition::ObservedBySolver,
+            Some(requested_at) if requested_at > completed_at => {
+                StiffCancellationDisposition::CompletedBeforeRequest
+            }
+            Some(_) => StiffCancellationDisposition::RequestedButNotObserved,
+            None => StiffCancellationDisposition::NotRequested,
+        };
+        self.finish_attempt_report(solve_id, result, completed_at, disposition)
+    }
+
+    /// Run one reportable solve and additionally compute LSODE2 telemetry
+    /// deltas for this call. The existing report continues to carry the
+    /// native cumulative snapshot and its scope. This opt-in wrapper performs
+    /// two snapshot reads, never per-step instrumentation.
+    pub fn try_solve_with_report_and_telemetry_delta(
+        &mut self,
+        cancellation: Option<CancellationToken>,
+    ) -> StiffSolveAttemptReportWithTelemetryDelta {
+        let (before, was_prepared) = match self {
+            Self::Lsode2(solver) => (
+                Some((solver.native_statistics(), solver.telemetry_snapshot())),
+                solver.is_prepared(),
+            ),
+            _ => (None, false),
+        };
+        let report = self.try_solve_with_report(cancellation);
+        let lsode2_delta = before.and_then(|(native_before, symbolic_before)| {
+            let (native_after, symbolic_after) = match self {
+                Self::Lsode2(solver) => (solver.native_statistics(), solver.telemetry_snapshot()),
+                _ => return None,
+            };
+            Some(lsode2_attempt_telemetry_delta(
+                native_before,
+                native_after,
+                symbolic_before,
+                symbolic_after,
+                if was_prepared {
+                    StiffTelemetryScope::Attempt
+                } else {
+                    StiffTelemetryScope::AttemptAndPreparation
+                },
+            ))
+        });
+        StiffSolveAttemptReportWithTelemetryDelta {
+            report,
+            lsode2_delta,
+        }
+    }
+
+    /// Parameter-rebinding variant of [`Self::try_solve_with_report`].
+    pub fn try_solve_with_parameter_values_report(
+        &mut self,
+        y0: DVector<f64>,
+        values: DVector<f64>,
+    ) -> StiffSolveAttemptReport {
+        let solve_id = NEXT_STIFF_SOLVE_ID.fetch_add(1, Ordering::Relaxed);
+        let result = self
+            .try_solve_with_parameter_values(y0, values)
+            .map_err(StiffAttemptError::Solve);
+        self.finish_attempt_report(
+            solve_id,
+            result,
+            std::time::Instant::now(),
+            StiffCancellationDisposition::NotRequested,
+        )
+    }
+
+    /// Explicit-interval parameter-rebinding variant of
+    /// [`Self::try_solve_with_report`].
+    pub fn try_solve_with_parameter_values_in_interval_report(
+        &mut self,
+        t0: f64,
+        y0: DVector<f64>,
+        t_bound: f64,
+        values: DVector<f64>,
+    ) -> StiffSolveAttemptReport {
+        let solve_id = NEXT_STIFF_SOLVE_ID.fetch_add(1, Ordering::Relaxed);
+        let result = self
+            .try_solve_with_parameter_values_in_interval(t0, y0, t_bound, values)
+            .map_err(StiffAttemptError::Solve);
+        self.finish_attempt_report(
+            solve_id,
+            result,
+            std::time::Instant::now(),
+            StiffCancellationDisposition::NotRequested,
+        )
+    }
+
+    /// Fresh-initial-state variant of [`Self::try_solve_with_report`].
+    pub fn try_solve_with_initial_state_report(
+        &mut self,
+        y0: DVector<f64>,
+    ) -> StiffSolveAttemptReport {
+        let solve_id = NEXT_STIFF_SOLVE_ID.fetch_add(1, Ordering::Relaxed);
+        let result = self
+            .try_solve_with_initial_state(y0)
+            .map_err(StiffAttemptError::Solve);
+        self.finish_attempt_report(
+            solve_id,
+            result,
+            std::time::Instant::now(),
+            StiffCancellationDisposition::NotRequested,
+        )
+    }
+
+    fn finish_attempt_report(
+        &self,
+        solve_id: u64,
+        result: Result<StiffSolveOutcome, StiffAttemptError>,
+        completed_at: std::time::Instant,
+        cancellation_at_return: StiffCancellationDisposition,
+    ) -> StiffSolveAttemptReport {
+        let failed = result.is_err();
+        let partial_trajectory = failed
+            .then(|| self.diagnostic_trajectory(solve_id, result.as_ref().err()))
+            .flatten();
+        let telemetry_snapshot = match &result {
+            Ok(StiffSolveOutcome::Radau(solution)) => {
+                Some(StiffTelemetrySnapshot::from_radau_solution(solution))
+            }
+            Ok(_) => self.telemetry_snapshot().ok(),
+            Err(StiffAttemptError::Cancelled(StiffCancellationError::Radau(
+                crate::numerical::Radau::api::RadauCancellationError::Cancelled { snapshot },
+            ))) => Some(StiffTelemetrySnapshot::Radau(snapshot.telemetry.clone())),
+            Err(StiffAttemptError::Cancelled(_)) => self.telemetry_snapshot().ok(),
+            Err(StiffAttemptError::Solve(StiffSolveError::Restart(_))) => None,
+            Err(StiffAttemptError::Solve(StiffSolveError::Radau(_))) => match self {
+                Self::Radau(prepared) => prepared
+                    .solver
+                    .last_solve_telemetry()
+                    .cloned()
+                    .map(StiffTelemetrySnapshot::Radau),
+                _ => None,
+            },
+            Err(StiffAttemptError::Solve(_)) if self.is_in_native_failed_state() => {
+                self.telemetry_snapshot().ok()
+            }
+            Err(StiffAttemptError::Solve(_)) => None,
+        };
+        StiffSolveAttemptReport {
+            solve_id,
+            result,
+            completed_at,
+            cancellation_at_return,
+            telemetry: telemetry_snapshot.map(|snapshot| StiffAttemptTelemetry {
+                solve_id,
+                scope: match self.kind() {
+                    StiffSolverKind::Bdf | StiffSolverKind::BackwardEuler => {
+                        StiffTelemetryScope::Attempt
+                    }
+                    StiffSolverKind::Radau => StiffTelemetryScope::AttemptAndPreparation,
+                    StiffSolverKind::Lsode2 => StiffTelemetryScope::SolverLifecycleCumulative,
+                },
+                snapshot,
+            }),
+            partial_trajectory,
+        }
+    }
+
+    fn diagnostic_trajectory(
+        &self,
+        solve_id: u64,
+        error: Option<&StiffAttemptError>,
+    ) -> Option<StiffDiagnosticTrajectory> {
+        let solver = self.kind();
+        if matches!(
+            error?,
+            StiffAttemptError::Cancelled(StiffCancellationError::Bdf(_))
+                | StiffAttemptError::Cancelled(StiffCancellationError::BackwardEuler(_))
+        ) {
+            let view = self.trajectory_view().ok()?;
+            return Some(StiffDiagnosticTrajectory {
+                solve_id,
+                solver,
+                axis: view.axis.clone(),
+                values: view.values.clone(),
+                accepted_steps: Some(view.axis.len().saturating_sub(1)),
+            });
+        }
+        let from_native_snapshot = match error? {
+            StiffAttemptError::Cancelled(StiffCancellationError::Bdf(
+                BdfSolveError::Cancelled { snapshot },
+            )) => Some((
+                vec![snapshot.current_time],
+                snapshot.current_state.clone(),
+                Some(snapshot.accepted_steps),
+            )),
+            StiffAttemptError::Cancelled(StiffCancellationError::BackwardEuler(
+                BeError::Cancelled { snapshot },
+            )) => Some((
+                vec![snapshot.current_time],
+                snapshot.current_state.clone(),
+                Some(snapshot.completed_steps),
+            )),
+            StiffAttemptError::Cancelled(StiffCancellationError::Lsode2(
+                crate::numerical::LSODE2::Lsode2Error::Cancelled { snapshot },
+            )) => {
+                let n = snapshot.current_state.len();
+                let rows = snapshot.accepted_states.len();
+                let values = snapshot
+                    .accepted_states
+                    .iter()
+                    .flat_map(|row| row.iter().copied())
+                    .collect::<Vec<_>>();
+                if rows > 0 && values.len() == rows.saturating_mul(n) {
+                    return Some(StiffDiagnosticTrajectory {
+                        solve_id,
+                        solver,
+                        axis: DVector::from_vec(snapshot.accepted_times.clone()),
+                        values: DMatrix::from_row_slice(rows, n, &values),
+                        accepted_steps: Some(rows.saturating_sub(1)),
+                    });
+                }
+                Some((
+                    vec![snapshot.current_time],
+                    snapshot.current_state.clone(),
+                    Some(rows.saturating_sub(1)),
+                ))
+            }
+            StiffAttemptError::Cancelled(StiffCancellationError::Radau(
+                crate::numerical::Radau::api::RadauCancellationError::Cancelled { snapshot },
+            )) => Some((
+                vec![snapshot.t],
+                snapshot.y.clone(),
+                Some(snapshot.accepted_steps),
+            )),
+            StiffAttemptError::Solve(StiffSolveError::Radau(_)) => {
+                let failure = match self {
+                    Self::Radau(prepared) => prepared.solver.last_failure_snapshot()?,
+                    _ => return None,
+                };
+                Some((
+                    vec![failure.t],
+                    failure.y.clone(),
+                    Some(failure.accepted_steps),
+                ))
+            }
+            StiffAttemptError::Cancelled(_) => None,
+            StiffAttemptError::Solve(_) => None,
+        };
+        if let Some((times, state, accepted_steps)) = from_native_snapshot {
+            return diagnostic_from_rows(solve_id, solver, times, vec![state], accepted_steps);
+        }
+
+        let is_current_failure = match self {
+            Self::Bdf(native) => {
+                native.status_kind() == crate::numerical::BDF::BDF_api::BdfStatus::Failed
+            }
+            Self::BackwardEuler(native) => {
+                native.status() == crate::numerical::BE::BeStatus::Failed
+            }
+            Self::Lsode2(native) => native.status() == "failed",
+            Self::Radau(_) => false,
+        };
+        if !is_current_failure {
+            return None;
+        }
+        let view = self.trajectory_view().ok()?;
+        Some(StiffDiagnosticTrajectory {
+            solve_id,
+            solver,
+            axis: view.axis.clone(),
+            values: view.values.clone(),
+            accepted_steps: Some(view.axis.len().saturating_sub(1)),
+        })
+    }
+
+    fn is_in_native_failed_state(&self) -> bool {
+        match self {
+            Self::Bdf(native) => {
+                native.status_kind() == crate::numerical::BDF::BDF_api::BdfStatus::Failed
+            }
+            Self::BackwardEuler(native) => {
+                native.status() == crate::numerical::BE::BeStatus::Failed
+            }
+            Self::Lsode2(native) => native.status() == "failed",
+            Self::Radau(_) => false,
+        }
+    }
+
     /// Starts a fresh solve with new parameter values and initial state while
     /// keeping the currently configured time interval. Native prepared
     /// callbacks and AOT artifacts are reused. This is not parameter
@@ -670,9 +1345,19 @@ impl PreparedStiffSolver {
         parameter_vectors: &[Vec<f64>],
     ) -> StiffParameterLoopReport {
         let report = run_ordered(parameter_vectors, |parameters| {
-            let outcome = self
-                .try_solve_with_parameter_values(y0.clone(), DVector::from_column_slice(parameters))
-                .map_err(StiffParameterLoopError::Solve);
+            let attempt = self.try_solve_with_parameter_values_report(
+                y0.clone(),
+                DVector::from_column_slice(parameters),
+            );
+            let metadata = StiffLoopAttemptMetadata {
+                solve_id: attempt.solve_id,
+                telemetry: attempt.telemetry,
+                partial_trajectory: attempt.partial_trajectory,
+            };
+            let outcome = attempt.result.map_err(|error| match error {
+                StiffAttemptError::Solve(error) => StiffParameterLoopError::Solve(error),
+                StiffAttemptError::Cancelled(error) => StiffParameterLoopError::Cancelled(error),
+            });
             let result = outcome.and_then(|outcome| match outcome {
                 StiffSolveOutcome::Radau(solution) => {
                     let (x_mesh, values) = solution.output_trajectory().map_err(|error| {
@@ -692,17 +1377,7 @@ impl PreparedStiffSolver {
                     })
                 }
             });
-            let telemetry = match self {
-                Self::Bdf(_) | Self::BackwardEuler(_) | Self::Lsode2(_) => {
-                    self.telemetry_snapshot().ok()
-                }
-                Self::Radau(prepared) => prepared
-                    .solver
-                    .last_solve_telemetry()
-                    .cloned()
-                    .map(StiffTelemetrySnapshot::Radau),
-            };
-            (result, telemetry)
+            (result, metadata)
         });
         StiffParameterLoopReport {
             points: report
@@ -710,14 +1385,16 @@ impl PreparedStiffSolver {
                 .into_iter()
                 .map(
                     |point: IvpParameterLoopPoint<
-                        Option<StiffTelemetrySnapshot>,
+                        StiffLoopAttemptMetadata,
                         StiffParameterLoopError,
                     >| {
                         StiffParameterLoopPoint {
                             index: point.index,
+                            solve_id: point.telemetry.solve_id,
                             parameter_values: point.parameter_values,
                             result: point.result,
-                            telemetry: point.telemetry,
+                            telemetry: point.telemetry.telemetry,
+                            partial_trajectory: point.telemetry.partial_trajectory,
                         }
                     },
                 )
@@ -904,6 +1581,97 @@ impl StiffTelemetrySnapshot {
     /// Preserve the telemetry attached to a completed Radau solve result.
     pub fn from_radau_solution(solution: &RadauSolution) -> Self {
         Self::Radau(solution.telemetry().clone())
+    }
+}
+
+fn lsode2_attempt_telemetry_delta(
+    before: Lsode2NativeStatistics,
+    after: Lsode2NativeStatistics,
+    symbolic_before: IvpTelemetrySnapshot,
+    symbolic_after: IvpTelemetrySnapshot,
+    scope: StiffTelemetryScope,
+) -> StiffLsode2AttemptTelemetryDelta {
+    use crate::symbolic::ivp_telemetry::{IvpTelemetryMode, IvpWarmStage};
+
+    let mut native_statistics_reset = after.solve_ms_total < before.solve_ms_total;
+    let mut delta_usize = |before: usize, after: usize| {
+        if after < before {
+            native_statistics_reset = true;
+            after
+        } else {
+            after - before
+        }
+    };
+    let symbolic_counts = matches!(
+        symbolic_after.mode,
+        IvpTelemetryMode::Counters | IvpTelemetryMode::Detailed
+    );
+    let symbolic_timings = matches!(
+        symbolic_after.mode,
+        IvpTelemetryMode::Timings | IvpTelemetryMode::Detailed
+    );
+    let symbolic_counters_reset = symbolic_after.residual_evaluations
+        < symbolic_before.residual_evaluations
+        || symbolic_after.jacobian_evaluations < symbolic_before.jacobian_evaluations;
+    let delta_u64 = |before: u64, after: u64| after.saturating_sub(before);
+    let delta_duration =
+        |before: std::time::Duration, after: std::time::Duration| after.saturating_sub(before);
+    let symbolic_stage_delta = |stage| {
+        delta_duration(
+            symbolic_before.warm_stage(stage).elapsed,
+            symbolic_after.warm_stage(stage).elapsed,
+        )
+    };
+    let native_solve_calls = delta_usize(before.solve_calls, after.solve_calls);
+    let native_solve_time_ms = (after.solve_ms_total - before.solve_ms_total).max(0.0);
+    let native_step_attempts = delta_usize(before.native_step_attempts, after.native_step_attempts);
+    let native_step_accepts = delta_usize(before.native_step_accepts, after.native_step_accepts);
+    let native_step_rejects = delta_usize(
+        before
+            .native_step_rejects_error_test
+            .saturating_add(before.native_step_rejects_nonlinear),
+        after
+            .native_step_rejects_error_test
+            .saturating_add(after.native_step_rejects_nonlinear),
+    );
+    let native_residual_calls =
+        delta_usize(before.native_residual_calls, after.native_residual_calls);
+    let native_jacobian_calls =
+        delta_usize(before.native_jacobian_calls, after.native_jacobian_calls);
+    let native_linear_solve_calls = delta_usize(
+        before.native_linear_solve_calls,
+        after.native_linear_solve_calls,
+    );
+    StiffLsode2AttemptTelemetryDelta {
+        scope,
+        native_before: before,
+        native_after: after,
+        symbolic_residual_evaluations: symbolic_counts.then(|| {
+            delta_u64(
+                symbolic_before.residual_evaluations,
+                symbolic_after.residual_evaluations,
+            )
+        }),
+        symbolic_jacobian_evaluations: symbolic_counts.then(|| {
+            delta_u64(
+                symbolic_before.jacobian_evaluations,
+                symbolic_after.jacobian_evaluations,
+            )
+        }),
+        symbolic_residual_time: symbolic_timings
+            .then(|| symbolic_stage_delta(IvpWarmStage::ResidualEvaluation)),
+        symbolic_jacobian_time: symbolic_timings
+            .then(|| symbolic_stage_delta(IvpWarmStage::JacobianEvaluation)),
+        native_solve_calls,
+        native_solve_time_ms,
+        native_step_attempts,
+        native_step_accepts,
+        native_step_rejects,
+        native_residual_calls,
+        native_jacobian_calls,
+        native_linear_solve_calls,
+        native_statistics_reset,
+        symbolic_counters_reset,
     }
 }
 

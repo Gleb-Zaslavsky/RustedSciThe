@@ -8,6 +8,22 @@ StiffAPI позволяет приложению выбрать production-со�
 Radau, Backward Euler и LSODE2. Численный алгоритм, символьная подготовка,
 AOT, логирование, телеметрия и владение результатом остаются у native-солвера.
 
+## Отчёт попытки solve и отмена
+
+Обычный `try_solve()` не создаёт диагностические копии. Если вызывающей
+стороне нужен корреляционный ID и partial report, используйте
+`try_solve_with_report(token)`, `try_solve_with_parameter_values_report(...)`
+или `try_solve_with_initial_state_report(...)`. Отчёт связывает `solve_id`,
+typed outcome/error, telemetry и при ошибке — `StiffDiagnosticTrajectory`.
+Последняя явно диагностическая и никогда не является опубликованным решением.
+
+Cancellation token фиксирует время первого запроса при `cancel()`; solver
+проверяет его только в собственных безопасных точках. Отчёт различает
+`ObservedBySolver`, `RequestedButNotObserved`, `CompletedBeforeRequest` и
+`NotRequested`. В частности, нормальное завершение до запроса остаётся
+успешным solve. Snapshot и частичная траектория копируются только в явном
+report API или при обработке ошибки, а не на каждом шаге интегрирования.
+
 ## Выбор маршрута и запуск
 
 `StiffSolverRequest` хранит типизированную конфигурацию выбранного солвера.

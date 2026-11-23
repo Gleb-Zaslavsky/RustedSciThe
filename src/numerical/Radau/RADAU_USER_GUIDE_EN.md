@@ -357,6 +357,9 @@ Preparation and solving return `Result<_, RadauError>`. Match error kinds in
 application code rather than parsing display strings. Shape errors, invalid
 configuration, unsupported routes, callback failures, Newton failures, step
 budget exhaustion, and output-range errors are distinct failure classes.
+When an internal callback/solver error has a classified stage, the public
+`RadauError::stage()` accessor preserves it (for example, `Residual` or
+`Jacobian`) alongside `RadauError::kind()`.
 
 Runnable examples in this repository:
 

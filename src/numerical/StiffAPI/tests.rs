@@ -261,6 +261,626 @@ fn stiff_api_forwards_bdf_cancellation_without_erasing_native_snapshot() {
 }
 
 #[test]
+fn attempt_report_uses_fresh_id_and_does_not_reuse_success_after_failed_retry() {
+    let options = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-rate*y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.001,
+        0.001,
+        1e-6,
+        1e-9,
+        None,
+        false,
+        Some(0.001),
+    )
+    .with_equation_parameters(vec!["rate".into()])
+    .with_equation_parameter_values(DVector::from_element(1, 1.0))
+    .with_max_steps(1);
+    let mut prepared = StiffSolverRequest::Bdf { options }
+        .prepare(None)
+        .expect("BDF request should prepare");
+
+    let first = prepared.try_solve_with_report(None);
+    assert!(
+        first.result.is_ok(),
+        "first solve should succeed: {:?}",
+        first.result
+    );
+    assert!(first.partial_trajectory.is_none());
+    let first_id = first.solve_id;
+    assert_eq!(first.telemetry.as_ref().unwrap().solve_id, first_id);
+
+    let second = prepared.try_solve_with_parameter_values_in_interval_report(
+        2.0,
+        DVector::from_element(1, 1.0),
+        3.0,
+        DVector::from_element(1, 1.0e8),
+    );
+    assert!(
+        second.result.is_err(),
+        "stiff retry should exceed the one-step budget"
+    );
+    assert_ne!(second.solve_id, first_id);
+    assert_eq!(second.telemetry.as_ref().unwrap().solve_id, second.solve_id);
+    assert!(second.partial_trajectory.is_some());
+    let diagnostic = second.partial_trajectory.unwrap();
+    assert_eq!(diagnostic.solve_id, second.solve_id);
+    assert_eq!(diagnostic.solver, StiffSolverKind::Bdf);
+    assert_eq!(diagnostic.axis.len(), diagnostic.values.nrows());
+    assert_eq!(
+        diagnostic.axis[0], 2.0,
+        "retry prefix must start at the new t0"
+    );
+    assert_eq!(
+        diagnostic.accepted_steps,
+        Some(diagnostic.axis.len().saturating_sub(1))
+    );
+}
+
+#[test]
+fn attempt_report_marks_pre_cancelled_state_as_diagnostic_only() {
+    let options = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 2.0),
+        0.1,
+        0.01,
+        1e-6,
+        1e-9,
+        None,
+        false,
+        None,
+    );
+    let mut prepared = StiffSolverRequest::Bdf { options }
+        .prepare(None)
+        .expect("BDF request should prepare");
+    let token = crate::numerical::CancellationToken::new();
+    token.cancel();
+
+    let report = prepared.try_solve_with_report(Some(token));
+    assert!(report.result.is_err());
+    let partial = report
+        .partial_trajectory
+        .expect("cancellation must retain initial state");
+    assert_eq!(partial.solve_id, report.solve_id);
+    assert_eq!(partial.axis.as_slice(), &[0.0]);
+    assert_eq!(partial.values.shape(), (1, 1));
+    assert_eq!(partial.values[(0, 0)], 2.0);
+    assert_eq!(partial.accepted_steps, Some(0));
+}
+
+#[test]
+fn attempt_report_distinguishes_completion_before_later_cancel_request() {
+    let options = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.01,
+        0.01,
+        1e-6,
+        1e-9,
+        None,
+        false,
+        None,
+    );
+    let mut prepared = StiffSolverRequest::Bdf { options }
+        .prepare(None)
+        .expect("BDF request should prepare");
+    let token = crate::numerical::CancellationToken::new();
+
+    let report = prepared.try_solve_with_report(Some(token.clone()));
+    assert!(report.result.is_ok());
+    assert_eq!(
+        report.cancellation_at_return,
+        StiffCancellationDisposition::NotRequested
+    );
+    token.cancel();
+    assert_eq!(
+        report.cancellation_disposition_for(&token),
+        StiffCancellationDisposition::CompletedBeforeRequest
+    );
+}
+
+#[test]
+fn attempt_report_pre_cancel_is_scoped_for_all_four_stiff_routes() {
+    use crate::numerical::BE::BeSolverOptions;
+    use crate::numerical::Radau::api::{RadauConfig, RadauProblem};
+
+    let bdf_options = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.1,
+        0.01,
+        1e-6,
+        1e-9,
+        None,
+        false,
+        None,
+    );
+    let be_options = BeSolverOptions::new(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        1e-8,
+        10,
+        Some(0.01),
+        0.0,
+        0.1,
+        DVector::from_element(1, 1.0),
+    );
+    let radau_problem =
+        RadauProblem::new(vec![Expr::parse_expression("-y")], vec!["y".into()], "t");
+    let lsode2_config = lsode2_config()
+        .with_native_sparse_faer_backend()
+        .with_faithful_bdf_solve(64, 64);
+
+    let mut prepared = [
+        StiffSolverRequest::Bdf {
+            options: bdf_options,
+        }
+        .prepare(None)
+        .expect("BDF should prepare"),
+        StiffSolverRequest::BackwardEuler {
+            options: be_options,
+            equation_parameters: Vec::new(),
+            parameter_values: Vec::new(),
+        }
+        .prepare(None)
+        .expect("Backward Euler should prepare"),
+        StiffSolverRequest::Radau {
+            problem: radau_problem,
+            config: RadauConfig {
+                t_bound: 0.1,
+                first_step: Some(0.01),
+                ..RadauConfig::default()
+            },
+            initial_state: vec![1.0],
+            parameters: Vec::new(),
+        }
+        .prepare(None)
+        .expect("Radau should prepare"),
+        StiffSolverRequest::Lsode2 {
+            config: lsode2_config,
+            logging_level: None,
+        }
+        .prepare(None)
+        .expect("LSODE2 should prepare"),
+    ];
+
+    let expected_kinds = [
+        StiffSolverKind::Bdf,
+        StiffSolverKind::BackwardEuler,
+        StiffSolverKind::Radau,
+        StiffSolverKind::Lsode2,
+    ];
+
+    for (solver, expected_kind) in prepared.iter_mut().zip(expected_kinds) {
+        let token = crate::numerical::CancellationToken::new();
+        token.cancel();
+        let report = solver.try_solve_with_report(Some(token.clone()));
+
+        assert!(matches!(
+            report.result,
+            Err(StiffAttemptError::Cancelled(_))
+        ));
+        assert_eq!(
+            report.cancellation_at_return,
+            StiffCancellationDisposition::ObservedBySolver
+        );
+        let telemetry = report
+            .telemetry
+            .as_ref()
+            .expect("pre-start cancellation should retain native telemetry");
+        assert_eq!(telemetry.solve_id, report.solve_id);
+        let partial = report
+            .partial_trajectory
+            .as_ref()
+            .expect("pre-start cancellation should retain diagnostic state");
+        assert_eq!(partial.solve_id, report.solve_id);
+        assert_eq!(partial.solver, expected_kind);
+        assert_eq!(partial.axis.len(), partial.values.nrows());
+        assert_eq!(partial.axis.len(), 1);
+        assert_eq!(partial.accepted_steps, Some(0));
+        assert_eq!(
+            report.cancellation_disposition_for(&token),
+            StiffCancellationDisposition::ObservedBySolver
+        );
+    }
+}
+
+#[test]
+fn attempt_report_captures_in_flight_cancellation_after_accepted_work() {
+    use crate::numerical::BE::BeSolverOptions;
+    use crate::numerical::Radau::api::{RadauConfig, RadauProblem, RadauTelemetryMode};
+
+    let bdf = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.1,
+        0.01,
+        1e-6,
+        1e-9,
+        None,
+        false,
+        Some(0.01),
+    );
+    let be = BeSolverOptions::new(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        1e-9,
+        20,
+        Some(0.05),
+        0.0,
+        0.1,
+        DVector::from_element(1, 1.0),
+    );
+    let radau = StiffSolverRequest::Radau {
+        problem: RadauProblem::new(vec![Expr::parse_expression("-y")], vec!["y".into()], "t"),
+        config: RadauConfig {
+            t_bound: 0.1,
+            first_step: Some(0.01),
+            max_step: 0.01,
+            telemetry: RadauTelemetryMode::Counters,
+            ..RadauConfig::default()
+        },
+        initial_state: vec![1.0],
+        parameters: Vec::new(),
+    }
+    .prepare(None)
+    .unwrap();
+    let lsode2 = Lsode2ProblemConfig::new(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.1,
+        0.01,
+        1e-7,
+        1e-9,
+    )
+    .with_native_sparse_faer_backend()
+    .with_native_solve(64, 64);
+
+    let mut prepared = [
+        StiffSolverRequest::Bdf { options: bdf }
+            .prepare(None)
+            .unwrap(),
+        StiffSolverRequest::BackwardEuler {
+            options: be,
+            equation_parameters: Vec::new(),
+            parameter_values: Vec::new(),
+        }
+        .prepare(None)
+        .unwrap(),
+        radau,
+        StiffSolverRequest::Lsode2 {
+            config: lsode2,
+            logging_level: None,
+        }
+        .prepare(None)
+        .unwrap(),
+    ];
+    let polls_after_one_step = [3, 4, 5, 4];
+
+    for (solver, poll) in prepared.iter_mut().zip(polls_after_one_step) {
+        let token = crate::numerical::CancellationToken::new();
+        token.cancel_on_nth_poll_for_test(poll);
+        let report = solver.try_solve_with_report(Some(token.clone()));
+
+        assert!(
+            matches!(report.result, Err(StiffAttemptError::Cancelled(_))),
+            "{:?} should report cancellation, got {:?}",
+            solver.kind(),
+            report.result
+        );
+        assert_eq!(
+            report.cancellation_at_return,
+            StiffCancellationDisposition::ObservedBySolver,
+            "{:?}",
+            solver.kind()
+        );
+        let telemetry = report
+            .telemetry
+            .as_ref()
+            .expect("in-flight cancellation should retain telemetry");
+        assert_eq!(telemetry.solve_id, report.solve_id);
+        let partial = report
+            .partial_trajectory
+            .as_ref()
+            .expect("in-flight cancellation should retain diagnostic state");
+        assert_eq!(partial.solve_id, report.solve_id);
+        assert!(
+            partial.accepted_steps.unwrap_or_default() > 0,
+            "{:?} must be cancelled after accepted work",
+            solver.kind()
+        );
+        assert_eq!(partial.axis.len(), partial.values.nrows());
+    }
+}
+
+#[test]
+fn failed_initial_state_retry_does_not_reuse_prior_attempt_data() {
+    use crate::numerical::BE::BeSolverOptions;
+    use crate::numerical::Radau::api::{RadauConfig, RadauProblem};
+
+    let bdf = BdfSolverOptions::for_bdf(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        0.0,
+        DVector::from_element(1, 1.0),
+        0.02,
+        0.01,
+        1e-6,
+        1e-9,
+        None,
+        false,
+        Some(0.01),
+    );
+    let be = BeSolverOptions::new(
+        vec![Expr::parse_expression("-y")],
+        vec!["y".into()],
+        "t".into(),
+        1e-9,
+        20,
+        Some(0.01),
+        0.0,
+        0.02,
+        DVector::from_element(1, 1.0),
+    );
+    let radau = RadauProblem::new(vec![Expr::parse_expression("-y")], vec!["y".into()], "t");
+    let lsode2 = lsode2_config()
+        .with_native_sparse_faer_backend()
+        .with_native_solve(64, 64);
+    let mut prepared = [
+        StiffSolverRequest::Bdf { options: bdf }
+            .prepare(None)
+            .unwrap(),
+        StiffSolverRequest::BackwardEuler {
+            options: be,
+            equation_parameters: Vec::new(),
+            parameter_values: Vec::new(),
+        }
+        .prepare(None)
+        .unwrap(),
+        StiffSolverRequest::Radau {
+            problem: radau,
+            config: RadauConfig {
+                t_bound: 0.02,
+                first_step: Some(0.01),
+                ..RadauConfig::default()
+            },
+            initial_state: vec![1.0],
+            parameters: Vec::new(),
+        }
+        .prepare(None)
+        .unwrap(),
+        StiffSolverRequest::Lsode2 {
+            config: lsode2,
+            logging_level: None,
+        }
+        .prepare(None)
+        .unwrap(),
+    ];
+
+    for solver in &mut prepared {
+        let first = solver.try_solve_with_report(None);
+        assert!(first.result.is_ok(), "{:?}", solver.kind());
+        let first_id = first.solve_id;
+        assert!(first.telemetry.is_some(), "{:?}", solver.kind());
+
+        let retry = solver.try_solve_with_initial_state_report(DVector::from_vec(vec![1.0, 2.0]));
+        assert!(
+            retry.result.is_err(),
+            "{:?} should reject wrong state size",
+            solver.kind()
+        );
+        assert_ne!(retry.solve_id, first_id);
+        assert!(retry.telemetry.is_none(), "{:?}", solver.kind());
+        assert!(retry.partial_trajectory.is_none(), "{:?}", solver.kind());
+    }
+}
+
+#[test]
+fn callback_diagnostics_use_typed_errors_and_only_report_known_provenance() {
+    use crate::numerical::BDF::BDF_solver::BdfStepError;
+    use crate::numerical::BE::NR_for_Euler::NreError;
+    use crate::numerical::LSODE2::Lsode2Error;
+    use crate::symbolic::symbolic_ivp::IvpBackendError;
+
+    let report_for = |error| StiffSolveAttemptReport {
+        solve_id: 19,
+        result: Err(StiffAttemptError::Solve(error)),
+        completed_at: std::time::Instant::now(),
+        cancellation_at_return: StiffCancellationDisposition::NotRequested,
+        telemetry: None,
+        partial_trajectory: None,
+    };
+
+    let bdf = report_for(StiffSolveError::Bdf(BdfSolveError::Step(
+        BdfStepError::NonFiniteRhs,
+    )));
+    assert_eq!(
+        bdf.callback_failure_diagnostic(),
+        Some(StiffCallbackFailureDiagnostic {
+            evaluation: StiffCallbackEvaluation::Residual,
+            reason: StiffCallbackFailureReason::NonFiniteOutput,
+            element_index: None,
+            callback_time: None,
+        })
+    );
+
+    let backward_euler = report_for(StiffSolveError::BackwardEuler(BeError::Newton(
+        NreError::NonFiniteCallback { stage: "Jacobian" },
+    )));
+    assert_eq!(
+        backward_euler
+            .callback_failure_diagnostic()
+            .unwrap()
+            .evaluation,
+        StiffCallbackEvaluation::Jacobian
+    );
+
+    let lsode2 = report_for(StiffSolveError::Lsode2(Lsode2Error::GeneratedBackend(
+        IvpBackendError::AtomEvaluationFailure {
+            stage: "Jacobian".into(),
+            index: 11,
+            message: "diagnostic text is intentionally opaque".into(),
+        },
+    )));
+    assert_eq!(
+        lsode2.callback_failure_diagnostic(),
+        Some(StiffCallbackFailureDiagnostic {
+            evaluation: StiffCallbackEvaluation::Jacobian,
+            reason: StiffCallbackFailureReason::CallbackFailed,
+            element_index: Some(11),
+            callback_time: None,
+        })
+    );
+
+    let unsupported_provenance = report_for(StiffSolveError::Lsode2(Lsode2Error::NativeStep(
+        "native callback failure".into(),
+    )));
+    assert_eq!(unsupported_provenance.callback_failure_diagnostic(), None);
+}
+
+#[test]
+fn radau_public_typed_error_preserves_callback_evaluation_stage() {
+    use crate::numerical::Radau::api::{RadauConfig, RadauProblem};
+
+    let mut prepared = StiffSolverRequest::Radau {
+        problem: RadauProblem::new(vec![Expr::parse_expression("ln(y)")], vec!["y".into()], "t"),
+        config: RadauConfig {
+            t_bound: 0.1,
+            first_step: Some(0.01),
+            ..RadauConfig::default()
+        },
+        initial_state: vec![-1.0],
+        parameters: Vec::new(),
+    }
+    .prepare(None)
+    .expect("Radau symbolic problem should prepare");
+
+    let report = prepared.try_solve_with_report(None);
+    assert!(report.result.is_err());
+    assert_eq!(
+        report.callback_failure_diagnostic(),
+        Some(StiffCallbackFailureDiagnostic {
+            evaluation: StiffCallbackEvaluation::Residual,
+            reason: StiffCallbackFailureReason::NonFiniteOutput,
+            element_index: None,
+            callback_time: None,
+        })
+    );
+}
+
+#[test]
+fn lsode2_attempt_report_exposes_per_call_telemetry_delta() {
+    let config = lsode2_config()
+        .with_native_sparse_faer_backend()
+        .with_faithful_bdf_solve(64, 64)
+        .with_telemetry(crate::numerical::LSODE2::IvpTelemetry::detailed());
+    let mut prepared = StiffSolverRequest::Lsode2 {
+        config,
+        logging_level: None,
+    }
+    .prepare(None)
+    .expect("LSODE2 request should prepare");
+
+    let report = prepared.try_solve_with_report_and_telemetry_delta(None);
+    assert!(report.report.result.is_ok());
+    let delta = report
+        .lsode2_delta
+        .expect("LSODE2 should have a per-call delta");
+    assert!(matches!(
+        delta.scope,
+        StiffTelemetryScope::Attempt | StiffTelemetryScope::AttemptAndPreparation
+    ));
+    assert_eq!(delta.native_solve_calls, 1);
+    assert!(delta.native_solve_time_ms >= 0.0);
+    assert!(delta.native_step_attempts > 0);
+    assert_eq!(
+        delta.native_after.solve_calls,
+        delta.native_before.solve_calls + 1
+    );
+    assert_eq!(delta.native_before.algorithm_decision_calls, 0);
+    assert!(delta.native_after.algorithm_decision_calls > 0);
+    assert!(delta.symbolic_residual_evaluations.unwrap_or_default() > 0);
+    assert!(delta.symbolic_residual_time.is_some());
+
+    let config = lsode2_config()
+        .with_native_sparse_faer_backend()
+        .with_faithful_bdf_solve(64, 64);
+    let mut telemetry_off = StiffSolverRequest::Lsode2 {
+        config,
+        logging_level: None,
+    }
+    .prepare(None)
+    .expect("LSODE2 request with telemetry Off should prepare");
+    let off_report = telemetry_off.try_solve_with_report_and_telemetry_delta(None);
+    let off_delta = off_report.lsode2_delta.unwrap();
+    assert_eq!(off_delta.symbolic_residual_evaluations, None);
+    assert_eq!(off_delta.symbolic_jacobian_evaluations, None);
+    assert_eq!(off_delta.symbolic_residual_time, None);
+    assert_eq!(off_delta.symbolic_jacobian_time, None);
+}
+
+#[test]
+fn radau_attempt_report_retains_last_committed_state_on_native_failure() {
+    use crate::numerical::Radau::api::{RadauConfig, RadauProblem};
+
+    let problem = RadauProblem::new(vec![Expr::parse_expression("-y")], vec!["y".into()], "t");
+    let config = RadauConfig {
+        t_bound: 1.0,
+        first_step: Some(0.01),
+        max_step: 0.01,
+        max_steps: 1,
+        ..RadauConfig::default()
+    };
+    let mut prepared = StiffSolverRequest::Radau {
+        problem,
+        config,
+        initial_state: vec![1.0],
+        parameters: Vec::new(),
+    }
+    .prepare(None)
+    .expect("Radau request should prepare");
+
+    let report = prepared.try_solve_with_report(None);
+    assert!(report.result.is_err());
+    let telemetry = report
+        .telemetry
+        .as_ref()
+        .expect("failed Radau telemetry retained");
+    assert_eq!(telemetry.solve_id, report.solve_id);
+    let diagnostic = report
+        .partial_trajectory
+        .expect("native failure should preserve the last committed Radau state");
+    assert_eq!(diagnostic.solve_id, report.solve_id);
+    assert_eq!(diagnostic.solver, StiffSolverKind::Radau);
+    assert_eq!(diagnostic.axis.len(), 1);
+    assert_eq!(diagnostic.axis[0], 0.01);
+    assert_eq!(diagnostic.accepted_steps, Some(1));
+    assert!(diagnostic.values[(0, 0)].is_finite());
+    assert!(diagnostic.values[(0, 0)] < 1.0 && diagnostic.values[(0, 0)] > 0.9);
+}
+
+#[test]
 fn stiff_api_forwards_backward_euler_cancellation() {
     let options = BeSolverOptions::new(
         vec![Expr::parse_expression("-y")],
@@ -426,7 +1046,13 @@ fn stiff_parameter_loop_keeps_each_native_failure_and_continues() {
     assert!(report.points[0].result.is_ok());
     assert!(report.points[1].result.is_err());
     assert!(report.points[2].result.is_ok());
-    assert!(report.points.iter().all(|point| point.telemetry.is_some()));
+    assert!(report.points[0].telemetry.is_some());
+    assert!(report.points[1].telemetry.is_none());
+    assert!(report.points[2].telemetry.is_some());
+    assert_ne!(report.points[0].solve_id, report.points[1].solve_id);
+    assert_ne!(report.points[1].solve_id, report.points[2].solve_id);
+    let failed_point = &report.points[1];
+    assert!(failed_point.partial_trajectory.is_none());
     for index in [0, 2] {
         let solution = report.points[index].result.as_ref().unwrap();
         assert_eq!(solution.values[(0, 0)], 1.0);
@@ -666,7 +1292,16 @@ fn stiff_parameter_loop_matches_all_native_routes() {
         .iter()
         .zip(&facade_bdf_report.points)
     {
-        let Some(StiffTelemetrySnapshot::Bdf { statistics, .. }) = &facade.telemetry else {
+        if facade.result.is_err() {
+            assert!(facade.telemetry.is_none());
+            assert!(facade.partial_trajectory.is_none());
+            continue;
+        }
+        let Some(StiffAttemptTelemetry {
+            snapshot: StiffTelemetrySnapshot::Bdf { statistics, .. },
+            ..
+        }) = &facade.telemetry
+        else {
             panic!("BDF facade loop must preserve its native telemetry variant");
         };
         assert_eq!(
@@ -721,7 +1356,15 @@ fn stiff_parameter_loop_matches_all_native_routes() {
         .iter()
         .zip(&facade_radau_report.points)
     {
-        match (&native.telemetry, &facade.telemetry) {
+        if facade.result.is_err() {
+            assert!(facade.telemetry.is_none());
+            assert!(facade.partial_trajectory.is_none());
+            continue;
+        }
+        match (
+            &native.telemetry,
+            facade.telemetry.as_ref().map(|attempt| &attempt.snapshot),
+        ) {
             (Some(native), Some(StiffTelemetrySnapshot::Radau(facade))) => {
                 assert_eq!(native.counters, facade.counters);
             }
@@ -772,9 +1415,18 @@ fn stiff_parameter_loop_matches_all_native_routes() {
         ))
     ));
     for (native, facade) in native_be_report.points.iter().zip(&facade_be_report.points) {
-        let Some(StiffTelemetrySnapshot::BackwardEuler {
-            statistics,
-            details,
+        if facade.result.is_err() {
+            assert!(facade.telemetry.is_none());
+            assert!(facade.partial_trajectory.is_none());
+            continue;
+        }
+        let Some(StiffAttemptTelemetry {
+            snapshot:
+                StiffTelemetrySnapshot::BackwardEuler {
+                    statistics,
+                    details,
+                    ..
+                },
             ..
         }) = &facade.telemetry
         else {
@@ -824,9 +1476,18 @@ fn stiff_parameter_loop_matches_all_native_routes() {
         .iter()
         .zip(&facade_lsode2_report.points)
     {
-        let Some(StiffTelemetrySnapshot::Lsode2 {
-            statistics,
-            native: native_statistics,
+        if facade.result.is_err() {
+            assert!(facade.telemetry.is_none());
+            assert!(facade.partial_trajectory.is_none());
+            continue;
+        }
+        let Some(StiffAttemptTelemetry {
+            snapshot:
+                StiffTelemetrySnapshot::Lsode2 {
+                    statistics,
+                    native: native_statistics,
+                    ..
+                },
             ..
         }) = &facade.telemetry
         else {

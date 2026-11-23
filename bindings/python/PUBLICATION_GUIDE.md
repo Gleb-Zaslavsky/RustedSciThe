@@ -780,6 +780,37 @@ changing the artifact hashes. See the WSL2 workflow above for the Linux build
 and validation record. Do not append files to 0.1.6; the next release requires
 a new version and a fresh complete artifact set.
 
+## Coordinated Python 0.1.7 release record
+
+The coordinated 0.1.7 release completed on 2026-11-21 from source commit
+`27ec13b5`. The Windows sdist and `cp310-abi3-win_amd64` wheel were built from
+that clean commit. The Linux `cp310-abi3-manylinux2014_x86_64` wheel was built
+from the exact same sdist in the pinned Maturin image
+`ghcr.io/pyo3/maturin@sha256:50bf2ff99eeff7b09332bad9baf4a5e925e2502304ae2f88f48ce8c06fd9957c`.
+The same three artifacts were uploaded first to TestPyPI and then to production
+PyPI; all registry SHA-256 values matched the local files.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `rustedscithe-0.1.7.tar.gz` | `d80a88b46b2d1b9bc2fcff3d8931d5f310c702768fd105e657fb0ac4a607a9bc` |
+| `rustedscithe-0.1.7-cp310-abi3-win_amd64.whl` | `e07150328a61235c6fb3e33eef14237466b1030361690d8abc2fe02f286f3ed5` |
+| `rustedscithe-0.1.7-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl` | `f16788ffda57286a5d717f7ca1f07514cdefbe6fd73b065d8d40740a7e2184f4` |
+
+Release validation: `twine check` passed for all artifacts; `auditwheel show`
+confirmed the Linux wheel's `manylinux_2_17_x86_64` compatibility. Clean
+installed-wheel contract suites passed from TestPyPI and production PyPI on
+Windows CPython 3.10.11 and WSL Ubuntu CPython 3.14.4 (`388 passed, 2 skipped`
+per run). The Linux wheel also passed the full contract suite in the manylinux
+container with its minimum CPython 3.10.22 (`388 passed, 2 skipped`). The
+Windows and Linux package/native-extension import paths were confirmed inside
+their clean environments. Build tools were Rust/Cargo `1.98.1` and Maturin
+`1.16.0`.
+
+An initial Linux build attempt that explicitly selected the nested binding
+manifest produced a misnamed wheel and an entrypoint warning; it was discarded
+and never uploaded. The published Linux wheel was rebuilt from the sdist root
+using the documented Maturin project configuration and passed all checks.
+
 ## Recovery from a defective release
 
 1. Stop further uploads for the affected version and preserve its wheel, sdist,

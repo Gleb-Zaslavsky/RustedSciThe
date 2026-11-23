@@ -48,9 +48,7 @@ impl Route {
         }
         .with_tolerance(1e-8)
         .with_max_iterations(12)
-        .with_bvp_telemetry_mode(
-            crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Detailed,
-        )
+        .with_bvp_telemetry_mode(crate::numerical::BVP_Damp::telemetry::BvpTelemetryMode::Detailed)
     }
 }
 

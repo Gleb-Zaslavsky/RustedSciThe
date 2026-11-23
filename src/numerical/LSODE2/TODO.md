@@ -1,5 +1,31 @@
 # LSODE2 Symbolic Runtime TODO
 
+## StiffAPI Attempt Diagnostics
+
+- [x] Correlate opt-in StiffAPI attempt reports with a unique `solve_id`; failed retries expose
+  only their own accepted prefix and telemetry.
+- [x] Bound new StiffAPI report collection to explicit report calls and native
+  failure/cancellation; ordinary solve path does not copy accepted history.
+  Native LSODE2's own retained output/history policy remains solver-owned.
+- [ ] Confirm that LSODE2 native retained-output history is bounded or expose
+  a bounded diagnostic view; StiffAPI only clones it in explicit reports.
+- [x] Add an opt-in StiffAPI per-call telemetry delta for core native solve,
+  step, callback and linear-solve metrics while retaining LSODE2's cumulative
+  snapshot and explicitly labelling preparation-inclusive scope.
+- [x] Keep full native LSODE2 before/after statistics in the explicit StiffAPI
+  delta report. This covers controller/event counters without maintaining a
+  parallel delta struct for every native statistic; compact core deltas remain
+  convenience fields.
+- [x] Keep attempt correlation StiffAPI-owned: direct LSODE2 has no attempt
+  report API or `solve_id`; native cancellation and cumulative snapshots remain
+  covered by solver-level tests.
+- [x] Verify a StiffAPI successful solve followed by an invalid initial-state
+  retry receives a fresh ID and no prior telemetry/trajectory.
+- [x] Verify in-flight cancellation through the StiffAPI report envelope after
+  accepted native work; the direct native cancellation test remains in place.
+- [x] Verify native in-flight cancellation preserves the last accepted step
+  and does not publish a solve summary (`native_cancellation_keeps_last_accepted_step_and_does_not_build_summary`).
+
 ## Fresh Solve With a Replacement Initial State (2026-11-07)
 
 - [x] Add `try_solve_with_initial_state(y0)` on the configured interval,

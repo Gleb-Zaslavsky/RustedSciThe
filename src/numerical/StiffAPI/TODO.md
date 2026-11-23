@@ -1,5 +1,74 @@
 # StiffAPI: Full-Fidelity Stiff IVP Facade
 
+## Solve-Attempt Observability
+
+- [x] Add an attempt-scoped `solve_id` and opt-in diagnostic reports for
+  direct solve/rebind/initial-state calls and parameter-loop points. Each
+  report keeps typed outcome/error and telemetry associated with its ID, with
+  native telemetry scope exposed explicitly.
+  Ordinary `try_solve()` remains unchanged and does not allocate a report.
+- [x] Ensure failed retries and pre-solve validation errors do not expose the
+  preceding successful attempt's trajectory or telemetry as current data.
+- [x] Return partial accepted output in `StiffDiagnosticTrajectory`, a distinct
+  diagnostic-only type, and preserve typed failure chains.
+- [x] Extend Radau to retain the last committed state, accepted/rejected counts
+  and telemetry on ordinary in-loop failures; the snapshot is copied once on
+  failure, not on each step.
+- [x] Record first cancellation-request time in `CancellationToken` and report
+  whether cancellation was observed or completion preceded the request.
+- [x] Add a backward-compatible `callback_failure_diagnostic()` accessor that
+  classifies callback errors from existing typed native variants and preserves
+  known AtomView element indices. It never parses display strings or copies a
+  trial state.
+- [ ] Deferred/rejected for the current error/report contract: preserve
+  callback evaluation time and trial-state provenance through all four runtime
+  adapters. Current native errors do not retain these values, so they cannot
+  be exposed honestly by a StiffAPI-only adapter. Do not add fields to existing
+  public native error variants or substitute the last accepted state. A future
+  implementation requires an explicit opt-in diagnostic side channel captured
+  at each callback failure boundary. Radau now preserves its typed
+  callback stage through a backward-compatible public `RadauError::stage()`
+  accessor. Audit: AtomView backend errors
+  retain evaluation stage and entry index, but no time/state; BDF step errors
+  reduce several callback failures to unit variants; BE retains typed stage or
+  shape/non-finite classification but no time/state; Radau preserves residual /
+  Jacobian / other stage without time/state; LSODE2 native-step failures may be flattened to `String`,
+  while its generated AtomView errors preserve stage/index. Exact trial
+  provenance therefore cannot be reconstructed centrally. Domain
+  classification is likewise omitted unless a typed evaluator category exists.
+- [x] Add an opt-in report wrapper that computes LSODE2 per-call deltas for
+  symbolic residual/Jacobian counts and timings plus core native solve/step,
+  callback and linear-solve counters. Preserve the full native snapshot and
+  identify whether the delta includes preparation.
+- [x] Preserve full LSODE2 native statistics immediately before and after an
+  explicit delta-report call, alongside convenience deltas for core counters.
+  This exposes every controller/event counter without duplicating a large,
+  drift-prone delta schema. Consumers can derive any field delta from the
+  bracket snapshots. Radau's preparation-inclusive scope remains explicitly
+  labelled.
+- [x] Audit the four native telemetry surfaces: they currently retain typed
+  counters/snapshots, not per-step event histories. There is no new event buffer
+  to bound and no dropped-event counter to report; revisit if event history is
+  introduced. Preserve `Off` as no-history.
+- [x] Add a cross-route report regression for cancellation before start on all
+  four families, asserting fresh attempt ID, native telemetry association and
+  diagnostic-only initial state.
+- [x] Add deterministic in-flight cancellation through the report API for all
+  four routes. A test-only Nth-poll trigger cancels at native safe checkpoints;
+  it is compiled only under `cfg(test)` and uses no timed race.
+- [x] Document cancellation checkpoints' observable outcomes and the attempt
+  reporting API in RU/EN StiffAPI guides.
+- [x] Add regressions for success followed by failed retry, per-loop attempt
+  IDs, failed-Radau snapshots, all-family pre-start cancellation and
+  completion-before-later-request classification. A cross-route successful
+  solve followed by invalid initial-state retry also verifies fresh IDs and no
+  stale telemetry/trajectory.
+- [x] Test callback-diagnostic mapping from typed BDF/BE/LSODE2 errors,
+  including an AtomView Jacobian entry index, and verify opaque LSODE2 native
+  error text is not classified.
+- [ ] Include these reports in worker/serialized result envelopes and Python
+  bindings if/when those clients need attempt correlation.
+
 ## Fresh Initial-State Solve Shortcut (2026-11-07)
 
 - [x] Add `try_solve_with_initial_state(y0)` for a fresh solve on the

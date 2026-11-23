@@ -43,7 +43,7 @@ use super::new::output::{RadauOutput, RadauOutputPolicy as InternalOutputPolicy}
 use super::new::solver::{
     RadauSolveResult, try_solve_dense_with_callbacks_with_output,
     try_solve_dense_with_callbacks_with_output_and_cancellation,
-    try_solve_symbolic_dense_with_output, try_solve_symbolic_dense_with_output_and_cancellation,
+    try_solve_symbolic_dense_with_output_and_cancellation,
 };
 use super::new::telemetry::{RadauTelemetry, RadauTelemetryMode as InternalTelemetryMode};
 use crate::numerical::CancellationToken;
@@ -452,11 +452,25 @@ pub enum RadauErrorKind {
     Aot,
 }
 
+/// Native stage retained by a public Radau error when the internal failure
+/// originated from a stage-classified solver operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadauErrorStage {
+    Preparation,
+    Residual,
+    Jacobian,
+    Newton,
+    LinearSolve,
+    StepControl,
+    Output,
+}
+
 /// Typed public error without exposing internal migration modules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RadauError {
     kind: RadauErrorKind,
     message: String,
+    stage: Option<RadauErrorStage>,
 }
 
 impl RadauError {
@@ -464,10 +478,16 @@ impl RadauError {
         self.kind
     }
 
+    /// Return the native solver stage when the typed failure retained one.
+    pub fn stage(&self) -> Option<RadauErrorStage> {
+        self.stage
+    }
+
     fn symbolic_substitution(message: String) -> Self {
         Self {
             kind: RadauErrorKind::SymbolicSubstitution,
             message,
+            stage: None,
         }
     }
 }
@@ -500,9 +520,24 @@ impl From<InternalError> for RadauError {
             | InternalError::OutputTimeOutsideInterval { .. }
             | InternalError::InvalidDenseOutput => RadauErrorKind::Output,
         };
+        let stage = match &error {
+            InternalError::Callback { stage, .. }
+            | InternalError::NonFiniteCallback { stage }
+            | InternalError::ShapeMismatch { stage, .. } => Some(match stage {
+                super::new::error::RadauStage::Preparation => RadauErrorStage::Preparation,
+                super::new::error::RadauStage::Residual => RadauErrorStage::Residual,
+                super::new::error::RadauStage::Jacobian => RadauErrorStage::Jacobian,
+                super::new::error::RadauStage::Newton => RadauErrorStage::Newton,
+                super::new::error::RadauStage::LinearSolve => RadauErrorStage::LinearSolve,
+                super::new::error::RadauStage::StepControl => RadauErrorStage::StepControl,
+                super::new::error::RadauStage::Output => RadauErrorStage::Output,
+            }),
+            _ => None,
+        };
         Self {
             kind,
             message: error.to_string(),
+            stage,
         }
     }
 }
@@ -510,6 +545,20 @@ impl From<InternalError> for RadauError {
 /// Last committed Radau state captured when cooperative cancellation is observed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RadauCancellationSnapshot {
+    pub t: f64,
+    pub y: Vec<f64>,
+    pub attempts: usize,
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
+    pub telemetry: RadauTelemetryReport,
+}
+
+/// Last committed Radau state retained for an ordinary native failure.
+///
+/// This is diagnostic data only and is never returned as a successful
+/// `RadauSolution`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RadauFailureSnapshot {
     pub t: f64,
     pub y: Vec<f64>,
     pub attempts: usize,
@@ -936,6 +985,7 @@ pub struct RadauSolver {
     parameter_count: usize,
     preparation_telemetry: RadauTelemetry,
     last_solve_telemetry: Option<RadauTelemetryReport>,
+    last_failure_snapshot: Option<RadauFailureSnapshot>,
     logging_level: SolverLogLevel,
 }
 
@@ -980,6 +1030,7 @@ impl RadauNativeSolver {
             return Err(RadauError {
                 kind: RadauErrorKind::Unsupported,
                 message: "native Radau callbacks currently require Dense layout".to_owned(),
+                stage: None,
             });
         }
         let logging_level = config.logging_level;
@@ -1180,6 +1231,7 @@ impl RadauSolver {
                 .map_err(|message| RadauError {
                     kind: RadauErrorKind::Configuration,
                     message,
+                    stage: None,
                 })?,
             )
         } else {
@@ -1199,6 +1251,7 @@ impl RadauSolver {
             .map_err(|message| RadauError {
                 kind: RadauErrorKind::Configuration,
                 message,
+                stage: None,
             })?;
         }
         let logging_level = config.logging_level;
@@ -1207,6 +1260,7 @@ impl RadauSolver {
         let assembly = internal.assembly.ok_or_else(|| RadauError {
             kind: RadauErrorKind::Configuration,
             message: "a symbolic frontend is required".to_owned(),
+            stage: None,
         })?;
         let parameter_count = problem.parameters.len();
         let mut preparation_telemetry = RadauTelemetry::new(config.telemetry.into_internal());
@@ -1215,6 +1269,7 @@ impl RadauSolver {
             let aot = stored_aot.as_ref().ok_or_else(|| RadauError {
                 kind: RadauErrorKind::Unsupported,
                 message: "Radau AOT configuration is missing".to_owned(),
+                stage: None,
             })?;
             let prepared_aot = AotPlan::prepare_with_policy(
                 assembly,
@@ -1307,6 +1362,7 @@ impl RadauSolver {
             parameter_count,
             preparation_telemetry,
             last_solve_telemetry: None,
+            last_failure_snapshot: None,
             logging_level,
         })
     }
@@ -1339,6 +1395,12 @@ impl RadauSolver {
         self.last_solve_telemetry.as_ref()
     }
 
+    /// Borrow the diagnostic data from the latest ordinary native failure.
+    /// Partial state is never returned as a successful `RadauSolution`.
+    pub fn last_failure_snapshot(&self) -> Option<&RadauFailureSnapshot> {
+        self.last_failure_snapshot.as_ref()
+    }
+
     /// Solve with no parameters. Parameterized problems should use the
     /// explicit value-taking method so accidental zero bindings are visible.
     pub fn solve(&mut self, y0: &[f64]) -> Result<RadauSolution, RadauError> {
@@ -1359,6 +1421,7 @@ impl RadauSolver {
         let _logging_scope = SolverLogGuard::enter(self.logging_level);
         crate::numerical::logging::solver_info!("Radau solve started");
         self.last_solve_telemetry = None;
+        self.last_failure_snapshot = None;
         if parameters.len() != self.parameter_count {
             return Err(RadauError {
                 kind: RadauErrorKind::Shape,
@@ -1367,6 +1430,7 @@ impl RadauSolver {
                     self.parameter_count,
                     parameters.len()
                 ),
+                stage: None,
             });
         }
         let mut session = self.callbacks.session_with_telemetry(self.config.telemetry);
@@ -1374,8 +1438,15 @@ impl RadauSolver {
         session
             .rebind_parameters(parameters)
             .map_err(RadauError::from)?;
-        let solve_result = try_solve_symbolic_dense_with_output(&self.config, &mut session, y0)
-            .map_err(RadauError::from);
+        let mut failure_state = None;
+        let solve_result = try_solve_symbolic_dense_with_output_and_cancellation(
+            &self.config,
+            &mut session,
+            y0,
+            None,
+            &mut failure_state,
+        )
+        .map_err(RadauError::from);
         session.absorb_runtime_telemetry();
         let telemetry = RadauTelemetryReport::from_internal_pair(
             &self.preparation_telemetry,
@@ -1393,6 +1464,14 @@ impl RadauSolver {
                 Ok(solution)
             }
             Err(error) => {
+                self.last_failure_snapshot = failure_state.map(|state| RadauFailureSnapshot {
+                    t: state.t,
+                    y: state.y,
+                    attempts: state.attempts,
+                    accepted_steps: state.accepted_steps,
+                    rejected_steps: state.rejected_steps,
+                    telemetry: telemetry.clone(),
+                });
                 crate::numerical::logging::solver_warn!("Radau solve failed: {error}");
                 Err(error)
             }
@@ -1412,6 +1491,7 @@ impl RadauSolver {
     ) -> Result<RadauSolution, RadauCancellationError> {
         let _logging_scope = SolverLogGuard::enter(self.logging_level);
         self.last_solve_telemetry = None;
+        self.last_failure_snapshot = None;
         if parameters.len() != self.parameter_count {
             return Err(RadauCancellationError::Solver(RadauError {
                 kind: RadauErrorKind::Shape,
@@ -1420,6 +1500,7 @@ impl RadauSolver {
                     self.parameter_count,
                     parameters.len()
                 ),
+                stage: None,
             }));
         }
         let mut session = self.callbacks.session_with_telemetry(self.config.telemetry);
@@ -1427,11 +1508,13 @@ impl RadauSolver {
         session
             .rebind_parameters(parameters)
             .map_err(|error| RadauCancellationError::Solver(error.into()))?;
+        let mut failure_state = None;
         let solve_result = try_solve_symbolic_dense_with_output_and_cancellation(
             &self.config,
             &mut session,
             y0,
             Some(cancellation),
+            &mut failure_state,
         );
         session.absorb_runtime_telemetry();
         let telemetry = RadauTelemetryReport::from_internal_pair(
@@ -1441,7 +1524,17 @@ impl RadauSolver {
         self.last_solve_telemetry = Some(telemetry.clone());
         match solve_result {
             Ok((result, output)) => Ok(self.solution(result, output, telemetry)),
-            Err(error) => Err(cancellation_error(error, telemetry)),
+            Err(error) => {
+                self.last_failure_snapshot = failure_state.map(|state| RadauFailureSnapshot {
+                    t: state.t,
+                    y: state.y,
+                    attempts: state.attempts,
+                    accepted_steps: state.accepted_steps,
+                    rejected_steps: state.rejected_steps,
+                    telemetry: telemetry.clone(),
+                });
+                Err(cancellation_error(error, telemetry))
+            }
         }
     }
 
